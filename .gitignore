@@ -33,3 +33,6 @@ results_tags.txt
 NUL
 UsersuserDocuments*
 flagged_websites.html
+
+# Claude internal
+.claude/

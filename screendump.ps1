@@ -1,0 +1,1 @@
+$t = New-Object Net.Sockets.TcpClient("127.0.0.1", 4444); $s = $t.GetStream(); $w = New-Object IO.StreamWriter($s); $w.WriteLine("screendump build/test.ppm"); $w.Flush(); Start-Sleep -Seconds 1; $t.Close()
