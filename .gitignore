@@ -1,0 +1,35 @@
+# Build outputs
+build/*.bin
+build/*.img
+build/*.efi
+build/*.EFI
+build/*.BIN
+build/*.obj
+build/*.lst
+build/*.ppm
+build/*.png
+build/*.log
+build/esp/
+build/screenshots/
+build/data.img
+build/regs.txt
+build/qemu_*.txt
+build/qemu_*.log
+build/OVMF.fd
+
+# Logs
+*.log
+*.txt
+buildqemu_debug.log
+buildqemu_err.txt
+qemu_err.txt
+serial.log
+serial_verify.log
+results.txt
+results_keywords.txt
+results_tags.txt
+
+# Misc
+NUL
+UsersuserDocuments*
+flagged_websites.html
