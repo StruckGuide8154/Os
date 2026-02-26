@@ -1293,6 +1293,7 @@ i2c_tp_addrs:
 I2C_TP_ADDR_COUNT   equ ($ - i2c_tp_addrs)
 
 ; I2C-HID state
+global i2c_hid_active
 i2c_hid_active:     db 0
 i2c_dev_addr:       db 0
 i2c_poll_state:     db 0        ; 0=issue, 1=read header, 2=read data

@@ -19,6 +19,7 @@ extern xhci_address_device
 extern xhci_flush_events
 extern xhci_pci_search_start
 extern xhci_pci_this_start
+extern xhci_probe
 extern xhci_slot_id
 extern xhci_slot2_mode
 extern xhci_int_ep_dci
@@ -125,6 +126,7 @@ usb_hid_init_body:
     ; Recompute port offset each iteration from xhci_port_num
     mov rbx, [tick_count]
     add rbx, 50
+    mov r9d, 10000000
 .tport_wait_prc:
     movzx eax, byte [xhci_port_num]
     dec eax
@@ -134,6 +136,10 @@ usb_hid_init_body:
     mov edx, [rsi + rax + XHCI_PORTSC]
     test edx, XHCI_PORTSC_PRC
     jnz .tport_reset_done
+    
+    dec r9d
+    jz .tport_reset_done
+    
     mov rax, [tick_count]
     cmp rax, rbx
     jge .tport_reset_done               ; timeout - proceed anyway
@@ -389,40 +395,48 @@ usb_hid_init_body:
     ret
 
 ; ============================================================================
-; usb_delay - PIT-based delay (accurate on real hardware AND QEMU)
-; Input: ECX = milliseconds (rounded up to 10ms PIT tick granularity)
-; Uses tick_count from PIT IRQ0 (100Hz = 10ms/tick)
+; usb_delay - Hybrid PIT/Spin delay (safe against PIT timer freezes)
+; Input: ECX = milliseconds
 ; ============================================================================
 usb_delay:
     push rax
     push rbx
     push rcx
+    push rdx
 
-    ; Convert ms -> ticks (ceiling division by 10, minimum 1 tick)
-    ; ticks = (ms + 9) / 10
-    add ecx, 9
+    ; Calculate PIT target (1 tick = 10ms)
     mov eax, ecx
+    add eax, 9
     xor edx, edx
-    mov ecx, 10
-    div ecx              ; EAX = ticks needed
+    mov ebx, 10
+    div ebx
     test eax, eax
     jnz .start
-    mov eax, 1           ; At least 1 tick
+    mov eax, 1
 
 .start:
-    mov rbx, rax         ; RBX = ticks to wait (zero-extended)
+    mov rbx, rax
     mov rax, [tick_count]
-    add rbx, rax         ; RBX = target tick count
+    add rbx, rax         ; Target tick_count
+
+    ; Calculate spin timeout (fallback)
+    ; ~2M spins per millisecond
+    mov rdx, 2000000
+    imul rdx, rcx        ; RDX = max spin iterations
 
 .wait:
     mov rax, [tick_count]
     cmp rax, rbx
     jge .done
-    ; Spin (PIT ISR updates tick_count)
+
+    dec rdx
+    jz .done
+
     pause
     jmp .wait
 
 .done:
+    pop rdx
     pop rcx
     pop rbx
     pop rax
@@ -436,7 +450,7 @@ usb_poll_mouse:
     cmp byte [usb_mouse_active], 1
     je .loop
 
-    ; Not active.
+.normal_inactive:
     ; First: check if the XHCI controller is running and has a PSC event
     ; (handles hot-plug: mouse plugged in after boot)
     cmp byte [xhci_active], 1
@@ -1106,21 +1120,32 @@ usb_control_transfer_nodata:
 ; usb_wait_completion - Wait for status stage completion
 ; ============================================================================
 usb_wait_completion:
-    ; PIT-based 1-second timeout. CPU-loops fail on fast real hardware.
+    ; PIT-based 1-second timeout + CPU spin fallback
     push rbx
+    push rcx
     mov rbx, [tick_count]
     add rbx, 100                 ; 100 ticks = 1 second at 100Hz
+    mov ecx, 20000000            ; ~10M iterations max spin fallback
 .poll:
     call xhci_poll_event
     test eax, eax
     jnz .done
+    
+    dec ecx
+    jz .fail_timeout
+    
     mov rax, [tick_count]
     cmp rax, rbx
     jl .poll
+    
+.fail_timeout:
     xor eax, eax
+    pop rcx
     pop rbx
     ret
+
 .done:
+    pop rcx
     pop rbx
     ; Check if it was success
     cmp eax, 1
@@ -1235,13 +1260,16 @@ usb_find_endpoint:
     ret
 
 section .data
+global usb_mouse_active
+global usb_no_xhci
 usb_mouse_active: db 0
 usb_no_xhci:      db 0           ; 1 = no XHCI hardware found, stop retrying
 usb_hid_protocol: db 0
 usb_ep_addr:      db 0
 usb_ep_mps:       dw 0
 usb_ep_interval:  db 0
-init_retry_counter: dd 0
+init_retry_counter:  dd 0
+spp_portsc_counter:  dd 0
 usb_ctrl_attempts: db 0          ; Number of XHCI controllers tried this init cycle
 
 ; Slot 1 saved state (used when init-ing slot 2)

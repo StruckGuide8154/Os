@@ -628,6 +628,103 @@ mouse_check_moved:
     xchg al, [mouse_moved]
     ret
 
+; --- Poll EFI_SIMPLE_POINTER_PROTOCOL saved by bootloader ---
+; Reads relative X/Y movement and button state from the UEFI mouse driver.
+; Non-destructive: if SPP pointer is 0, returns immediately.
+; Clobbers: rax, rcx, rdx, r8, r9, r10, r11 (caller-saved)
+global uefi_mouse_poll
+uefi_mouse_poll:
+    push rbx
+    push r12
+    push r13
+
+    ; Load SPP interface pointer from VBE info block
+    mov rbx, [VBE_INFO_ADDR + VBE_SPP_OFF]
+    test rbx, rbx
+    jz .done                        ; No UEFI pointer protocol available
+
+    ; Build a 16-byte EFI_SIMPLE_POINTER_STATE on the stack
+    ; Also allocate 32 bytes of shadow space required for the MS x64 ABI call
+    sub rsp, 48
+    xor eax, eax
+    mov [rsp+32], eax
+    mov [rsp+36], eax
+    mov [rsp+40], eax
+    mov [rsp+44], eax
+
+    ; Call GetState(interface, &state)
+    ; GetState is second vtable entry (+8)
+    mov rax, [rbx + 8]
+    mov rcx, rbx                    ; This = interface
+    lea rdx, [rsp+32]               ; &state
+    call rax
+    ; EFI_NOT_READY (0x8000000000000006) means no new data
+    test rax, rax
+    jnz .pop_done                   ; Any non-zero = no data / error
+
+    ; Apply relative X movement (scale >>1 to avoid excessive speed)
+    mov r12d, [rsp+32]              ; RelativeMovementX (signed 32-bit)
+    sar r12d, 1
+    add r12d, [mouse_x]
+    ; Clamp to [0, scr_width-1]
+    test r12d, r12d
+    jns .clamp_x_hi
+    xor r12d, r12d
+.clamp_x_hi:
+    mov r13d, [scr_width]
+    dec r13d
+    cmp r12d, r13d
+    jle .clamp_x_ok
+    mov r12d, r13d
+.clamp_x_ok:
+    mov [mouse_x], r12d
+
+    ; Apply relative Y movement
+    mov r13d, [rsp+36]              ; RelativeMovementY (signed 32-bit)
+    sar r13d, 1
+    add r13d, [mouse_y]
+    ; Clamp to [0, scr_height-1]
+    test r13d, r13d
+    jns .clamp_y_hi
+    xor r13d, r13d
+.clamp_y_hi:
+    push rax
+    mov eax, [scr_height]
+    dec eax
+    cmp r13d, eax
+    pop rax
+    jle .clamp_y_ok
+    push rax
+    mov eax, [scr_height]
+    dec eax
+    mov r13d, eax
+    pop rax
+.clamp_y_ok:
+    mov [mouse_y], r13d
+
+    ; Update buttons (bit0=left, bit1=right)
+    xor al, al
+    cmp byte [rsp+44], 0            ; LeftButton
+    je .no_left
+    or al, 0x01
+.no_left:
+    cmp byte [rsp+45], 0            ; RightButton
+    je .no_right
+    or al, 0x02
+.no_right:
+    mov [mouse_buttons], al
+
+    ; Mark mouse as moved so the cursor redraws
+    mov byte [mouse_moved], 1
+
+.pop_done:
+    add rsp, 48
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 ; --- Debug: build diagnostic string into buffer ---
 ; RDI = output buffer (at least 256 bytes)
 ; Returns: RDI preserved

@@ -586,12 +586,6 @@ display_flip:
     push rsi
     push rdi
 
-    ; Check VSync
-    cmp byte [vsync_enabled], 1
-    jne .no_vsync_wait
-    call wait_vsync
-.no_vsync_wait:
-
     mov rdi, [fb_addr]       ; Destination: framebuffer (VRAM)
     mov rsi, [bb_addr]       ; Source: back buffer (RAM)
 
