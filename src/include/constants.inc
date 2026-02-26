@@ -48,6 +48,7 @@ VBE_WIDTH_OFF       equ 0x08         ; Screen width (4 bytes)
 VBE_HEIGHT_OFF      equ 0x0C         ; Screen height (4 bytes)
 VBE_PITCH_OFF       equ 0x10         ; Bytes per scanline (4 bytes)
 VBE_BPP_OFF         equ 0x14         ; Bits per pixel (4 bytes)
+VBE_SPP_OFF         equ 0x18         ; EFI_SIMPLE_POINTER_PROTOCOL interface ptr (qword, 0=none)
 
 ; --- Colors (32-bit 0x00RRGGBB, stored as BGRX in memory) ---
 COLOR_BLACK         equ 0x00000000

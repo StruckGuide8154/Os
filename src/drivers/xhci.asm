@@ -121,10 +121,15 @@ xhci_init:
     ; Wait for HCH = 0 (controller running) - up to 500ms
     mov rbx, [tick_count]
     add rbx, 50              ; 50 ticks = 500ms
+    mov ecx, 10000000        ; 10M spins fallback
 .wait_run:
     mov eax, [rsi + XHCI_OP_USBSTS]
     test eax, XHCI_STS_HCH
     jz .running
+    
+    dec ecx
+    jz .fail
+    
     mov rax, [tick_count]
     cmp rax, rbx
     jge .fail
@@ -347,6 +352,46 @@ xhci_pci_find:
     ret
 
 ; ============================================================================
+; xhci_probe - Find XHCI controller via PCI and read capabilities.
+; Does NOT reset or initialise the controller.
+; Sets xhci_op_base and xhci_max_ports so port registers can be polled.
+; Returns: EAX = 1 found, 0 not found.
+; ============================================================================
+global xhci_probe
+xhci_probe:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov dword [xhci_pci_search_start], 0
+    call xhci_pci_find
+    test eax, eax
+    jz .not_found
+    call xhci_read_caps
+    mov eax, 1
+    jmp .done
+.not_found:
+    xor eax, eax
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; ============================================================================
 ; xhci_read_caps - Read capability registers
 ; ============================================================================
 xhci_read_caps:
@@ -457,12 +502,16 @@ xhci_take_ownership:
 
     ; Wait for BIOS to release (bit 16 = 0) - up to 100ms
     push rdx
+    push rcx
     mov rdx, [tick_count]
     add rdx, 10              ; 10 ticks = 100ms
+    mov ecx, 2000000
 .wait_bios:
     mov eax, [rsi]
     test eax, (1 << 16)
     jz .own_done_pop
+    dec ecx
+    jz .bios_timeout
     mov rax, [tick_count]
     cmp rax, rdx
     jge .bios_timeout
@@ -475,6 +524,7 @@ xhci_take_ownership:
     or eax, (1 << 24)
     mov [rsi], eax
 .own_done_pop:
+    pop rcx
     pop rdx
 
 .own_done:
@@ -510,10 +560,13 @@ xhci_reset:
     ; Wait for HCH = 1 (halted) - up to 100ms
     mov rbx, [tick_count]
     add rbx, 10              ; 10 PIT ticks = 100ms
+    mov ecx, 2000000
 .wait_halt:
     mov eax, [rsi + XHCI_OP_USBSTS]
     test eax, XHCI_STS_HCH
     jnz .halted
+    dec ecx
+    jz .reset_fail
     mov rax, [tick_count]
     cmp rax, rbx
     jge .reset_fail          ; Timeout
@@ -536,10 +589,13 @@ xhci_reset:
     ; Wait for HCRST to clear - up to 1 second
     mov rbx, [tick_count]
     add rbx, 100             ; 100 PIT ticks = 1 second
+    mov ecx, 20000000
 .wait_rst:
     mov eax, [rsi + XHCI_OP_USBCMD]
     test eax, XHCI_CMD_HCRST
     jz .rst_done
+    dec ecx
+    jz .reset_fail
     mov rax, [tick_count]
     cmp rax, rbx
     jge .reset_fail          ; Timeout
@@ -557,10 +613,13 @@ xhci_reset:
     ; Wait for CNR = 0 - up to 1 second
     mov rbx, [tick_count]
     add rbx, 100
+    mov ecx, 20000000
 .wait_cnr:
     mov eax, [rsi + XHCI_OP_USBSTS]
     test eax, XHCI_STS_CNR
     jz .reset_ok
+    dec ecx
+    jz .reset_fail
     mov rax, [tick_count]
     cmp rax, rbx
     jge .reset_fail
@@ -769,17 +828,25 @@ xhci_submit_cmd:
     mov rsi, [xhci_db_base]
     mov dword [rsi], 0
 
-    ; Poll event ring for Command Completion (PIT-based 2-second timeout)
-    ; CPU-loop timeouts fail on fast real hardware (3M iters = ~0.6ms on Zen 5).
+    ; Poll event ring for Command Completion (PIT-based 2-second timeout + spin fallback)
     mov rbx, [tick_count]
     add rbx, 200                  ; 200 ticks = 2 seconds at 100Hz
+    mov ecx, 40000000             ; ~20M iterations spin fallback
 .poll:
+    push rcx
     call xhci_poll_event
+    pop rcx
     test eax, eax
     jnz .got_event
+    
+    dec ecx
+    jz .cmd_fail
+    
     mov rax, [tick_count]
     cmp rax, rbx
     jl .poll
+
+.cmd_fail:
 
     ; Timeout
     xor eax, eax
@@ -968,12 +1035,19 @@ xhci_find_port:
     ; Wait 30ms for port power (PIT-based, CPU-loops are calibrated for QEMU not real HW)
     push rax
     push rdx
+    push rcx
     mov rdx, [tick_count]
     add rdx, 3                    ; 3 ticks = 30ms at 100Hz
+    mov ecx, 600000
 .power_wait:
     mov rax, [tick_count]
     cmp rax, rdx
-    jl .power_wait
+    jge .pwdone
+    dec ecx
+    jz .pwdone
+    jmp .power_wait
+.pwdone:
+    pop rcx
     pop rdx
     pop rax
 .port_powered:
@@ -1006,12 +1080,15 @@ xhci_find_port:
     ; Wait for reset complete: PRC (Port Reset Change) = 1 or WRC (Warm Reset Change = 1<<19)
     mov rbx, [tick_count]
     add rbx, 50
+    mov ecx, 10000000
 .wait_reset:
     mov eax, [rsi + rdx + XHCI_PORTSC]
     test eax, XHCI_PORTSC_PRC
     jnz .reset_done
     test eax, (1 << 19)                ; WRC bit
     jnz .reset_done
+    dec ecx
+    jz .no_port
     mov rax, [tick_count]
     cmp rax, rbx
     jge .no_port                  ; Reset timeout
@@ -1153,18 +1230,25 @@ xhci_find_port_next:
 
     ; Wait for reset complete (PRC bit) - PIT-based 500ms timeout
     push rdx
+    push r8
     mov rdx, [tick_count]
     add rdx, 50                   ; 50 ticks = 500ms at 100Hz
+    mov r8d, 10000000
 .next_rst_wait:
     mov eax, [rsi + rcx + XHCI_PORTSC]
     test eax, XHCI_PORTSC_PRC
     jnz .next_rst_pop_done
+    
+    dec r8d
+    jz .next_rst_pop_done
+    
     push rax
     mov rax, [tick_count]
     cmp rax, rdx
     pop rax
     jl .next_rst_wait
 .next_rst_pop_done:
+    pop r8
     pop rdx
 .next_rst_done:
     ; Clear PRC

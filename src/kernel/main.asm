@@ -47,6 +47,11 @@ extern mouse_y
 extern mouse_buttons
 extern mouse_moved
 extern usb_poll_mouse
+extern uefi_mouse_poll
+extern usb_mouse_active
+extern usb_no_xhci
+extern i2c_hid_active
+extern xhci_probe
 extern keyboard_read
 extern keyboard_repeat_tick
 extern keyboard_available
@@ -112,8 +117,8 @@ WIN_OFF_APPDATA equ 136
 ; FPS overlay region (small rect that gets updated each frame)
 FPS_REGION_X    equ 8
 FPS_REGION_Y    equ 8
-FPS_REGION_W    equ 112      ; Covers "FPS: XXXXX" (14 chars * 8px)
-FPS_REGION_H    equ 20       ; 16px font height + 4px padding
+FPS_REGION_W    equ 290      ; Wide enough for debug line "USB:1 I2C:1 SPP:1 X:NNNN Y:NNNN"
+FPS_REGION_H    equ 40       ; Two lines: FPS + debug status
 
 extern fill_rect
 
@@ -182,8 +187,8 @@ debug_print:
 
     ; Advance Y
     add dword [debug_y], 16
-    ; NOTE: No display_flip here - avoid 1fps flicker during init.
-    ; Serial output (above) captures all debug messages.
+    ; NOTE: We now call display_flip here to see debug boot logs instantly on screen!
+    call display_flip
 
 .done:
     pop r11
@@ -245,7 +250,7 @@ kmain:
 
     mov rsi, szUsbDone
     call debug_print
-    
+
     mov rsi, szI2cInit
     call debug_print
 
@@ -272,10 +277,10 @@ kmain:
     test eax, eax
     jnz .flush_keys
 
-    ; 4. Initial Draw
+    ; 5. Initial Draw
     mov byte [scene_dirty], 1
 
-    ; 5. Free-running Event + Render Loop
+    ; 6. Free-running Event + Render Loop
 .loop:
     ; --- Poll USB Mouse ---
     call usb_poll_mouse
@@ -310,9 +315,6 @@ process_mouse:
     call mouse_check_moved
     test al, al
     jz .pm_done
-
-    ; Hide cursor before any redraw
-    call cursor_hide
 
     ; Get state
     mov edi, [mouse_x]
@@ -407,7 +409,14 @@ process_mouse:
     ; If dragging, mark dirty for outline updates
     cmp qword [wm_drag_window_id], -1
     jne .pm_set_dirty
+    
     ; Just cursor movement - redraw cursor at new position
+    cmp byte [vsync_enabled], 1
+    jne .pm_skip_vs
+    call wait_vsync
+.pm_skip_vs:
+
+    call cursor_hide
     mov edi, [mouse_x]
     mov esi, [mouse_y]
     call cursor_draw
@@ -489,7 +498,6 @@ process_keyboard:
 
     ; --- Arrow key mouse movement (NumLock OFF) ---
 .pk_key_up:
-    call cursor_hide
     mov eax, [mouse_y]
     sub eax, 5
     jns .pk_set_y
@@ -501,7 +509,6 @@ process_keyboard:
     ret
 
 .pk_key_down:
-    call cursor_hide
     mov eax, [mouse_y]
     add eax, 5
     cmp eax, SCREEN_HEIGHT - 1
@@ -514,7 +521,6 @@ process_keyboard:
     ret
 
 .pk_key_left:
-    call cursor_hide
     mov eax, [mouse_x]
     sub eax, 5
     jns .pk_set_x
@@ -526,7 +532,6 @@ process_keyboard:
     ret
 
 .pk_key_right:
-    call cursor_hide
     mov eax, [mouse_x]
     add eax, 5
     cmp eax, SCREEN_WIDTH - 1
@@ -539,7 +544,6 @@ process_keyboard:
     ret
 
 .pk_key_lclick:
-    call cursor_hide
     mov byte [mouse_buttons], 1
     mov edi, [mouse_x]
     mov esi, [mouse_y]
@@ -565,7 +569,6 @@ process_keyboard:
     ret
 
 .pk_key_rclick:
-    call cursor_hide
     mov edi, [mouse_x]
     mov esi, [mouse_y]
     call tb_handle_rclick
@@ -592,8 +595,8 @@ render_frame:
     cmp byte [scene_dirty], 0
     je .rf_fast_path
 
-    ; Scene changed - full redraw
-    call cursor_hide
+    ; === SCENE CHANGED: Full Redraw ===
+    ; We DO NOT hide the cursor yet. We build the full BB while VRAM remains untouched showing old state.
     call wm_draw_desktop
     call desktop_draw_icons
     call tb_draw
@@ -609,11 +612,20 @@ render_frame:
     call render_save_backbuffer
     mov byte [scene_dirty], 0
 
+    ; --- VRAM Modification Window ---
+    cmp byte [vsync_enabled], 1
+    jne .fr_skip_full_vs
+    call wait_vsync
+.fr_skip_full_vs:
+
+    ; Hide old cursor from VRAM
+    call cursor_hide
+
     ; Full flip to VRAM
     call render_mark_full
     call render_flush
 
-    ; Draw cursor on top of front buffer
+    ; Draw cursor on top of front buffer (and resample background)
     mov edi, [mouse_x]
     mov esi, [mouse_y]
     call cursor_draw
@@ -621,18 +633,22 @@ render_frame:
 
 .rf_fast_path:
     ; === FAST PATH: Scene unchanged ===
-    ; Only update FPS text region (~6KB instead of 3MB).
-    ; Do NOT hide/redraw cursor here - that causes visible flicker
-    ; because the cursor disappears from VRAM between hide and draw.
-    ; Cursor is only moved in process_mouse when it actually changes.
-
     call .rf_update_fps
 
-    ; Restore just the FPS region from cache to clear old text
+    ; Restore just the FPS region from cache to clear old text in BB
     call .rf_restore_fps_region
 
     ; Draw new FPS text into backbuffer
     call .rf_draw_fps_text
+
+    ; --- VRAM Modification Window ---
+    cmp byte [vsync_enabled], 1
+    jne .fr_skip_fast_vs
+    call wait_vsync
+.fr_skip_fast_vs:
+
+    ; Hide old cursor from VRAM
+    call cursor_hide
 
     ; Flip only the FPS region from backbuffer to VRAM
     mov edi, FPS_REGION_X
@@ -641,17 +657,30 @@ render_frame:
     mov ecx, FPS_REGION_H
     call display_flip_rect
 
+    ; Draw cursor on top of VRAM (and resample background)
+    mov edi, [mouse_x]
+    mov esi, [mouse_y]
+    call cursor_draw
+
     ret
 
 .rf_draw_drag:
     ; --- Drag path: need full backbuffer restore for outline ---
-    call cursor_hide
     call render_restore_backbuffer
     call wm_draw_drag_outline
     call .rf_update_fps
     call .rf_draw_fps_text
     call render_mark_full
+
+    ; --- VRAM Modification Window ---
+    cmp byte [vsync_enabled], 1
+    jne .fr_skip_drag_vs
+    call wait_vsync
+.fr_skip_drag_vs:
+
+    call cursor_hide
     call render_flush
+    
     mov edi, [mouse_x]
     mov esi, [mouse_y]
     call cursor_draw
@@ -693,6 +722,77 @@ render_frame:
     mov rsi, 10
     lea rdx, [fps_str]
     mov ecx, 0x00FFFF00      ; Yellow
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+
+    ; --- Debug status line: "USB:X I2C:X SPP:X X:NNN Y:NNN" ---
+    ; Render static flags at y=28, then numbers at fixed x offsets
+    ; "USB:X"
+    movzx eax, byte [usb_mouse_active]
+    add al, '0'
+    mov [dbg_str+4], al
+    mov rdi, 10
+    mov rsi, 28
+    lea rdx, [dbg_str]
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+
+    ; "I2C:X"
+    movzx eax, byte [i2c_hid_active]
+    add al, '0'
+    mov [dbg_str+10], al
+    mov rdi, 58
+    mov rsi, 28
+    lea rdx, [dbg_str+6]
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+
+    ; "SPP:X"
+    mov rax, [VBE_INFO_ADDR + VBE_SPP_OFF]
+    test rax, rax
+    setnz al
+    add al, '0'
+    mov [dbg_str+16], al
+    mov rdi, 106
+    mov rsi, 28
+    lea rdx, [dbg_str+12]
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+
+    ; "X:" + number
+    mov rdi, [mouse_x]
+    lea rsi, [dbg_num]
+    call uint32_to_str
+    mov rdi, 154
+    mov rsi, 28
+    lea rdx, [dbg_xlbl]     ; "X:"
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+    mov rdi, 170
+    mov rsi, 28
+    lea rdx, [dbg_num]
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+
+    ; "Y:" + number
+    mov rdi, [mouse_y]
+    lea rsi, [dbg_num]
+    call uint32_to_str
+    mov rdi, 218
+    mov rsi, 28
+    lea rdx, [dbg_ylbl]     ; "Y:"
+    mov ecx, 0x0000FF00
+    mov r8d, COLOR_DESKTOP_BG
+    call render_text
+    mov rdi, 234
+    mov rsi, 28
+    lea rdx, [dbg_num]
+    mov ecx, 0x0000FF00
     mov r8d, COLOR_DESKTOP_BG
     call render_text
 
@@ -746,6 +846,11 @@ render_frame:
 
 szFPSPrefix db "FPS:", 0
 fps_str     times 16 db 0
+; Debug HUD strings (chars at [+4],[+10],[+16] are overwritten each frame)
+dbg_str     db "USB:0",0,"I2C:0",0,"SPP:0",0
+dbg_xlbl    db "X:",0
+dbg_ylbl    db "Y:",0
+dbg_num     times 12 db 0    ; scratch for uint32_to_str output
 scene_dirty db 1              ; 1 = scene needs full redraw
 
 szBootMsg db "Booting NexusOS v3.0...", 0

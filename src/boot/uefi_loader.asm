@@ -239,6 +239,10 @@ _start:
     rep stosd
 .gop_done:
 
+    ; === S1.5: Locate EFI_SIMPLE_POINTER_PROTOCOL and save for kernel ===
+    SDBG 'S1b-SPP'
+    call locate_spp
+
     ; === S2: Load kernel from filesystem ===
     SDBG 'S2-Kernel'
     lea rdx, [s_kernel]
@@ -818,6 +822,56 @@ setup_paging:
 
 ; ============================================================================
 ; EXIT_BOOT_SERVICES  - get memory map and call ExitBootServices (3 retries)
+; ============================================================================
+; LOCATE_SPP  - Find EFI_SIMPLE_POINTER_PROTOCOL and store pointer in VBE block
+; Failure is non-fatal: just leaves VBE_INFO+SPP_OFF as 0.
+; ============================================================================
+locate_spp:
+    push rbx
+    push r12
+    ; 2 pushes = 16. Entry 16n-8. After pushes: 16n-24. sub 40 -> 16n-64 = 0 mod 16.
+    sub rsp, 40
+
+    ; LocateProtocol(GUID, NULL, &Interface)
+    ; RCX=BS, RAX=LocateProtocol, then: RCX=&GUID, RDX=0, R8=&v_spp
+    mov rbx, [v_bs]
+    mov rax, [rbx + BS_LOCATE]       ; LocateProtocol
+    lea rcx, [guid_spp]
+    xor edx, edx                     ; Registration = NULL
+    lea r8,  [v_spp]
+    call rax
+    SREG 'SPP-RET', rax
+    test rax, rax
+    jnz .no_spp
+
+    ; Got the interface. Reset it so GetState returns fresh data.
+    mov r12, [v_spp]
+    SREG 'SPP-IF', r12
+    test r12, r12
+    jz .no_spp
+
+    ; Call Reset(interface, ExtendedVerification=0)
+    mov rax, [r12 + 0]               ; Reset is first vtable entry
+    mov rcx, r12
+    xor edx, edx
+    call rax
+
+    ; Write interface pointer into VBE info block so the kernel can find it
+    mov qword [VBE_INFO + 0x18], r12
+    SDBG 'SPP-OK'
+    jmp .done
+
+.no_spp:
+    SDBG 'SPP-NONE'
+    mov qword [VBE_INFO + 0x18], 0
+
+.done:
+    add rsp, 40
+    pop r12
+    pop rbx
+    ret
+
+; ============================================================================
 ; Returns: RAX = 0 success, 1 fail
 ; ============================================================================
 exit_boot_services:
@@ -937,6 +991,12 @@ guid_lip:
     dw 0x9562, 0x11d2
     db 0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
 
+; EFI_SIMPLE_POINTER_PROTOCOL
+guid_spp:
+    dd 0x31878c87
+    dw 0x0b75, 0x11d5
+    db 0x9a, 0x4f, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d
+
 ; ============================================================================
 ; UCS-2 strings
 ; ============================================================================
@@ -961,6 +1021,7 @@ v_bs:          dq 0
 v_conout:      dq 0
 
 v_gop:         dq 0
+v_spp:         dq 0
 v_fb:          dq 0
 v_scrw:        dd 0
 v_scrh:        dd 0
