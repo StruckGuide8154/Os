@@ -28,12 +28,53 @@
 ; --- Core Kernel Entry Point (MUST BE FIRST) ---
 section .text
 %include "src/kernel/core/entry.asm"
+%include "src/kernel/core/core_runtime_state.asm"
 section .text
-%include "src/kernel/core/main.asm"
+%include "build/nxh/kernel_console.asm"
+section .text
+%include "build/nxh/context_menu.asm"
+section .text
+%include "build/nxh/kernel_lifecycle.asm"
+section .text
+%include "build/nxh/serial_poll.asm"
+section .text
+%include "build/nxh/input_dispatch.asm"
+section .text
+%include "build/nxh/frame_present.asm"
+; NexusHLK: former main-loop and diagnostic modules. Keep these directly after
+; core_runtime_state.asm and before measured_boot.asm so the moved code stays in
+; the early kernel text span [_start, _kernel_text_end).
+section .text
+%include "build/nxh/serial_diag.asm"
+; Boot/serial diagnostics, debug overlay, CPU accounting, serial console, and
+; real-mode boot diagnostics are split into NexusHLK owner modules and compiled
+; by nxhc.py --target kernel.
+section .text
+%include "build/nxh/boot_diag.asm"
+section .text
+%include "build/nxh/debug_overlay.asm"
+section .text
+%include "build/nxh/cpu_acct.asm"
+section .text
+%include "build/nxh/serial_console.asm"
+section .text
+%include "build/nxh/real_boot_diag.asm"
+section .text
+%include "build/nxh/real_boot_diag_core.asm"
+section .text
+%include "build/nxh/real_boot_diag_fbperf.asm"
+section .text
+%include "build/nxh/real_boot_diag_legacy.asm"
+section .text
+%include "build/nxh/real_boot_diag_gfx.asm"
 section .text
 %include "src/kernel/core/measured_boot.asm"
 section .text
+%include "src/kernel/core/nk_monitor.asm"
+section .text
 %include "src/kernel/core/kernel_lockdown.asm"
+section .text
+%include "src/kernel/core/security_status.asm"
 section .text
 %include "src/kernel/core/klog.asm"
 section .text
@@ -122,7 +163,7 @@ section .text
 ; AMD DCN/DMUB and GFX11 bring-up subsystems retired 2026-05-26.
 ; Source preserved under deprecated/780M_IGPU/. See deprecated/README.md
 ; for the deprecation policy. Do NOT add -dNEXUS_DIAG_LEGACY or
-; -dNEXUS_GFX_BRINGUP to any build — the gated source still in main.asm
+; -dNEXUS_GFX_BRINGUP to any build — the retired gated source
 ; references symbols that no longer link in the active tree.
 %include "src/kernel/drivers/rtl8139.asm"
 section .text

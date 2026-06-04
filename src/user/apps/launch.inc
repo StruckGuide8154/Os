@@ -1,5 +1,12 @@
 MEDIA_PLAYER_BAR_H equ 26
 
+; ----------------------------------------------------------------------------
+; Named constants for the launcher / L3 selftest. Values copied verbatim from
+; the original inline literals.
+; ----------------------------------------------------------------------------
+LAUNCH_COL_L3_PANEL equ 0x0000AA44   ; L3 selftest result panel rect/text color (green, ARGB)
+LAUNCH_NBA1_MAGIC   equ 0x3141424E   ; 'NBA1' little-endian file magic (NexusOS video clip)
+
 app_l3_test_draw:
     push rdi
     push r14
@@ -51,11 +58,11 @@ app_l3_test_draw:
     mov rdi, rax
     mov edx, 80
     mov ecx, 24
-    mov r8d, 0x0000AA44
+    mov r8d, LAUNCH_COL_L3_PANEL
     SYS_GUI_RECT rdi, rsi, rdx, rcx, r8
     lea rdx, [szL3DrawOk]
     mov ecx, COLOR_TEXT_WHITE
-    mov r8d, 0x0000AA44
+    mov r8d, LAUNCH_COL_L3_PANEL
     SYS_GUI_TEXT rdi, rsi, rdx, rcx, r8
     ret
 
@@ -364,76 +371,25 @@ app_launch:
     jmp .done
 
 .launch_terminal:
-    SER 'T'
-    SER 't'
-    ; Reset terminal state
-    mov dword [term_cursor], 0
-    mov byte [term_input], 0
-    
-    ; Clear entire input buffer for safety
-    lea rdi, [term_input]
-    xor eax, eax
-    mov ecx, 64
-    cld
-    rep stosb
-
-    mov dword [term_hist_count], 0
-    ; Clear history pointers
-    lea rcx, [rel term_hist_ptrs]
-    xor eax, eax
-.clr_hist:
-    cmp eax, TERM_MAX_HIST
-    jge .hist_cleared
-    mov qword [rcx + rax * 8], 0
-    inc eax
-    jmp .clr_hist
-.hist_cleared:
-    ; Add welcome lines
-    lea rcx, [term_hist_ptrs]
-    lea rax, [rel szTermWelcome]
-    mov qword [rcx + 0], rax
-    lea rax, [rel szTermVer]
-    mov qword [rcx + 8], rax
-    lea rax, [rel szTermHelpHint]
-    mov qword [rcx + 16], rax
-    mov dword [term_hist_count], 3
+    ; Terminal is now a pure-NexusHL app (src/user/nexushl/apps/terminal.nxh).
+    ; Per-slot state lives in its state{} block (zero-initialised on copy) and
+    ; the welcome banner is seeded lazily on first draw, so no launch-time
+    ; state/history/fat16 seeding is required — same shape as .launch_ping.
     lea rdi, [rel szTermTitle]
     mov rsi, 200
     mov rdx, 150
     mov rcx, 450
     mov r8, 300
-    mov r9, app_terminal_draw
-    SER '{'
+    mov r9, app_hl_terminal_draw
     sub rsp, 8               ; Align stack
     call wm_create_window_ex
     add rsp, 8
-    SER '}'
     cmp rax, -1
     je .done
     APPLY_MANIFEST APP_TERMINAL
-    SER 'a'
-    push rax
-    SER 'b'
-    ; Per-slot terminal state lives inside the blob image now (zero-initialised
-    ; on copy). Empty echo buffer triggers the help-hint fallback in the draw
-    ; routine, so no explicit seeding is needed.
-
-    ; Reset filesystem state to root when terminal starts
-    ; (Use direct kernel fat16 call; %xdefine aliases are for ring-3 handlers.)
-    SER 'r'
-    %undef fat16_change_dir
-    xor eax, eax
-    extern fat16_change_dir
-    call fat16_change_dir
-    %xdefine fat16_change_dir app_sys_fs_change_dir
-    SER 'R'
-    
-    mov rax, [rsp]
-    mov r10, app_terminal_click
-    mov r11, app_terminal_key
+    mov r10, app_hl_terminal_click
+    mov r11, app_hl_terminal_key
     call app_set_window_handlers
-    SER 't'
-    pop rax
     jmp .done
 
 .launch_notepad:
@@ -1550,7 +1506,7 @@ kernel_open_file_in_media:
     ; the file and the real header stays in the slot for controls/hit-testing.
     ; Per-window ownership (vs. the old single shared buffer) means opening a
     ; second video no longer truncates the first one's playback.
-    cmp dword [r14 + APP_SLOT_BMP_FILE_OFF], 0x3141424E ; 'NBA1'
+    cmp dword [r14 + APP_SLOT_BMP_FILE_OFF], LAUNCH_NBA1_MAGIC ; 'NBA1'
     jne .kom_loaded
 
     ; Drop any buffer left over from a previous tenant of this reused window id.
@@ -1589,7 +1545,7 @@ kernel_open_file_in_media:
     jbe .kom_nba_free_fallback
     lea rcx, [rel media_full_buf]
     mov r11, [rcx + r13*8]                   ; buffer base
-    cmp dword [r11], 0x3141424E
+    cmp dword [r11], LAUNCH_NBA1_MAGIC
     jne .kom_nba_free_fallback
     mov ebx, eax                             ; bytes loaded into full buffer
     ; Refresh the slot header from the full buffer so controls/sizing match.
@@ -1643,7 +1599,7 @@ kernel_open_file_in_media:
 .kom_loaded:
     ; Native-size NBA playback avoids the expensive scaler hot path for the
     ; common BOOTANIM.NBA case while still using normal controls/chrome.
-    cmp dword [r14 + APP_SLOT_BMP_FILE_OFF], 0x3141424E ; 'NBA1'
+    cmp dword [r14 + APP_SLOT_BMP_FILE_OFF], LAUNCH_NBA1_MAGIC ; 'NBA1'
     jne .kom_return
     mov rax, r13
     imul rax, WINDOW_STRUCT_SIZE

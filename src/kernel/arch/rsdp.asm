@@ -5,6 +5,7 @@
 bits 64
 
 %include "constants.inc"
+%include "arch_regs.inc"
 
 section .text
 global rsdp_find
@@ -17,8 +18,8 @@ rsdp_find:
     push rdi
 
     ; Range 1: E0000h to FFFFFh
-    mov rsi, 0xE0000
-    mov rcx, 0x20000 / 16        ; 8192 paragraphs covers 0xE0000..0xFFFFF inclusive
+    mov rsi, RSDP_BIOS_SCAN_BASE
+    mov rcx, RSDP_BIOS_SCAN_LEN / 16   ; 8192 paragraphs covers 0xE0000..0xFFFFF inclusive
 .scan1:
     cmp dword [rsi], 'RSD '
     jne .next1

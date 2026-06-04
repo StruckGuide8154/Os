@@ -1,109 +1,106 @@
-# NexusHL Settings app. Display section now shows the current logical
-# desktop size, surfaces a "Use Native" choice for the monitor's actual
-# resolution (queried via SYS_DISPLAY_NATIVE), and exposes the Stretch
-# flag alongside VSync and Show FPS. Layout flows top-to-bottom with
-# spacing constants from gui.nxh so rows never collide.
+# NexusHL Settings app — tabbed redesign.
+#
+# Four tabs (Debug only appears on debug builds): General, Display, Security,
+# Debug. Each tab's content fits inside the 380x340 window with no overflow —
+# the old single-scroll layout ran past the client area. Colors resolve through
+# the active theme (UI_COL_* sentinels) so Settings follows light/dark.
+#
+# The Security tab reads the kernel's runtime hardening inventory via
+# SYS_SYSINFO selectors 200..240 (src/kernel/core/security_status.asm) and shows
+# a status pill per feature. A feature that failed to engage shows "FAILED" in
+# red instead of bricking the box — the kernel reports it rather than halting.
 
 use gui
 use svg
 
 app "Settings" { stack = 4096; }
 
-const C_PANEL      = 0x00F5F6FA
-const C_BUTTON     = 0x00D8DDE3
-const C_BUTTON_ON  = 0x002A6FFF
-const C_BUTTON_OFF = 0x00B8BEC8
-const C_TEXT       = 0x000F141E
-const C_MUTED      = 0x004B5563
+# --- Layout metrics ----------------------------------------------------------
+const PAD            = 12
+const TABBAR_H       = 26
+const CONTENT_Y0     = 34            # first content row, just below the tab bar
 
-# Widget metrics.
-const RES_W           = 78            # preset resolution button width
-const BG_W            = 82            # theme button width
-const NATIVE_BTN_W    = 92            # "Use Native" button width
-const TOGGLE_COL_W    = 130           # checkbox + label column
+const RES_W          = 78            # preset resolution button width
+const BG_W           = 82            # wallpaper button width
+const NATIVE_BTN_W   = 92
+const TOGGLE_COL_W   = 130
+const PILL_W         = 80            # security status pill width
+const FB_DUMP_W      = 130
 
-# Layout cursor constants. Derived from gui.nxh defaults
-# (UI_PAD=12, UI_TITLE_H=22, UI_FONT_H=12, UI_LABEL_GAP=6,
-#  UI_BUTTON_H=16, UI_ROW_GAP=6, UI_ROW_H=22, UI_SECTION_GAP=20).
-# Inlined as literals because nxhc `const` only accepts numeric literals.
-const X0              = 12
-const Y_TITLE_DISP    = 10            # "Display"
-const Y_CURRENT_LINE  = 32            # "Current: WxH"
-const Y_NATIVE_LINE   = 46            # "Native: WxH"
-const Y_NATIVE_BTN    = 44            # [ Use Native ]
-const Y_CAP_RES       = 70            # "Resolution"
-const Y_RES           = 86            # preset buttons
-const Y_TOGGLES       = 108           # vsync / fps row
-const Y_TOGGLES_2     = 128           # stretch row
-const Y_TITLE_GPU     = 150           # "Graphics"
-const Y_GPU_NAME      = 168
-const Y_GPU_ID        = 182
-const Y_GPU_BAR       = 196
-const Y_TITLE_MEM     = 218           # "Memory"
-const Y_RAM           = 236
-const Y_TITLE_BG      = 256           # "Appearance"
-const Y_CAP_BG        = 270
-const Y_BG            = 286
+# --- Per-tab content Y cursors (client coords) -------------------------------
+# Display tab.
+const Y_DISP_CUR     = 34
+const Y_DISP_NAT     = 50
+const Y_DISP_NATBTN  = 48
+const Y_DISP_RESCAP  = 74
+const Y_DISP_RES     = 92
+const Y_DISP_TOG1    = 122
+const Y_DISP_TOG2    = 146
+# General tab.
+const Y_GEN_SYS      = 34
+const Y_GEN_RAM      = 56
+const Y_GEN_CPU      = 72
+const Y_GEN_GPU      = 88
+const Y_GEN_GPUID    = 104
+const Y_GEN_APP      = 130
+const Y_GEN_BG       = 152
+# Debug tab.
+const Y_DBG_TITLE    = 34
+const Y_DBG_L1       = 56
+const Y_DBG_L2       = 70
+const Y_DBG_L3       = 84
+const Y_DBG_L4       = 98
+const Y_DBG_L5       = 112
+const Y_DBG_L6       = 126
+const Y_DBG_DUMP     = 148
+# Security tab.
+const Y_SEC_SUMMARY  = 34
+const Y_SEC_LIST     = 58
+const SEC_ROW_H      = 18
 
-# --- Framebuffer (debug) section ---------------------------------------
-# Live readouts from SYS_SYSINFO selectors 100..134 (fbperf). Lets the user
-# watch flip rate / caching state without leaving the OS, and ships a
-# "Dump to serial" button that fires selector 199 -> fbperf_serial_dump,
-# emitting a full [FBPERF] block over COM1 for offline diagnosis.
-const Y_TITLE_FB      = 310
-const Y_FB_LINE1      = 328
-const Y_FB_LINE2      = 342
-const Y_FB_LINE3      = 356
-const Y_FB_LINE4      = 370
-const Y_FB_LINE5      = 384
-const Y_FB_LINE6      = 398
-const Y_FB_DUMP_BTN   = 414
-const FB_DUMP_W       = 130
+# --- Security status SYS_SYSINFO selectors (security_status.asm) --------------
+const SEC_SI_DEBUG   = 200
+const SEC_SI_COUNT   = 201
+const SEC_SI_ANYFAIL = 202
+const SEC_SI_READY   = 203
+const SEC_SI_FEAT0   = 210
 
-# fbperf SYS_SYSINFO selector IDs (mirror fbperf.asm comment block).
-const FB_SI_FLIPS_TOTAL   = 100
-const FB_SI_FULL_FLIPS    = 101
-const FB_SI_RECT_FLIPS    = 102
-const FB_SI_BYTES_LO      = 103
-const FB_SI_BYTES_HI      = 104
-const FB_SI_TSC_TOTAL_LO  = 105
-const FB_SI_TSC_TOTAL_HI  = 106
-const FB_SI_TSC_MIN       = 107
-const FB_SI_TSC_MAX       = 108
-const FB_SI_TSC_LAST      = 109
-const FB_SI_DIRTY_SUM     = 110
-const FB_SI_CR3           = 116
-const FB_SI_CR4           = 117
-const FB_SI_PAT_LO        = 120
-const FB_SI_PAT_HI        = 121
-const FB_SI_MTRR_DEF      = 122
-const FB_SI_MTRR_COUNT    = 123
-const FB_SI_PTE_LO        = 124
-const FB_SI_PTE_HI        = 125
-const FB_SI_PTE_LEVEL     = 126
-const FB_SI_CACHING_TYPE  = 127
-const FB_SI_WC_PLAN_LO    = 128
-const FB_SI_WC_ARMED      = 130
-const FB_SI_WC_ACTIVATED  = 131
-const FB_SI_FB_ADDR_LO    = 132
-const FB_SI_FB_ADDR_HI    = 133
-const FB_SI_INIT_DONE     = 134
-const FB_SI_DUMP_SERIAL   = 199
+# Per-feature status codes (mirror security_status.asm).
+const SECST_OFF      = 0
+const SECST_ACTIVE   = 1
+const SECST_SOFTWARE = 2
+const SECST_UNSUPP   = 3
+const SECST_FAILED   = 4
+
+# --- fbperf selectors used by the Debug tab ----------------------------------
+const FB_SI_FLIPS_TOTAL  = 100
+const FB_SI_FULL_FLIPS   = 101
+const FB_SI_RECT_FLIPS   = 102
+const FB_SI_BYTES_LO     = 103
+const FB_SI_TSC_MIN      = 107
+const FB_SI_TSC_MAX      = 108
+const FB_SI_TSC_LAST     = 109
+const FB_SI_PAT_LO       = 120
+const FB_SI_PAT_HI       = 121
+const FB_SI_MTRR_COUNT   = 123
+const FB_SI_PTE_LEVEL    = 126
+const FB_SI_CACHING_TYPE = 127
+const FB_SI_WC_ARMED     = 130
+const FB_SI_WC_ACTIVATED = 131
+const FB_SI_INIT_DONE    = 134
+const FB_SI_DUMP_SERIAL  = 199
 
 state {
+    active_tab: 4;
     settings_flags: 4;
     settings_last_mode_result: 4;
     settings_bg_cache: 4;
-    # Scratch buffers used to format "WxH" strings for current/native
-    # resolution captions. 24 bytes covers any width<99999 + 'x' + height.
-    current_res_buf: 24;
-    native_res_buf:  24;
     current_label_buf: 24;
     native_label_buf:  24;
     ram_label_buf:     40;
+    cpu_label_buf:     48;
     gpu_name_buf:      48;
     gpu_id_buf:        56;
-    gpu_bar_buf:       64;
     fb_line1_buf:      64;
     fb_line2_buf:      64;
     fb_line3_buf:      64;
@@ -112,54 +109,80 @@ state {
     fb_line6_buf:      64;
 }
 
-str title_display  = "Display";
-str title_gpu      = "Graphics";
-str title_memory   = "Memory";
-str title_bg_sec   = "Appearance";
-str label_res      = "Preset resolutions";
-str label_vsync    = "VSync";
-str label_fps      = "Show FPS";
-str label_stretch  = "Stretch to fill";
-str label_ram_prefix = "Total RAM: ";
-str label_ram_suffix = " MB";
-str label_bg       = "Desktop background";
-str btn_native     = "Use Native";
-str res_800        = "800x600";
-str res_1024       = "1024x768";
-str res_1280       = "1280x720";
-str bg_metal       = "Metal";
-str bg_ribbons     = "Ribbons";
-str bg_bloom       = "Bloom";
-str mode_ok        = "Mode switch ready";
-str mode_failed    = "Mode switch failed";
-str prefix_current = "Current: ";
-str prefix_native  = "  Native: ";
-str prefix_gpu     = "GPU: ";
-str prefix_gpu_id  = "ID: ";
-str prefix_bdf     = " BDF: ";
-str prefix_bar0    = "BAR0: ";
-str prefix_cmd     = " CMD: ";
-str gpu_none       = "No AMD display";
-str gpu_780m       = "AMD Radeon 780M";
-str gpu_amd        = "AMD display"
-str title_fb_dbg   = "Framebuffer (debug)"
-str btn_dump_ser   = "Dump to serial"
-str fb_lbl_flips   = "flips total/full/rect: "
-str fb_lbl_tsc     = "tsc last/min/max: "
-str fb_lbl_bytes   = "bytes total: "
-str fb_lbl_pat     = "PAT: "
-str fb_lbl_leaf    = "fb leaf lvl/cache/mtrr#: "
-str fb_lbl_wc      = "WC armed/activated/init: ";
+# Tab + section labels.
+str tab_general   = "General";
+str tab_display   = "Display";
+str tab_security  = "Security";
+str tab_debug     = "Debug";
+str t_system      = "System";
+str t_appearance  = "Appearance";
+str t_resolution  = "Resolution";
+str t_displaysec  = "Display";
+str t_fbsec       = "Framebuffer (debug)";
 
-# --- fbperf accessors. Selectors 100..199 reserved for framebuffer perf in
-# the kernel's sc_sysinfo dispatcher.
-fn fbperf_get(sel) {
-    return syscall(SYS_SYSINFO, sel, 0);
-}
+# Display tab strings.
+str label_vsync   = "VSync";
+str label_fps     = "Show FPS";
+str label_stretch = "Stretch to fill";
+str btn_native    = "Use Native";
+str res_800       = "800x600";
+str res_1024      = "1024x768";
+str res_1280      = "1280x720";
+str prefix_current= "Current: ";
+str prefix_native = "Native:  ";
+str mode_ok       = "Ready";
+str mode_failed   = "Mode switch failed";
+str status_hint   = "NexusOS Settings";
 
-# Append `n` as a decimal ASCII into `buf`, return ptr just past the last
-# digit. Writes the digits LSB-first then reverses the slice in place,
-# which avoids needing a temp stack buffer.
+# General tab strings.
+str lbl_ram       = "RAM: ";
+str lbl_ram_suf   = " MB";
+str lbl_cpu       = "CPU: ";
+str lbl_mhz       = " MHz, ";
+str lbl_cores     = " cores";
+str prefix_gpu    = "GPU: ";
+str prefix_gpu_id = "ID: ";
+str prefix_bdf    = "  BDF: ";
+str gpu_none      = "No discrete display";
+str gpu_780m      = "AMD Radeon 780M";
+str gpu_amd       = "AMD display";
+str bg_metal      = "Metal";
+str bg_ribbons    = "Ribbons";
+str bg_bloom      = "Bloom";
+
+# Security tab strings.
+str sec_all_ok    = "All hardening features active";
+str sec_some_fail = "One or more features degraded";
+str sec_not_ready = "Status not yet available";
+str st_active     = "Active";
+str st_software   = "Software";
+str st_unsupp     = "No HW";
+str st_failed     = "FAILED";
+str st_off        = "Off";
+str sf0           = "SMEP / SMAP";
+str sf1           = "CET shadow stack";
+str sf2           = "Page-table isolation";
+str sf3           = "Syscall permutation";
+str sf4           = "KASLR";
+str sf5           = "Kernel shadow stack";
+str sf6           = "Page-table monitor";
+str sf7           = "Measured boot";
+str sf8           = "Read-only kernel";
+str sf9           = "Signed app blob";
+str sf_unknown    = "Feature";
+
+# Debug tab strings.
+str btn_dump_ser  = "Dump to serial";
+str fb_lbl_flips  = "flips t/f/r: ";
+str fb_lbl_tsc    = "tsc l/min/max: ";
+str fb_lbl_bytes  = "bytes total: ";
+str fb_lbl_pat    = "PAT: ";
+str fb_lbl_leaf   = "fb lvl/cache/mtrr#: ";
+str fb_lbl_wc     = "WC arm/act/init: ";
+
+# ---------------------------------------------------------------------------
+# Formatting helpers.
+# ---------------------------------------------------------------------------
 fn put_uint(buf, n) {
     if n == 0 {
         sb(buf, 48);
@@ -171,7 +194,6 @@ fn put_uint(buf, n) {
         p = p + 1;
         n = n / 10;
     }
-    # Reverse [buf .. p).
     let i = buf;
     let j = p - 1;
     while i < j {
@@ -211,8 +233,6 @@ fn put_hex32(buf, n) {
     return p;
 }
 
-# Copy a NUL-terminated string into `dst`, returning ptr past the
-# terminator-replacement spot (i.e. dst + length, no NUL written).
 fn copy_cstr(dst, src) {
     let p = dst;
     let s = src;
@@ -226,17 +246,6 @@ fn copy_cstr(dst, src) {
     return p;
 }
 
-# Format "WxH" with NUL terminator into buf.
-fn fmt_res(buf, w, h) {
-    let p = put_uint(buf, w);
-    sb(p, 120);                        # 'x'
-    p = p + 1;
-    p = put_uint(p, h);
-    sb(p, 0);
-}
-
-# Format "<prefix>WxH" into buf, NUL-terminated. Used for the inline
-# "Current: 1024x768  Native: 1280x720" caption.
 fn fmt_labeled_res(buf, prefix, w, h) {
     let p = copy_cstr(buf, prefix);
     p = put_uint(p, w);
@@ -246,6 +255,83 @@ fn fmt_labeled_res(buf, prefix, w, h) {
     sb(p, 0);
 }
 
+# ---------------------------------------------------------------------------
+# Shared widgets.
+# ---------------------------------------------------------------------------
+fn button_frame(win, x, y, w, fill) {
+    ui_rect_at(win, x, y, w, UI_BUTTON_H, fill);
+    ui_rect_at(win, x, y, w, 1, UI_COL_BORDER_2);
+    ui_rect_at(win, x, y + UI_BUTTON_H - 1, w, 1, UI_COL_BORDER_2);
+    ui_rect_at(win, x, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
+    ui_rect_at(win, x + w - 1, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
+}
+
+fn action_button(win, x, y, w, label, active) {
+    let fill = UI_COL_SURFACE;
+    let fg = UI_COL_TEXT;
+    if active != 0 {
+        fill = UI_COL_ACCENT;
+        fg = UI_COL_TEXT_INVERT;
+    }
+    button_frame(win, x, y, w, fill);
+    ui_text_at(win, x + 5, y + 2, label, fg, fill);
+}
+
+fn section_title(win, y, label) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    ui_text_at(win, PAD, y, label, UI_COL_ACCENT, UI_COL_BG_BASE);
+    ui_rect_at(win, PAD, y + 14, cw - PAD * 2, 1, UI_COL_BORDER);
+}
+
+fn native_button_x(win) {
+    return ui_win_w(win) - UI_BORDER * 2 - PAD - NATIVE_BTN_W;
+}
+
+# ---------------------------------------------------------------------------
+# Tab bar.
+# ---------------------------------------------------------------------------
+fn sec_si(sel) {
+    return syscall(SYS_SYSINFO, sel, 0);
+}
+
+fn n_tabs() {
+    if sec_si(SEC_SI_DEBUG) != 0 {
+        return 4;
+    }
+    return 3;
+}
+
+fn tab_name(i) {
+    if i == 0 { return &tab_general; }
+    if i == 1 { return &tab_display; }
+    if i == 2 { return &tab_security; }
+    return &tab_debug;
+}
+
+fn draw_tabbar(win, n, active) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    let tw = cw / n;
+    ui_rect_at(win, 0, 0, cw, TABBAR_H, UI_COL_SURFACE_2);
+    ui_rect_at(win, 0, TABBAR_H - 1, cw, 1, UI_COL_BORDER);
+    let i = 0;
+    while i < n {
+        let tx = i * tw;
+        let fg = UI_COL_TEXT_MUTED;
+        let bg = UI_COL_SURFACE_2;
+        if i == active {
+            ui_rect_at(win, tx, 0, tw, TABBAR_H - 1, UI_COL_BG_BASE);
+            ui_rect_at(win, tx, TABBAR_H - 3, tw, 3, UI_COL_ACCENT);
+            fg = UI_COL_TEXT;
+            bg = UI_COL_BG_BASE;
+        }
+        ui_text_at(win, tx + 10, 8, tab_name(i), fg, bg);
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# General tab.
+# ---------------------------------------------------------------------------
 fn fmt_gpu_name(buf) {
     let provider = gpu_provider();
     let p = copy_cstr(buf, &prefix_gpu);
@@ -275,13 +361,89 @@ fn fmt_gpu_id(buf) {
     sb(p, 0);
 }
 
-fn fmt_gpu_bar(buf) {
-    let p = copy_cstr(buf, &prefix_bar0);
-    p = put_hex32(p, gpu_bar0_hi());
-    p = put_hex32(p, gpu_bar0_lo());
-    p = copy_cstr(p, &prefix_cmd);
-    p = put_hex32(p, gpu_cmd());
+fn theme_button(win, x, y, id, label) {
+    let fill = UI_COL_SURFACE;
+    let fg = UI_COL_TEXT;
+    let busy = svg_desktop_background_busy();
+    if svg_desktop_background() == id {
+        fill = UI_COL_ACCENT;
+        fg = UI_COL_TEXT_INVERT;
+    }
+    if busy != 0 {
+        fill = UI_COL_BORDER_2;
+        fg = UI_COL_TEXT_MUTED;
+    }
+    button_frame(win, x, y, BG_W, fill);
+    ui_text_at(win, x + 5, y + 2, label, fg, fill);
+}
+
+fn draw_general(win) {
+    section_title(win, Y_GEN_SYS, &t_system);
+
+    let ram_kb = sys_ram_max_kb();
+    let ram_mb = (ram_kb + 512) / 1024;
+    let p = copy_cstr(&ram_label_buf, &lbl_ram);
+    p = put_uint(p, ram_mb);
+    p = copy_cstr(p, &lbl_ram_suf);
     sb(p, 0);
+    ui_text_at(win, PAD, Y_GEN_RAM, &ram_label_buf, UI_COL_TEXT, UI_COL_BG_BASE);
+
+    p = copy_cstr(&cpu_label_buf, &lbl_cpu);
+    p = put_uint(p, sys_cpu_mhz());
+    p = copy_cstr(p, &lbl_mhz);
+    p = put_uint(p, sys_core_count());
+    p = copy_cstr(p, &lbl_cores);
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_GEN_CPU, &cpu_label_buf, UI_COL_TEXT, UI_COL_BG_BASE);
+
+    fmt_gpu_name(&gpu_name_buf);
+    fmt_gpu_id(&gpu_id_buf);
+    ui_text_at(win, PAD, Y_GEN_GPU,   &gpu_name_buf, UI_COL_TEXT,       UI_COL_BG_BASE);
+    ui_text_at(win, PAD, Y_GEN_GPUID, &gpu_id_buf,   UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    section_title(win, Y_GEN_APP, &t_appearance);
+    theme_button(win, ui_row_x(PAD, BG_W, 0), Y_GEN_BG, SVG_BG_LIQUID_METAL, &bg_metal);
+    theme_button(win, ui_row_x(PAD, BG_W, 1), Y_GEN_BG, SVG_BG_GLASS_RIBBONS, &bg_ribbons);
+    theme_button(win, ui_row_x(PAD, BG_W, 2), Y_GEN_BG, SVG_BG_FROSTED_BLOOM, &bg_bloom);
+}
+
+fn click_general(win, x, y) {
+    if y >= Y_GEN_BG {
+        if y < Y_GEN_BG + UI_BUTTON_H {
+            if svg_desktop_background_busy() != 0 {
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 0), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_LIQUID_METAL) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_LIQUID_METAL);
+                }
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 1), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_GLASS_RIBBONS) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_GLASS_RIBBONS);
+                }
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 2), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_FROSTED_BLOOM) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_FROSTED_BLOOM);
+                }
+                return;
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Display tab.
+# ---------------------------------------------------------------------------
+fn sync_flags() {
+    let flags = display_flags();
+    if flags >= 0 {
+        sw(&settings_flags, flags);
+    }
+    return lw(&settings_flags);
 }
 
 fn set_mode(width, height) {
@@ -292,150 +454,176 @@ fn set_mode(width, height) {
     }
 }
 
-fn sync_flags() {
-    let flags = display_flags();
-    if flags >= 0 {
-        sw(&settings_flags, flags);
-    }
-    return lw(&settings_flags);
-}
-
-fn sync_bg() {
-    let bg = svg_desktop_background();
-    if bg >= 0 {
-        sw(&settings_bg_cache, bg);
-    }
-    return lw(&settings_bg_cache);
-}
-
-fn theme_button(win, x, y, id, label) {
-    let fill = C_BUTTON;
-    let fg = C_TEXT;
-    let busy = svg_desktop_background_busy();
-    if sync_bg() == id {
-        fill = C_BUTTON_ON;
-        fg = UI_COL_TEXT_INVERT;
-    }
-    if busy != 0 {
-        fill = C_BUTTON_OFF;
-        fg = C_MUTED;
-    }
-    button_frame(win, x, y, BG_W, fill);
-    ui_text_at(win, x + 5, y + 2, label, fg, fill);
-}
-
-fn button_frame(win, x, y, w, fill) {
-    ui_rect_at(win, x, y, w, UI_BUTTON_H, fill);
-    ui_rect_at(win, x, y, w, 1, UI_COL_BORDER_2);
-    ui_rect_at(win, x, y + UI_BUTTON_H - 1, w, 1, UI_COL_BORDER_2);
-    ui_rect_at(win, x, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
-    ui_rect_at(win, x + w - 1, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
-}
-
-fn action_button(win, x, y, w, label, active) {
-    let fill = C_BUTTON;
-    let fg = C_TEXT;
-    if active != 0 {
-        fill = C_BUTTON_ON;
-        fg = UI_COL_TEXT_INVERT;
-    }
-    button_frame(win, x, y, w, fill);
-    ui_text_at(win, x + 5, y + 2, label, fg, fill);
-}
-
-fn native_button_x(win) {
-    return ui_win_w(win) - UI_BORDER * 2 - X0 - NATIVE_BTN_W;
-}
-
-fn settings_section_title(win, y, label) {
-    let w = ui_win_w(win) - UI_BORDER * 2;
-    ui_rect_at(win, 0, y - 3, w, 18, UI_COL_SURFACE_2);
-    ui_rect_at(win, 0, y + 15, w, 1, UI_COL_BORDER);
-    ui_text_at(win, X0, y, label, C_TEXT, UI_COL_SURFACE_2);
-}
-
-fn draw(win) {
+fn draw_display(win) {
     let flags = sync_flags();
     let cur_w = display_current_width();
     let cur_h = display_current_height();
     let nat_w = display_native_width();
     let nat_h = display_native_height();
 
+    section_title(win, Y_DISP_CUR - 2, &t_displaysec);
+
     fmt_labeled_res(&current_label_buf, &prefix_current, cur_w, cur_h);
     fmt_labeled_res(&native_label_buf,  &prefix_native,  nat_w, nat_h);
-    fmt_gpu_name(&gpu_name_buf);
-    fmt_gpu_id(&gpu_id_buf);
-    fmt_gpu_bar(&gpu_bar_buf);
+    ui_text_at(win, PAD, Y_DISP_CUR + 18, &current_label_buf, UI_COL_TEXT,       UI_COL_BG_BASE);
+    ui_text_at(win, PAD, Y_DISP_NAT + 18, &native_label_buf,  UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    ui_fill_client_below(win, 0, C_PANEL);
-
-    # --- Display ---------------------------------------------------------
-    settings_section_title(win, Y_TITLE_DISP, &title_display);
-
-    ui_text_at(win, X0, Y_CURRENT_LINE,
-               &current_label_buf, C_TEXT, C_PANEL);
-    ui_text_at(win, X0, Y_NATIVE_LINE,
-               &native_label_buf, C_MUTED, C_PANEL);
-
-    # "Use Native" — switch to the monitor's detected native size.
     let native_active = 0;
     if cur_w == nat_w {
         if cur_h == nat_h {
             native_active = 1;
         }
     }
-    action_button(win, native_button_x(win), Y_NATIVE_BTN, NATIVE_BTN_W, &btn_native, native_active);
+    action_button(win, native_button_x(win), Y_DISP_NATBTN + 18, NATIVE_BTN_W, &btn_native, native_active);
 
-    # Preset resolution buttons.
-    ui_caption(win, X0, Y_CAP_RES, &label_res);
-    action_button(win, ui_row_x(X0, RES_W, 0), Y_RES, RES_W, &res_800, 0);
-    action_button(win, ui_row_x(X0, RES_W, 1), Y_RES, RES_W, &res_1024, 0);
-    action_button(win, ui_row_x(X0, RES_W, 2), Y_RES, RES_W, &res_1280, 0);
+    ui_caption(win, PAD, Y_DISP_RESCAP + 18, &t_resolution);
+    action_button(win, ui_row_x(PAD, RES_W, 0), Y_DISP_RES + 18, RES_W, &res_800,  0);
+    action_button(win, ui_row_x(PAD, RES_W, 1), Y_DISP_RES + 18, RES_W, &res_1024, 0);
+    action_button(win, ui_row_x(PAD, RES_W, 2), Y_DISP_RES + 18, RES_W, &res_1280, 0);
 
-    # Toggles wrap into two rows so labels stay inside the window.
-    ui_checkbox(win, X0,                       Y_TOGGLES,
-                flags & DISPLAY_FLAG_VSYNC,   &label_vsync);
-    ui_checkbox(win, X0 + TOGGLE_COL_W,        Y_TOGGLES,
-                flags & DISPLAY_FLAG_FPS,     &label_fps);
-    ui_checkbox(win, X0,                       Y_TOGGLES_2,
-                flags & DISPLAY_FLAG_STRETCH, &label_stretch);
+    ui_checkbox(win, PAD,                 Y_DISP_TOG1 + 18, flags & DISPLAY_FLAG_VSYNC,   &label_vsync);
+    ui_checkbox(win, PAD + TOGGLE_COL_W,  Y_DISP_TOG1 + 18, flags & DISPLAY_FLAG_FPS,     &label_fps);
+    ui_checkbox(win, PAD,                 Y_DISP_TOG2 + 18, flags & DISPLAY_FLAG_STRETCH, &label_stretch);
+}
 
-    # --- Graphics --------------------------------------------------------
-    settings_section_title(win, Y_TITLE_GPU, &title_gpu);
-    ui_text_at(win, X0, Y_GPU_NAME, &gpu_name_buf, C_TEXT, C_PANEL);
-    ui_text_at(win, X0, Y_GPU_ID,   &gpu_id_buf,   C_MUTED, C_PANEL);
-    ui_text_at(win, X0, Y_GPU_BAR,  &gpu_bar_buf,  C_MUTED, C_PANEL);
+fn toggle_flag(bit) {
+    let flags = sync_flags();
+    flags = flags ^ bit;
+    display_set_flags(flags);
+    sw(&settings_flags, flags);
+}
 
-    # --- Memory ----------------------------------------------------------
-    settings_section_title(win, Y_TITLE_MEM, &title_memory);
-    # Build "Total RAM: <N> MB" from SYS_SYSINFO. The kernel returns total
-    # usable RAM in KB; round to nearest MB so a 4096 MB stick reads "4096"
-    # not "4095" once a few KB get shaved off by alignment.
-    let ram_kb = sys_ram_max_kb();
-    let ram_mb = (ram_kb + 512) / 1024;
-    let p = copy_cstr(&ram_label_buf, &label_ram_prefix);
-    p = put_uint(p, ram_mb);
-    p = copy_cstr(p, &label_ram_suffix);
-    sb(p, 0);
-    ui_text_at(win, X0, Y_RAM, &ram_label_buf, C_TEXT, C_PANEL);
+fn click_display(win, x, y) {
+    if y >= Y_DISP_NATBTN + 18 {
+        if y < Y_DISP_NATBTN + 18 + UI_BUTTON_H {
+            if ui_button_hit(x, y, native_button_x(win), Y_DISP_NATBTN + 18, NATIVE_BTN_W) != 0 {
+                set_mode(display_native_width(), display_native_height());
+                return;
+            }
+        }
+    }
+    if y >= Y_DISP_RES + 18 {
+        if y < Y_DISP_RES + 18 + UI_BUTTON_H {
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 0), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(800, 600);
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 1), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(1024, 768);
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 2), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(1280, 720);
+                return;
+            }
+        }
+    }
+    if y >= Y_DISP_TOG1 + 18 {
+        if y < Y_DISP_TOG1 + 18 + UI_CHECK_SIZE {
+            if x >= PAD {
+                if x < PAD + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_VSYNC);
+                    return;
+                }
+            }
+            if x >= PAD + TOGGLE_COL_W {
+                if x < PAD + TOGGLE_COL_W + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_FPS);
+                    return;
+                }
+            }
+        }
+    }
+    if y >= Y_DISP_TOG2 + 18 {
+        if y < Y_DISP_TOG2 + 18 + UI_CHECK_SIZE {
+            if x >= PAD {
+                if x < PAD + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_STRETCH);
+                    return;
+                }
+            }
+        }
+    }
+}
 
-    # --- Appearance ------------------------------------------------------
-    settings_section_title(win, Y_TITLE_BG, &title_bg_sec);
-    ui_caption(win, X0, Y_CAP_BG, &label_bg);
-    theme_button(win, ui_row_x(X0, BG_W, 0), Y_BG, SVG_BG_LIQUID_METAL, &bg_metal);
-    theme_button(win, ui_row_x(X0, BG_W, 1), Y_BG, SVG_BG_GLASS_RIBBONS, &bg_ribbons);
-    theme_button(win, ui_row_x(X0, BG_W, 2), Y_BG, SVG_BG_FROSTED_BLOOM, &bg_bloom);
+# ---------------------------------------------------------------------------
+# Security tab.
+# ---------------------------------------------------------------------------
+fn sec_feat_name(i) {
+    if i == 0 { return &sf0; }
+    if i == 1 { return &sf1; }
+    if i == 2 { return &sf2; }
+    if i == 3 { return &sf3; }
+    if i == 4 { return &sf4; }
+    if i == 5 { return &sf5; }
+    if i == 6 { return &sf6; }
+    if i == 7 { return &sf7; }
+    if i == 8 { return &sf8; }
+    if i == 9 { return &sf9; }
+    return &sf_unknown;
+}
 
-    # --- Framebuffer (debug) -------------------------------------------
-    # All values pulled live from fbperf via SYS_SYSINFO each draw. Cheap:
-    # each call is one MSR-free scalar read on the kernel side. Six lines so
-    # the user can see flip stats, the FB's actual page caching, and the
-    # WC arm/activate state without leaving the OS. The "Dump to serial"
-    # button below fires the full [FBPERF] block over COM1 for offline
-    # analysis (much more detail than the on-screen lines).
-    settings_section_title(win, Y_TITLE_FB, &title_fb_dbg);
+fn sec_status_text(code) {
+    if code == SECST_ACTIVE   { return &st_active; }
+    if code == SECST_SOFTWARE { return &st_software; }
+    if code == SECST_UNSUPP   { return &st_unsupp; }
+    if code == SECST_FAILED   { return &st_failed; }
+    return &st_off;
+}
 
-    # Line 1: "flips total/full/rect: A/B/C"
+fn sec_status_color(code) {
+    if code == SECST_ACTIVE   { return UI_COL_SUCCESS; }
+    if code == SECST_SOFTWARE { return UI_COL_SUCCESS; }
+    if code == SECST_FAILED   { return UI_COL_ERROR; }
+    return UI_COL_BORDER_2;
+}
+
+fn draw_security(win) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    let ready = sec_si(SEC_SI_READY);
+    let anyfail = sec_si(SEC_SI_ANYFAIL);
+
+    # Summary banner.
+    let banner = UI_COL_SUCCESS;
+    let msg = &sec_all_ok;
+    if ready == 0 {
+        banner = UI_COL_BORDER_2;
+        msg = &sec_not_ready;
+    } else {
+        if anyfail != 0 {
+            banner = UI_COL_ERROR;
+            msg = &sec_some_fail;
+        }
+    }
+    ui_rect_at(win, PAD, Y_SEC_SUMMARY, cw - PAD * 2, 18, banner);
+    ui_text_at(win, PAD + 6, Y_SEC_SUMMARY + 3, msg, UI_COL_TEXT_INVERT, banner);
+
+    # Per-feature rows.
+    let count = sec_si(SEC_SI_COUNT);
+    let pill_x = cw - PAD - PILL_W;
+    let y = Y_SEC_LIST;
+    let i = 0;
+    while i < count {
+        let code = sec_si(SEC_SI_FEAT0 + i);
+        ui_text_at(win, PAD, y + 2, sec_feat_name(i), UI_COL_TEXT, UI_COL_BG_BASE);
+        let col = sec_status_color(code);
+        ui_rect_at(win, pill_x, y, PILL_W, 16, col);
+        ui_text_at(win, pill_x + 6, y + 2, sec_status_text(code), UI_COL_TEXT_INVERT, col);
+        y = y + SEC_ROW_H;
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Debug tab (only reachable when n_tabs() == 4 on a debug build).
+# ---------------------------------------------------------------------------
+fn fbperf_get(sel) {
+    return syscall(SYS_SYSINFO, sel, 0);
+}
+
+fn draw_debug(win) {
+    section_title(win, Y_DBG_TITLE, &t_fbsec);
+
     let p = copy_cstr(&fb_line1_buf, &fb_lbl_flips);
     p = put_uint(p, fbperf_get(FB_SI_FLIPS_TOTAL));
     sb(p, 47); p = p + 1;
@@ -443,9 +631,8 @@ fn draw(win) {
     sb(p, 47); p = p + 1;
     p = put_uint(p, fbperf_get(FB_SI_RECT_FLIPS));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE1, &fb_line1_buf, C_TEXT, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L1, &fb_line1_buf, UI_COL_TEXT, UI_COL_BG_BASE);
 
-    # Line 2: "tsc last/min/max: A/B/C"
     p = copy_cstr(&fb_line2_buf, &fb_lbl_tsc);
     p = put_uint(p, fbperf_get(FB_SI_TSC_LAST));
     sb(p, 47); p = p + 1;
@@ -453,22 +640,19 @@ fn draw(win) {
     sb(p, 47); p = p + 1;
     p = put_uint(p, fbperf_get(FB_SI_TSC_MAX));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE2, &fb_line2_buf, C_MUTED, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L2, &fb_line2_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    # Line 3: "bytes total: N (lo only — hi via serial dump)"
     p = copy_cstr(&fb_line3_buf, &fb_lbl_bytes);
     p = put_uint(p, fbperf_get(FB_SI_BYTES_LO));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE3, &fb_line3_buf, C_MUTED, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L3, &fb_line3_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    # Line 4: "PAT: <hex32>"
     p = copy_cstr(&fb_line4_buf, &fb_lbl_pat);
     p = put_hex32(p, fbperf_get(FB_SI_PAT_HI));
     p = put_hex32(p, fbperf_get(FB_SI_PAT_LO));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE4, &fb_line4_buf, C_MUTED, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L4, &fb_line4_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    # Line 5: "fb leaf lvl/cache/mtrr#: L/C/M"
     p = copy_cstr(&fb_line5_buf, &fb_lbl_leaf);
     p = put_uint(p, fbperf_get(FB_SI_PTE_LEVEL));
     sb(p, 47); p = p + 1;
@@ -476,9 +660,8 @@ fn draw(win) {
     sb(p, 47); p = p + 1;
     p = put_uint(p, fbperf_get(FB_SI_MTRR_COUNT));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE5, &fb_line5_buf, C_MUTED, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L5, &fb_line5_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    # Line 6: "WC armed/activated/init: A/B/I"
     p = copy_cstr(&fb_line6_buf, &fb_lbl_wc);
     p = put_uint(p, fbperf_get(FB_SI_WC_ARMED));
     sb(p, 47); p = p + 1;
@@ -486,121 +669,64 @@ fn draw(win) {
     sb(p, 47); p = p + 1;
     p = put_uint(p, fbperf_get(FB_SI_INIT_DONE));
     sb(p, 0);
-    ui_text_at(win, X0, Y_FB_LINE6, &fb_line6_buf, C_MUTED, C_PANEL);
+    ui_text_at(win, PAD, Y_DBG_L6, &fb_line6_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
 
-    action_button(win, X0, Y_FB_DUMP_BTN, FB_DUMP_W, &btn_dump_ser, 0);
-
-    if lw(&settings_last_mode_result) < 0 {
-        ui_status_bar(win, &mode_failed, UI_COL_ERROR);
-    } else {
-        ui_status_bar(win, &mode_ok, UI_COL_SURFACE_2);
-    }
+    action_button(win, PAD, Y_DBG_DUMP, FB_DUMP_W, &btn_dump_ser, 0);
 }
 
-fn click(win, x, y) {
-    # Use-Native button
-    if y >= Y_NATIVE_BTN {
-        if y < Y_NATIVE_BTN + UI_BUTTON_H {
-            if ui_button_hit(x, y, native_button_x(win), Y_NATIVE_BTN, NATIVE_BTN_W) != 0 {
-                set_mode(display_native_width(), display_native_height());
-                return;
-            }
-        }
-    }
-
-    # Preset resolution row
-    if y >= Y_RES {
-        if y < Y_RES + UI_BUTTON_H {
-            if ui_button_hit(x, y, ui_row_x(X0, RES_W, 0), Y_RES, RES_W) != 0 {
-                set_mode(800, 600);
-                return;
-            }
-            if ui_button_hit(x, y, ui_row_x(X0, RES_W, 1), Y_RES, RES_W) != 0 {
-                set_mode(1024, 768);
-                return;
-            }
-            if ui_button_hit(x, y, ui_row_x(X0, RES_W, 2), Y_RES, RES_W) != 0 {
-                set_mode(1280, 720);
-                return;
-            }
-        }
-    }
-
-    # Toggle rows
-    if y >= Y_TOGGLES {
-        if y < Y_TOGGLES + UI_CHECK_SIZE {
-            let flags = sync_flags();
-            if x >= X0 {
-                if x < X0 + UI_CHECK_SIZE {
-                    flags = flags ^ DISPLAY_FLAG_VSYNC;
-                    display_set_flags(flags);
-                    sw(&settings_flags, flags);
-                    return;
-                }
-            }
-            if x >= X0 + TOGGLE_COL_W {
-                if x < X0 + TOGGLE_COL_W + UI_CHECK_SIZE {
-                    flags = flags ^ DISPLAY_FLAG_FPS;
-                    display_set_flags(flags);
-                    sw(&settings_flags, flags);
-                    return;
-                }
-            }
-        }
-    }
-
-    if y >= Y_TOGGLES_2 {
-        if y < Y_TOGGLES_2 + UI_CHECK_SIZE {
-            let flags = sync_flags();
-            if x >= X0 {
-                if x < X0 + UI_CHECK_SIZE {
-                    flags = flags ^ DISPLAY_FLAG_STRETCH;
-                    display_set_flags(flags);
-                    sw(&settings_flags, flags);
-                    return;
-                }
-            }
-        }
-    }
-
-    # Appearance row
-    if y >= Y_BG {
-        if y < Y_BG + UI_BUTTON_H {
-            if svg_desktop_background_busy() != 0 {
-                return;
-            }
-            if ui_button_hit(x, y, ui_row_x(X0, BG_W, 0), Y_BG, BG_W) != 0 {
-                if svg_set_desktop_background(SVG_BG_LIQUID_METAL) == 0 {
-                    sw(&settings_bg_cache, SVG_BG_LIQUID_METAL);
-                }
-                return;
-            }
-            if ui_button_hit(x, y, ui_row_x(X0, BG_W, 1), Y_BG, BG_W) != 0 {
-                if svg_set_desktop_background(SVG_BG_GLASS_RIBBONS) == 0 {
-                    sw(&settings_bg_cache, SVG_BG_GLASS_RIBBONS);
-                }
-                return;
-            }
-            if ui_button_hit(x, y, ui_row_x(X0, BG_W, 2), Y_BG, BG_W) != 0 {
-                if svg_set_desktop_background(SVG_BG_FROSTED_BLOOM) == 0 {
-                    sw(&settings_bg_cache, SVG_BG_FROSTED_BLOOM);
-                }
-                return;
-            }
-        }
-    }
-
-    # Dump-to-serial button. One press emits the full [FBPERF] block over
-    # COM1 — captured by the standard serial.log redirect in QEMU and by
-    # the EFI klog->ESP flush path on real hardware.
-    if y >= Y_FB_DUMP_BTN {
-        if y < Y_FB_DUMP_BTN + UI_BUTTON_H {
-            if ui_button_hit(x, y, X0, Y_FB_DUMP_BTN, FB_DUMP_W) != 0 {
+fn click_debug(win, x, y) {
+    if y >= Y_DBG_DUMP {
+        if y < Y_DBG_DUMP + UI_BUTTON_H {
+            if ui_button_hit(x, y, PAD, Y_DBG_DUMP, FB_DUMP_W) != 0 {
                 fbperf_get(FB_SI_DUMP_SERIAL);
                 return;
             }
         }
     }
+}
+
+# ---------------------------------------------------------------------------
+# Entry points.
+# ---------------------------------------------------------------------------
+fn draw(win) {
+    let n = n_tabs();
+    let tab = lw(&active_tab);
+    if tab >= n {
+        tab = 0;
+        sw(&active_tab, 0);
+    }
+
+    ui_fill_client_below(win, 0, UI_COL_BG_BASE);
+    draw_tabbar(win, n, tab);
+
+    if tab == 0 { draw_general(win); }
+    if tab == 1 { draw_display(win); }
+    if tab == 2 { draw_security(win); }
+    if tab == 3 { draw_debug(win); }
+
+    if lw(&settings_last_mode_result) < 0 {
+        ui_status_bar(win, &mode_failed, UI_COL_ERROR);
+    } else {
+        ui_status_bar(win, &status_hint, UI_COL_SURFACE_2);
+    }
+}
+
+fn click(win, x, y) {
+    let n = n_tabs();
+    if y < TABBAR_H {
+        let cw = ui_win_w(win) - UI_BORDER * 2;
+        let tw = cw / n;
+        let idx = x / tw;
+        if idx >= n {
+            idx = n - 1;
+        }
+        sw(&active_tab, idx);
+        return;
+    }
+    let tab = lw(&active_tab);
+    if tab == 0 { click_general(win, x, y); return; }
+    if tab == 1 { click_display(win, x, y); return; }
+    if tab == 3 { click_debug(win, x, y); return; }
 }
 
 fn key(win, k) {

@@ -1,0 +1,35 @@
+# ============================================================================
+# NexusHLK serial command dispatcher.
+#
+# Ported out of the former src/kernel/core/main.asm into this NexusHL kernel module
+# (nxhc.py --target kernel, %include'd from kernel_build.asm right after
+# cpu_acct.asm, before measured_boot.asm). serial_dispatch_control decodes the
+# byte that follows the 0x01 "arm" prefix on the COM1 automation channel and
+# routes it: '2'..'9' launch an app by id; o/q/p/m/s/v/=/t/g/b/n/N/i/x/X drive
+# desktop, perfdiag, the real_boot_diag_dump, trace dump, SVG render probe,
+# benchmark, ICMP pings, and window-close. Called once per armed byte from
+# serial_poll_command.
+#
+# In the original source the SVG-probe and close-focused arms (serial_dispatch_control.
+# svg_dump / .close_focused / .control_done) were physically separated from the
+# decode body by real_boot_diag_dump; here they are reunited as the tail of the
+# one function (they are only entered via `je`, never fallen into, so the order
+# is behaviorally identical to the original).
+#
+# Single NASM translation unit (-f bin): the caller (serial_poll_command) and
+# every callee/string this binds to (app_launch, ser_print_hex64, perfdiag_*,
+# real_boot_diag_dump, svg_dump_serial/svg_dump_puts, wm_*, rtl8139_*/net_ping_*,
+# desktop_handle_click, the net_ping_* strings, klog_visible, scene_dirty) stay
+# defined elsewhere and bind with no extern wiring. Custom ABI: al = command
+# byte in; clobbers caller-saved regs; the original SER / %ifdef ENABLE_TRACE
+# lines are reproduced verbatim, so emitted bytes (and behavior) are unchanged.
+# ============================================================================
+
+module "serial_console";
+
+global serial_dispatch_control;
+
+# al = the post-arm command byte. Decodes + dispatches; see header.
+fn serial_dispatch_control() {
+    asm "    cmp al, '2'\n    jb .check_close\n    cmp al, '9'\n    ja .check_close\n    movzx edi, al\n    sub edi, '0'\n    SER 'L'\n    push rax\n    push rdi\n    call ser_print_hex64\n    pop rdi\n    pop rax\n    sub rsp, 8\n    call app_launch\n    add rsp, 8\n    SER 'R'\n    push rdi\n    mov rdi, rax\n    call ser_print_hex64\n    pop rdi\n    mov byte [scene_dirty], 1\n    ret\n\n.check_close:\n    cmp al, 'o'\n    je .desktop_open_first\n    cmp al, 'q'\n    je .dump_windows\n    cmp al, 'p'\n    je .diag_profile\n    cmp al, 'm'\n    je .diag_memory\n    cmp al, 's'\n    je .diag_smp\n    cmp al, 'v'\n    je .diag_pci_gpu\n    cmp al, '='\n    je .diag_real_boot\n    cmp al, 't'\n    je .dump_trace\n    cmp al, 'g'\n    je .svg_dump\n    cmp al, 'b'\n    je .diag_bench\n    cmp al, 'n'\n    je .net_ping\n    cmp al, 'N'\n    je .net_ping_ics\n    cmp al, 'i'\n    je .net_ping_google\n    cmp al, 'x'\n    je .close_focused\n    cmp al, 'X'\n    jne .control_done\n\n.dump_windows:\n    SER 'Q'\n    push rax\n    mov rdi, [wm_window_count]\n    call ser_print_hex64\n    SER ','\n    mov rdi, [wm_focused_window]\n    call ser_print_hex64\n    pop rax\n    ret\n\n.desktop_open_first:\n    mov edi, 48\n    mov esi, 48\n    call desktop_handle_click\n    SER 'O'\n    push rax\n    mov rdi, rax\n    call ser_print_hex64\n    pop rax\n    mov byte [scene_dirty], 1\n    ret\n\n.diag_profile:\n    call perfdiag_print_profile\n    ret\n\n.diag_memory:\n    call perfdiag_print_memory\n    ret\n\n.diag_smp:\n    call perfdiag_print_smp\n    ret\n\n.diag_pci_gpu:\n    call perfdiag_print_pci_gpu\n    ret\n\n.diag_real_boot:\n    call real_boot_diag_dump\n    extern klog_visible\n    mov byte [klog_visible], 1\n    mov byte [scene_dirty], 1\n    ret\n\n.diag_bench:\n    call perfdiag_benchmark\n    ret\n\n.net_ping:\n    lea rsi, [rel net_ping_start_msg]\n    call svg_dump_puts\n    call rtl8139_icmp_ping_gateway\n    test eax, eax\n    jz .net_ping_serial_fail\n    lea rsi, [rel net_ping_ok_msg]\n    call svg_dump_puts\n    ret\n.net_ping_serial_fail:\n    lea rsi, [rel net_ping_fail_msg]\n    call svg_dump_puts\n    ret\n\n.net_ping_ics:\n    lea rsi, [rel net_ping_ics_start_msg]\n    call svg_dump_puts\n    call rtl8139_icmp_ping_ics\n    test eax, eax\n    jz .net_ping_ics_serial_fail\n    lea rsi, [rel net_ping_ok_msg]\n    call svg_dump_puts\n    ret\n.net_ping_ics_serial_fail:\n    lea rsi, [rel net_ping_fail_msg]\n    call svg_dump_puts\n    ret\n\n.net_ping_google:\n    lea rsi, [rel net_ping_google_start_msg]\n    call svg_dump_puts\n    mov edi, 0x08080808\n    call net_ping_ipv4\n    cmp rax, -1\n    je .net_ping_google_fail\n    lea rsi, [rel net_ping_ok_msg]\n    call svg_dump_puts\n    ret\n.net_ping_google_fail:\n    lea rsi, [rel net_ping_fail_msg]\n    call svg_dump_puts\n    ret\n\n.dump_trace:\n%ifdef ENABLE_TRACE\n    call trace_dump_serial\n%endif\n    ret\n.svg_dump:\n    SER 'G'\n    mov byte [desktop_bg_theme], 1\n    mov byte [wallpaper_selected], 1\n    mov byte [wallpaper_cache_valid], 0\n    sub rsp, 8\n    call wm_draw_desktop_background\n    add rsp, 8\n    call svg_dump_serial\n    mov byte [scene_dirty], 1\n    ret\n.close_focused:\n    mov rdi, [wm_focused_window]\n    cmp rdi, -1\n    je .control_done\n    sub rsp, 8\n    call wm_close_window\n    add rsp, 8\n    mov byte [scene_dirty], 1\n.control_done:\n    ret";
+}

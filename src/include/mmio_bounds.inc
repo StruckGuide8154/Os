@@ -242,6 +242,25 @@ mmio_register_lapic:
     mov rdi, [lapic_base]
     test rdi, rdi
     jz .skip
+    ; Idempotent: kmain registers the LAPIC page BEFORE `sti` (the PIT is armed
+    ; by then, so the first IRQ0 -> apic_eoi -> mmio_bounds_assert fires during
+    ; the boot splash, long before apic_init runs). apic_init re-resolves the
+    ; base from the APIC_BASE MSR and calls here again; skip if a LAPIC region
+    ; with this base is already present so we don't append a duplicate.
+    mov ecx, [mmio_reg_count]
+    xor eax, eax
+.find:
+    cmp eax, ecx
+    jae .do_register
+    cmp dword [mmio_reg_owner + rax*4], MMIO_DRV_LAPIC
+    jne .find_next
+    cmp [mmio_reg_base + rax*8], rdi
+    je .skip                            ; already registered for this base
+.find_next:
+    inc eax
+    jmp .find
+.do_register:
+    mov rdi, [lapic_base]
     mov esi, MMIO_LAPIC_WINDOW
     mov edx, MMIO_DRV_LAPIC
     call mmio_region_register

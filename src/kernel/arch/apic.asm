@@ -5,9 +5,10 @@
 bits 64
 
 %include "constants.inc"
+%include "arch_regs.inc"
 
 section .data
-lapic_base dq 0xFEE00000
+lapic_base dq LAPIC_DEFAULT_BASE
 
 section .text
 ; auto-wrapped (FN_BEGIN emits global): global apic_init
@@ -120,7 +121,7 @@ apic_wake_workers:
     pause
     loop .wait_clear
 .send:
-    mov dword [rdi + 0x300], 0x000C4031 ; all-excluding-self, assert, vector 49
+    mov dword [rdi + 0x300], LAPIC_ICR_WAKE_WORKERS ; all-excluding-self, assert, vector 49
     pop rdi
     pop rcx
     pop rax
@@ -222,13 +223,13 @@ smp_start_one:
     mov eax, [rbx + 8]
     shl eax, 24
     mov [rdi + 0x310], eax
-    mov dword [rdi + 0x300], 0x00004500
+    mov dword [rdi + 0x300], LAPIC_ICR_INIT_ASSERT
     call smp_short_delay
-    mov dword [rdi + 0x300], 0x00008500
+    mov dword [rdi + 0x300], LAPIC_ICR_INIT_DEASSERT
     call smp_short_delay
-    mov dword [rdi + 0x300], 0x00004608
+    mov dword [rdi + 0x300], LAPIC_ICR_STARTUP
     call smp_short_delay
-    mov dword [rdi + 0x300], 0x00004608
+    mov dword [rdi + 0x300], LAPIC_ICR_STARTUP
     call smp_wait_alive
     pop rcx
     ret
@@ -294,12 +295,12 @@ ap_pm32:
     mov cr4, eax
     mov eax, PAGE_TABLE_ADDR
     mov cr3, eax
-    mov ecx, 0xC0000080
+    mov ecx, IA32_EFER_MSR
     rdmsr
     or eax, 0x100
     wrmsr
     mov eax, cr0
-    or eax, 0x80000000
+    or eax, CR0_PG
     mov cr0, eax
     jmp 0x18:(SMP_TRAMPOLINE_ADDR + ap_lm64 - ap_tramp_start)
 [bits 64]
@@ -343,9 +344,9 @@ ap_lm64:
 align 8
 ap_gdt:
     dq 0
-    dq 0x00CF9A000000FFFF
-    dq 0x00CF92000000FFFF
-    dq 0x00AF9A000000FFFF
+    dq GDT_DESC_CODE32
+    dq GDT_DESC_DATA32
+    dq GDT_DESC_CODE64
 ap_gdt_ptr:
     dw ap_gdt_ptr - ap_gdt - 1
     dq SMP_TRAMPOLINE_ADDR + ap_gdt - ap_tramp_start
@@ -414,7 +415,7 @@ ap_long_mode_init:
     mov cr4, rax
     ; EFER: enable NXE so kernel page tables with the NX bit are accepted.
     push rdx
-    mov ecx, 0xC0000080
+    mov ecx, IA32_EFER_MSR
     rdmsr
     bts eax, 11                       ; NXE on
     wrmsr
@@ -424,9 +425,9 @@ ap_long_mode_init:
     ; APs come out of reset with the architectural default (slot 1 = WT),
     ; which would degrade any AP-side FB access to write-through. Slot 0=WB
     ; matches the default so this is safe to write before BSP has activated.
-    mov ecx, 0x277
-    mov eax, 0x00070106
-    mov edx, 0x00070106
+    mov ecx, IA32_PAT_MSR
+    mov eax, IA32_PAT_CANONICAL_LO
+    mov edx, IA32_PAT_CANONICAL_HI
     wrmsr
     pop rdx
     mov ecx, edi                      ; restore core index in ecx

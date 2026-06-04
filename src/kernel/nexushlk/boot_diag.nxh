@@ -1,0 +1,93 @@
+# ============================================================================
+# NexusHLK boot/serial diagnostic emitters.
+#
+# Ported out of the former src/kernel/core/main.asm into this NexusHL kernel module
+# (nxhc.py --target kernel, %include'd from kernel_build.asm immediately after
+# the old monolithic core owner, before measured_boot.asm). The kernel is ONE
+# NASM translation unit (-f bin), so callers in other NexusHLK modules
+# serial_dispatch_control, serial_poll_command, process_keyboard) bind to these
+# labels with no extern wiring, and these routines bind to the data they read
+# (ovl_buf, svg_dump_hdr/dim/ftr, scr_width/height, wallpaper_cache_active_addr,
+# wm_focused_window, scene_dirty) which stay defined in core_runtime_state.asm.
+#
+# Every routine here uses a hand-rolled, NON-System-V register ABI (args in
+# rbx/ecx/rdi, rdx/rdi, or al; specific registers preserved per routine). That
+# ABI cannot be expressed through NexusHL's `fn(args)` System-V convention, so —
+# exactly as in the sibling serial_diag.nxh module — each body is a
+# register-exact `asm { }` shim reproduced verbatim from the old core owner so the kernel
+# image's behavior is byte-for-byte preserved. The shim is the faithful unit of
+# decomposition: it lifts a cohesive cluster into its own file without
+# rewriting the kernel's custom calling conventions (which the surrounding
+# boot/IRQ code depends on).
+#
+# Per-routine ABI:
+#   diag_emit_hexbytes  rbx=src ptr, ecx=count, rdi=dest cursor -> rdi advanced
+#   diag_emit_line      ovl_buf holds a NUL-terminated line -> screen + COM1+CRLF
+#   diag_puth64         rdx=value, rdi=dest cursor -> 16 hex chars, rdi advanced
+#   svg_dump_serial     (no args) stream wallpaper cache as 160x90 hex over COM1
+#   serial_forward_input al=byte -> routed as a keypress to the focused window
+# ============================================================================
+
+module "boot_diag";
+
+global diag_emit_hexbytes;
+global diag_emit_line;
+global diag_puth64;
+global svg_dump_serial;
+global serial_forward_input;
+
+# ASCII bases for hex formatting in diag_puth64 (below).
+const ASCII_ZERO  = 48;   # '0'
+const ASCII_A_M10 = 55;   # 'A' - 10
+const HEX_BASE    = 10;   # nibbles 0..9 -> digits, 10..15 -> 'A'..'F'
+
+# rbx=src ptr, ecx=byte count, rdi=dest cursor -> emits 2 uppercase hex chars
+# per source byte into [rdi], advancing rdi.  rbx/ecx/rdi all consumed.
+fn diag_emit_hexbytes() {
+    asm ".hbloop:\n    test ecx, ecx\n    jz .hbdone\n    movzx eax, byte [rbx]\n    mov edx, eax\n    shr edx, 4\n    and edx, 0x0F\n    cmp edx, 10\n    jl .hb_h1d\n    add edx, 'A'-10\n    jmp .hb_h1s\n.hb_h1d:\n    add edx, '0'\n.hb_h1s:\n    mov [rdi], dl\n    inc rdi\n    mov edx, eax\n    and edx, 0x0F\n    cmp edx, 10\n    jl .hb_h2d\n    add edx, 'A'-10\n    jmp .hb_h2s\n.hb_h2d:\n    add edx, '0'\n.hb_h2s:\n    mov [rdi], dl\n    inc rdi\n    inc rbx\n    dec ecx\n    jmp .hbloop\n.hbdone:\n    ret";
+}
+
+# ovl_buf holds a NUL-terminated line. Prints it to the green console
+# (debug_print) and streams it over COM1 followed by CR/LF. Preserves rsi.
+fn diag_emit_line() {
+    asm "    push rsi\n    lea rsi, [ovl_buf]\n    call debug_print\n    lea rsi, [ovl_buf]\n    call svg_dump_puts\n    mov al, 13\n    call svg_dump_putc\n    mov al, 10\n    call svg_dump_putc\n    pop rsi\n    ret";
+}
+
+# rdx=64-bit value, rdi=dest cursor -> 16 uppercase hex chars into [rdi],
+# advancing rdi. Preserves rax/rcx.
+#
+# Structured NexusHLK (kernel explicit-register ABI): `rdx value` and `rdi
+# cursor` bind the two ABI inputs to their physical registers; `preserves(rax,
+# rcx)` re-states the original callee-save set. rdi is NOT preserved, so the
+# advanced cursor is written back to rdi on exit — the "rdi advanced" output
+# callers rely on. The prior shim rotated rdx left by 4 each
+# step and masked the top nibble; this shifts value left by 4 (the high nibble
+# read via >>60) which yields the identical 16-character MSB-first hex stream.
+fn diag_puth64(rdx value, rdi cursor) preserves(rax, rcx) {
+    let n = 16;
+    while n > 0 {
+        let nib = (value >> 60) & 0x0F;
+        value = value << 4;
+        if nib < HEX_BASE {
+            sb(cursor, nib + ASCII_ZERO);
+        } else {
+            sb(cursor, nib + ASCII_A_M10);
+        }
+        cursor = cursor + 1;
+        n = n - 1;
+    }
+}
+
+# Stream the active wallpaper-cache render over COM1, downsampled to 160x90 with
+# nearest-neighbour sampling, framed [SVGDUMP]\n <rows> [SVGEND]\n. SVG_DUMP_W /
+# SVG_DUMP_H (160/90) and svg_dump_hdr/dim/ftr are defined in core_runtime_state.asm.
+# Preserves all registers it touches (full save/restore).
+fn svg_dump_serial() {
+    asm "    push rax\n    push rbx\n    push rcx\n    push rdx\n    push rsi\n    push rdi\n    push r8\n    push r12\n    push r13\n    push r14\n    push r15\n    lea rsi, [rel svg_dump_hdr]\n    call svg_dump_puts\n    lea rsi, [rel svg_dump_dim]\n    call svg_dump_puts\n    mov eax, [scr_width]\n    call svg_dump_dec\n    mov al, ' '\n    call svg_dump_putc\n    mov eax, [scr_height]\n    call svg_dump_dec\n    mov al, 10\n    call svg_dump_putc\n    xor r12d, r12d\n.row:\n    cmp r12d, SVG_DUMP_H\n    jae .rows_done\n    mov eax, r12d\n    mov ecx, [scr_height]\n    imul eax, ecx\n    xor edx, edx\n    mov ebx, SVG_DUMP_H\n    div ebx\n    mov ecx, [scr_width]\n    imul eax, ecx\n    shl eax, 2\n    mov r13, [wallpaper_cache_active_addr]\n    add r13, rax\n    xor r14d, r14d\n.col:\n    cmp r14d, SVG_DUMP_W\n    jae .col_done\n    mov eax, r14d\n    mov ecx, [scr_width]\n    imul eax, ecx\n    xor edx, edx\n    mov ebx, SVG_DUMP_W\n    div ebx\n    lea r15, [r13 + rax*4]\n    mov r8d, [r15]\n    mov eax, r8d\n    shr eax, 16\n    call svg_dump_hexbyte\n    mov eax, r8d\n    shr eax, 8\n    call svg_dump_hexbyte\n    mov eax, r8d\n    call svg_dump_hexbyte\n    inc r14d\n    jmp .col\n.col_done:\n    mov al, 10\n    call svg_dump_putc\n    inc r12d\n    jmp .row\n.rows_done:\n    lea rsi, [rel svg_dump_ftr]\n    call svg_dump_puts\n    pop r15\n    pop r14\n    pop r13\n    pop r12\n    pop r8\n    pop rdi\n    pop rsi\n    pop rdx\n    pop rcx\n    pop rbx\n    pop rax\n    ret";
+}
+
+# al=input byte from the serial automation channel -> normalised and routed to
+# the focused window's CPI-verified key callback (printable + CR/BS/TAB only).
+fn serial_forward_input() {
+    asm "    cmp al, 0\n    je .input_done\n    cmp al, 10\n    jne .input_check_cr\n    mov al, 13\n.input_check_cr:\n    cmp al, 13\n    je .input_dispatch\n    cmp al, 8\n    je .input_dispatch\n    cmp al, 9\n    je .input_dispatch\n    cmp al, 32\n    jb .input_done\n    cmp al, 126\n    ja .input_done\n.input_dispatch:\n    mov dl, al\n    mov r8, [wm_focused_window]\n    cmp r8, -1\n    je .input_done\n    mov rax, r8\n    imul rax, WINDOW_STRUCT_SIZE\n    add rax, WINDOW_POOL_ADDR\n    push rax\n    push rdx\n    mov rdi, [rax + WIN_OFF_KEYFN]\n    mov rsi, rax\n    mov rdx, WIN_OFF_KEYFN\n    call cpi_verify_callback\n    mov r9, rax\n    pop rdx\n    pop rax\n    test r9, r9\n    jz .input_done\n    movzx edx, dl\n    shl edx, 8\n    or edx, 0x01000000\n    mov rsi, rax\n    mov rdi, r9\n    call dispatch_app_callback\n.input_dispatch_done:\n    mov byte [scene_dirty], 1\n.input_done:\n    ret";
+}

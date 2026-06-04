@@ -77,75 +77,75 @@ section .text
 %endmacro
 
 app_sys_render_rect:
-    mov rax, 2
+    APP_SYSNO 2
     mov r10, rcx
     syscall
     ret
 
 app_sys_render_text:
-    mov rax, 3
+    APP_SYSNO 3
     mov r10, rcx
     syscall
     ret
 
 
 app_sys_fs_count:
-    mov rax, 4
+    APP_SYSNO 4
     syscall
     ret
 
 app_sys_fs_get_entry:
-    mov rax, 5
+    APP_SYSNO 5
     syscall
     ret
 
 app_sys_fs_change_dir:
-    mov rax, 6
+    APP_SYSNO 6
     syscall
     ret
 
 app_sys_fs_read:
-    mov rax, 8
+    APP_SYSNO 8
     syscall
     ret
 
 app_sys_fs_write_file:
-    mov rax, 13
+    APP_SYSNO 13
     syscall
     ret
 
 app_sys_fs_sync_root:
-    mov rax, 14
+    APP_SYSNO 14
     syscall
     ret
 
 app_sys_fs_delete:
-    mov rax, 19
+    APP_SYSNO 19
     syscall
     ret
 
 app_sys_fs_rename:
-    mov rax, 20
+    APP_SYSNO 20
     syscall
     ret
 
 app_sys_fs_mkdir:
-    mov rax, 21
+    APP_SYSNO 21
     syscall
     ret
 
 app_sys_wm_close_window:
-    mov rax, 15
+    APP_SYSNO 15
     syscall
     ret
 
 app_sys_display_set_mode:
-    mov rax, 16
+    APP_SYSNO 16
     syscall
     ret
 
 app_sys_cursor_init:
-    mov rax, 17
+    APP_SYSNO 17
     syscall
     ret
 
@@ -167,6 +167,5 @@ app_sys_cursor_init:
 global app_l3_test_draw
 global app_l3_test_click
 global app_l3_test_key
-global app_terminal_kernel_draw
-global app_terminal_kernel_key
+; app_terminal_kernel_draw/key removed — Terminal migrated to NexusHL.
 

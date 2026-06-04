@@ -4,6 +4,19 @@
 ; app_blob_end and every slot-relative access points to garbage.
 section .text
 
+; ----------------------------------------------------------------------------
+; Named paint palette color constants (ARGB 0xAARRGGBB, opaque alpha 0xFF).
+; Values copied verbatim from the original inline literals.
+; ----------------------------------------------------------------------------
+STATE_PAL_BLACK   equ 0xFF000000   ; palette slot 0 + default paint color (black)
+STATE_PAL_WHITE   equ 0xFFFFFFFF   ; palette slot 1 (white)
+STATE_PAL_RED     equ 0xFFFF0000   ; palette slot 2 (red)
+STATE_PAL_GREEN   equ 0xFF00FF00   ; palette slot 3 (green)
+STATE_PAL_BLUE    equ 0xFF0000FF   ; palette slot 4 (blue)
+STATE_PAL_YELLOW  equ 0xFFFFFF00   ; palette slot 5 (yellow)
+STATE_PAL_CYAN    equ 0xFF00FFFF   ; palette slot 6 (cyan)
+STATE_PAL_MAGENTA equ 0xFFFF00FF   ; palette slot 7 (magenta)
+
 ; --- Window titles ---
 szExplorerTitle db "File Explorer", 0
 szTermTitle     db "Terminal", 0
@@ -257,21 +270,21 @@ szAboutCopy     db "(c) 2026 NexusOS Project", 0
 szPaintTitle db "Paint", 0
 paint_filename_83 db "PAINT   BMP"
 paint_palette_colors:
-    dd 0xFF000000 ; Black
-    dd 0xFFFFFFFF ; White
-    dd 0xFFFF0000 ; Red
-    dd 0xFF00FF00 ; Green
-    dd 0xFF0000FF ; Blue
-    dd 0xFFFFFF00 ; Yellow
-    dd 0xFF00FFFF ; Cyan
-    dd 0xFFFF00FF ; Magenta
+    dd STATE_PAL_BLACK   ; Black
+    dd STATE_PAL_WHITE   ; White
+    dd STATE_PAL_RED     ; Red
+    dd STATE_PAL_GREEN   ; Green
+    dd STATE_PAL_BLUE    ; Blue
+    dd STATE_PAL_YELLOW  ; Yellow
+    dd STATE_PAL_CYAN    ; Cyan
+    dd STATE_PAL_MAGENTA ; Magenta
 
 ; Paint state
 paint_save_active db 0
 paint_save_buf times 16 db 0
 paint_save_len dd 0
 szExtBmp db ".BMP", 0
-paint_color dd 0xFF000000
+paint_color dd STATE_PAL_BLACK
 paint_brush_size dd 2
 
 ; Terminal command strings

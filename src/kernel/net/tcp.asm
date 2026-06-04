@@ -335,7 +335,7 @@ net_tcp_rng_ensure_seed:
 .no_rdrand:
     test rbx, rbx
     jnz .store
-    mov rbx, 0x9E3779B97F4A7C15          ; non-zero guard
+    mov rbx, SPLITMIX64_GOLDEN           ; non-zero guard
 .store:
     mov [rel net_tcp_rng_key], rbx
     ; Mix RDTSC into the running state too so the first nonce isn't 0.
@@ -359,7 +359,7 @@ net_tcp_rng_next:
     push rdx
     ; Advance the per-connection nonce by the golden-ratio odd constant.
     mov rax, [rel net_tcp_rng_state]
-    mov rcx, 0x9E3779B97F4A7C15
+    mov rcx, SPLITMIX64_GOLDEN
     add rax, rcx
     mov [rel net_tcp_rng_state], rax
     ; z = (state ^ key); SplitMix64 finaliser.
@@ -367,12 +367,12 @@ net_tcp_rng_next:
     mov rdx, rax
     shr rdx, 30
     xor rax, rdx
-    mov rcx, 0xBF58476D1CE4E5B9
+    mov rcx, SPLITMIX64_MIX1
     imul rax, rcx
     mov rdx, rax
     shr rdx, 27
     xor rax, rdx
-    mov rcx, 0x94D049BB133111EB
+    mov rcx, SPLITMIX64_MIX2
     imul rax, rcx
     mov rdx, rax
     shr rdx, 31

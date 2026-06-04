@@ -29,13 +29,21 @@ const NIC_MAGIC = 0x3143494E    # 'NIC1' little-endian
 const NIC_HEADER = 16
 const NBA_MAGIC = 0x3141424E    # 'NBA1'
 const NBA_HEADER = 20
+
+const MEDIA_MAGIC_OFF = 0
+const NIC_DIM_PACKED_OFF = 4
+const NBA_WIDTH_OFF = 4
+const NBA_HEIGHT_OFF = 8
+const NBA_FRAME_COUNT_OFF = 12
+const NBA_FPS_OFF = 16
+
 const APP_SLOT_BMP_FILE_OFF = 0x17D000
 
 # Detect codec from the first dword of `buf`. Returns one of CODEC_*.
 # `size` is a guard against probing buffers smaller than the header.
 fn media_probe(buf, size) {
     if size < 4 { return CODEC_NONE; }
-    let m = lw(buf);
+    let m = lw(buf + MEDIA_MAGIC_OFF);
     if m == NIC_MAGIC {
         if size < NIC_HEADER { return CODEC_NONE; }
         return CODEC_NIC;
@@ -49,27 +57,27 @@ fn media_probe(buf, size) {
 
 # Pixel width. NIC stores width as u16 at +4; NBA as u32 at +4.
 fn media_width(codec, buf) {
-    if codec == CODEC_NIC { return lw(buf + 4) & 0xFFFF; }
-    if codec == CODEC_NBA { return lw(buf + 4); }
+    if codec == CODEC_NIC { return lw(buf + NIC_DIM_PACKED_OFF) & 0xFFFF; }
+    if codec == CODEC_NBA { return lw(buf + NBA_WIDTH_OFF); }
     return 0;
 }
 
 fn media_height(codec, buf) {
-    if codec == CODEC_NIC { return (lw(buf + 4) >> 16) & 0xFFFF; }
-    if codec == CODEC_NBA { return lw(buf + 8); }
+    if codec == CODEC_NIC { return (lw(buf + NIC_DIM_PACKED_OFF) >> 16) & 0xFFFF; }
+    if codec == CODEC_NBA { return lw(buf + NBA_HEIGHT_OFF); }
     return 0;
 }
 
 # Frame count. NIC is always a single still frame; NBA stores u32 at +12.
 fn media_frame_count(codec, buf) {
     if codec == CODEC_NIC { return 1; }
-    if codec == CODEC_NBA { return lw(buf + 12); }
+    if codec == CODEC_NBA { return lw(buf + NBA_FRAME_COUNT_OFF); }
     return 0;
 }
 
 # Playback rate, frames per second. NIC has no rate.
 fn media_fps(codec, buf) {
-    if codec == CODEC_NBA { return lw(buf + 16); }
+    if codec == CODEC_NBA { return lw(buf + NBA_FPS_OFF); }
     return 0;
 }
 

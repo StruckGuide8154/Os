@@ -65,8 +65,14 @@ SC_TRACE_HIST_MAX     equ 0xFFFF        ; saturation ceiling (u16)
 ;              per-slot arrays).
 ;      rsp   = PUSH_ALL frame ([rsp+ALL_RAX]=sysno, [rsp+ALL_RDI]=arg0).
 ;      l3_runtime[slot].L3_RT_USER_RIP holds the user RIP for this call.
-; Clobbers rax, rbx, rcx, rdx, r8 — all dead at the call site (reloaded from
-; the saved frame before the handler runs). r15 / the saved frame preserved.
+; Clobbers rax, rbx, rcx, rdx, r8. r15 and the saved PUSH_ALL frame are
+; preserved. IMPORTANT: on exit rax holds the user RIP (the macro's last store
+; is the ring's +8 forensic RIP anchor), NOT the syscall number. The caller MUST
+; `mov rax, [rsp + ALL_RAX]` before using rax as the syscall number again (the
+; bounds check / per-slot permutation key off it). The arg-register reloads at
+; the dispatch tail are far too late for that. (Regression fixed 2026-05-31:
+; without the reload every syscall number became its return RIP -> out-of-range
+; -> -1 -> all app windows painted blank. See docs/STATUS.md.)
 ; ----------------------------------------------------------------------------
 %macro SC_TRACE_APPEND 0
     movzx ecx, r15b

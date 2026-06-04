@@ -4,12 +4,19 @@ param(
     [ValidateSet('Default', 'Cache32Max')]
     [string]$PerfProfile = 'Default',
     [switch]$NoFbWc,         # Phase A baseline: skip fbperf WC arm+activate
+    [switch]$NoMemRandom,    # Diagnostic: deterministic memory layout (KASLR off, per-slot code/user-stack slides off) plus boot milestone logs.
     [switch]$NoKaslr,        # Disable KASLR (random kernel base per boot). KASLR is on by default since 2026-05-27 after multi-boot QEMU verification.
     [switch]$ShadowStackPoc, # Build-gated kernel shadow-stack proof harness (debug only). Trips KEPILOGUE on a corrupted return address at boot; never ship.
+    [switch]$ProbeNkPt,      # Nested-kernel monitor negative test (debug only). After nk_protect_page_tables runs, kmain does ONE un-bracketed write to the now-read-only PML4; expect a ring-0 #PF caught by isr_common_stub (proves page-table self-protection is live). Never ship.
     [switch]$SecurityRegression, # Security PoC regression suite (debug only). Compile-gates every ring-3 PoC harness in src/user/poc/ (catches mitigation-ABI drift at build time) AND builds the kernel shadow-stack trip into the image (asserted at boot by scripts/test/test_security_regression.ps1). Never ship.
     [switch]$NoSmap,         # Disable CR4.SMEP/SMAP enforcement. SMAP is ON by default (CPUID-gated at runtime); pass -NoSmap only for CPUs/emulators that lack SMAP and where the run target can't expose +smap.
     [switch]$Cet,            # Enable the hardware CET scaffold (CR4.CET + IA32_S_CET). CPUID-gated at runtime (no-op on CPUs/VMs without SHSTK, incl. QEMU TCG); complements the always-on software kernel shadow stack. SHSTK/IBT *detection* is always compiled regardless of this flag. The supervisor shadow-stack RET-check itself is NOT armed yet (needs a seeded PL0_SSP — documented follow-up in src/include/cet.inc).
+    # NOTE: -Cet is retained for old scripts only; CET protection is default-on.
+    [switch]$NoCet,          # Disable CET SHSTK protection. Default ON: hardware SHSTK when CPUID exposes it, software shadow-stack fallback otherwise.
     [switch]$CetIbt,         # Additionally arm the IBT-side S_CET bits when IBT is present. Requires -Cet. OFF by default: endbr64 markers are not yet emitted at indirect-branch targets, so enabling ENDBR_EN would #CP. Plumbing only.
+    [switch]$Kpti,           # Kernel Page-Table Isolation (security_todo.md §3). Compiles the user-view-PML4 builder + CR3-swap entry/exit macros (src/include/kpti.inc). OFF by default -> macros emit nothing, no kpti.inc code/data, default image byte-for-byte unchanged. Even with -Kpti the feature is a runtime no-op (kpti_active=0) until the SYSCALL (syscall.asm) + IRQ/exception (isr.asm) CR3-swap points and the kmain kpti_init flip are wired -- see the scoped-out note in kpti.inc. The usermode.asm iretq exits are already wired (inert until armed). Compile-gate verification only for now.
+    [switch]$NoKpti,         # Disable KPTI. Default ON: user-view CR3 while ring 3 runs, full kernel CR3 on entry.
+    [switch]$NoSyscallPerm,  # Disable heterogeneous syscall numbering per slot (security_todo.md §12). ON by default: per-launch keyed-random permutation of the syscall table; the loader rewrites each app's compiled SYS_* immediates (via the .scfix fixup table) to the slot's forward-permuted numbers, and the dispatcher applies the kernel-side inverse mapping on entry. Pass -NoSyscallPerm to fall back to identity numbering.
     [switch]$CopyToE         # Copy built ESP\EFI tree to E:\ for boot from removable media.
     # GFX/DCN bring-up flags (-Gfx, -GfxWave3, -GfxWave3L, -GfxImuKick,
     # -DiagLegacy) were retired 2026-05-26 along with the AMD 780M iGPU
@@ -42,6 +49,11 @@ if ($NoFbWc) {
     $KernelDefines += '-dFBPERF_NO_WC'
     Write-Host '  (FBPERF: WC activation DISABLED -- Phase A baseline build)' -ForegroundColor Magenta
 }
+if ($NoMemRandom) {
+    $KernelDefines += '-dNEXUS_NO_MEM_RANDOM'
+    $KernelDefines += '-dNEXUS_BOOT_DIAG_LOG'
+    Write-Host '  (MEMRND: DISABLED via -NoMemRandom -- KASLR, per-slot code slide, and user-stack top randomization forced deterministic)' -ForegroundColor Yellow
+}
 if ($SecurityRegression -and $Release) {
     Write-Host '  FAILED - -SecurityRegression is a debug-only harness; do not combine with -Release.' -ForegroundColor Red
     exit 1
@@ -53,6 +65,10 @@ if ($ShadowStackPoc -or $SecurityRegression) {
     $KernelDefines += '-dENABLE_SHADOW_STACK_POC'
     Write-Host '  (SHADOW: kernel shadow-stack PoC trip ENABLED -- debug only)' -ForegroundColor Magenta
 }
+if ($ProbeNkPt) {
+    $KernelDefines += '-dPROBE_NK_PT'
+    Write-Host '  (NKPT: nested-kernel page-table protection NEGATIVE TEST ENABLED -- expect a deliberate #PF at boot; debug only)' -ForegroundColor Magenta
+}
 if (-not $NoSmap) {
     $KernelDefines += '-dENABLE_SMAP'
     Write-Host '  (SMAP: CR4.SMEP/SMAP enforcement + stac/clac user-access brackets ENABLED -- default; -NoSmap to disable)' -ForegroundColor Magenta
@@ -60,29 +76,62 @@ if (-not $NoSmap) {
     Write-Host '  (SMAP: DISABLED via -NoSmap -- CR4 left as loaders configured it)' -ForegroundColor Yellow
 }
 # CET (security_todo.md §3). Detection (cet_detect) is ALWAYS compiled; -Cet
-# only compiles the cet_enable CR4.CET/S_CET programming, which is itself
-# CPUID-gated at runtime and thus inert without hardware support (incl. TCG).
-if ($CetIbt -and -not $Cet) {
-    Write-Host '  FAILED - -CetIbt requires -Cet.' -ForegroundColor Red
+# default-on SHSTK protection uses hardware support when present and the
+# software shadow-stack fallback otherwise. -NoCet is the explicit opt-out.
+if ($CetIbt -and $NoCet) {
+    Write-Host '  FAILED - -CetIbt requires CET; remove -NoCet.' -ForegroundColor Red
     exit 1
 }
-if ($Cet) {
+if (-not $NoCet) {
     $KernelDefines += '-dENABLE_CET'
-    Write-Host '  (CET: hardware shadow-stack scaffold ENABLED -- CPUID-gated; SS RET-check not yet armed; software shadow stack still active)' -ForegroundColor Magenta
+    if ($Cet) {
+        Write-Host '  (CET: -Cet accepted for compatibility; SHSTK protection is already ON by default)' -ForegroundColor Gray
+    }
+    Write-Host '  (CET: SHSTK protection ENABLED by default -- hardware when CPUID exposes it, software fallback otherwise; -NoCet to disable)' -ForegroundColor Magenta
     if ($CetIbt) {
         $KernelDefines += '-dENABLE_CET_IBT'
         Write-Host '  (CET: IBT S_CET bits armed -- plumbing only, endbr64 markers pending)' -ForegroundColor Magenta
     }
 } else {
-    Write-Host '  (CET: hardware enable OFF -- SHSTK/IBT detection still compiled; -Cet to enable scaffold)' -ForegroundColor Gray
+    Write-Host '  (CET: DISABLED via -NoCet -- SHSTK/IBT detection still compiled)' -ForegroundColor Yellow
 }
-if (-not $NoKaslr) {
+# Heterogeneous syscall numbering per slot (security_todo.md §12). ON by
+# default: the loader rewrites every app's compiled SYS_* immediate (located via
+# the build-emitted .scfix fixup table) to that slot's FORWARD-permuted number,
+# and the dispatcher applies the per-slot INVERSE map on entry (branch-free; the
+# lfence-before-indirect-jmp barrier is preserved). Slot 0 stays identity
+# (fail-safe). -NoSyscallPerm falls back to identity numbering.
+if (-not $NoSyscallPerm) {
+    $KernelDefines += '-dENABLE_SYSCALL_PERM'
+    Write-Host '  (SYSCALLPERM: per-slot syscall-number permutation ENABLED -- default; loader rewrites SYS_* immediates, dispatcher inverse-maps; -NoSyscallPerm to disable)' -ForegroundColor Magenta
+} else {
+    Write-Host '  (SYSCALLPERM: DISABLED via -NoSyscallPerm -- identity syscall numbering)' -ForegroundColor Yellow
+}
+# KPTI (security_todo.md §3). -Kpti compiles the user-view-PML4 builder + the
+# CR3-swap entry/exit macro bodies (src/include/kpti.inc).
+#
+# OFF BY DEFAULT (reverted from default-on 2026-06-01): the entry/exit
+# trampolines were never relocated into the low-2 MiB user-view window that
+# kpti_init maps, so once KPTI_SWITCH_TO_USER_CR3 installs the user view the
+# next kernel .text instruction (and the IDT) are UNMAPPED -> ring-0 #PF on
+# fetch -> #DF -> triple fault on the first ring-3 round-trip (timer IRQ /
+# syscall return). kpti.inc's own header documents this exact hazard and says
+# KPTI must stay OFF until the trampoline relocation lands. Verified via a
+# QEMU -d int trace: RIP==CR2 in kernel .text under CR3==kpti_user_cr3.
+# Pass -Kpti to force-compile it anyway (will triple-fault until relocated).
+if ($Kpti -and -not $NoKpti) {
+    $KernelDefines += '-dENABLE_KPTI'
+    Write-Host '  (KPTI: FORCE-ENABLED via -Kpti -- WARNING: entry-stub relocation incomplete; this build WILL triple-fault on the first ring-3 round-trip)' -ForegroundColor Red
+} else {
+    Write-Host '  (KPTI: OFF -- entry/exit trampoline not yet relocated below 2 MiB (see kpti.inc); kernel fully mapped while ring 3 runs. -Kpti to force-enable)' -ForegroundColor Yellow
+}
+if (-not ($NoKaslr -or $NoMemRandom)) {
     # Loader-only switch: kernel assembles transparently at the chosen ORG;
     # only the loader's slide-picker is gated.
     $LoaderDefines += '-dENABLE_KASLR'
     Write-Host '  (KASLR: enabled — kernel will load at a random base each boot)' -ForegroundColor Magenta
 } else {
-    Write-Host '  (KASLR: DISABLED via -NoKaslr — slide forced to 0)' -ForegroundColor Yellow
+    Write-Host '  (KASLR: DISABLED -- slide forced to 0)' -ForegroundColor Yellow
 }
 $KernelDefines += '-dNEXUS_SMP'
 $KernelDefines += '-dNEXUS_CACHE32_AP_STARTUP'
@@ -117,6 +166,41 @@ if (Test-Path $WallpaperTool) {
 # 0b. Compile NexusHL apps -> build/nxh/*.asm (included by src/user/apps.asm)
 & powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_nxh.ps1')
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED NexusHL compile' -ForegroundColor Red; exit 1 }
+
+# 0b2. Compile NexusHLK kernel modules -> build/nxh/*.asm (%include'd by
+# kernel_build.asm). These use nxhc.py's kernel emit mode (--target kernel):
+# plain NASM, bare labels, direct in-unit calls, no app-blob framing. Currently
+# the serial-diagnostic leaf cluster (PoC). Regenerated every build so the
+# .nxh source stays the source of truth for the generated .asm.
+$NxhcPy   = Join-Path $Root 'src\user\nexushl\compiler\nxhc.py'
+$NxhLibDir = Join-Path $Root 'src\user\nexushl\lib'
+$NxhkOutDir = Join-Path $Root 'build\nxh'
+New-Item -Path $NxhkOutDir -ItemType Directory -Force | Out-Null
+$KernelModules = @(
+    @{ src = 'src\kernel\nexushlk\kernel_console.nxh'; out = 'build\nxh\kernel_console.asm' },
+    @{ src = 'src\kernel\nexushlk\context_menu.nxh'; out = 'build\nxh\context_menu.asm' },
+    @{ src = 'src\kernel\nexushlk\kernel_lifecycle.nxh'; out = 'build\nxh\kernel_lifecycle.asm' },
+    @{ src = 'src\kernel\nexushlk\serial_poll.nxh'; out = 'build\nxh\serial_poll.asm' },
+    @{ src = 'src\kernel\nexushlk\input_dispatch.nxh'; out = 'build\nxh\input_dispatch.asm' },
+    @{ src = 'src\kernel\nexushlk\frame_present.nxh'; out = 'build\nxh\frame_present.asm' },
+    @{ src = 'src\kernel\nexushlk\serial_diag.nxh'; out = 'build\nxh\serial_diag.asm' },
+    @{ src = 'src\kernel\nexushlk\boot_diag.nxh';   out = 'build\nxh\boot_diag.asm' },
+    @{ src = 'src\kernel\nexushlk\debug_overlay.nxh'; out = 'build\nxh\debug_overlay.asm' },
+    @{ src = 'src\kernel\nexushlk\cpu_acct.nxh';    out = 'build\nxh\cpu_acct.asm' },
+    @{ src = 'src\kernel\nexushlk\serial_console.nxh'; out = 'build\nxh\serial_console.asm' },
+    @{ src = 'src\kernel\nexushlk\real_boot_diag.nxh'; out = 'build\nxh\real_boot_diag.asm' },
+    @{ src = 'src\kernel\nexushlk\real_boot_diag_core.nxh'; out = 'build\nxh\real_boot_diag_core.asm' },
+    @{ src = 'src\kernel\nexushlk\real_boot_diag_fbperf.nxh'; out = 'build\nxh\real_boot_diag_fbperf.asm' },
+    @{ src = 'src\kernel\nexushlk\real_boot_diag_legacy.nxh'; out = 'build\nxh\real_boot_diag_legacy.asm' },
+    @{ src = 'src\kernel\nexushlk\real_boot_diag_gfx.nxh'; out = 'build\nxh\real_boot_diag_gfx.asm' }
+)
+foreach ($m in $KernelModules) {
+    $mSrc = Join-Path $Root $m.src
+    $mOut = Join-Path $Root $m.out
+    Write-Host "  compile (kernel) $($m.src)" -ForegroundColor Yellow
+    & python $NxhcPy $mSrc -o $mOut -L $NxhLibDir --embed --target kernel
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED NexusHLK kernel-module compile' -ForegroundColor Red; exit 1 }
+}
 $CoverageTool = Join-Path $Root 'tools\check_coverage.py'
 if (Test-Path $CoverageTool) {
     & python $CoverageTool

@@ -47,13 +47,18 @@ CAP_ALL         equ 0xFF
 ; slot_cap_mask[] is plain kernel data, so any kernel-write bug could flip a
 ; cap bit and silently widen a slot's privileges between writes. To make that
 ; tamper detectable, slot_cap_hmac[slot] stores
-;   low8(kernel_canary ^ slot ^ mask ^ CAP_HMAC_DOMAIN)
+;   low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK)
 ; recomputed on every legitimate mask write and re-checked at dispatch before
 ; the mask is trusted (see cap_mask_sign / cap_mask_verify in syscall.asm).
 ; The domain byte separates this MAC from the WIN_OFF_USER_ARG / CPI tags that
 ; reuse the same kernel_canary key, so a tag forged for one can't be replayed
 ; into the other.
-CAP_HMAC_DOMAIN equ 0x5C
+;
+; The domain constant and the MAC arithmetic itself now live in ONE place,
+; kdomain_hmac.inc (security_todo.md §13): KDOM_CAP_MASK is this user's row in
+; the domain-separation table, and KHMAC_TAG is the shared primitive every
+; site invokes. Its value (0x5C) is the former CAP_HMAC_DOMAIN, so existing
+; stamped authenticators still verify.
 
 ; --- Capability-transition audit ring (security_todo.md §4) -----------------
 ; Every legitimate cap-mask write (declare_manifest narrowing, the loader's

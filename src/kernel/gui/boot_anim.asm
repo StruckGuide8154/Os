@@ -329,6 +329,18 @@ boot_anim_play:
     test edx, edx
     jz .ret
 
+    ; Upper-bound sanity (unsigned). The real animation is 320x180; a width or
+    ; height of thousands+ means a corrupt header (or corrupted global state that
+    ; left garbage here). Without this cap, boot_anim_rect_h = height*scale flows
+    ; into display_flip_rect as a multi-thousand-row rectangle and, if scr_*
+    ; are also bad so the clip doesn't bound it, runs a multi-GB movntdq copy that
+    ; never returns (the observed boot hang). 8192 is far above any real panel, so
+    ; reject and skip the animation rather than risk hanging the boot.
+    cmp r14d, 8192
+    ja .ret
+    cmp r15d, 8192
+    ja .ret
+
     ; Integer scale = min(scr_width/(w*2), scr_height/(h*2)), clamped to 1..4.
     ; This keeps the 16:9 animation readable on native panels without clipping.
     mov eax, [scr_width]

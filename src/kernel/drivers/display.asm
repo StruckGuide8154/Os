@@ -1534,6 +1534,20 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     mov ecx, [scr_height]
     sub ecx, esi
 .fr_noclip_b:
+    ; Hard backstop against corrupt geometry. The clip above bounds the rect to
+    ; scr_width/scr_height, but if THOSE globals are themselves garbage (corrupt
+    ; VBE/GOP state) the clip is a no-op and a bad width/row-count would drive the
+    ; movntdq loop below off the end of RAM in a multi-GB copy that never returns
+    ; (boot hang). Cap the post-clip extents to 8192 px — far above any real
+    ; panel — so no caller can ever turn this into an unbounded copy.
+    cmp edx, 8192
+    jle .fr_w_cap_ok
+    mov edx, 8192
+.fr_w_cap_ok:
+    cmp ecx, 8192
+    jle .fr_h_cap_ok
+    mov ecx, 8192
+.fr_h_cap_ok:
     cmp edx, 0
     jle .fr_done
     cmp ecx, 0

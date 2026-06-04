@@ -15,6 +15,7 @@ SEC_FAT16_ROOT_CACHE equ 0xD11000
 %endif
 SEC_README_ENTRY   equ (SEC_FAT16_ROOT_CACHE + 32)
 SEC_WRITTEN_ENTRY  equ (SEC_FAT16_ROOT_CACHE + (6 * 32))
+SECPROBE_COL_PANEL_BG equ 0x000000A8   ; security-probe result panel background (dark blue, ARGB)
 
 %macro SEC_MARK 1
     mov rax, %1
@@ -49,7 +50,7 @@ app_security_probe_draw:
     add rsi, TITLEBAR_HEIGHT + 12
     mov edx, 420
     mov ecx, 96
-    mov r8d, 0x000000A8
+    mov r8d, SECPROBE_COL_PANEL_BG
     SYS_GUI_RECT rdi, rsi, rdx, rcx, r8
     lea rdx, [rel szSecurityProbeTitle]
     mov ecx, COLOR_TEXT_WHITE

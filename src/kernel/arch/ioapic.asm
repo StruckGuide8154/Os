@@ -5,11 +5,12 @@
 bits 64
 
 %include "constants.inc"
+%include "arch_regs.inc"
 
 section .data
 global ioapic_base
 global touchpad_irq
-ioapic_base dq 0xFEC00000
+ioapic_base dq IOAPIC_DEFAULT_BASE
 touchpad_irq dw 18
 
 section .text

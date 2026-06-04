@@ -84,6 +84,48 @@ default rel
 %define CO_SETCURPOS 56
 %define CO_ENABLECUR 64
 
+; ============================================================================
+; NAMED CONSTANTS (replacing bare 5+ hex-digit "magic" literals)
+; Values copied verbatim from their original literals. Do not alter a digit.
+; ----------------------------------------------------------------------------
+; PE/COFF header fields
+PE_SIGNATURE          equ 0x00004550   ; "PE\0\0" optional-header signature
+SECCHAR_TEXT          equ 0xE0000060   ; .text  flags: CODE|EXEC|READ (+MEM_…)
+SECCHAR_RELOC         equ 0x42000040   ; .reloc flags: INITDATA|DISCARDABLE|READ
+
+; --- BGRA pixel colors (0x00RRGGBB / GOP BltPixel layout) ---
+COLOR_TEST_RECT_GREEN equ 0x0000FF00   ; T07 test-rect green (line 320)
+COLOR_BG_DARK_SLATE   equ 0x00000810   ; very dark blue-grey screen clear
+COLOR_CURSOR_MAGENTA  equ 0x00FF00FF   ; bright magenta cursor / async bar
+COLOR_BG_UEFI_BLUE    equ 0x000000A8   ; UEFI EFI_BACKGROUND_BLUE (BGRA) erase
+COLOR_DARK_RED        equ 0x00800000   ; slot0 idle (dark red)
+COLOR_BRIGHT_RED      equ 0x00FF0000   ; slot0 active (bright red)
+COLOR_DIM_GREY        equ 0x00303030   ; status slot "not found" dim grey
+COLOR_DARK_ORANGE     equ 0x00803000   ; slot1 idle (dark orange)
+COLOR_BRIGHT_ORANGE   equ 0x00FF8000   ; slot1 active (bright orange)
+COLOR_DARK_GREEN      equ 0x00006000   ; slot2 idle (dark green)
+COLOR_BRIGHT_GREEN    equ 0x0000FF00   ; slot2 active (bright green)
+COLOR_DARK_CYAN       equ 0x00006080   ; slot3 idle (dark cyan)
+COLOR_BRIGHT_CYAN     equ 0x0000FFFF   ; slot3 active / cb indicator (bright cyan)
+COLOR_DARK_YELLOW     equ 0x00606000   ; slot4 idle (dark yellow)
+COLOR_YELLOW          equ 0x00FFFF00   ; slot4 active / HITS bar (yellow)
+COLOR_PANEL_BG        equ 0x00080808   ; usb panel clear strip (near-black)
+COLOR_RC_GREEN        equ 0x0000C000   ; RC square pass (green)
+COLOR_RC_RED          equ 0x00C00000   ; RC square fail (red)
+COLOR_WHITE           equ 0x00FFFFFF   ; byte-bar b0 / report white
+COLOR_BAR_RED         equ 0x00FF4040   ; byte-bar b1 (red)
+COLOR_BAR_GREEN       equ 0x0040FF40   ; byte-bar b2 (green)
+COLOR_BAR_CYAN        equ 0x0040FFFF   ; byte-bar b3 (cyan)
+COLOR_CB_DARK_GREY    equ 0x00202020   ; async cb indicator dark grey (never fired)
+COLOR_BLACK           equ 0x00000000   ; dead-code report-bar background (black)
+
+; --- EFI GUID data1 (first 32-bit field of each protocol GUID) ---
+EFI_GOP_GUID_D1       equ 0x9042a9de   ; EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID data1
+EFI_SPP_GUID_D1       equ 0x31878c87   ; EFI_SIMPLE_POINTER_PROTOCOL_GUID data1
+EFI_APP_GUID_D1       equ 0x8d59d32b   ; EFI_ABSOLUTE_POINTER_PROTOCOL_GUID data1
+EFI_USBIO_GUID_D1     equ 0x2b2f68d6   ; EFI_USB_IO_PROTOCOL_GUID data1
+; ============================================================================
+
 ; --- Serial helpers ---
 %macro SER 1
     push rax
@@ -157,7 +199,7 @@ section .text start=0
     dd pe_hdr
 
 pe_hdr:
-    dd 0x00004550
+    dd PE_SIGNATURE
     dw 0x8664
     dw 2
     dd 0, 0, 0
@@ -183,13 +225,13 @@ opt_end:
     dd TEXT_RAW, TEXT_VA, TEXT_RAW, HDR_SZ
     dd 0, 0
     dw 0, 0
-    dd 0xE0000060
+    dd SECCHAR_TEXT
 
     db '.reloc',0,0
     dd RELOC_VSZ, RELOC_VA, RELOC_FSZ, RELOC_FOFF
     dd 0, 0
     dw 0, 0
-    dd 0x42000040
+    dd SECCHAR_RELOC
 
     times (HDR_SZ - ($ - $$)) db 0
 
@@ -317,7 +359,7 @@ _start:
     mov esi, 300
     mov edx, 200
     mov ecx, 200
-    mov r8d, 0x0000FF00
+    mov r8d, COLOR_TEST_RECT_GREEN
     call fill_rect
 
     TRACE "T07: TEST RECT drawn - LOOK: is there a GREEN BOX on screen?"
@@ -482,7 +524,7 @@ clear_screen_bg:
     mov rdi, [v_fb]
     mov ecx, [v_pitch_pixels]
     imul ecx, [v_scrh]
-    mov eax, 0x00000810                       ; very dark blue-grey
+    mov eax, COLOR_BG_DARK_SLATE              ; very dark blue-grey
     rep stosd
     pop rcx
     pop rdi
@@ -970,7 +1012,7 @@ draw_cursor:
     mov esi, [v_my]
     mov edx, 20
     mov ecx, 20
-    mov r8d, 0x00FF00FF                       ; bright magenta
+    mov r8d, COLOR_CURSOR_MAGENTA             ; bright magenta
     call fill_rect
     ret
 
@@ -979,7 +1021,7 @@ erase_cursor:
     mov esi, [v_prev_my]
     mov edx, 20
     mov ecx, 20
-    mov r8d, 0x000000A8                       ; UEFI EFI_BACKGROUND_BLUE (BGRA)
+    mov r8d, COLOR_BG_UEFI_BLUE               ; UEFI EFI_BACKGROUND_BLUE (BGRA)
     call fill_rect
     ret
 
@@ -997,14 +1039,14 @@ draw_status_row:
     mov esi, 4
     cmp byte [v_spp_ok + 0], 0
     je .s0_off
-    mov r8d, 0x00800000                       ; dark red
+    mov r8d, COLOR_DARK_RED                   ; dark red
     cmp byte [v_state + 0], 0
     je .s0_paint
-    mov r8d, 0x00FF0000                       ; bright red
+    mov r8d, COLOR_BRIGHT_RED                 ; bright red
 .s0_paint:
     jmp .s0_do
 .s0_off:
-    mov r8d, 0x00303030
+    mov r8d, COLOR_DIM_GREY
 .s0_do:
     mov edx, 14
     mov ecx, 14
@@ -1015,14 +1057,14 @@ draw_status_row:
     mov esi, 4
     cmp byte [v_spp_ok + 1], 0
     je .s1_off
-    mov r8d, 0x00803000
+    mov r8d, COLOR_DARK_ORANGE
     cmp byte [v_state + 1], 0
     je .s1_paint
-    mov r8d, 0x00FF8000
+    mov r8d, COLOR_BRIGHT_ORANGE
 .s1_paint:
     jmp .s1_do
 .s1_off:
-    mov r8d, 0x00303030
+    mov r8d, COLOR_DIM_GREY
 .s1_do:
     mov edx, 14
     mov ecx, 14
@@ -1033,14 +1075,14 @@ draw_status_row:
     mov esi, 4
     cmp byte [v_app_ok + 0], 0
     je .s2_off
-    mov r8d, 0x00006000
+    mov r8d, COLOR_DARK_GREEN
     cmp byte [v_state + 2], 0
     je .s2_paint
-    mov r8d, 0x0000FF00
+    mov r8d, COLOR_BRIGHT_GREEN
 .s2_paint:
     jmp .s2_do
 .s2_off:
-    mov r8d, 0x00303030
+    mov r8d, COLOR_DIM_GREY
 .s2_do:
     mov edx, 14
     mov ecx, 14
@@ -1051,14 +1093,14 @@ draw_status_row:
     mov esi, 4
     cmp byte [v_app_ok + 1], 0
     je .s3_off
-    mov r8d, 0x00006080
+    mov r8d, COLOR_DARK_CYAN
     cmp byte [v_state + 3], 0
     je .s3_paint
-    mov r8d, 0x0000FFFF
+    mov r8d, COLOR_BRIGHT_CYAN
 .s3_paint:
     jmp .s3_do
 .s3_off:
-    mov r8d, 0x00303030
+    mov r8d, COLOR_DIM_GREY
 .s3_do:
     mov edx, 14
     mov ecx, 14
@@ -1069,14 +1111,14 @@ draw_status_row:
     mov esi, 4
     cmp byte [v_usb_ok], 0
     je .s4_off
-    mov r8d, 0x00606000
+    mov r8d, COLOR_DARK_YELLOW
     cmp byte [v_state + 4], 0
     je .s4_paint
-    mov r8d, 0x00FFFF00
+    mov r8d, COLOR_YELLOW
 .s4_paint:
     jmp .s4_do
 .s4_off:
-    mov r8d, 0x00303030
+    mov r8d, COLOR_DIM_GREY
 .s4_do:
     mov edx, 14
     mov ecx, 14
@@ -1102,17 +1144,17 @@ draw_usb_panel:
     mov esi, 4
     mov edx, 800
     mov ecx, 96
-    mov r8d, 0x00080808
+    mov r8d, COLOR_PANEL_BG
     call fill_rect
 
     ; ---- RC square ----
     mov rax, [v_lastret + 4*8]
     test rax, rax
     jnz .rc_bad
-    mov r8d, 0x0000C000                       ; green
+    mov r8d, COLOR_RC_GREEN                    ; green
     jmp .rc_paint
 .rc_bad:
-    mov r8d, 0x00C00000                       ; red
+    mov r8d, COLOR_RC_RED                      ; red
 .rc_paint:
     mov edi, 150
     mov esi, 4
@@ -1131,7 +1173,7 @@ draw_usb_panel:
     mov edi, 260
     mov esi, 4
     mov ecx, 24
-    mov r8d, 0x00FFFF00                       ; yellow
+    mov r8d, COLOR_YELLOW                      ; yellow
     call fill_rect
 
     ; ---- byte bars (4 stacked) ----
@@ -1149,7 +1191,7 @@ draw_usb_panel:
     mov edi, 150
     mov esi, 34
     mov ecx, 5
-    mov r8d, 0x00FFFFFF
+    mov r8d, COLOR_WHITE
     call fill_rect
 
     ; b1 red (signed)
@@ -1168,7 +1210,7 @@ draw_usb_panel:
     mov edi, 150
     mov esi, 40
     mov ecx, 5
-    mov r8d, 0x00FF4040
+    mov r8d, COLOR_BAR_RED
     call fill_rect
 
     ; b2 green (signed)
@@ -1187,7 +1229,7 @@ draw_usb_panel:
     mov edi, 150
     mov esi, 46
     mov ecx, 5
-    mov r8d, 0x0040FF40
+    mov r8d, COLOR_BAR_GREEN
     call fill_rect
 
     ; b3 cyan (signed)
@@ -1206,7 +1248,7 @@ draw_usb_panel:
     mov edi, 150
     mov esi, 52
     mov ecx, 5
-    mov r8d, 0x0040FFFF
+    mov r8d, COLOR_BAR_CYAN
     call fill_rect
 
     ; ---- rc as 16 hex nibbles ----
@@ -1249,10 +1291,10 @@ draw_usb_panel:
     mov eax, [usb_async_hits]
     test eax, eax
     jz .cbi_dark
-    mov r8d, 0x0000FFFF
+    mov r8d, COLOR_BRIGHT_CYAN
     jmp .cbi_draw
 .cbi_dark:
-    mov r8d, 0x00202020
+    mov r8d, COLOR_CB_DARK_GREY
 .cbi_draw:
     mov edi, 1340                             ; far right, clear of the text
     mov esi, 130
@@ -1272,7 +1314,7 @@ draw_usb_panel:
     mov edi, 1340
     mov esi, 450
     mov ecx, 40
-    mov r8d, 0x00FF00FF
+    mov r8d, COLOR_CURSOR_MAGENTA
     call fill_rect
     ret
 
@@ -1285,7 +1327,7 @@ old_draw_report_bars_dead:
     mov esi, 4
     mov edx, 800
     mov ecx, 44
-    mov r8d, 0x00000000
+    mov r8d, COLOR_BLACK
     call fill_rect
 
     mov eax, [v_last_report]
@@ -1302,7 +1344,7 @@ old_draw_report_bars_dead:
     mov edi, 110
     mov esi, 6
     mov ecx, 8
-    mov r8d, 0x00FFFFFF
+    mov r8d, COLOR_WHITE
     call fill_rect
 
     ; byte 1 - red (this is dx in boot layout)
@@ -1322,7 +1364,7 @@ old_draw_report_bars_dead:
     mov edi, 110
     mov esi, 16
     mov ecx, 8
-    mov r8d, 0x00FF4040
+    mov r8d, COLOR_BAR_RED
     call fill_rect
 
     ; byte 2 - green (this is dy in boot layout, OR dx if report ID present)
@@ -1341,7 +1383,7 @@ old_draw_report_bars_dead:
     mov edi, 110
     mov esi, 26
     mov ecx, 8
-    mov r8d, 0x0040FF40
+    mov r8d, COLOR_BAR_GREEN
     call fill_rect
 
     ; byte 3 - cyan (dy if report ID present, or wheel)
@@ -1360,7 +1402,7 @@ old_draw_report_bars_dead:
     mov edi, 110
     mov esi, 36
     mov ecx, 8
-    mov r8d, 0x0040FFFF
+    mov r8d, COLOR_BAR_CYAN
     call fill_rect
     ret
 
@@ -2126,28 +2168,28 @@ s_crlf_real:
 ; --- GUIDs ---
 align 8
 guid_gop:
-    dd 0x9042a9de
+    dd EFI_GOP_GUID_D1
     dw 0x23dc, 0x4a38
     db 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a
 
 ; EFI_SIMPLE_POINTER_PROTOCOL_GUID
 ; 31878c87-0b75-11d5-9a4f-0090273fc14d
 guid_spp:
-    dd 0x31878c87
+    dd EFI_SPP_GUID_D1
     dw 0x0b75, 0x11d5
     db 0x9a, 0x4f, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d
 
 ; EFI_ABSOLUTE_POINTER_PROTOCOL_GUID
 ; 8D59D32B-C655-4AE9-9B15-F25904992A43
 guid_app:
-    dd 0x8d59d32b
+    dd EFI_APP_GUID_D1
     dw 0xc655, 0x4ae9
     db 0x9b, 0x15, 0xf2, 0x59, 0x04, 0x99, 0x2a, 0x43
 
 ; EFI_USB_IO_PROTOCOL_GUID
 ; 2B2F68D6-0CD2-44CF-8E8B-BBA20B1B5B75
 guid_usbio:
-    dd 0x2b2f68d6
+    dd EFI_USBIO_GUID_D1
     dw 0x0cd2, 0x44cf
     db 0x8e, 0x8b, 0xbb, 0xa2, 0x0b, 0x1b, 0x5b, 0x75
 

@@ -49,6 +49,11 @@ fn draw(win) {
     return;
 }
 
+fn media_slot_file(win) {
+    let app_base = lq(win + WIN_APPDATA);
+    return app_base + APP_SLOT_BMP_FILE_OFF;
+}
+
 fn click(win, cx, cy) {
     let app_base = lq(win + WIN_APPDATA);
     let file = app_base + APP_SLOT_BMP_FILE_OFF;
@@ -58,7 +63,6 @@ fn click(win, cx, cy) {
 }
 
 fn key(win, k) {
-    let app_base = lq(win + WIN_APPDATA);
-    let file = app_base + APP_SLOT_BMP_FILE_OFF;
+    let file = media_slot_file(win);
     mp_handle_key(k, file, &mp_paused, &mp_frame, &mp_no_loop, &mp_seek_to);
 }

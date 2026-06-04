@@ -71,6 +71,11 @@ const MP_ACTION_BACK_10  = 2
 const MP_ACTION_FWD_10   = 3
 const MP_ACTION_SCRUB    = 4             # extra info: target frame in retval2
 
+const MP_KEY_SPACE       = 32
+const MP_KEY_A           = 97
+const MP_KEY_D           = 100
+const MP_KEY_L           = 108
+
 # ----------------------------------------------------------------------
 # State layout reference. The host app's state block must include these
 # fields in any order; the names matter, not the order.
@@ -114,6 +119,40 @@ fn mp_seek_delta_frames(fps) {
 fn mp_frame_to_seconds(frame, fps) {
     if fps <= 0 { return 0; }
     return frame / fps;
+}
+
+# Probe the slot-local media file and expose only NBA timeline metadata.
+# Still images and text/vector formats do not render the control bar, so
+# they should not consume timeline clicks or seek keys.
+fn mp_media_codec(file) {
+    return media_probe(file, NBA_HEADER);
+}
+
+fn mp_media_frames(file) {
+    let codec = mp_media_codec(file);
+    if codec != CODEC_NBA { return 0; }
+    return media_frame_count(codec, file);
+}
+
+fn mp_media_fps(file) {
+    let codec = mp_media_codec(file);
+    if codec != CODEC_NBA { return 0; }
+    return media_fps(codec, file);
+}
+
+fn mp_clamp_frame(frame, frames) {
+    if frames <= 0 { return 0; }
+    if frame < 0 { return 0; }
+    if frame >= frames { return frames - 1; }
+    return frame;
+}
+
+fn mp_wrap_or_clamp_frame(frame, frames, no_loop) {
+    if frames <= 0 { return 0; }
+    if frame < 0 { return 0; }
+    if frame < frames { return frame; }
+    if no_loop == 0 { return frame % frames; }
+    return frames - 1;
 }
 
 # ======================================================================
@@ -163,6 +202,24 @@ fn mp_request_seek(seek_ptr, frame) {
     sw(seek_ptr, frame + 1);
 }
 
+fn mp_request_relative_seek(frame_ptr, no_loop_ptr, seek_ptr, delta, frames) {
+    if delta == 0 { return; }
+    let cur = lw(frame_ptr);
+    let t = cur + delta;
+    if delta < 0 {
+        t = mp_clamp_frame(t, frames);
+    } else {
+        t = mp_wrap_or_clamp_frame(t, frames, lw(no_loop_ptr));
+    }
+    mp_request_seek(seek_ptr, t);
+}
+
+fn mp_toggle_loop(no_loop_ptr) {
+    let l = lw(no_loop_ptr);
+    if l == 0 { sw(no_loop_ptr, 1); return; }
+    sw(no_loop_ptr, 0);
+}
+
 # ======================================================================
 # Compound: handle one click for a "standard" media app that uses the
 # canonical state-field names (mp_paused, mp_frame, mp_no_loop,
@@ -174,8 +231,8 @@ fn mp_request_seek(seek_ptr, frame) {
 # own branch before falling into this.
 # ======================================================================
 fn mp_handle_click(win, cx, cy, file, paused_ptr, frame_ptr, no_loop_ptr, seek_ptr, dragging_ptr) {
-    let frames = lw(file + 12);
-    let fps    = lw(file + 16);
+    let frames = mp_media_frames(file);
+    let fps    = mp_media_fps(file);
     let act    = mp_hit_test_controls(win, cx, cy, frames);
     if act == MP_ACTION_NONE { return 0; }
     if act == MP_ACTION_TOGGLE {
@@ -185,22 +242,13 @@ fn mp_handle_click(win, cx, cy, file, paused_ptr, frame_ptr, no_loop_ptr, seek_p
     if act == MP_ACTION_BACK_10 {
         let d = mp_seek_delta_frames(fps);
         if d == 0 { return 1; }
-        let cur = lw(frame_ptr);
-        let t = cur - d;
-        if t < 0 { t = 0; }
-        mp_request_seek(seek_ptr, t);
+        mp_request_relative_seek(frame_ptr, no_loop_ptr, seek_ptr, 0 - d, frames);
         return 1;
     }
     if act == MP_ACTION_FWD_10 {
         let d = mp_seek_delta_frames(fps);
         if d == 0 { return 1; }
-        let cur = lw(frame_ptr);
-        let t = cur + d;
-        if t >= frames {
-            if lw(no_loop_ptr) == 0 { t = t % frames; }
-            else { t = frames - 1; }
-        }
-        mp_request_seek(seek_ptr, t);
+        mp_request_relative_seek(frame_ptr, no_loop_ptr, seek_ptr, d, frames);
         return 1;
     }
     if act == MP_ACTION_SCRUB {
@@ -225,32 +273,22 @@ fn mp_handle_click(win, cx, cy, file, paused_ptr, frame_ptr, no_loop_ptr, seek_p
 # ======================================================================
 fn mp_handle_key(k, file, paused_ptr, frame_ptr, no_loop_ptr, seek_ptr) {
     let ch = (k >> 8) & 0xFF;
-    if ch == 32 { mp_toggle_paused(paused_ptr); return 1; }
-    let frames = lw(file + 12);
+    if ch == MP_KEY_SPACE { mp_toggle_paused(paused_ptr); return 1; }
+    let frames = mp_media_frames(file);
     if frames <= 0 { return 0; }
-    let fps = lw(file + 16);
+    let fps = mp_media_fps(file);
     let d   = mp_seek_delta_frames(fps);
     if d == 0 { return 0; }
-    let cur = lw(frame_ptr);
-    if ch == 97 {                                # 'a'
-        let t = cur - d;
-        if t < 0 { t = 0; }
-        mp_request_seek(seek_ptr, t);
+    if ch == MP_KEY_A {
+        mp_request_relative_seek(frame_ptr, no_loop_ptr, seek_ptr, 0 - d, frames);
         return 1;
     }
-    if ch == 100 {                               # 'd'
-        let t = cur + d;
-        if t >= frames {
-            if lw(no_loop_ptr) == 0 { t = t % frames; }
-            else { t = frames - 1; }
-        }
-        mp_request_seek(seek_ptr, t);
+    if ch == MP_KEY_D {
+        mp_request_relative_seek(frame_ptr, no_loop_ptr, seek_ptr, d, frames);
         return 1;
     }
-    if ch == 108 {                               # 'l'
-        let l = lw(no_loop_ptr);
-        if l == 0 { sw(no_loop_ptr, 1); return 1; }
-        sw(no_loop_ptr, 0);
+    if ch == MP_KEY_L {
+        mp_toggle_loop(no_loop_ptr);
         return 1;
     }
     return 0;

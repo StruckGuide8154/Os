@@ -1,0 +1,65 @@
+# ============================================================================
+# COM1 automation input poller.
+# Consumes bounded serial bursts, arms control commands, and forwards normal bytes.
+# ============================================================================
+
+module "serial_poll";
+
+global serial_poll_command;
+
+fn serial_poll_command() {
+    asm "    push rax";
+    asm "    push rcx";
+    asm "    push rdx";
+    asm "    push rdi";
+    asm "";
+    asm "    ; Cap bytes consumed per call. On real hardware with no UART attached,";
+    asm "    ; reading the LSR at 0x3FD can return 0xFF (data-ready bit permanently";
+    asm "    ; set), which would freeze the main loop in an infinite read here.";
+    asm "    ; 256 bytes is far more than any legitimate burst per ~10ms tick.";
+    asm "    mov ecx, 256";
+    asm "";
+    asm ".poll:";
+    asm "    mov dx, 0x3F8 + 5";
+    asm "    in al, dx";
+    asm "    ; LSR == 0xFF means no UART present (floating bus / pull-ups).";
+    asm "    ; Treat as \"no data\" and bail out so the main loop can keep running.";
+    asm "    cmp al, 0xFF";
+    asm "    je .done";
+    asm "    test al, 1";
+    asm "    jz .done";
+    asm "";
+    asm "    mov dx, 0x3F8";
+    asm "    in al, dx";
+    asm "";
+    asm "    cmp byte [serial_command_armed], 0";
+    asm "    jne .dispatch_control";
+    asm "";
+    asm "    cmp al, 1";
+    asm "    je .arm_control";
+    asm "";
+    asm "    call serial_forward_input";
+    asm "    dec ecx";
+    asm "    jnz .poll";
+    asm "    jmp .done";
+    asm "";
+    asm ".arm_control:";
+    asm "    mov byte [serial_command_armed], 1";
+    asm "    dec ecx";
+    asm "    jnz .poll";
+    asm "    jmp .done";
+    asm "";
+    asm ".dispatch_control:";
+    asm "    mov byte [serial_command_armed], 0";
+    asm "    call serial_dispatch_control";
+    asm "    dec ecx";
+    asm "    jnz .poll";
+    asm "    jmp .done";
+    asm "";
+    asm ".done:";
+    asm "    pop rdi";
+    asm "    pop rdx";
+    asm "    pop rcx";
+    asm "    pop rax";
+}
+

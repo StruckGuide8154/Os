@@ -105,7 +105,7 @@ extern app_hl_notepad_draw
 extern app_hl_paint_draw
 extern app_hl_settings_draw
 extern app_hl_taskmgr_draw
-extern app_terminal_draw
+extern app_hl_terminal_draw
 extern app_security_probe_draw
 
 ; Draw the taskbar + start menu
@@ -629,7 +629,7 @@ tb_icon_for_window:
     je .explorer
     cmp rax, app_hl_explorer_properties_draw
     je .explorer
-    cmp rax, app_terminal_draw
+    cmp rax, app_hl_terminal_draw
     je .terminal
     cmp rax, app_hl_notepad_draw
     je .notepad

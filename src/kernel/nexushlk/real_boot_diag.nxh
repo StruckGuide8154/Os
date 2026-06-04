@@ -1,0 +1,40 @@
+# ============================================================================
+# NexusHLK real boot diagnostic dump.
+#
+# ABI owner for the large real-hardware diagnostic report. The report body is
+# split into focused helpers so no source module becomes another monolith.
+# ============================================================================
+
+module "real_boot_diag";
+
+global real_boot_diag_dump;
+
+fn real_boot_diag_dump() {
+    asm "    push rax";
+    asm "    push rdx";
+    asm "    push rsi";
+    asm "    push rdi";
+    asm "";
+    asm "    call pci_gpu_scan";
+    asm "    call real_boot_diag_core";
+    asm "    call real_boot_diag_fbperf";
+    asm "";
+    asm "    push rbx";
+    asm "    push rcx";
+    asm "    call real_boot_diag_legacy";
+    asm "    call real_boot_diag_gfx";
+    asm "    pop rcx";
+    asm "    pop rbx";
+    asm "";
+    asm "    lea rdi, [ovl_buf]";
+    asm "    lea rsi, [s_diag_end]";
+    asm "    call ovl_puts";
+    asm "    mov byte [rdi], 0";
+    asm "    call diag_emit_line";
+    asm "";
+    asm "    pop rdi";
+    asm "    pop rsi";
+    asm "    pop rdx";
+    asm "    pop rax";
+    asm "    ret";
+}

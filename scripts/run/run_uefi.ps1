@@ -23,7 +23,11 @@ param(
     # build/data.img as a USB Mass Storage device on the xHCI bus so the
     # kernel's MSC stack has something to enumerate, AND drop the legacy
     # if=ide data.img so ATA-PIO can't shortcut the test path.
-    [switch]$MscTest
+    [switch]$MscTest,
+    # Diagnostic: log every exception/interrupt and CPU reset to
+    # build\qemu_int.log so a guest triple-fault (which -no-reboot turns into a
+    # QEMU exit) leaves a vector + RIP trail behind. Off by default.
+    [switch]$IntLog
 )
 $UsbPassthrough       = -not ($NoPassthrough -or $NoNicPassthrough)
 $UsbMousePassthrough  = -not ($NoPassthrough -or $NoMousePassthrough)
@@ -167,6 +171,10 @@ $qemuArgs += @(
     '-monitor', 'telnet:127.0.0.1:4444,server,nowait',
     '-name', 'NexusOS_UEFI'
 )
+if ($IntLog) {
+    Write-Host "Interrupt/reset logging -> $BUILD\qemu_int.log" -ForegroundColor Yellow
+    $qemuArgs += @('-d', 'int,cpu_reset,guest_errors', '-D', "$BUILD\qemu_int.log")
+}
 # Diagnostics for USB passthrough — logs every libusb open/claim attempt.
 if ($UsbPassthrough -or $UsbMousePassthrough) {
     $qemuArgs += @(

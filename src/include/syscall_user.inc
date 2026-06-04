@@ -1,23 +1,25 @@
 %ifndef SYSCALL_USER_INC
 %define SYSCALL_USER_INC
 
+%include "app_sysno.inc"
+
 ; ============================================================================
 ; NexusOS v3.0 - Usermode Syscall Wrappers
 ; ============================================================================
 
 %macro SYS_PRINT 1
-    mov rax, 0
+    APP_SYSNO 0
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_EXIT 0
-    mov rax, 1
+    APP_SYSNO 1
     syscall
 %endmacro
 
 %macro SYS_GUI_RECT 5
-    mov rax, 2
+    APP_SYSNO 2
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -27,7 +29,7 @@
 %endmacro
 
 %macro SYS_GUI_TEXT 5
-    mov rax, 3
+    APP_SYSNO 3
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -37,7 +39,7 @@
 %endmacro
 
 %macro SYS_FS_COUNT 0
-    mov rax, 4
+    APP_SYSNO 4
     syscall
 %endmacro
 
@@ -62,24 +64,24 @@
 ;
 ;   rax = 0 on any failure (out-of-range index, table full, kernel skip).
 %macro SYS_FS_ENTRY 1
-    mov rax, 5
+    APP_SYSNO 5
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_APP_DONE 0
-    mov rax, 10
+    APP_SYSNO 10
     syscall
 %endmacro
 
 %macro SYS_FS_CHDIR 1
-    mov rax, 6
+    APP_SYSNO 6
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_WM_CREATE 6
-    mov rax, 7
+    APP_SYSNO 7
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -90,7 +92,7 @@
 %endmacro
 
 %macro SYS_FS_READ 3
-    mov rax, 8
+    APP_SYSNO 8
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -98,7 +100,7 @@
 %endmacro
 
 %macro SYS_WM_HANDLERS 3
-    mov rax, 9
+    APP_SYSNO 9
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -106,20 +108,20 @@
 %endmacro
 
 %macro SYS_FS_FORMAT_NAME 2
-    mov rax, 11
+    APP_SYSNO 11
     mov rdi, %1
     mov rsi, %2
     syscall
 %endmacro
 
 %macro SYS_APP_LAUNCH 1
-    mov rax, 12
+    APP_SYSNO 12
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_FS_WRITE 3
-    mov rax, 13
+    APP_SYSNO 13
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -127,18 +129,18 @@
 %endmacro
 
 %macro SYS_FS_SYNC_ROOT 0
-    mov rax, 14
+    APP_SYSNO 14
     syscall
 %endmacro
 
 %macro SYS_WM_CLOSE 1
-    mov rax, 15
+    APP_SYSNO 15
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_DISPLAY_SET_MODE 3
-    mov rax, 16
+    APP_SYSNO 16
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -146,30 +148,30 @@
 %endmacro
 
 %macro SYS_CURSOR_INIT 0
-    mov rax, 17
+    APP_SYSNO 17
     syscall
 %endmacro
 
 %macro SYS_TICKS 0
-    mov rax, 18
+    APP_SYSNO 18
     syscall
 %endmacro
 
 %macro SYS_FS_DELETE 1
-    mov rax, 19
+    APP_SYSNO 19
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_FS_RENAME 2
-    mov rax, 20
+    APP_SYSNO 20
     mov rdi, %1
     mov rsi, %2
     syscall
 %endmacro
 
 %macro SYS_FS_MKDIR 1
-    mov rax, 21
+    APP_SYSNO 21
     mov rdi, %1
     syscall
 %endmacro
@@ -178,7 +180,7 @@
 ;   rdi = slot-cached dir entry pointer (from SYS_FS_ENTRY)
 ;   returns rax = notepad window id, or -1
 %macro SYS_OPEN_FILE_NP 1
-    mov rax, 22
+    APP_SYSNO 22
     mov rdi, %1
     syscall
 %endmacro
@@ -187,7 +189,7 @@
 ;   command_line format: "app" or "app param1,param2"
 ;   returns rax = launched window id, or -1
 %macro SYS_APP_OPEN 1
-    mov rax, 23
+    APP_SYSNO 23
     mov rdi, %1
     syscall
 %endmacro
@@ -198,14 +200,14 @@
 ;   compositor scaler lands. Persisting it through this syscall lets
 ;   Settings expose the toggle ahead of the scaler work.
 %macro SYS_DISPLAY_FLAGS 0
-    mov rax, 24
+    APP_SYSNO 24
     syscall
 %endmacro
 
 ; SYS_DISPLAY_SET_FLAGS(flags)
 ;   bit0=VSync, bit1=FPS overlay, bit2=Stretch. See SYS_DISPLAY_FLAGS.
 %macro SYS_DISPLAY_SET_FLAGS 1
-    mov rax, 25
+    APP_SYSNO 25
     mov rdi, %1
     syscall
 %endmacro
@@ -214,14 +216,14 @@
 ;   returns current desktop background theme id:
 ;     0=liquid metal, 1=glass ribbons, 2=frosted bloom
 %macro SYS_DESKTOP_BG 0
-    mov rax, 26
+    APP_SYSNO 26
     syscall
 %endmacro
 
 ; SYS_DESKTOP_SET_BG(theme)
 ;   theme: 0=liquid metal, 1=glass ribbons, 2=frosted bloom
 %macro SYS_DESKTOP_SET_BG 1
-    mov rax, 27
+    APP_SYSNO 27
     mov rdi, %1
     syscall
 %endmacro
@@ -233,7 +235,7 @@
 ;   scr_height after boot, but the value returned here never moves, so it
 ;   is the right thing to offer as "Use native resolution".
 %macro SYS_DISPLAY_NATIVE 0
-    mov rax, 28
+    APP_SYSNO 28
     syscall
 %endmacro
 
@@ -241,31 +243,31 @@
 ;   returns the current desktop size, same packing as SYS_DISPLAY_NATIVE.
 ;   Drifts when display_set_mode succeeds; reads should be per-draw.
 %macro SYS_DISPLAY_SIZE 0
-    mov rax, 29
+    APP_SYSNO 29
     syscall
 %endmacro
 
 ; SYS_XML_PARSE(buf, len) -> rax = 1 ok, 0 err
 %macro SYS_XML_PARSE 2
-    mov rax, 30
+    APP_SYSNO 30
     mov rdi, %1
     mov rsi, %2
     syscall
 %endmacro
 
 %macro SYS_XML_ROOT 0
-    mov rax, 31
+    APP_SYSNO 31
     syscall
 %endmacro
 
 %macro SYS_XML_TAG 1
-    mov rax, 32
+    APP_SYSNO 32
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_XML_TAG_NAME 3
-    mov rax, 33
+    APP_SYSNO 33
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -273,25 +275,25 @@
 %endmacro
 
 %macro SYS_XML_FIRST_CHILD 1
-    mov rax, 34
+    APP_SYSNO 34
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_XML_NEXT_SIBLING 1
-    mov rax, 35
+    APP_SYSNO 35
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_XML_PARENT 1
-    mov rax, 36
+    APP_SYSNO 36
     mov rdi, %1
     syscall
 %endmacro
 
 %macro SYS_XML_ATTR 5
-    mov rax, 37
+    APP_SYSNO 37
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -301,7 +303,7 @@
 %endmacro
 
 %macro SYS_XML_TEXT 3
-    mov rax, 38
+    APP_SYSNO 38
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -309,13 +311,13 @@
 %endmacro
 
 %macro SYS_XML_FREE 0
-    mov rax, 39
+    APP_SYSNO 39
     syscall
 %endmacro
 
 ; SYS_DRAW_LINE(x0,y0,x1,y1,color)
 %macro SYS_DRAW_LINE 5
-    mov rax, 40
+    APP_SYSNO 40
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -326,7 +328,7 @@
 
 ; SYS_FILL_CIRCLE(cx,cy,r,color)
 %macro SYS_FILL_CIRCLE 4
-    mov rax, 41
+    APP_SYSNO 41
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -336,7 +338,7 @@
 
 ; SYS_FILL_TRIANGLE(coords_ptr, color) — coords_ptr -> 6 int32 [x0,y0,x1,y1,x2,y2]
 %macro SYS_FILL_TRIANGLE 2
-    mov rax, 42
+    APP_SYSNO 42
     mov rdi, %1
     mov rsi, %2
     syscall
@@ -344,19 +346,19 @@
 
 ; SYS_XML_LAST_ERROR() -> rax bits[31:0]=error, bits[63:32]=byte offset
 %macro SYS_XML_LAST_ERROR 0
-    mov rax, 43
+    APP_SYSNO 43
     syscall
 %endmacro
 
 ; SYS_XML_NODE_COUNT() -> rax = total parsed DOM nodes
 %macro SYS_XML_NODE_COUNT 0
-    mov rax, 44
+    APP_SYSNO 44
     syscall
 %endmacro
 
 ; SYS_BLEND_PIXEL(x, y, argb)
 %macro SYS_BLEND_PIXEL 3
-    mov rax, 45
+    APP_SYSNO 45
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -365,7 +367,7 @@
 
 ; SYS_BLEND_SPAN(x, y, len, argb)
 %macro SYS_BLEND_SPAN 4
-    mov rax, 46
+    APP_SYSNO 46
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -375,14 +377,14 @@
 
 ; SYS_XML_TEXT_RUNS(node) -> rax = mixed-content text run count
 %macro SYS_XML_TEXT_RUNS 1
-    mov rax, 47
+    APP_SYSNO 47
     mov rdi, %1
     syscall
 %endmacro
 
 ; SYS_XML_TEXT_RUN(node, index, out, max) -> rax = bytes copied
 %macro SYS_XML_TEXT_RUN 4
-    mov rax, 48
+    APP_SYSNO 48
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -392,7 +394,7 @@
 
 ; SYS_XML_NAMESPACE(node, prefix, prefix_len, out, max) -> rax = URI length
 %macro SYS_XML_NAMESPACE 5
-    mov rax, 49
+    APP_SYSNO 49
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -403,7 +405,7 @@
 
 ; SYS_XML_NODE_NAMESPACE(node, out, max) -> rax = URI length
 %macro SYS_XML_NODE_NAMESPACE 3
-    mov rax, 50
+    APP_SYSNO 50
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -412,7 +414,7 @@
 
 ; SYS_XML_ENTITY_VALUE(name, name_len, out, max) -> rax = bytes copied
 %macro SYS_XML_ENTITY_VALUE 4
-    mov rax, 51
+    APP_SYSNO 51
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -422,7 +424,7 @@
 
 ; SYS_BLEND_SPAN_ARGB(x, y, len, buf)
 %macro SYS_BLEND_SPAN_ARGB 4
-    mov rax, 52
+    APP_SYSNO 52
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -432,7 +434,7 @@
 
 ; SYS_BLEND_SPAN_ARGB_SCREEN(x, y, len, buf)
 %macro SYS_BLEND_SPAN_ARGB_SCREEN 4
-    mov rax, 53
+    APP_SYSNO 53
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -442,7 +444,7 @@
 
 ; SYS_BLEND_SPAN_ARGB_MULTIPLY(x, y, len, buf)
 %macro SYS_BLEND_SPAN_ARGB_MULTIPLY 4
-    mov rax, 54
+    APP_SYSNO 54
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -452,7 +454,7 @@
 
 ; SYS_SYSINFO(selector, arg)
 %macro SYS_SYSINFO 2
-    mov rax, 55
+    APP_SYSNO 55
     mov rdi, %1
     mov rsi, %2
     syscall
@@ -462,7 +464,7 @@
 ;   ip = A.B.C.D packed into a 32-bit scalar (8.8.8.8 => 0x08080808)
 ;   returns approximate RTT in ms, or -1 after a 2s timeout/failure.
 %macro SYS_NET_PING4 1
-    mov rax, 56
+    APP_SYSNO 56
     mov rdi, %1
     syscall
 %endmacro
@@ -471,7 +473,7 @@
 ;   ip = A.B.C.D packed into a 32-bit scalar
 ;   returns 1 if a TCP SYN was sent, 0 on network failure, -2 if busy.
 %macro SYS_NET_TCP_CONNECT4 3
-    mov rax, 60
+    APP_SYSNO 60
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -483,7 +485,7 @@
 ;   returns IPv4 A.B.C.D packed into a 32-bit scalar, 0 on lookup failure,
 ;   -1 for invalid arguments, or -2 if another DNS query is in flight.
 %macro SYS_NET_DNS_A 1
-    mov rax, 61
+    APP_SYSNO 61
     mov rdi, %1
     syscall
 %endmacro
@@ -498,7 +500,7 @@
 ;     -1   -> timeout / no link / send failed
 ;     -2   -> a ping with a different target is still in flight
 %macro SYS_NET_PING4_TICK 1
-    mov rax, 62
+    APP_SYSNO 62
     mov rdi, %1
     syscall
 %endmacro
@@ -507,7 +509,7 @@
 ;   returns 1 while a selected wallpaper is invalid, rendering, or waiting to
 ;   be presented; 0 once the finished cache has been shown.
 %macro SYS_DESKTOP_BG_BUSY 0
-    mov rax, 63
+    APP_SYSNO 63
     syscall
 %endmacro
 
@@ -518,7 +520,7 @@
 ;   rdi = slot-cached dir entry pointer (from SYS_FS_ENTRY)
 ;   returns rax = media window id, or -1
 %macro SYS_OPEN_FILE_MEDIA 1
-    mov rax, 64
+    APP_SYSNO 64
     mov rdi, %1
     syscall
 %endmacro
@@ -546,7 +548,7 @@
 ;   Designed for the Media Player codecs (NIC/NBA/BMP-via-scratch/SVG-via-
 ;   svg2) so the per-codec draw fn can stay in user-mode NexusHL.
 %macro SYS_MEDIA_BLIT_SCALED 5
-    mov rax, 66
+    APP_SYSNO 66
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -556,7 +558,7 @@
 %endmacro
 
 %macro SYS_WM_SET_USER_ARG 2
-    mov rax, 65
+    APP_SYSNO 65
     mov rdi, %1
     mov rsi, %2
     syscall
@@ -573,7 +575,7 @@
 ;   Idempotent — callable any time the app wants to widen/replace its code
 ;   range. RWX is never produced at any intermediate step.
 %macro SYS_WX_INSTALL_MANIFEST 2
-    mov rax, 67
+    APP_SYSNO 67
     mov rdi, %1
     mov rsi, %2
     syscall
@@ -590,7 +592,7 @@
 ;   between) so no TLB cache line ever observes RWX.
 ;   Returns 0 on success, -1 on any validation failure.
 %macro SYS_MPROTECT_WX 2
-    mov rax, 68
+    APP_SYSNO 68
     mov rdi, %1
     mov rsi, %2
     syscall
@@ -613,7 +615,7 @@
 ;   lifetime; slot teardown tears the PT down.
 ;   Returns 0 on success, -1 on any validation failure.
 %macro SYS_WX_JIT_ALIAS 3
-    mov rax, 69
+    APP_SYSNO 69
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -632,7 +634,7 @@
 ;   net socket, window) migrate onto the table, this syscall will dispatch
 ;   on the embedded kind tag rather than growing per-kind close syscalls.
 %macro SYS_HANDLE_CLOSE 1
-    mov rax, 70
+    APP_SYSNO 70
     mov rdi, %1
     syscall
 %endmacro
@@ -655,7 +657,7 @@
 ;   This replaces the previous "SYS_FS_ENTRY returns a snapshot pointer you
 ;   dereference directly" contract — kernel VAs no longer leak to ring 3.
 %macro SYS_FS_ENTRY_INFO 3
-    mov rax, 71
+    APP_SYSNO 71
     mov rdi, %1
     mov rsi, %2
     mov rdx, %3
@@ -684,7 +686,7 @@ MPROT_WX_MODE_XRO equ 1
 ;
 ;   Returns: rax = the effective mask after narrowing, or -1 on bad app_id.
 %macro SYS_APP_DECLARE_MANIFEST 1
-    mov rax, 72
+    APP_SYSNO 72
     mov rdi, %1
     syscall
 %endmacro
@@ -697,7 +699,7 @@ MPROT_WX_MODE_XRO equ 1
 ;   field by dereferencing &window+160 must migrate to this syscall — direct
 ;   reads now see the tag bytes and won't decode the original value.
 %macro SYS_WM_GET_USER_ARG 1
-    mov rax, 73
+    APP_SYSNO 73
     mov rdi, %1
     syscall
 %endmacro

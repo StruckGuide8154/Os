@@ -10,6 +10,8 @@
 ; ============================================================================
 bits 64
 
+%include "net_driver.inc"
+
 extern net_info
 extern net_nic_poll_rx
 extern net_udp_send_ipv4
@@ -25,7 +27,8 @@ DNS_QUERY_CAP   equ 512
 ; Per-slot destination policy (security_todo.md §7). Provides
 ; sec_net_check_suffix, consulted below after the LDH/length kill-switch.
 %include "net_slot_policy.inc"
-DNS_FALLBACK_IP equ 0x08080808           ; 8.8.8.8 in A.B.C.D-packed form
+; 8.8.8.8 public fallback resolver; defined in net_driver.inc as
+; NET_DNS_FALLBACK_IP (header is the source of the name, maintainability §4.2).
 
 section .text
 
@@ -82,7 +85,7 @@ net_dns_query_a:
 .try_fallback:
     ; Attempt 2: public DNS fallback (8.8.8.8) — longer window since this is
     ; the last chance to resolve before reporting failure.
-    mov dword [rel net_dns_server_ip], DNS_FALLBACK_IP
+    mov dword [rel net_dns_server_ip], NET_DNS_FALLBACK_IP
     mov dword [rel net_dns_wait_ticks], 100  ; 1s
     call net_dns_send_and_wait
     test eax, eax

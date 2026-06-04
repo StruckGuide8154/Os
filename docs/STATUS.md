@@ -162,6 +162,25 @@ plus secrets the kernel derives and holds in kernel-only BSS/.rodata
 secrets never enter ring-3 memory, and after `kernel_lockdown_ro` the .text
 /.rodata that holds compiled-in keys is mapped read-only.
 
+**Nested-kernel page-table protection (portable, no CPU feature).** As of
+2026-05-31 the page tables themselves are tamper-resistant from the kernel.
+`src/kernel/core/nk_monitor.asm` is the Dautenhahn-style nested-kernel monitor:
+after `kernel_lockdown_ro` engages `CR0.WP`, `nk_protect_page_tables` maps the
+whole page-table region `[0x70000,0x83000)` read-only, so the ONLY code that can
+mutate a mapping is the audited monitor window (`nk_pt_window_begin/end`, the
+sole post-boot `CR0.WP` toggle site). Every runtime PTE writer brackets its edits
+(`l3_apply_slot_isolation`/`l3_apply_wx_policy`/`l3_install_syscall_stack_pt`/
+`sc_mprotect_wx`/`sc_wx_jit_alias`). This was chosen deliberately over hardware
+CET (Intel-TGL+/AMD-Zen3+ only; QEMU TCG doesn't expose `shstk`) and over a
+hypervisor (VT-x is again a CPU feature) so it runs on *every* x86-64 and under
+TCG. A stray write / overflow / ROP chain that tries to clear W^X, make `.text`
+writable, or remap a user slot as supervisor now `#PF`s. Verified positive
+(`NKP+` marker, clean boot) and negative (`-ProbeNkPt` → deliberate un-bracketed
+PML4 write faults, vec 0x0E errcode 3 @ CR2=0x70000). **Limitation:** enforced on
+the BSP only — APs enter their dispatch loop with `CR0.WP=0` before protection
+engages; per-AP WP-engage + SMP-safe (per-CPU/locked) windowing is the follow-up
+before an all-core claim.
+
 **A physical attacker with the boot medium is explicitly OUT of scope**
 (unlike iOS / a TEE). Someone who can rewrite the ESP, swap KERNEL.BIN/APPS.BIN
 on the USB stick, or attach a debugger to DRAM can already replace the whole
@@ -218,6 +237,15 @@ threat model requires while adding a hard-to-audit NASM bignum.
   hangs the AMD DCN.
 - USB device protocol=0 mice are relative, not absolute. Treat them
   as such even if the HID parser doesn't fire.
+- The syscall dispatcher must reload `rax` from `[rsp + ALL_RAX]` after
+  `SC_TRACE_APPEND`. The always-on §11 trace-ring macro leaves the user
+  RIP in `rax` (its last store is the ring's forensic RIP anchor); the
+  bounds check (`cmp rax, syscall_table_count`), the per-slot permutation
+  and the `s` debug trace all key off `rax` as the syscall NUMBER. Without
+  the reload every syscall number is replaced by its return RIP → always
+  out-of-range → `.sc_invalid` → -1, so no app syscall ever dispatches and
+  every app window paints blank/white. Fixed 2026-05-31 in
+  `src/kernel/proc/syscall.asm` right after the `SC_TRACE_APPEND` call.
 
 ---
 

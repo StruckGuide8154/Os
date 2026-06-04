@@ -43,6 +43,12 @@ PDE_2MB           equ 0x200000
 
 extern _start
 extern _kernel_text_end
+; Nested-kernel monitor (nk_monitor.asm): the ONLY WP-toggle site. Lockdown is
+; the monitor's first client — it brackets its .text PDE edits in a window and
+; relies on nk_pt_window_end to set CR0.WP for the first time + flush the TLB.
+extern nk_pt_window_begin
+extern nk_pt_window_end
+extern nk_engage_wp
 
 section .text
 
@@ -61,6 +67,11 @@ FN_BEGIN kernel_lockdown_ro, 0, 0, FN_RET_VOID
     push rdi
     push r8
     push r9
+
+    ; Open the monitor window: masks interrupts and clears CR0.WP so the PDE
+    ; edits below are permitted (and, post-Phase-2, so they're permitted even
+    ; once the page tables are mapped read-only). nk_pt_window_end re-arms WP.
+    call nk_pt_window_begin
 
     ; Compute the 2 MiB-aligned interior [lo, hi) of the .text span:
     ;   lo = round_up(_start, 2MiB)
@@ -108,14 +119,12 @@ FN_BEGIN kernel_lockdown_ro, 0, 0, FN_RET_VOID
     jmp .pde_loop
 
 .apply_wp:
-    ; Enable CR0.WP so supervisor writes honor the read-only PDEs above.
-    mov rax, cr0
-    bts rax, 16                          ; CR0.WP
-    mov cr0, rax
-
-    ; Flush the TLB so the new permissions are live immediately.
-    mov rax, cr3
-    mov cr3, rax
+    ; Close the monitor window (restores pre-window WP=0 + flush + IF), then
+    ; perform the deliberate one-time WP off->on engage so supervisor writes now
+    ; honor the read-only .text PDEs cleared above. Both WP toggles live in the
+    ; monitor (nk_monitor.asm) — this routine never touches CR0 directly.
+    call nk_pt_window_end
+    call nk_engage_wp
 
     mov byte [rel kl_done], 1
 

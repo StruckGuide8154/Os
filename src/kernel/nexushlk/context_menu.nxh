@@ -1,0 +1,114 @@
+# ============================================================================
+# Kernel-side explorer context menu.
+# Draws the small Open menu and routes accepted clicks to the notepad opener.
+# ============================================================================
+
+module "context_menu";
+
+global ctx_menu_draw;
+global ctx_menu_handle_click;
+
+fn ctx_menu_draw() {
+    asm "ctx_menu_draw:";
+    asm "    cmp byte [ctx_menu_visible], 0";
+    asm "    je .cmd_done";
+    asm "    push rdi";
+    asm "    push rsi";
+    asm "    push rdx";
+    asm "    push rcx";
+    asm "    push r8";
+    asm "    ; Background";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    mov edx, CTX_W";
+    asm "    mov ecx, CTX_H";
+    asm "    mov r8d, 0x00F0F0F0";
+    asm "    call fill_rect";
+    asm "    ; Top border";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    mov edx, CTX_W";
+    asm "    mov ecx, 1";
+    asm "    mov r8d, 0x00999999";
+    asm "    call fill_rect";
+    asm "    ; Bottom border";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    add esi, CTX_H - 1";
+    asm "    mov edx, CTX_W";
+    asm "    mov ecx, 1";
+    asm "    mov r8d, 0x00999999";
+    asm "    call fill_rect";
+    asm "    ; Left border";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    mov edx, 1";
+    asm "    mov ecx, CTX_H";
+    asm "    mov r8d, 0x00999999";
+    asm "    call fill_rect";
+    asm "    ; Right border";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    add edi, CTX_W - 1";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    mov edx, 1";
+    asm "    mov ecx, CTX_H";
+    asm "    mov r8d, 0x00999999";
+    asm "    call fill_rect";
+    asm "    ; \"Open\" label";
+    asm "    mov edi, [ctx_menu_x]";
+    asm "    add edi, 10";
+    asm "    mov esi, [ctx_menu_y]";
+    asm "    add esi, 6";
+    asm "    lea rdx, [rel szCtxOpen]";
+    asm "    mov ecx, 0x00222222";
+    asm "    mov r8d, 0x00F0F0F0";
+    asm "    call render_text";
+    asm "    pop r8";
+    asm "    pop rcx";
+    asm "    pop rdx";
+    asm "    pop rsi";
+    asm "    pop rdi";
+    asm ".cmd_done:";
+    asm "    ret";
+    asm "";
+    asm "; Called when a left-click happens while ctx_menu_visible is set. The caller";
+    asm "; already loaded the click coords into EDI/ESI and the buttons mask in EDX.";
+}
+
+fn ctx_menu_handle_click() {
+    asm "    push rax";
+    asm "    push rcx";
+    asm "    push rdi";
+    asm "    ; Hit-test the menu rect.";
+    asm "    mov eax, [ctx_menu_x]";
+    asm "    cmp edi, eax";
+    asm "    jl .cmh_done";
+    asm "    mov ecx, eax";
+    asm "    add ecx, CTX_W";
+    asm "    cmp edi, ecx";
+    asm "    jge .cmh_done";
+    asm "    mov eax, [ctx_menu_y]";
+    asm "    cmp esi, eax";
+    asm "    jl .cmh_done";
+    asm "    mov ecx, eax";
+    asm "    add ecx, CTX_H";
+    asm "    cmp esi, ecx";
+    asm "    jge .cmh_done";
+    asm "    ; Inside menu -> \"Open\" the explorer-selected entry.";
+    asm "    mov edi, [explorer_sel]";
+    asm "    call fat16_get_entry";
+    asm "    test rax, rax";
+    asm "    jz .cmh_done";
+    asm "    mov cl, [rax + 11]";
+    asm "    test cl, 0x10                ; skip directories";
+    asm "    jnz .cmh_done";
+    asm "    mov rdi, rax";
+    asm "    call kernel_open_file_in_notepad";
+    asm ".cmh_done:";
+    asm "    pop rdi";
+    asm "    pop rcx";
+    asm "    pop rax";
+    asm "    ret";
+    asm "";
+}
+

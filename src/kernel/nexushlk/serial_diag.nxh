@@ -1,0 +1,117 @@
+# ============================================================================
+# NexusHLK serial-diagnostic leaf helpers.
+#
+# This is a PROOF-OF-CONCEPT vertical slice of "NexusHLK" — the kernel emit
+# mode of the NexusHL compiler (src/user/nexushl/compiler/nxhc.py). Compile it
+# with:
+#
+#     python nxhc.py serial_diag.nxh -o serial_diag.asm --embed --target kernel
+#
+# and %include the generated serial_diag.asm into kernel_build.asm under
+# `section .text`, at the position the original code occupied in the old
+# monolithic core owner (before measured_boot.asm).
+#
+# Because the kernel is assembled as ONE NASM translation unit (-f bin), the
+# labels below are mutually visible with the rest of the kernel translation unit;
+# callers such as diag_emit_line and svg_dump_serial bind to these labels
+# with no extern wiring.
+#
+# These five helpers are LEAF serial-output routines with a hand-rolled,
+# non-System-V register ABI (arg in AL / EAX / RSI; ALL registers preserved).
+#
+# Three of them — svg_dump_nibble, svg_dump_hexbyte, svg_dump_dec — are now
+# written as GENUINELY STRUCTURED NexusHLK using the kernel-mode explicit-
+# register ABI feature (nxhc.py): a parameter is bound to a physical register
+# (`fn f(al nib) ...`), `preserves(all)` re-states the original "pushes
+# everything" save/restore contract, and `call f(al: expr);` expresses the
+# custom-ABI inter-routine calls (the targets take their argument in al, not in
+# the System-V rdi). The compiler spills each register param to a stack slot on
+# entry, runs the structured body over that slot, restores the preserved set on
+# exit, and writes any non-preserved (output) param register back. The emitted
+# behavior over COM1 is byte-identical to the prior asm{} shims.
+#
+# svg_dump_putc (a single OUT) and svg_dump_puts (a tight string loop reading
+# rsi) remain register-exact asm{} shims: they are pure I/O leaves whose value
+# is in the literal instruction, not in structure.
+#
+# The data strings (svg_dump_hdr/dim/ftr) and the higher-level callers
+# (svg_dump_serial, diag_emit_line, diag_puth64, diag_emit_hexbytes) stay in
+# their modules — this cluster binds to them with no extern wiring.
+# ============================================================================
+
+module "serial_diag";
+
+global svg_dump_putc;
+global svg_dump_puts;
+global svg_dump_hexbyte;
+global svg_dump_nibble;
+global svg_dump_dec;
+
+# COM1 base I/O port (used by the putc leaf below).
+const COM1 = 0x3F8;
+# ASCII bases for digit/hex formatting.
+const ASCII_ZERO  = 48;   # '0'
+const ASCII_A_M10 = 55;   # 'A' - 10
+const HEX_BASE    = 10;   # nibbles 0..9 are digits, 10..15 are 'A'..'F'
+
+# al = character -> COM1.  Preserves all registers.  (Pure OUT leaf — kept as a
+# register-exact asm shim: a single port write has no structure to recover.)
+fn svg_dump_putc() {
+    asm "push rax\npush rdx\nmov dx, 0x3F8\nout dx, al\npop rdx\npop rax\nret";
+}
+
+# rsi = NUL-terminated string -> COM1.  Preserves all registers.  (Tight
+# byte-loop reading rsi directly — kept as a register-exact asm shim.)
+fn svg_dump_puts() {
+    asm "push rax\npush rsi\n.puts_loop:\nmov al, [rsi]\ntest al, al\njz .puts_done\ncall svg_dump_putc\ninc rsi\njmp .puts_loop\n.puts_done:\npop rsi\npop rax\nret";
+}
+
+# eax = byte (low 8 bits) -> two uppercase hex chars on COM1.
+# Preserves all registers.  ABI-equivalent to the prior shim that staged the
+# byte in ebx and emitted high then low nibble via svg_dump_nibble.
+fn svg_dump_hexbyte(eax b) preserves(all) {
+    call svg_dump_nibble(al: (b >> 4) & 0x0F);
+    call svg_dump_nibble(al: b & 0x0F);
+}
+
+# al = nibble (low 4 bits) -> one uppercase hex char on COM1.
+# Preserves all registers.
+fn svg_dump_nibble(al nib) preserves(all) {
+    nib = nib & 0x0F;
+    if nib < HEX_BASE {
+        call svg_dump_putc(al: nib + ASCII_ZERO);
+    } else {
+        call svg_dump_putc(al: nib + ASCII_A_M10);
+    }
+}
+
+# eax = unsigned value -> decimal digits on COM1, most-significant first.
+# Preserves all registers.  The prior shim divided repeatedly, pushed each
+# remainder, then popped them back; this computes the digit count, builds the
+# leading power of ten, and emits digit = (val / pow) % 10 down to pow == 0 —
+# the same character stream (including the lone '0' for val == 0).
+fn svg_dump_dec(eax val) preserves(all) {
+    # Count decimal digits in val (at least one).
+    let digits = 0;
+    let acc = val;
+    while acc > 0 {
+        acc = acc / 10;
+        digits = digits + 1;
+    }
+    if digits == 0 {
+        digits = 1;
+    }
+    # Largest power of ten <= val (10^(digits-1)).
+    let pow = 1;
+    let i = 1;
+    while i < digits {
+        pow = pow * 10;
+        i = i + 1;
+    }
+    # Emit each digit from most- to least-significant.
+    while pow > 0 {
+        let d = (val / pow) % 10;
+        call svg_dump_putc(al: d + ASCII_ZERO);
+        pow = pow / 10;
+    }
+}

@@ -89,6 +89,14 @@ S_CET_NO_TRACK_EN equ (1 << 4) ; honor no-track prefix
 ; CR4.CET is bit 23.
 CR4_CET_BIT   equ 23
 
+; Dedicated supervisor CET shadow stack. This is intentionally separate from
+; the software per-slot shadow pages that KPROLOGUE writes to.
+CET_PL0_SHSTK_ADDR equ (L3_SYSCALL_STACK_ADDR + 0x1FF000)
+CET_PL0_SHSTK_TOP  equ (CET_PL0_SHSTK_ADDR + 0x1000)
+CET_PL0_SHSTK_PTE  equ (SYSCALL_STACK_PT_BASE + 0x1FF*8)
+CET_P_PRESENT      equ 0x001
+CET_P_DIRTY        equ 0x040
+
 ; ---------------------------------------------------------------------------
 ; cet_detect — probe CPUID(7,0) for SHSTK/IBT and record the result.
 ;   Always safe to call on any long-mode CPU. Clobbers rax/rbx/rcx/rdx
@@ -121,20 +129,47 @@ cet_detect:
     mov byte [rel cet_have_ibt], al
     or  bl, al
     mov byte [rel cet_supported], bl
+    call cet_log_detect
     pop rbx
     ret
 .none:
     mov byte [rel cet_have_shstk], 0
     mov byte [rel cet_have_ibt], 0
     mov byte [rel cet_supported], 0
+    call cet_log_detect
     pop rbx
     ret
 
+cet_log_detect:
+    push rax
+    push rdi
+    SER 'C'
+    SER 'E'
+    SER 'T'
+    SER 'D'
+    SER ' '
+    SER 's'
+    movzx edi, byte [rel cet_have_shstk]
+    call ser_print_hex64
+    SER ' '
+    SER 'i'
+    movzx edi, byte [rel cet_have_ibt]
+    call ser_print_hex64
+    SER 13
+    SER 10
+    pop rdi
+    pop rax
+    ret
+
 %ifdef ENABLE_CET
+extern nk_pt_window_begin
+extern nk_pt_window_end
+
 ; ---------------------------------------------------------------------------
 ; cet_enable — turn on the hardware CET enable bits the part supports.
-;   PRECONDITION: cet_detect has run (kmain calls it first). Hard no-op unless
-;   SHSTK was detected, so this is byte-for-byte inert on CET-less CPUs / TCG.
+;   PRECONDITION: cet_detect has run (kmain calls it first). If hardware SHSTK
+;   is unavailable, the existing software kernel shadow stack remains the active
+;   fallback and the serial state reports that explicitly.
 ;
 ;   Scoped (see header): sets CR4.CET and programs IA32_S_CET, but leaves the
 ;   supervisor shadow-stack ENABLE bit (SH_STK_EN) CLEAR — activating it needs
@@ -149,16 +184,39 @@ cet_detect:
 global cet_enable
 cet_enable:
     cmp byte [rel cet_have_shstk], 0
-    je .skip                         ; no hardware shadow stack -> inert
-    ; Build the S_CET value. Shadow-stack enable stays CLEAR (follow-up).
-    xor eax, eax                     ; low 32 bits of S_CET
-    xor edx, edx                     ; high 32 bits
+    je .software_fallback            ; no hardware shadow stack -> software guard
+
+    ; Seed the RET that leaves cet_enable before arming SH_STK_EN.
+    mov r8, [rsp]
+    mov qword [abs CET_PL0_SHSTK_TOP - 8], r8
+    mov qword [rel cet_pl0_ssp], CET_PL0_SHSTK_TOP - 8
+
+    ; Convert the dedicated page to a CET shadow-stack PTE:
+    ; present, read-only, dirty, NX, supervisor.
+    call nk_pt_window_begin
+    mov rax, CET_PL0_SHSTK_ADDR
+    or  rax, CET_P_PRESENT | CET_P_DIRTY
+    bts rax, 63
+    mov [abs CET_PL0_SHSTK_PTE], rax
+    call nk_pt_window_end
+
+    mov ecx, IA32_PL0_SSP
+    mov rax, CET_PL0_SHSTK_TOP - 8
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+
+    ; Build the S_CET value. Hardware supervisor shadow stack is active.
+    mov eax, S_CET_SH_STK_EN
+    xor edx, edx
 %ifdef ENABLE_CET_IBT
     cmp byte [rel cet_have_ibt], 0
     je .no_ibt
     or  eax, S_CET_ENDBR_EN | S_CET_NO_TRACK_EN
+    mov byte [rel cet_ibt_armed], 1
 .no_ibt:
 %endif
+    mov [rel cet_s_cet_low], eax
     mov ecx, IA32_S_CET
     wrmsr
     ; Enable CR4.CET. Safe because SHSTK is present; note CR4.CET requires
@@ -166,9 +224,52 @@ cet_enable:
     mov rax, cr4
     bts rax, CR4_CET_BIT
     mov cr4, rax
-.skip:
+    mov byte [rel cet_shstk_armed], 1
+    mov byte [rel cet_enable_state], 2
+    ; No CALLs after CR4.CET until this seeded RET completes.
+    ret
+.software_fallback:
+    mov byte [rel cet_sw_shstk_armed], 1
+    mov byte [rel cet_enable_state], 3
     ret
 %endif ; ENABLE_CET
+
+global cet_log_state
+cet_log_state:
+    push rax
+    push rdi
+    SER 'C'
+    SER 'E'
+    SER 'T'
+    SER ' '
+    SER 'e'
+    movzx edi, byte [rel cet_enable_state]
+    call ser_print_hex64
+    SER ' '
+    SER 's'
+    movzx edi, byte [rel cet_shstk_armed]
+    call ser_print_hex64
+    SER ' '
+    SER 'w'
+    movzx edi, byte [rel cet_sw_shstk_armed]
+    call ser_print_hex64
+    SER ' '
+    SER 'i'
+    movzx edi, byte [rel cet_ibt_armed]
+    call ser_print_hex64
+    SER ' '
+    SER 'p'
+    mov rdi, [rel cet_pl0_ssp]
+    call ser_print_hex64
+    SER ' '
+    SER 'm'
+    mov rdi, [rel cet_s_cet_low]
+    call ser_print_hex64
+    SER 13
+    SER 10
+    pop rdi
+    pop rax
+    ret
 
 section .data
 align 1
@@ -177,8 +278,21 @@ align 1
 global cet_have_shstk
 global cet_have_ibt
 global cet_supported
+global cet_enable_state
+global cet_shstk_armed
+global cet_sw_shstk_armed
+global cet_ibt_armed
+global cet_s_cet_low
+global cet_pl0_ssp
 cet_have_shstk: db 0
 cet_have_ibt:   db 0
 cet_supported:  db 0
+cet_enable_state: db 0     ; 0=not called, 2=hardware SHSTK, 3=software fallback
+cet_shstk_armed:  db 0
+cet_sw_shstk_armed: db 0
+cet_ibt_armed:    db 0
+align 8
+cet_s_cet_low:    dq 0
+cet_pl0_ssp:      dq 0
 
 %endif ; CET_INC

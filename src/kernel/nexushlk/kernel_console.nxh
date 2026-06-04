@@ -1,0 +1,84 @@
+# ============================================================================
+# Early kernel console and klog mirror.
+# Owns debug_print: RSI = NUL-terminated message; preserves the original register-save contract.
+# ============================================================================
+
+module "kernel_console";
+
+global debug_print;
+
+fn debug_print() {
+    asm "    push rax";
+    asm "    push rbx";
+    asm "    push rcx";
+    asm "    push rdx";
+    asm "    push rdi";
+    asm "    push rsi";
+    asm "    push r8";
+    asm "    push r9";
+    asm "    push r10";
+    asm "    push r11";
+    asm "    push r12";
+    asm "";
+    asm "    mov r12, rsi     ; Preserve RSI";
+    asm "";
+    asm "    ; Always capture the message in the kernel log ring buffer, regardless of";
+    asm "    ; whether the framebuffer is available or the GUI has started. This is the";
+    asm "    ; data source for the F12 overlay and the (future) USB MSC log flush.";
+    asm "    extern klog_write";
+    asm "    call klog_write";
+    asm "";
+    asm "    ; Screen Output";
+    asm "    mov rax, [bb_addr]";
+    asm "    test rax, rax";
+    asm "    jz .done";
+    asm "";
+    asm "    ; Boot splash: keep the green console hidden during boot so the animation";
+    asm "    ; owns the screen. Holding a key reveals the live console.";
+    asm "    extern kb_repeat_scancode";
+    asm "    cmp byte [gui_initialized], 1";
+    asm "    je .console_draw";
+    asm "    movzx ecx, byte [kb_repeat_scancode]";
+    asm "    test ecx, ecx";
+    asm "    jz .done";
+    asm ".console_draw:";
+    asm "";
+    asm "    mov edi, 0";
+    asm "    mov esi, [debug_y]";
+    asm "    mov edx, 800";
+    asm "    mov ecx, 16";
+    asm "    mov r8d, 0x00000000";
+    asm "    call fill_rect";
+    asm "    ";
+    asm "    mov edi, 10";
+    asm "    mov esi, [debug_y]";
+    asm "    mov rdx, r12";
+    asm "    mov ecx, 0x0000FF00";
+    asm "    mov r8d, 0x00000000";
+    asm "    call render_text";
+    asm "    add dword [debug_y], 16";
+    asm "    ";
+    asm "    cmp dword [debug_y], 600";
+    asm "    jl .y_ok";
+    asm "    mov dword [debug_y], 0";
+    asm ".y_ok:";
+    asm "";
+    asm "    cmp byte [gui_initialized], 1";
+    asm "    je .done";
+    asm "    call display_flip";
+    asm ".done:";
+    asm "    pop r12";
+    asm "    pop r11";
+    asm "    pop r10";
+    asm "    pop r9";
+    asm "    pop r8";
+    asm "    pop rsi";
+    asm "    pop rdi";
+    asm "    pop rdx";
+    asm "    pop rcx";
+    asm "    pop rbx";
+    asm "    pop rax";
+    asm "    ret";
+    asm "";
+}
+

@@ -3,7 +3,7 @@
 ; this directory assembles as a STANDALONE flat binary, outside the monolithic
 ; app blob (src/user/apps.asm).
 ;
-; WHY THIS EXISTS (TODO §13 — always-buildable security regression suite)
+; WHY THIS EXISTS (spec ref: security_todo.md §13 — always-buildable security regression suite)
 ;   The ring-3 PoC harnesses (wx_poc_*, wx_jit_alias_*, stack_overflow_poc)
 ;   exercise landed mitigations through the syscall ABI: SYS_WX_INSTALL_MANIFEST,
 ;   SYS_MPROTECT_WX / MPROT_WX_MODE_XRO, SYS_WX_JIT_ALIAS, SYS_PRINT, SYS_EXIT.

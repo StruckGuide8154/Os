@@ -9,10 +9,58 @@
 import os, re, sys, json
 
 KEYWORDS = {
-    "use","app","fn","let","if","else","while","for","return",
+    "use","app","module","fn","let","if","else","while","for","return",
     "str","i8","i16","i32","i64","u8","u16","u32","u64","ptr","void","bool",
-    "true","false","asm","syscall","extern","const","struct","state","break","continue"
+    "true","false","asm","syscall","extern","const","struct","state","break","continue",
+    "global",
+    # Kernel-mode explicit-register ABI:
+    #   preserves(...) — callee-save contract (see gen_kernel_fn)
+    #   call           — register-annotated call statement `call f(al: x);`
+    "preserves","call"
 }
+
+# ---------------------------------------------------------------------------
+# Kernel-mode explicit-register ABI register table.
+#
+# Maps every legal GP register spelling to (canonical 64-bit name, width in
+# bits). Used by the kernel `fn name(REG param, ...)` syntax, by `preserves(...)`
+# (which always operates on the full 64-bit register regardless of the spelling
+# the body uses), and by register-annotated calls `call f(REG: expr, ...)`.
+#
+# A named register parameter is a *physical-register binding*: inside the body
+# the parameter name reads/writes that register at the declared width via the
+# normal expression machinery (mov/movzx into rax on read; sized mov out of rax
+# on write). This is the minimal mechanism that lets hand-rolled kernel leaf
+# routines (arg in al/eax/rsi, all registers preserved) be written structurally
+# without dropping to `asm{}`.
+# ---------------------------------------------------------------------------
+def _build_reg_table():
+    t={}
+    # base name -> (q,d,w,b)  64/32/16/8 spellings
+    rows=[
+        ("rax","eax","ax","al"),
+        ("rbx","ebx","bx","bl"),
+        ("rcx","ecx","cx","cl"),
+        ("rdx","edx","dx","dl"),
+        ("rsi","esi","si","sil"),
+        ("rdi","edi","di","dil"),
+        ("rbp","ebp","bp","bpl"),
+        ("rsp","esp","sp","spl"),
+    ]
+    for q,d,w,b in rows:
+        t[q]=(q,64); t[d]=(q,32); t[w]=(q,16); t[b]=(q,8)
+    for n in range(8,16):
+        q=f"r{n}"; t[q]=(q,64); t[f"r{n}d"]=(q,32); t[f"r{n}w"]=(q,16); t[f"r{n}b"]=(q,8)
+    return t
+
+REG_TABLE=_build_reg_table()
+
+def _reg_at_width(canon, bits):
+    # Return the register spelling for canonical 64-bit reg `canon` at `bits`.
+    for spell,(c,w) in REG_TABLE.items():
+        if c==canon and w==bits:
+            return spell
+    raise SyntaxError(f"no {bits}-bit spelling for {canon}")
 
 TOK_RE = re.compile(r"""
     (?P<ws>\s+)
@@ -130,6 +178,20 @@ def parse(toks,path):
             if neg: v = -v
             p.match(";")
             decls.append(node("const",name=nm,val=v))
+        elif t.v=="module":
+            # Kernel-mode unit marker: `module "name";`. Names the translation
+            # unit for the generated-file banner. Presence does NOT itself switch
+            # codegen — the --target kernel flag does — but it documents intent
+            # and is rejected by the user-mode path so a kernel module can't be
+            # compiled as an app by accident.
+            p.eat(); nm=p.eat("str").v; p.match(";")
+            decls.append(node("module",name=nm))
+        elif t.v=="global":
+            # Kernel-mode: export a symbol so other kernel modules / main.asm
+            # can reference it. `global name;` — emits `global name` ahead of
+            # the label. Ignored (with a clear error) in user mode.
+            p.eat(); nm=p.eat("id").v; p.match(";")
+            decls.append(node("global",name=nm))
         elif t.v=="extern":
             p.eat(); nm=p.eat("id").v; p.match(";")
             decls.append(node("extern",name=nm))
@@ -154,15 +216,36 @@ def parse(toks,path):
 def parse_fn(p):
     p.eat("fn"); name=p.eat("id").v
     p.eat("(")
-    params=[]
+    params=[]      # plain param names (user-mode / System-V kernel fns)
+    regparams=[]   # list of (regname, paramname) for explicit-register kernel fns
     if not p.match(")"):
         while True:
-            pn=p.eat("id").v
-            params.append(pn)
+            first=p.eat("id").v
+            # Explicit-register param: `REG name` (two adjacent identifiers,
+            # the first a known GP register spelling). Kernel-mode only; the
+            # sema/codegen rejects it in user mode.
+            if p.peek().k=="id" and first in REG_TABLE:
+                pn=p.eat("id").v
+                regparams.append((first,pn))
+            else:
+                params.append(first)
             if p.match(")"): break
             p.eat(",")
+    # Optional register-preservation contract: `preserves(all)` or
+    # `preserves(rbx, rsi, ...)`. Kernel-mode only.
+    preserves=None
+    if p.peek().v=="preserves":
+        p.eat(); p.eat("(")
+        plist=[]
+        while True:
+            r=p.eat("id").v
+            plist.append(r)
+            if p.match(")"): break
+            p.eat(",")
+        preserves=plist
     body=parse_block(p)
-    return node("fn",name=name,params=params,body=body)
+    return node("fn",name=name,params=params,regparams=regparams,
+                preserves=preserves,body=body)
 
 def parse_block(p):
     p.eat("{")
@@ -201,6 +284,22 @@ def parse_stmt(p):
     if t.v=="asm":
         p.eat(); s=p.eat("str").v; p.match(";")
         return node("asm",text=s)
+    if t.v=="call":
+        # Register-annotated call (kernel-mode): load the named registers from
+        # the given expressions, then `call target`. The target uses a custom
+        # (non-System-V) register ABI, so we name each input register explicitly:
+        #     call svg_dump_nibble(al: nib);
+        #     call f();                       # bare call, no register setup
+        p.eat(); tgt=p.eat("id").v; p.eat("(")
+        regargs=[]   # list of (regname, expr)
+        if not p.match(")"):
+            while True:
+                r=p.eat("id").v; p.eat(":"); e=parse_expr(p)
+                regargs.append((r,e))
+                if p.match(")"): break
+                p.eat(",")
+        p.match(";")
+        return node("regcall",target=tgt,regargs=regargs)
     # expr-stmt or assign
     e=parse_expr(p)
     if p.match("="):
@@ -294,9 +393,11 @@ def rbpoff(o):
     return ""
 
 class CG:
-    def __init__(s,app_prefix):
+    def __init__(s,app_prefix,kernel=False):
         s.text=[]; s.rodata=[]; s.data=[]
         s.lbl=0
+        s.kernel=kernel
+        s.globals=set()       # kernel-mode: symbols to emit `global` for
         s.prefix=app_prefix
         s.str_lbls={}
         s.state_defs={}
@@ -478,16 +579,26 @@ def _peephole(lines):
         i += 1
     return out
 
-def compile_unit(decls,app_prefix,embed=False):
+def compile_unit(decls,app_prefix,embed=False,kernel=False):
     global LAST_SIGS
-    cg=CG(app_prefix)
+    cg=CG(app_prefix,kernel=kernel)
     cg.embed=embed
     app_meta={"name":app_prefix,"stack":4096}
     # collect top-level
     str_defs={}
     for d in decls:
         if d["k"]=="app":
+            if kernel:
+                raise SyntaxError("`app` declaration is not allowed in a kernel module (--target kernel); use `module`")
             app_meta["name"]=d["name"]; app_meta["stack"]=d["stack"]
+        elif d["k"]=="module":
+            if not kernel:
+                raise SyntaxError("`module` declaration requires --target kernel")
+            app_meta["name"]=d["name"]
+        elif d["k"]=="global":
+            if not kernel:
+                raise SyntaxError("`global` declaration requires --target kernel")
+            cg.globals.add(d["name"])
         elif d["k"]=="strdef":
             lbl=f"{app_prefix}_{d['name']}"
             cg.str_lbls[d["val"]]=lbl
@@ -511,17 +622,30 @@ def compile_unit(decls,app_prefix,embed=False):
     # functions
     for d in decls:
         if d["k"]=="fn":
-            gen_fn(cg,d,app_prefix)
+            if kernel:
+                gen_kernel_fn(cg,d)
+            else:
+                gen_fn(cg,d,app_prefix)
     # assemble output
     out=[]
     out.append(f"; NexusHL generated — do not edit by hand")
-    out.append(f'; app="{app_meta["name"]}" stack={app_meta["stack"]}')
-    if not embed:
+    if kernel:
+        out.append(f'; module="{app_meta["name"]}" target=kernel')
+    else:
+        out.append(f'; app="{app_meta["name"]}" stack={app_meta["stack"]}')
+    if not embed and not kernel:
         out.append("bits 64")
         out.append("default rel")
         out.append('%include "trace.inc"')
     for e in sorted(cg.externs):
         out.append(f"extern {e}")
+    # Kernel mode: emit `global` for every exported symbol. Under -f bin (the
+    # kernel's single-TU build) these are %unmacro'd to no-ops by
+    # kernel_build.asm; they remain meaningful for any future -f elf reuse and
+    # they document the module's public surface.
+    if kernel:
+        for g in sorted(cg.globals):
+            out.append(f"global {g}")
     if not embed:
         out.append("section .text")
     out.extend(_peephole(cg.text))
@@ -539,9 +663,258 @@ def compile_unit(decls,app_prefix,embed=False):
     LAST_SIGS=cg.sigs
     return "\n".join(out)+"\n"
 
+def gen_kernel_fn(cg,fn):
+    # Kernel-mode function codegen.
+    #
+    # Two forms:
+    #
+    #  (1) Register-exact ABI shim — the body is ONE OR MORE `asm { }` blocks and
+    #      nothing else. The function's NASM label is emitted and the asm lines
+    #      are passed through verbatim; the asm owns the entire prologue, the
+    #      custom (non-System-V) register ABI, and its own `ret`. The compiler
+    #      adds NO frame, NO callee-save, NO FN_BEGIN/FN_END trace framing. This
+    #      is how hand-rolled kernel leaf helpers (e.g. arg in AL, all regs
+    #      preserved) are ported faithfully — the security property we keep here
+    #      is that every such block is explicitly author-marked `asm`, never
+    #      synthesised.
+    #
+    #  (2) Structured body — any non-`asm` statement present. Emits a standard
+    #      System-V frame (same convention as user mode: args in
+    #      rdi/rsi/rdx/rcx/r8/r9, locals on the stack) but WITHOUT the app-blob
+    #      FN_BEGIN/FN_END syscall-trace framing and WITHOUT name prefixing, so
+    #      the label is callable directly from hand-written kernel asm. Typed
+    #      memory accessors (lb/lw/lq/sb/sw/sq) and direct `call <kernel_label>`
+    #      are available exactly as in user mode. (Not exercised by the initial
+    #      serial-diag port, which is entirely form (1), but supported so future
+    #      logic-bearing kernel code need not drop to asm.)
+    name=fn["name"]
+    params=fn["params"]
+    regparams=fn.get("regparams") or []
+    preserves=fn.get("preserves")
+    body=fn["body"]
+    all_asm = len(body)>0 and all(s.get("k")=="asm" for s in body)
+    if all_asm:
+        if params or regparams or preserves:
+            raise SyntaxError(
+                f"kernel asm-shim fn {name!r} must declare no params — the custom "
+                f"register ABI is defined inside the asm block (document it in a comment)")
+        cg.emit(f"{name}:")
+        for s in body:
+            for ln in s["text"].split("\\n"):
+                cg.emit("    "+ln)
+        return
+    # ------------------------------------------------------------------
+    # Explicit-register-ABI structured function (kernel mode).
+    #
+    # Distinguished from the System-V structured form by the presence of any
+    # register-bound param or a `preserves(...)` clause. The frame is:
+    #
+    #   <label>:
+    #       push <preserved regs in declared order>      ; callee-save contract
+    #       push rbp ; mov rbp,rsp ; sub rsp,<frame>     ; local frame
+    #       mov [slot_p], <reg_p>                         ; spill each reg param
+    #       ... body (reg params are normal stack locals) ...
+    #   .epilogue:
+    #       mov <reg_p>, [slot_p]                         ; write reg params back
+    #       mov rsp,rbp ; pop rbp
+    #       pop <preserved regs, reverse order>
+    #       ret
+    #
+    # Spilling register params to stack locals (rather than keeping them live in
+    # their physical registers) lets the existing rax/rcx-clobbering expression
+    # codegen run unchanged; the named register's *value* is what the body reads
+    # and mutates, and it is written back on exit so output-register ABIs (e.g.
+    # "rdi advanced" cursors) are honored. `preserves` is taken on the FULL
+    # 64-bit register regardless of the width the param/body uses.
+    # ------------------------------------------------------------------
+    if regparams or preserves is not None:
+        gen_kernel_fn_regabi(cg,fn,name,regparams,preserves,body)
+        return
+    if regparams:
+        raise SyntaxError(f"internal: regparams without regabi path for {name!r}")
+    # Structured kernel function: standard System-V frame, no FN_* framing.
+    scope={}
+    for i,pn in enumerate(params):
+        if i<len(CALL_REGS):
+            scope[pn]=-8*(i+1)
+        else:
+            scope[pn]=16+8*(i-len(CALL_REGS))
+    def count_lets(stmts):
+        n=0
+        for s in stmts:
+            k=s.get("k")
+            if k=="let": n+=1
+            if k=="if":
+                n+=count_lets(s.get("then",[]))
+                n+=count_lets(s.get("els",[]) or [])
+            if k=="while":
+                n+=count_lets(s.get("body",[]))
+        return n
+    reg_param_count=min(len(params),len(CALL_REGS))
+    n_locals=count_lets(body)
+    local_size=8*(reg_param_count+n_locals)+64
+    local_size=(local_size+15)&~15
+    cg.emit(f"{name}:")
+    cg.emit("    push rbp")
+    cg.emit("    mov rbp, rsp")
+    cg.emit(f"    sub rsp, {local_size}")
+    for i,pn in enumerate(params):
+        if i<len(CALL_REGS):
+            cg.emit(f"    mov [rbp{rbpoff(scope[pn])}], {CALL_REGS[i]}")
+    cg.emit("    push rbx")
+    cg.emit("    push r12")
+    next_off=[-8*(reg_param_count+1)]
+    st=FnState(cg,scope,next_off,local_size)
+    st.epilogue=f".fn_end_{cg.lbl}_{name}"
+    for stmt in body:
+        gen_stmt(st,stmt)
+    cg.emit(f"{st.epilogue}:")
+    cg.emit("    pop r12")
+    cg.emit("    pop rbx")
+    cg.emit("    mov rsp, rbp")
+    cg.emit("    pop rbp")
+    cg.emit("    ret")
+
+# Deterministic full GP set for `preserves(all)`: every caller-visible
+# general-purpose register except the frame regs (rsp/rbp, managed by the
+# prologue). rax IS included: the "preserves all registers" leaf shims this
+# feature replaces save/restore rax too (it is scratch in their custom ABI,
+# never a return value), and a register *param* bound to rax is therefore an
+# input-only, caller-preserved register (saved on entry, not written back).
+PRESERVE_ALL_SET=["rax","rbx","rcx","rdx","rsi","rdi","r8","r9","r10","r11",
+                  "r12","r13","r14","r15"]
+
+def _resolve_preserves(preserves, name):
+    if preserves is None:
+        return []
+    canon=[]
+    if len(preserves)==1 and preserves[0]=="all":
+        canon=list(PRESERVE_ALL_SET)
+    else:
+        for r in preserves:
+            if r=="all":
+                raise SyntaxError(f"{name}: preserves(all) must be the only entry")
+            if r not in REG_TABLE:
+                raise SyntaxError(f"{name}: preserves({r}) — not a register")
+            canon.append(REG_TABLE[r][0])
+    # de-dup preserving order
+    seen=set(); out=[]
+    for c in canon:
+        if c in ("rbp","rsp"):
+            raise SyntaxError(f"{name}: cannot preserve frame register {c}")
+        if c in seen: continue
+        seen.add(c); out.append(c)
+    # A register may be BOTH a parameter and in preserves(...). That expresses
+    # an *input-only, caller-preserved* register: it is pushed on entry (so its
+    # original value is restored on exit by the matching pop) and the function's
+    # internal mutation of the param is NOT written back. A param register NOT
+    # in preserves is an *output*: its (possibly mutated) value is written back
+    # to the physical register on exit (e.g. an advanced cursor in rdi). This is
+    # the whole input-vs-output distinction, and it matches the original shims:
+    # svg_dump_nibble `preserves(all)` restores its al input; diag_puth64
+    # `preserves(rax,rcx)` does NOT list rdi, so the advanced cursor is exported.
+    return out
+
+def gen_kernel_fn_regabi(cg,fn,name,regparams,preserves,body):
+    # Resolve param register bindings.
+    regparam_canons=[]
+    bindings=[]   # (paramname, canon, width, spill_off)
+    for spell,pn in regparams:
+        if spell not in REG_TABLE:
+            raise SyntaxError(f"{name}: {spell} is not a register")
+        canon,width=REG_TABLE[spell]
+        if canon in regparam_canons:
+            raise SyntaxError(f"{name}: register {canon} bound to two params")
+        regparam_canons.append(canon)
+        bindings.append([pn,canon,width,None])
+    preserved=_resolve_preserves(preserves,name)
+    preserved_set=set(preserved)
+
+    # Frame: one 8-byte slot per register param + one per `let`.
+    def count_lets(stmts):
+        n=0
+        for s in stmts:
+            k=s.get("k")
+            if k=="let": n+=1
+            if k=="if":
+                n+=count_lets(s.get("then",[]))
+                n+=count_lets(s.get("els",[]) or [])
+            if k=="while":
+                n+=count_lets(s.get("body",[]))
+        return n
+    n_locals=count_lets(body)
+    nregp=len(bindings)
+    local_size=8*(nregp+n_locals)+64
+    local_size=(local_size+15)&~15
+
+    scope={}
+    off=-8
+    for b in bindings:
+        b[3]=off; scope[b[0]]=off; off-=8
+
+    cg.emit(f"{name}:")
+    # callee-save contract first, so it brackets the whole frame.
+    for c in preserved:
+        cg.emit(f"    push {c}")
+    cg.emit("    push rbp")
+    cg.emit("    mov rbp, rsp")
+    cg.emit(f"    sub rsp, {local_size}")
+    # Spill each register param into its slot at its declared width. Reads in
+    # the body go through the slot; the named register itself is now free.
+    for pn,canon,width,slot in bindings:
+        spell=_reg_at_width(canon,width)
+        if width==64:
+            cg.emit(f"    mov [rbp{rbpoff(slot)}], {spell}")
+        elif width==32:
+            # 32-bit store zero-extends conceptually; store the dword and the
+            # high dword is don't-care because reads use the declared width.
+            cg.emit(f"    mov dword [rbp{rbpoff(slot)}], {spell}")
+        elif width==16:
+            cg.emit(f"    mov word [rbp{rbpoff(slot)}], {spell}")
+        else:
+            cg.emit(f"    mov byte [rbp{rbpoff(slot)}], {spell}")
+
+    st=FnState(cg,scope,[off],local_size)
+    # widths for sized read/write of register params
+    st.regparam_width={b[0]:b[2] for b in bindings}
+    st.epilogue=f".fn_end_{cg.lbl}_{name}"
+    for stmt in body:
+        gen_stmt(st,stmt)
+    cg.emit(f"{st.epilogue}:")
+    # Write register params back to their physical registers — but ONLY for
+    # output params (those whose register is NOT in the preserved set). An
+    # input-only, caller-preserved param reg is restored by its push/pop pair
+    # below, so writing the mutated value back would defeat the preservation.
+    for pn,canon,width,slot in bindings:
+        if canon in preserved_set:
+            continue
+        spell=_reg_at_width(canon,width)
+        if width==64:
+            cg.emit(f"    mov {spell}, [rbp{rbpoff(slot)}]")
+        elif width==32:
+            cg.emit(f"    mov {spell}, dword [rbp{rbpoff(slot)}]")
+        elif width==16:
+            cg.emit(f"    mov {spell}, word [rbp{rbpoff(slot)}]")
+        else:
+            cg.emit(f"    mov {spell}, byte [rbp{rbpoff(slot)}]")
+    cg.emit("    mov rsp, rbp")
+    cg.emit("    pop rbp")
+    for c in reversed(preserved):
+        cg.emit(f"    pop {c}")
+    cg.emit("    ret")
+
 def gen_fn(cg,fn,prefix):
     name=f"{prefix}_{fn['name']}"
     params=fn["params"]
+    # The explicit-register ABI (register-bound params, preserves(...)) is a
+    # kernel-mode-only feature; reject it on the user-mode path so app codegen
+    # is unchanged and these constructs can't leak into a ring-3 blob.
+    if fn.get("regparams"):
+        raise SyntaxError(
+            f"explicit-register parameters in fn {fn['name']!r} require --target kernel")
+    if fn.get("preserves") is not None:
+        raise SyntaxError(
+            f"preserves(...) in fn {fn['name']!r} requires --target kernel")
     # scope: var -> rbp offset
     scope={}
     # Params 0..5 arrive in CALL_REGS and are spilled to negative rbp slots.
@@ -610,6 +983,9 @@ class FnState:
     def __init__(s,cg,scope,next_off,local_size):
         s.cg=cg; s.scope=scope; s.next_off=next_off; s.local_size=local_size
         s.epilogue=""
+        # name -> (canonical_64bit_reg, width_bits) for explicit-register params
+        # (kernel mode). Empty for user-mode and System-V kernel fns.
+        s.regscope={}
     def new_local(s,name):
         s.next_off[0]-=8
         if -s.next_off[0]>s.local_size:
@@ -631,7 +1007,16 @@ def gen_stmt(st,s):
             raise SyntaxError(f"unknown var {lhs['name']}")
         gen_expr(st,s["rhs"])
         off=st.scope[lhs["name"]]
-        cg.emit(f"    mov [rbp{rbpoff(off)}], rax")
+        w=getattr(st,"regparam_width",{}).get(lhs["name"])
+        offs=rbpoff(off)
+        if w==8:
+            cg.emit(f"    mov byte [rbp{offs}], al")
+        elif w==16:
+            cg.emit(f"    mov word [rbp{offs}], ax")
+        elif w==32:
+            cg.emit(f"    mov dword [rbp{offs}], eax")
+        else:
+            cg.emit(f"    mov [rbp{rbpoff(off)}], rax")
     elif k=="exprstmt":
         gen_expr(st,s["expr"])
     elif k=="return":
@@ -670,8 +1055,44 @@ def gen_stmt(st,s):
     elif k=="asm":
         for ln in s["text"].split("\\n"):
             cg.emit("    "+ln)
+    elif k=="regcall":
+        # Register-annotated call to a custom-ABI kernel routine: evaluate each
+        # input expression, load it into the named register at the declared
+        # width, then `call target`. Inputs are staged on the stack and popped
+        # in reverse so an earlier arg's evaluation can't clobber a register a
+        # later arg already loaded.
+        if not getattr(cg,"kernel",False):
+            raise SyntaxError("register-annotated `call` requires --target kernel")
+        regargs=s["regargs"]
+        canons=[]
+        for spell,_ in regargs:
+            if spell not in REG_TABLE:
+                raise SyntaxError(f"call {s['target']}: {spell} is not a register")
+            canon,_w=REG_TABLE[spell]
+            if canon in canons:
+                raise SyntaxError(f"call {s['target']}: register {canon} set twice")
+            canons.append(canon)
+        for _spell,expr in regargs:
+            gen_expr(st,expr); cg.emit("    push rax")
+        for canon in reversed(canons):
+            cg.emit(f"    pop {canon}")
+        cg.emit(f"    call {s['target']}")
     else:
         raise SyntaxError(f"bad stmt {k}")
+
+def const_fold_int(cg, e):
+    # Return the integer value of a compile-time-constant expression node, or
+    # None if it isn't a plain int literal / const identifier. Used to emit
+    # syscall numbers through APP_SYSNO (which needs a literal immediate).
+    k=e.get("k")
+    if k=="int":
+        v=e["val"]
+        return v if isinstance(v,int) else None
+    if k=="ident":
+        n=e["name"]
+        if n in cg.consts and isinstance(cg.consts[n],int):
+            return cg.consts[n]
+    return None
 
 def gen_expr(st,e):
     cg=st.cg; k=e["k"]
@@ -683,7 +1104,19 @@ def gen_expr(st,e):
     elif k=="ident":
         n=e["name"]
         if n in st.scope:
-            cg.emit(f"    mov rax, [rbp{rbpoff(st.scope[n])}]")
+            # Register params are stored at their declared width; read them at
+            # that width (zero-extended into rax) so a sub-64-bit ABI value
+            # never picks up garbage from the high bits of its qword slot.
+            w=getattr(st,"regparam_width",{}).get(n)
+            off=rbpoff(st.scope[n])
+            if w==8:
+                cg.emit(f"    movzx rax, byte [rbp{off}]")
+            elif w==16:
+                cg.emit(f"    movzx rax, word [rbp{off}]")
+            elif w==32:
+                cg.emit(f"    mov eax, dword [rbp{off}]")
+            else:
+                cg.emit(f"    mov rax, [rbp{rbpoff(st.scope[n])}]")
         elif n in cg.consts:
             cg.emit(f"    mov rax, {cg.consts[n]}")
         elif n in cg.str_defs:
@@ -779,7 +1212,16 @@ def gen_expr(st,e):
             gen_expr(st,a); cg.emit("    push rax")
         for reg in reversed(ARG_REGS[:len(args)]):
             cg.emit(f"    pop {reg}")
-        gen_expr(st,e["num"])
+        # Heterogeneous syscall numbering (security_todo.md §12): if the syscall
+        # number is a compile-time constant (it always is for the SYS_* consts),
+        # emit it through APP_SYSNO so the build records a fixup for the loader to
+        # rewrite per slot. A non-constant number falls back to a plain rax load
+        # (not permuted — there is no immediate to rewrite).
+        numc=const_fold_int(cg, e["num"])
+        if numc is not None:
+            cg.emit(f"    APP_SYSNO {numc}")
+        else:
+            gen_expr(st,e["num"])
         cg.emit("    syscall")
     elif k=="call":
         args=e["args"]
@@ -815,7 +1257,12 @@ def gen_expr(st,e):
             gen_expr(st,a); cg.emit("    push rax")
         for reg in reversed(CALL_REGS[:len(reg_args)]):
             cg.emit(f"    pop {reg}")
-        if name in getattr(cg,"local_fns",set()):
+        if getattr(cg,"kernel",False):
+            # Kernel mode: direct call to an in-unit label (the kernel is one
+            # NASM translation unit, so every label resolves without extern
+            # wiring). No FN_CALL trace framing, no app-prefix on local fns.
+            cg.emit(f"    call {name}")
+        elif name in getattr(cg,"local_fns",set()):
             cg.emit(f"    FN_CALL {cg.prefix}_{name}, {len(args)}")
         else:
             cg.externs.add(name)
@@ -832,7 +1279,7 @@ def resolve_use(name, lib_dir):
         raise FileNotFoundError(f"use {name}: {path} not found")
     return path
 
-def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False):
+def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False, kernel=False):
     with open(path,"r",encoding="utf-8") as f: src=f.read()
     toks=lex(src,path); decls=parse(toks,path)
     # expand uses: prepend decls from lib files
@@ -859,7 +1306,10 @@ def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False)
         if d["k"]!="use":
             expanded.append(d)
     prefix=app_prefix or os.path.splitext(os.path.basename(path))[0]
-    asm=compile_unit(expanded, "app_hl_"+prefix, embed=embed)
+    # Kernel modules are not prefixed (their labels must match existing kernel
+    # symbols verbatim); the prefix is retained only for the user-mode path.
+    unit_prefix = prefix if kernel else "app_hl_"+prefix
+    asm=compile_unit(expanded, unit_prefix, embed=embed, kernel=kernel)
     if return_sigs:
         return asm, LAST_SIGS
     return asm
@@ -875,11 +1325,16 @@ def main():
                     help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives, strings inline in .text")
     ap.add_argument("--emit-sigs",action="store_true",
                     help="write a .sig.json sidecar next to the generated assembly")
+    ap.add_argument("--target",choices=["user","kernel"],default="user",
+                    help="user (default): emit a ring-3 app blob with syscall wrappers. "
+                         "kernel: emit plain NASM for %%include into kernel_build.asm — "
+                         "bare labels, direct in-unit calls, no app framing, no syscall wrappers.")
     args=ap.parse_args()
+    kernel=(args.target=="kernel")
     if args.emit_sigs:
-        asm,sigs=compile_file(args.input, os.path.abspath(args.lib), args.prefix, embed=args.embed, return_sigs=True)
+        asm,sigs=compile_file(args.input, os.path.abspath(args.lib), args.prefix, embed=args.embed, return_sigs=True, kernel=kernel)
     else:
-        asm=compile_file(args.input, os.path.abspath(args.lib), args.prefix, embed=args.embed)
+        asm=compile_file(args.input, os.path.abspath(args.lib), args.prefix, embed=args.embed, kernel=kernel)
         sigs=[]
     with open(args.output,"w",encoding="utf-8",newline="\n") as f: f.write(asm)
     if args.emit_sigs:

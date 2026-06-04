@@ -1,0 +1,449 @@
+# NexusOS Terminal — NexusHL port of the former src/user/apps/terminal.inc.
+#
+# A minimal interactive console: a scrolling history pane plus a "C:\> " input
+# row. Recognised builtins:
+#   cls            clear history
+#   ver            print the version banner
+#   help           print the help hint
+#   ping <target>  IPv4 or hostname echo (4 replies), driven async by the
+#                  per-frame pump so the WM never freezes
+#   <anything>     handed to SYS_APP_OPEN (kernel_open_app_command parses
+#                  "<app> <params>"); an optional leading "open " is stripped
+#
+# Per-slot state lives entirely in the state{} block (zero-initialised per L3
+# slot on copy), so no launch-time seeding glue is required.
+
+use gui
+use net
+
+app "Terminal" { stack = 4096; }
+
+# ----------------------------------------------------------------------------
+# Layout / limits
+# ----------------------------------------------------------------------------
+const TERM_HIST_MAX   = 8       # history lines retained
+const TERM_HIST_LINE  = 64      # bytes per history line (incl NUL)
+const TERM_INPUT_MAX  = 62      # max chars in the input buffer (64 - NUL - slack)
+const KMOD_CTRL       = 2       # constants.inc KMOD_CTRL
+
+const TEXT_X   = 6              # client-relative x of all text
+const HEAD_Y   = 4             # header row y
+const HIST_Y0  = 20            # first history row y
+const LINE_H   = 14            # history line pitch
+const INPUT_X  = 46            # TEXT_X + 5 glyphs ("C:\> ") * UI_FONT_W(8)
+
+# ARGB 0x00RRGGBB — passed straight through ui_resolve_color (positive = literal)
+const TERM_COL_BG     = 0x00111111   # near-black client background
+const TERM_COL_HEADER = 0x0000DD00   # green version banner
+const TERM_COL_HINT   = 0x00CCCCCC   # light-grey history text
+const TERM_COL_PROMPT = 0x0000FF00   # bright-green prompt
+const TERM_COL_INPUT  = 0x00FFFFFF   # white input + cursor
+
+# ----------------------------------------------------------------------------
+# Per-slot mutable state
+# ----------------------------------------------------------------------------
+state {
+    input_buf:      64;     # current input line (NUL-terminated)
+    cursor:          8;     # input length / caret column
+    hist_count:      8;     # number of live history lines
+    hist_buf:      512;     # TERM_HIST_MAX * TERM_HIST_LINE ring of lines
+    line_tmp:       64;     # scratch for building a line before push
+    ping_ip_buf:    24;     # dotted-decimal of the target being pinged
+    ping_host:      64;     # hostname snapshot (empty for a bare IP)
+    ping_pending:    8;     # remaining echo replies (0 = idle)
+    ping_target:     8;     # A.B.C.D-packed target while in flight
+    ping_next_tick:  8;     # ui_ticks() value the next echo fires at
+    seeded:          8;     # 0 until the welcome banner has been seeded once
+}
+
+# ----------------------------------------------------------------------------
+# Strings
+# ----------------------------------------------------------------------------
+str welcome      = "NexusOS Terminal v3.0";
+str help_hint    = "Type 'help', 'ver', or 'cls'";
+str prompt       = "C:\\> ";
+str cursor_glyph = "_";
+str dot          = ".";
+
+str cmd_help = "help";
+str cmd_ver  = "ver";
+str cmd_cls  = "cls";
+str cmd_open = "open ";
+str cmd_ping = "ping ";
+
+str msg_launch_ok  = "  launched window ";
+str msg_launch_err = "  error: unknown app";
+
+str ping_hdr_pre    = "Pinging ";
+str ping_hdr_brk    = " [";
+str ping_hdr_brkend = "]";
+str ping_hdr_end    = " with 32 bytes of data:";
+str ping_dns_fail   = "  error: DNS lookup failed";
+str ping_reply_pre  = "Reply from ";
+str ping_reply_mid  = ": bytes=32 time=";
+str ping_reply_ttl  = "ms TTL=";
+str ping_timeout    = "Request timed out.";
+str ping_bad_ip     = "  error: invalid IPv4 address";
+str ping_busy       = "  error: ping already in flight";
+str ping_aborted    = "^C";
+
+# ----------------------------------------------------------------------------
+# Small string helpers (same idiom as ping.nxh / about.nxh)
+# ----------------------------------------------------------------------------
+fn copy_cstr(dst, src) {
+    let c = lb(src);
+    while c != 0 {
+        sb(dst, c);
+        dst = dst + 1;
+        src = src + 1;
+        c = lb(src);
+    }
+    sb(dst, 0);
+    return dst;
+}
+
+fn put_uint(buf, n) {
+    if n == 0 {
+        sb(buf, 48);
+        sb(buf + 1, 0);
+        return buf + 1;
+    }
+    let p = buf;
+    while n > 0 {
+        sb(p, 48 + (n % 10));
+        p = p + 1;
+        n = n / 10;
+    }
+    let end = p;
+    let i = buf;
+    let j = p - 1;
+    while i < j {
+        let a = lb(i);
+        let b = lb(j);
+        sb(i, b);
+        sb(j, a);
+        i = i + 1;
+        j = j - 1;
+    }
+    sb(end, 0);
+    return end;
+}
+
+fn str_eq(a, b) {
+    let ca = lb(a);
+    let cb = lb(b);
+    while ca == cb {
+        if ca == 0 { return 1; }
+        a = a + 1;
+        b = b + 1;
+        ca = lb(a);
+        cb = lb(b);
+    }
+    return 0;
+}
+
+fn starts_with(s, pre) {
+    let cp = lb(pre);
+    while cp != 0 {
+        if lb(s) != cp { return 0; }
+        s = s + 1;
+        pre = pre + 1;
+        cp = lb(pre);
+    }
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# History ring
+# ----------------------------------------------------------------------------
+fn hist_line(i) {
+    return &hist_buf + i * TERM_HIST_LINE;
+}
+
+fn push_hist(src) {
+    let n = lq(&hist_count);
+    if n >= TERM_HIST_MAX {
+        # Full: shift lines [1..N-1] down to [0..N-2], drop the oldest.
+        let i = 0;
+        while i < TERM_HIST_MAX - 1 {
+            copy_cstr(hist_line(i), hist_line(i + 1));
+            i = i + 1;
+        }
+        n = TERM_HIST_MAX - 1;
+    }
+    let dst = hist_line(n);
+    let cnt = 0;
+    let c = lb(src);
+    while c != 0 {
+        if cnt >= TERM_HIST_LINE - 1 { break; }
+        sb(dst + cnt, c);
+        cnt = cnt + 1;
+        src = src + 1;
+        c = lb(src);
+    }
+    sb(dst + cnt, 0);
+    sq(&hist_count, n + 1);
+}
+
+fn ensure_seeded() {
+    if lq(&seeded) != 0 { return; }
+    sq(&seeded, 1);
+    push_hist(&welcome);
+    push_hist(&help_hint);
+}
+
+fn clear_input() {
+    sb(&input_buf, 0);
+    sq(&cursor, 0);
+}
+
+# ----------------------------------------------------------------------------
+# ping builtin
+# ----------------------------------------------------------------------------
+# Parse a dotted-decimal IPv4 at p. Returns (A<<24)|(B<<16)|(C<<8)|D, or -1.
+fn parse_ipv4(p) {
+    let ip = 0;
+    let parts = 0;
+    while parts < 4 {
+        let octet = 0;
+        let digits = 0;
+        let c = lb(p);
+        while c >= 48 {
+            if c > 57 { break; }
+            octet = octet * 10 + (c - 48);
+            if octet > 255 { return -1; }
+            digits = digits + 1;
+            p = p + 1;
+            c = lb(p);
+        }
+        if digits == 0 { return -1; }
+        ip = (ip << 8) | octet;
+        parts = parts + 1;
+        if parts < 4 {
+            if lb(p) != 46 { return -1; }
+            p = p + 1;
+        }
+    }
+    return ip;
+}
+
+fn format_ip(ip) {
+    let p = put_uint(&ping_ip_buf, (ip >> 24) & 255);
+    p = copy_cstr(p, &dot);
+    p = put_uint(p, (ip >> 16) & 255);
+    p = copy_cstr(p, &dot);
+    p = put_uint(p, (ip >> 8) & 255);
+    p = copy_cstr(p, &dot);
+    put_uint(p, ip & 255);
+}
+
+# p points at the target literal (just past "ping ").
+fn do_ping(p) {
+    if lq(&ping_pending) != 0 {
+        push_hist(&ping_busy);
+        return;
+    }
+    let ip = parse_ipv4(p);
+    if ip >= 0 {
+        sb(&ping_host, 0);
+    } else {
+        # Snapshot the hostname (stop at space/CR/LF/NUL) for DNS + echo.
+        let i = 0;
+        let c = lb(p);
+        while c != 0 {
+            if c == 32 { break; }
+            if c == 10 { break; }
+            if c == 13 { break; }
+            if i >= 63 { break; }
+            sb(&ping_host + i, c);
+            i = i + 1;
+            p = p + 1;
+            c = lb(p);
+        }
+        sb(&ping_host + i, 0);
+        if lb(&ping_host) == 0 {
+            push_hist(&ping_bad_ip);
+            return;
+        }
+        ip = net_dns_a(&ping_host);
+        if ip <= 0 {
+            push_hist(&ping_dns_fail);
+            return;
+        }
+    }
+
+    format_ip(ip);
+
+    # Header — "Pinging <host> [<ip>] with 32 bytes of data:" or the bare-IP form.
+    let q = copy_cstr(&line_tmp, &ping_hdr_pre);
+    if lb(&ping_host) != 0 {
+        q = copy_cstr(q, &ping_host);
+        q = copy_cstr(q, &ping_hdr_brk);
+        q = copy_cstr(q, &ping_ip_buf);
+        q = copy_cstr(q, &ping_hdr_brkend);
+    } else {
+        q = copy_cstr(q, &ping_ip_buf);
+    }
+    copy_cstr(q, &ping_hdr_end);
+    push_hist(&line_tmp);
+
+    # Arm the per-frame pump: first echo fires next draw, then ~1s apart.
+    sq(&ping_target, ip);
+    sq(&ping_pending, 4);
+    sq(&ping_next_tick, 0);
+}
+
+# Called once per draw frame. Advances the async SYS_NET_PING4_TICK state
+# machine so a ping never blocks the window manager.
+fn ping_pump() {
+    if lq(&ping_pending) == 0 { return; }
+    if ui_ticks() < lq(&ping_next_tick) { return; }
+
+    let r = net_ping4_tick(lq(&ping_target));
+    if r == 0 { return; }       # still in flight this frame
+    if r == -2 { return; }      # a different target is mid-flight; retry
+
+    if r < 0 {
+        push_hist(&ping_timeout);
+    } else {
+        let ttl = net_info(NI_PING_LAST_TTL);
+        let q = copy_cstr(&line_tmp, &ping_reply_pre);
+        q = copy_cstr(q, &ping_ip_buf);
+        q = copy_cstr(q, &ping_reply_mid);
+        q = put_uint(q, (r + 500) / 1000);   # round usec -> ms
+        q = copy_cstr(q, &ping_reply_ttl);
+        put_uint(q, ttl);
+        push_hist(&line_tmp);
+    }
+
+    sq(&ping_pending, lq(&ping_pending) - 1);
+    sq(&ping_next_tick, ui_ticks() + 100);    # ~1s gap before the next echo
+}
+
+fn abort_ping() {
+    sq(&ping_pending, 0);
+    push_hist(&ping_aborted);
+}
+
+# ----------------------------------------------------------------------------
+# command dispatch
+# ----------------------------------------------------------------------------
+fn run_command() {
+    if str_eq(&input_buf, &cmd_cls) != 0 {
+        sq(&hist_count, 0);
+        return;
+    }
+    if str_eq(&input_buf, &cmd_ver) != 0 {
+        push_hist(&welcome);
+        return;
+    }
+    if str_eq(&input_buf, &cmd_help) != 0 {
+        push_hist(&help_hint);
+        return;
+    }
+    if starts_with(&input_buf, &cmd_ping) != 0 {
+        do_ping(&input_buf + 5);
+        return;
+    }
+
+    # Everything else is handed to the kernel's app launcher. An optional
+    # leading "open " is stripped so `open ping 8.8.8.8` == `ping 8.8.8.8`'s
+    # launch form. kernel_open_app_command parses "<app> <params>".
+    let arg = &input_buf;
+    if starts_with(&input_buf, &cmd_open) != 0 {
+        arg = &input_buf + 5;
+    }
+    let r = syscall(SYS_APP_OPEN, arg);
+    if r == -1 {
+        push_hist(&msg_launch_err);
+    } else {
+        let q = copy_cstr(&line_tmp, &msg_launch_ok);
+        put_uint(q, r);
+        push_hist(&line_tmp);
+    }
+}
+
+fn on_enter() {
+    if lb(&input_buf) == 0 { return; }   # ignore Enter on an empty line
+    # Echo "C:\> <input>" into history before running the command.
+    let p = copy_cstr(&line_tmp, &prompt);
+    copy_cstr(p, &input_buf);
+    push_hist(&line_tmp);
+    run_command();
+    clear_input();
+}
+
+# ----------------------------------------------------------------------------
+# callbacks
+# ----------------------------------------------------------------------------
+fn draw(win) {
+    ensure_seeded();
+    ping_pump();
+
+    ui_fill_client_below(win, 0, TERM_COL_BG);
+    ui_text_at(win, TEXT_X, HEAD_Y, &welcome, TERM_COL_HEADER, TERM_COL_BG);
+
+    let n = lq(&hist_count);
+    if n == 0 {
+        ui_text_at(win, TEXT_X, HIST_Y0, &help_hint, TERM_COL_HINT, TERM_COL_BG);
+    } else {
+        let i = 0;
+        while i < n {
+            ui_text_at(win, TEXT_X, HIST_Y0 + i * LINE_H, hist_line(i),
+                       TERM_COL_HINT, TERM_COL_BG);
+            i = i + 1;
+        }
+    }
+
+    # Prompt row sits below the history (reserve one line when empty).
+    let lines = n;
+    if lines == 0 { lines = 1; }
+    let py = lines * LINE_H + 24;
+
+    # Suppress the input row while a ping is draining so typing can't appear to
+    # land on the wrong line.
+    if lq(&ping_pending) != 0 { return; }
+
+    ui_text_at(win, TEXT_X,  py, &prompt,    TERM_COL_PROMPT, TERM_COL_BG);
+    ui_text_at(win, INPUT_X, py, &input_buf, TERM_COL_INPUT,  TERM_COL_BG);
+    let cx = INPUT_X + lq(&cursor) * 8;
+    ui_text_at(win, cx, py, &cursor_glyph, TERM_COL_INPUT, TERM_COL_BG);
+}
+
+fn click(win, x, y) {
+    return;
+}
+
+fn key(win, k) {
+    let ch = (k >> 8) & 255;
+    if ch == 0 { return; }
+    let mods = (k >> 16) & 255;
+
+    # While a ping is in flight only Ctrl+C (abort) is honoured.
+    if lq(&ping_pending) != 0 {
+        if (mods & KMOD_CTRL) == 0 { return; }
+        if ch == 99 { abort_ping(); return; }   # 'c'
+        if ch == 67 { abort_ping(); return; }   # 'C'
+        if ch == 3  { abort_ping(); return; }   # raw ^C
+        return;
+    }
+
+    if ch == KEY_ENTER { on_enter(); return; }
+    if ch == KEY_BACK {
+        let nb = lq(&cursor);
+        if nb > 0 {
+            nb = nb - 1;
+            sb(&input_buf + nb, 0);
+            sq(&cursor, nb);
+        }
+        return;
+    }
+
+    if ch < 32 { return; }
+    if ch > 126 { return; }
+    let c = lq(&cursor);
+    if c >= TERM_INPUT_MAX { return; }
+    sb(&input_buf + c, ch);
+    sb(&input_buf + c + 1, 0);
+    sq(&cursor, c + 1);
+}

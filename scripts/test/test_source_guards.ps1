@@ -34,7 +34,7 @@ $syscallUserPath = Join-Path $Root 'src\include\syscall_user.inc'
 $displayPath = Join-Path $Root 'src\kernel\drivers\display.asm'
 $usermodePath = Join-Path $Root 'src\kernel\proc\usermode.asm'
 $windowPath = Join-Path $Root 'src\kernel\gui\window.asm'
-$corePath = Join-Path $Root 'src\kernel\core\main.asm'
+$inputDispatchPath = Join-Path $Root 'src\kernel\nexushlk\input_dispatch.nxh'
 $appsPath = Join-Path $Root 'build\nxh\explorer.asm'
 $wrapperPath = Join-Path $Root 'src\user\apps.asm'
 $launchPath = Join-Path $Root 'src\user\apps\launch.inc'
@@ -104,7 +104,7 @@ Assert-Match $uefiBuildPath "NEXUS_CACHE32_AP_STARTUP'[\s\S]*NEXUS_ENABLE_RING3_
 Assert-Match $biosBuildPath "PerfProfile -eq 'Cache32Max'[\s\S]*NEXUS_SMP'[\s\S]*NEXUS_CACHE32_AP_STARTUP'[\s\S]*NEXUS_ENABLE_RING3_AP" 'BIOS Cache32Max AP startup builds must enable SMP, AP startup, and ring-3 AP callback routing.'
 Assert-Match $usermodePath 'FN_BEGIN call_app_l3_packed' 'AP-routed callbacks require the packed call_app_l3 thunk.'
 Assert-Match $windowPath 'call dispatch_app_callback' 'Window manager callbacks must go through dispatch_app_callback.'
-Assert-Match $corePath 'call dispatch_app_callback' 'Main-loop app input callbacks must go through dispatch_app_callback.'
+Assert-Match $inputDispatchPath 'call dispatch_app_callback' 'Main-loop app input callbacks must go through dispatch_app_callback.'
 
 Write-Host '[guards] Checking window bounds fix...' -ForegroundColor Yellow
 Assert-Match $windowPath '(wm_close_window:|FN_BEGIN wm_close_window)[\s\S]*cmp rdi, MAX_WINDOWS[\s\S]*jae \.close_ret' 'wm_close_window must use an unsigned bounds check.'
@@ -116,8 +116,8 @@ Assert-Match $launchPath 'kernel_open_file_in_media:[\s\S]*APP_SLOT_BMP_FILE_SZ[
 Assert-Match $mediaViewerPath 'app_hl_media_mp_frame - app_blob_start[\s\S]*nx_media_draw_nba_controls' 'Media Player NBA renderer must use per-window frame state and draw controls.'
 Assert-Match $nxhMediaPath 'fn click\(win, cx, cy\)[\s\S]*APP_SLOT_BMP_FILE_OFF[\s\S]*mp_handle_click' 'Media Player click handler must delegate to media_player lib (mp_handle_click) so the timeline widget stays reusable across apps.'
 Assert-Match $bootAnimGenPath 'poster if i == 0 else render_frame' 'BOOTANIM.NBA frame 0 must be a non-black poster for Media Player preview.'
-Assert-Match $corePath 'FN_BEGIN process_mouse[\s\S]*call mouse_check_moved[\s\S]*cmp al, \[process_mouse_last_buttons\][\s\S]*mov \[process_mouse_last_buttons\], dl' 'Mouse processing must notice button-only changes so release events clear held-click state.'
-Assert-Match $corePath '\.pk_key_lclick:[\s\S]*call wm_handle_mouse_event[\s\S]*\.pk_kc_handled:[\s\S]*mov byte \[mouse_buttons\], 0[\s\S]*xor edx, edx[\s\S]*call wm_handle_mouse_event' 'Keyboard/serial left-click must send both mouse down and mouse up so later Explorer clicks are not treated as a held button.'
+Assert-Match $inputDispatchPath 'fn process_mouse\(\)[\s\S]*call mouse_check_moved[\s\S]*cmp al, \[process_mouse_last_buttons\][\s\S]*mov \[process_mouse_last_buttons\], dl' 'Mouse processing must notice button-only changes so release events clear held-click state.'
+Assert-Match $inputDispatchPath '\.pk_key_lclick:[\s\S]*call wm_handle_mouse_event[\s\S]*\.pk_kc_handled:[\s\S]*mov byte \[mouse_buttons\], 0[\s\S]*xor edx, edx[\s\S]*call wm_handle_mouse_event' 'Keyboard/serial left-click must send both mouse down and mouse up so later Explorer clicks are not treated as a held button.'
 
 Write-Host '[guards] Checking Explorer Enter stack fix...' -ForegroundColor Yellow
 Assert-NotMatch $appsPath 'app_explorer_key:[\s\S]*?\.exp_key_enter:[\s\S]*?push rax[\s\S]*?\.exp_key_done:' 'Explorer Enter path must not push an unmatched rax before the shared epilogue.'

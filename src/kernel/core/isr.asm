@@ -72,6 +72,9 @@ ISR_NOERRCODE 31
 ; Common ISR handler for exceptions
 ; auto-wrapped (FN_BEGIN emits global): global isr_common_stub
 FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
+    push rax
+    KPTI_SWITCH_TO_KERNEL_CR3 rax
+    pop rax
     cld
     
     ; Nested exception guard
@@ -226,6 +229,28 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     SER 13
     SER 10
 
+    ; DEBUG (blank-app #UD diagnosis): dump 16 bytes at the faulting RIP so we can
+    ; identify the exact offending opcode. Only for ring-3 faults (CS[1:0]==3) so
+    ; RIP is a mapped app-arena VA (kernel pages may be unmapped under KPTI). SMAP
+    ; is off in this diag build, so a ring-0 read of the user page won't #AC.
+    mov rax, [rsp + 160]     ; saved CS
+    and rax, 3
+    cmp rax, 3
+    jne .skip_op_dump
+    SER 'O'
+    SER 'P'
+    SER '='
+    mov rsi, [rsp + 152]     ; faulting RIP
+    mov rdi, [rsi]           ; bytes [0..7]
+    call ser_print_hex64
+    SER ' '
+    mov rsi, [rsp + 152]
+    mov rdi, [rsi + 8]       ; bytes [8..15]
+    call ser_print_hex64
+    SER 13
+    SER 10
+.skip_op_dump:
+
 %ifdef ENABLE_TRACE
     call trace_dump_serial
     call trace_dump_screen
@@ -255,6 +280,12 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     jne .isr_canary_bad
     add rsp, 32              ; Pop canary, pad, error code, interrupt number
     lock dec dword [rel nested_exc_count]
+    mov rax, [rsp + 8]
+    and rax, 3
+    cmp rax, 3
+    jne .isr_no_kpti_user
+    KPTI_SWITCH_TO_USER_CR3 rax
+.isr_no_kpti_user:
     iretq
 .isr_canary_bad:
     mov rdi, rax
@@ -311,6 +342,9 @@ IRQ_STUB 18, 50    ; Advanced Touchpad (APIC)
 ; Common IRQ handler
 ; auto-wrapped (FN_BEGIN emits global): global irq_common_stub
 FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
+    push rax
+    KPTI_SWITCH_TO_KERNEL_CR3 rax
+    pop rax
     sub rsp, 8                                  ; canary alignment pad
     push qword [rel kernel_canary]              ; canary push
     PUSH_ALL
@@ -382,6 +416,12 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     cmp rax, [rel kernel_canary]
     jne .irq_canary_bad
     add rsp, 32              ; Pop canary, pad, error code, interrupt number
+    mov rax, [rsp + 8]
+    and rax, 3
+    cmp rax, 3
+    jne .irq_no_kpti_user
+    KPTI_SWITCH_TO_USER_CR3 rax
+.irq_no_kpti_user:
     iretq
 .irq_canary_bad:
     mov rdi, rax

@@ -50,6 +50,7 @@ extern memcpy
 extern cursor_mode
 extern call_app_l3
 extern dispatch_app_callback           ; Stage 2d cross-core chokepoint
+extern cpi_verify_callback             ; CPI-lite: authenticate tagged callback ptrs
 extern call_app_l3_packed
 extern process_submit_job
 extern workqueue_done
@@ -1073,6 +1074,22 @@ FN_BEGIN wm_handle_mouse_event, 3, 0, FN_RET_SCALAR
     mov r8, [rax + WIN_OFF_CLICKFN]
     test r8, r8
     jz .set_focus
+    ; The stored CLICKFN is CPI-tag-signed at install time (cpi_sign_callback in
+    ; SYS_WM_HANDLERS stamps a tag into the top 16 bits). Authenticate and STRIP
+    ; the tag to recover the raw kernel-image VA before interning/dispatching —
+    ; exactly as the KEYFN dispatch in main.asm does. Dispatching the still-tagged
+    ; value iretq's to a non-canonical RIP (0xXXXX0000........) -> ring-3 #GP, i.e.
+    ; the click freeze. cpi_verify_callback returns the raw fn in rax (or panics on
+    ; a forged tag); rax currently holds &window, so preserve it across the call.
+    push rax                          ; &window
+    mov rdi, r8                       ; stored (tagged) click_fn
+    mov rsi, rax                      ; &window
+    mov rdx, WIN_OFF_CLICKFN          ; field offset bound into the tag
+    call cpi_verify_callback
+    mov r8, rax                       ; raw (untagged) click_fn
+    pop rax                           ; restore &window
+    test r8, r8
+    jz .set_focus
     test qword [wm_last_buttons], 1
     jnz .client_click_already_down
 
@@ -1181,6 +1198,20 @@ FN_BEGIN wm_handle_mouse_event, 3, 0, FN_RET_SCALAR
     mov r11, [rax + WIN_OFF_RCLICKFN]
     test r11, r11
     jz .mouse_done
+    ; CPI: authenticate + STRIP the tag before interning (mirror .client_click).
+    ; RCLICKFN is cpi_sign_callback'd at install (launch.inc); interning the
+    ; still-tagged pointer dispatches to a non-canonical RIP -> ring-3 #GP (the
+    ; freeze). cpi_verify_callback clobbers rax, and rax holds &window (live
+    ; below), so preserve it across the call.
+    push rax                          ; &window
+    mov rdi, r11                       ; stored (tagged) rclick_fn
+    mov rsi, rax                       ; &window
+    mov rdx, WIN_OFF_RCLICKFN          ; field offset bound into the tag
+    call cpi_verify_callback
+    mov r11, rax                       ; raw (untagged) rclick_fn
+    pop rax                            ; restore &window
+    test r11, r11
+    jz .mouse_done
     mov rdx, r12
     sub rdx, [rax + WIN_OFF_X]
     sub rdx, BORDER_WIDTH
@@ -1261,10 +1292,43 @@ FN_BEGIN wm_handle_mouse_event, 3, 0, FN_RET_SCALAR
     sub r8, [wm_drag_off_x]
     mov r9, r13
     sub r9, [wm_drag_off_y]
-    ; Clamp Y
-    cmp r9, -10
-    jge .drag_clamp_ok
-    mov r9, -10
+    ; Keep the WHOLE window on-screen. App draw routines that write straight
+    ; into the framebuffer (notably the media player's scaler, which historically
+    ; clamped only vertically) fault the entire OS if handed a client rect that
+    ; extends past a screen edge. Clamp X to [0, scr_width - w] and Y to
+    ; [0, scr_height - h]; pin to 0 if the window is larger than the screen.
+    mov rax, rbx
+    imul rax, WINDOW_STRUCT_SIZE
+    add rax, WINDOW_POOL_ADDR
+    ; --- X ---
+    mov r10d, [scr_width]
+    sub r10d, [rax + WIN_OFF_W]          ; max_x = scr_width - w
+    movsxd r10, r10d
+    jns .clamp_x_max
+    xor r10, r10                          ; wider than screen -> pin left
+.clamp_x_max:
+    cmp r8, r10
+    jle .clamp_x_lo
+    mov r8, r10
+.clamp_x_lo:
+    test r8, r8
+    jns .clamp_y
+    xor r8, r8
+.clamp_y:
+    ; --- Y ---
+    mov r11d, [scr_height]
+    sub r11d, [rax + WIN_OFF_H]          ; max_y = scr_height - h
+    movsxd r11, r11d
+    jns .clamp_y_max
+    xor r11, r11                          ; taller than screen -> pin top
+.clamp_y_max:
+    cmp r9, r11
+    jle .clamp_y_lo
+    mov r9, r11
+.clamp_y_lo:
+    test r9, r9
+    jns .drag_clamp_ok
+    xor r9, r9
 .drag_clamp_ok:
     ; Mark OLD position edges as dirty (to erase/restore)
     push r8
@@ -1335,6 +1399,21 @@ FN_BEGIN wm_handle_mouse_event, 3, 0, FN_RET_SCALAR
     test qword [rax + WIN_OFF_FLAGS], WF_ACTIVE
     jz .app_drag_release
     mov r11, [rax + WIN_OFF_DRAGFN]
+    test r11, r11
+    jz .app_drag_release
+    ; CPI: authenticate + STRIP the tag before interning (mirror .client_click).
+    ; DRAGFN is cpi_sign_callback'd at install (launch.inc); interning the
+    ; still-tagged pointer dispatches to a non-canonical RIP -> ring-3 #GP (the
+    ; drag freeze on file-open, since a click latches a drag session).
+    ; cpi_verify_callback clobbers rax, and rax holds &window (live below), so
+    ; preserve it across the call.
+    push rax                          ; &window
+    mov rdi, r11                       ; stored (tagged) drag_fn
+    mov rsi, rax                       ; &window
+    mov rdx, WIN_OFF_DRAGFN            ; field offset bound into the tag
+    call cpi_verify_callback
+    mov r11, rax                       ; raw (untagged) drag_fn
+    pop rax                            ; restore &window
     test r11, r11
     jz .app_drag_release
 
