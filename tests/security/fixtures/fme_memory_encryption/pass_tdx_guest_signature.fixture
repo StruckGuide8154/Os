@@ -1,0 +1,7 @@
+checker=fme_memory_encryption_check
+expect=pass
+case=tdx_leaf21_signature_reports_confidential_active
+cpuid21_ebx=0x65746E49
+cpuid21_edx=0x5844546C
+cpuid21_ecx=0x20202020
+expected_confidential_status=SECST_ACTIVE

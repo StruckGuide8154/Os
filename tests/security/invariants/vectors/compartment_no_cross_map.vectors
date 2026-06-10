@@ -1,0 +1,12 @@
+# INV-COMPARTMENT-NO-CROSS-MAP vectors —
+# predicate inv_compartment_no_cross_map(comp_region, target_region, map_present).
+invariant=INV-COMPARTMENT-NO-CROSS-MAP
+predicate=inv_compartment_no_cross_map
+# no map authority asserted — nothing is mapped, vacuously safe
+case=accept | 2, 9, 0
+# map authority over the holder's OWN region
+case=accept | 5, 5, 1
+case=accept | 0, 0, 1
+# THE violation: map authority targeting a foreign compartment region
+case=reject | 2, 9, 1
+case=reject | 5, 0, 1

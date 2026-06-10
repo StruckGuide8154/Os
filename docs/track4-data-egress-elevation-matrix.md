@@ -127,6 +127,18 @@ each artifact's row above is defeated by ≥2 independent barriers.
 
 ## Honest gaps (NOT closed by this document)
 
+- **Formal proof of the three diversification barriers DONE (2026-06-10).**
+  Barriers (1) per-boot ephemerality, (2)/(4) per-slot key+ASLR confinement, and
+  (3) per-launch syscall permutation are now machine-checked theorems in the
+  Track-3 proven-invariant kernel, not merely static audit: `INV-EPHEMERAL-NO-REPLAY`,
+  `INV-PER-SLOT-KEY-CONFINED`, `INV-SYSCALL-PERM-PER-LAUNCH` in
+  `src/tools/security/invariant_check.nxh`, each proven exhaustively over its
+  bounded context space (`scripts/test/eval_invariants.py --exhaustive`, 32,768
+  evaluations apiece). They encode the load-bearing claim directly: a secret
+  bound to context A (boot epoch / slot id / launch permutation) fails closed
+  when presented in any context B. This closes the *formal* half of "leak ≠
+  elevation" for the three diversification pivots; the planted-leak *boot* test
+  below remains the empirical complement.
 - **Dynamic proof DONE (2026-06-09).** The two dynamic test scripts now live at
   `scripts/test/test_track4_planted_leak.ps1` (planted-leak negative test —
   three tiers: symbol audit, two-boot ephemerality proof, structural barrier

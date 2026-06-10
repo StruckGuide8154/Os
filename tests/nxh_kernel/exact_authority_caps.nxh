@@ -1,0 +1,24 @@
+module "exact_authority_caps";
+
+# Exact-authority capability split (nhl-beyond-zero-trust-todo.md). This module
+# declares ONLY the narrow per-authority caps it needs — never the broad
+# kernel_priv — proving each privileged intrinsic is gated by its own authority.
+unsafe kernel_creg;     # control-register writes
+unsafe kernel_pgtable;  # page-table / TLB authority
+unsafe kernel_dtable;   # descriptor-table loads
+unsafe kernel_idtable;  # interrupt-table loads
+
+global nxh_test_exact_authority_caps;
+
+data test_dtr: 10 = 0;
+
+fn nxh_test_exact_authority_caps(cr0, cr3, cr4) {
+    write_cr0(cr0);    # kernel_creg
+    write_cr4(cr4);    # kernel_creg
+    write_cr3(cr3);    # kernel_pgtable
+    invlpg(&test_dtr); # kernel_pgtable
+    lgdt(&test_dtr);   # kernel_dtable
+    ltr(0x30);         # kernel_dtable
+    lidt(&test_dtr);   # kernel_idtable
+    return cr0;
+}

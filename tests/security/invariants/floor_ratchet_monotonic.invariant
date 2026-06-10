@@ -1,0 +1,12 @@
+# Track 2 anti-rollback: the persisted floor (version/counter/epoch + clock
+# high-water) only ratchets forward. A write that would lower the stored
+# minimum — a rollback of the floor itself — is rejected; equal or higher is
+# accepted. This monotonicity is what makes INV-NO-ROLLBACK durable across a
+# power cycle.
+invariant=INV-FLOOR-RATCHET-MONOTONIC
+title=The persisted anti-rollback floor only moves forward
+statement=A floor ratchet is accepted iff new_floor >= old_floor; any attempt to lower the floor is a violation.
+compromised=An attacker rewinding the persisted floor to re-admit an old artifact
+denied_authority=Lowering the persisted per-class floor minimum
+predicate=inv_floor_ratchet_monotonic
+status=proven

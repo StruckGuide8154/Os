@@ -20,6 +20,23 @@
 #      calling security_threshold_change_valid in the real boot).
 #   6. The same KQUORUM.ENV with a flipped signature byte ->
 #      "[QUORUM] rejected rc=" (non-fatal).
+#   7. RTC/now binding: the kernel logs "[RTCNOW] now=" (the CMOS wallclock
+#      bound into the verifier context at K5), and a KUPDATE.ENV whose
+#      validity window EXPIRED in 2001 (--not-after 1000000000) is rejected
+#      ("[UPDATE] rejected rc=E" = ENVR_ERR_WINDOW) despite valid quorum
+#      signatures -- proving windows are judged against real time.
+#   8. Persistent anti-rollback floors (floor_store.nxh): boot A admits a
+#      validly signed v3 update ("[FLOOR] persisted g="); after a full
+#      power cycle, boot B reloads the floors from the data.img floor
+#      sector ("[FLOOR] loaded g=") and rejects a validly signed v2 update
+#      of the same class ("[UPDATE] rejected rc=10" = ENVR_ERR_DOWNGRADE).
+#   9. Loader-side KERNEL.BIN envelope (the last "no unsigned input"
+#      residual): the build-emitted KERNEL.ENV (kernel-class envelope over
+#      the SHA-256 of the KERNEL.BIN container) verifies against the
+#      pristine loader-read image -> "[KERNSIG] ok n=" (asserted in phase 1);
+#      a KERNEL.ENV whose signed digest does NOT match the image must FAIL
+#      CLOSED ("[KERNSIG] rc=" panic, never "[KERNSIG] ok", no [/BOOTTIME]);
+#      a MISSING KERNEL.ENV must also fail closed.
 #
 # The ESP is a live VVFAT directory (build\esp), so each phase swaps files on
 # disk and reboots a fresh VM. SYSSIG.ENV is restored afterwards.
@@ -43,8 +60,22 @@ $Esp        = Join-Path $BuildDir 'esp\EFI\BOOT'
 $SyssigPath = Join-Path $Esp 'SYSSIG.ENV'
 $KupdPath   = Join-Path $Esp 'KUPDATE.ENV'
 $KquorPath  = Join-Path $Esp 'KQUORUM.ENV'
+$KernEnvPath = Join-Path $Esp 'KERNEL.ENV'
 $SerialPort = 5555
 $SerialLog  = Join-Path $BuildDir 'track2_callsites_serial.log'
+
+function Reset-FloorSector {
+    # Zero the persistent anti-rollback floor sector (floor_store.nxh
+    # FLOOR_LBA = 2) of the QEMU IDE data disk so phase 8 starts from (and
+    # the suite leaves behind) the build-time floors.
+    $dataImg = Join-Path $BuildDir 'data.img'
+    if (-not (Test-Path $dataImg)) { return }
+    $fs = [System.IO.File]::Open($dataImg, 'Open', 'ReadWrite')
+    try {
+        $fs.Seek(2 * 512, 'Begin') | Out-Null
+        $fs.Write((New-Object byte[] 512), 0, 512)
+    } finally { $fs.Close() }
+}
 
 function Stop-QemuIfRunning {
     Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue |
@@ -108,6 +139,7 @@ Write-Host ' Track 2 -- envelope_verify_signed call-site binding (QEMU)' -Foregr
 Write-Host '============================================================' -ForegroundColor Cyan
 
 $syssigBackup = $null
+$kernEnvBackup = $null
 try {
     if (-not $SkipBuild) {
         Write-Host '[track2-callsites] Building UEFI image...' -ForegroundColor Yellow
@@ -127,6 +159,8 @@ try {
     Check 'in-kernel hash-cache hit on re-admit (c=...1)' ($log -match '\[SYSSIG\] ok c=0*1\b')
     Check 'no staged update -> "[UPDATE] none"' ($log.Contains('[UPDATE] none'))
     Check 'no staged quorum change -> "[QUORUM] none"' ($log.Contains('[QUORUM] none'))
+    Check 'RTC wallclock bound into the gate ("[RTCNOW] now=")' ($log.Contains('[RTCNOW] now='))
+    Check 'KERNEL.BIN envelope verified ("[KERNSIG] ok n=")' ($log.Contains('[KERNSIG] ok n='))
     Check 'boot completes ([/BOOTTIME])' ($log.Contains('[/BOOTTIME]'))
 
     # ---- Phase 2: tampered SYSSIG must fail closed ------------------------
@@ -193,10 +227,77 @@ try {
     Check 'tampered quorum change rejected ("[QUORUM] rejected rc=")' ($log.Contains('[QUORUM] rejected rc='))
     Check 'tampered quorum change never accepted' (-not $log.Contains('[QUORUM] accepted'))
     Check 'quorum-change rejection is non-fatal (boot completes)' ($log.Contains('[/BOOTTIME]'))
+    if (Test-Path $KquorPath) { Remove-Item $KquorPath -Force }
+
+    # ---- Phase 7: EXPIRED (validly signed) update rejected vs the live RTC --
+    Write-Host '[track2-callsites] Phase 7: expired KUPDATE.ENV (window ended 2001)...' -ForegroundColor Yellow
+    & python (Join-Path $Root 'scripts\build\write_envelope.py') `
+        --payload $updPayload --out $KupdPath --type update --device-id 1 `
+        --not-after 1000000000 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for expired KUPDATE.ENV' }
+    $log = Boot-AndCapture @('[/BOOTTIME]') $BootTimeoutSec
+    Add-Content $SerialLog "===== PHASE 7 =====`n$log"
+    # ENVR_ERR_WINDOW = 14 = 0xE (ser_print_hex64 prints hex).
+    Check 'expired update rejected vs live clock (rc=...E)' ($log -match '\[UPDATE\] rejected rc=0*E\b')
+    Check 'expired update never accepted' (-not $log.Contains('[UPDATE] accepted'))
+    Check 'window rejection is non-fatal (boot completes)' ($log.Contains('[/BOOTTIME]'))
+    if (Test-Path $KupdPath) { Remove-Item $KupdPath -Force }
+
+    # ---- Phase 8: persistent anti-rollback floors survive a reboot ----------
+    # Boot A admits a validly signed v3 update; floor_store persists the raised
+    # class floor to the data.img floor sector (LBA 2). Boot B then stages a
+    # validly signed v2 update of the SAME class: the reloaded floor must make
+    # it inadmissible (ENVR_ERR_DOWNGRADE = 16 = 0x10) across the power cycle.
+    Write-Host '[track2-callsites] Phase 8: floor persistence across reboot (v3 then v2)...' -ForegroundColor Yellow
+    Reset-FloorSector
+    & python (Join-Path $Root 'scripts\build\write_envelope.py') `
+        --payload $updPayload --out $KupdPath --type update --device-id 1 `
+        --version 3 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for v3 KUPDATE.ENV' }
+    $log = Boot-AndCapture @('[/BOOTTIME]') $BootTimeoutSec
+    Add-Content $SerialLog "===== PHASE 8A =====`n$log"
+    Check 'v3 update accepted (boot A)' ($log.Contains('[UPDATE] accepted'))
+    Check 'raised floor persisted to disk ("[FLOOR] persisted g=")' ($log.Contains('[FLOOR] persisted g='))
+    & python (Join-Path $Root 'scripts\build\write_envelope.py') `
+        --payload $updPayload --out $KupdPath --type update --device-id 1 `
+        --version 2 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for v2 KUPDATE.ENV' }
+    $log = Boot-AndCapture @('[/BOOTTIME]') $BootTimeoutSec
+    Add-Content $SerialLog "===== PHASE 8B =====`n$log"
+    Check 'persisted floors reload on boot B ("[FLOOR] loaded g=")' ($log.Contains('[FLOOR] loaded g='))
+    Check 'superseded v2 update rejected across reboot (rc=...10 DOWNGRADE)' ($log -match '\[UPDATE\] rejected rc=0*10\b')
+    Check 'superseded update never accepted' (-not $log.Contains('[UPDATE] accepted'))
+    Check 'rollback rejection is non-fatal (boot completes)' ($log.Contains('[/BOOTTIME]'))
+    if (Test-Path $KupdPath) { Remove-Item $KupdPath -Force }
+
+    # ---- Phase 9: loader-side KERNEL.BIN envelope fails closed --------------
+    Write-Host '[track2-callsites] Phase 9: KERNEL.ENV digest mismatch + missing file...' -ForegroundColor Yellow
+    $kernEnvBackup = [System.IO.File]::ReadAllBytes($KernEnvPath)
+    # A validly signed kernel-class envelope over the WRONG digest: sign 32
+    # bytes that are not the image hash. Crypto passes; the payload-vs-image
+    # compare must panic ('KSG3').
+    $wrongDigest = Join-Path $BuildDir 'track2_test_wrong_kdigest.bin'
+    [System.IO.File]::WriteAllBytes($wrongDigest, (New-Object byte[] 32))
+    & python (Join-Path $Root 'scripts\build\write_envelope.py') `
+        --payload $wrongDigest --out $KernEnvPath --type kernel --device-id 1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for wrong-digest KERNEL.ENV' }
+    $log = Boot-AndCapture @('[KERNSIG] rc=', '[/BOOTTIME]') $BootTimeoutSec
+    Add-Content $SerialLog "===== PHASE 9A =====`n$log"
+    Check 'wrong-digest KERNEL.ENV fails closed ("[KERNSIG] rc=")' ($log.Contains('[KERNSIG] rc='))
+    Check 'wrong-digest KERNEL.ENV never accepted' (-not $log.Contains('[KERNSIG] ok'))
+    Check 'boot does NOT complete on kernel-envelope mismatch' (-not $log.Contains('[/BOOTTIME]'))
+    Remove-Item $KernEnvPath -Force
+    $log = Boot-AndCapture @('[KERNSIG] rc=', '[/BOOTTIME]') $BootTimeoutSec
+    Add-Content $SerialLog "===== PHASE 9B =====`n$log"
+    Check 'missing KERNEL.ENV fails closed ("[KERNSIG] rc=")' ($log.Contains('[KERNSIG] rc='))
+    Check 'boot does NOT complete without KERNEL.ENV' (-not $log.Contains('[/BOOTTIME]'))
+    [System.IO.File]::WriteAllBytes($KernEnvPath, $kernEnvBackup)
 } finally {
     if ($syssigBackup) { [System.IO.File]::WriteAllBytes($SyssigPath, $syssigBackup) }
+    if ($kernEnvBackup) { [System.IO.File]::WriteAllBytes($KernEnvPath, $kernEnvBackup) }
     if (Test-Path $KupdPath) { Remove-Item $KupdPath -Force }
     if (Test-Path $KquorPath) { Remove-Item $KquorPath -Force }
+    Reset-FloorSector
     Stop-QemuIfRunning
 }
 

@@ -1,3 +1,4 @@
+# THREAT: a non-canonical/ambiguous encoding parsing differently than it was signed, enabling a signature-bypass.
 # NHL-native canonical schema checker kernel.
 #
 # The caller owns byte traversal. This module owns the policy decisions for

@@ -61,7 +61,7 @@ They are complementary, not duplicates: the tracks build the architecture; the
 | `nhl-beyond-zero-trust-todo.md` | master checklist + Extended Hardening + Kill-Chain Defense + HW mem-enc | active; master P0/P1 mostly `[ ]`; Extended/Kill-Chain are net-new |
 | `track1-repo-enforcement-todo.md` | repo enforcement (no new .asm/.inc, presubmits, CI) | **DONE / green** |
 | `track2-signed-everything-todo.md` | signed-artifact envelope + threshold | **reader landed** (2026-06-09): in-kernel `envelope_reader.nxh` in the image + full reject matrix executed by `eval_envelope.py`; threshold signing, host writer, boot/update call-site binding TODO |
-| `track3-sel4-validity-todo.md` | seL4-style authority invariants | 12 invariants **`proven`** (exhaustive bounded checker, 2.28M evaluations); recovery-bypass / confused-deputy / app-mem-isolation added 2026-06-10 |
+| `track3-sel4-validity-todo.md` | seL4-style authority invariants | **COMPLETE / CLOSED 2026-06-10** — 12 invariants `proven` (2.28M evaluations) AND P3 mapping done: authority bitmasks derived from real signed policy (`derive_authority.py`, 194 checks in the runner); proofs + containment claim table in `track3-invariant-proofs.md` |
 | `track4-ram-secure-erasure-todo.md` | RAM-only/volatile + secure-erasure + HW FME (TME/SME) + leak≠elevation | Part A landed; Part B partial; Part C detect-only; Part D matrix audited |
 | `track4-data-egress-elevation-matrix.md` | Part D leak≠elevation matrix: artifact × barrier, with code citations | **static audit DONE**; planted-leak negative test still `[ ]` |
 | `track5-hypervisor-monitor-todo.md` | **all-vendor hardware** monitor tier — the two irreducible-hardware guarantees only (G1 privilege-below-ring-0 to make the floor un-disableable; G2 IOMMU device-DMA), abstracted across Intel VT-x/VT-d, AMD SVM/AMD-Vi, ARM EL2/SMMUv3, RISC-V H-ext/IOMMU behind one `mon_hal` | **new, design only**; opportunistic; hardens Track 6 |
@@ -142,12 +142,34 @@ Build: monolithic `nasm -f bin` on `src/kernel/kernel_build.asm` via
   (`security_threshold_change_valid` now enforced at a real call site) and
   ratchets the active per-class quorum for all later admissions; stolen-key
   negative suite (one key/build server/update server/recovery key) green.
-  Next: the "Residuals" list (loader-side KERNEL.BIN envelope, RTC/now
-  binding, persistent anti-rollback floors).
-- **Track 3**: DONE through P2 — all 12 invariants `proven` (exhaustive
-  bounded checker; recovery non-bypass, confused-deputy IPC, and app
-  memory-isolation landed 2026-06-10). Remaining: bind authority bitmasks to
-  the real signed capability policy (P3 mapping work).
+  **RTC/now binding LANDED (2026-06-10)** — rtc_time.nxh (zero-asm CMOS RTC
+  -> unix seconds) bound into the gate's verifier clock at K5, floor-clamped
+  + forward-ratcheting; validity windows re-judged on every admit incl.
+  hash-cache hits (eval_ed25519 §9 + QEMU phase 7: an expired-but-signed
+  update is rejected with ENVR_ERR_WINDOW). **Persistent anti-rollback
+  floors LANDED (2026-06-10)** — floor_store.nxh keeps the per-class
+  version/counter/epoch minimums (+ the clock high-water) in a checksummed
+  data.img sector (FLOOR_LBA=2, raw ATA PIO, fail-soft without IDE media);
+  loaded at K5 before any admission, ratcheted by every accepted envelope,
+  persisted after the call sites (eval_ed25519 §10 + QEMU phase 8: a v3
+  admit in boot A makes a validly signed v2 inadmissible in boot B across
+  a power cycle). **Loader-side KERNEL.BIN envelope LANDED (2026-06-10)** —
+  the build signs SHA-256(KERNEL.BIN container) into a kernel-class 3-of
+  KERNEL.ENV; the loader publishes it plus the pristine container read
+  buffer (VBE 0xB0..0xC8); kernel_env_verify_boot (envelope_gate.nxh, K5)
+  re-hashes and fail-closed compares ('KSG*' panics; QEMU phase 9 of
+  test_track2_envelope_callsites.ps1 green). Track 2 core is COMPLETE;
+  minor residuals: device_id pinned to 1, unused artifact classes,
+  NVMe/USB-boot floor write-back.
+- **Track 3**: **COMPLETE / CLOSED (2026-06-10)** — all 12 invariants `proven`
+  AND the P3 mapping landed: `scripts/test/derive_authority.py` derives the
+  authority bitmasks from the real signed policy (app manifests / policy graph
+  / compiler unsafe caps over the signed build list / artifact-class quorums)
+  and re-proves the invariants against them inside the Track-3 runner.
+  Theorems, bounds, state counts, and the containment claim table live in
+  `docs/track3-invariant-proofs.md` (read its honesty statement before
+  claiming anything). Extensions follow its maintenance section without
+  reopening the track.
 - **Track 4**: Part A volatile landed; Part C TME/SME detection scaffold done;
   Part D exfil→elevation matrix audited (`track4-data-egress-elevation-matrix.md`). Next:
   the Part D **planted-leak negative test** + the `pmemsave` RAM-dump grep (the

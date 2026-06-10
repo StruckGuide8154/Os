@@ -1,0 +1,15 @@
+module "exact_authority_wrong";
+
+# Negative fixture: declares ONLY the control-register authority but reaches for
+# a descriptor-table load. Exact-authority gating must reject this — holding
+# kernel_creg does NOT grant kernel_dtable.
+unsafe kernel_creg;
+
+global nxh_test_exact_authority_wrong;
+
+data test_dtr: 10 = 0;
+
+fn nxh_test_exact_authority_wrong() {
+    lgdt(&test_dtr);   # requires kernel_dtable -> compile error
+    return 0;
+}

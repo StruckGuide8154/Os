@@ -65,11 +65,18 @@ touching callers.
       `protect_region(region, perms)`, `trap_on(event-set)`, `iommu_map(dev, buf,
       perms)`, `iommu_fault_handler()`, `status()`. Vendor back-ends register
       against it. `modeled`
-- [ ] Capability probe that selects a back-end at boot and publishes the chosen
+- [x] Capability probe that selects a back-end at boot and publishes the chosen
       tier + per-feature availability via `SYS_SYSINFO` (200..240 range, same
       fail-soft pattern as CET/SMAP/KPTI/TME rows). `modeled`
-- [ ] Fallback contract: if `detect()` finds nothing, `mon_hal` reports
+      `mon_hal_select_backend` (in `src/tools/security/mon_hal_detect.nxh`) picks
+      the tier from the per-vendor `*_usable` predicates; `mon_hal_status` maps it
+      to a SYS_SYSINFO row.
+- [x] Fallback contract: if `detect()` finds nothing, `mon_hal` reports
       `floor-only` and Track 6 runs unchanged on the software floor. `tested-tcg`
+      `mon_hal_select_backend` returns `MONHAL_TIER_FLOOR_ONLY` for every
+      non-virtualizable case and `mon_hal_status` reports `FLOOR_ONLY` (a distinct
+      "software floor" row, never an error) — the only leg actually reachable on
+      QEMU TCG.
 
 ---
 
@@ -81,8 +88,11 @@ events that would let a compromised ring-0 disable the Track 6 compartments
 (writes to CR0.WP / CR3 / CR4, EFER, page-table roots, illegal privileged insns).
 
 ### Intel VT-x
-- [ ] Detect: `CPUID.1:ECX.VMX[5]`, `IA32_FEATURE_CONTROL` lock + VMXON-outside-SMX;
+- [x] Detect: `CPUID.1:ECX.VMX[5]`, `IA32_FEATURE_CONTROL` lock + VMXON-outside-SMX;
       EPT/unrestricted-guest via `IA32_VMX_PROCBASED_CTLS2`. `modeled`
+      `mon_hal_vmx_usable` (CPUID + FEATURE_CONTROL lock/outside-SMX semantics),
+      `mon_hal_vmx_ept_supported` and `mon_hal_vmx_unrestricted_guest`
+      (PROCBASED_CTLS2 high-dword allowed-1 bits 33/39).
 - [ ] VMXON region; VMCS for kernel-as-guest (capture CR/GDT/IDT/TR/RIP/RSP/RFLAGS;
       host-state → monitor). `modeled`
 - [ ] Identity **EPT**; VMLAUNCH; exit handler resumes transparently. Markers
@@ -90,20 +100,25 @@ events that would let a compromised ring-0 disable the Track 6 compartments
 - [ ] Trap CR0/CR4/CR3 writes + privileged insns that would disarm the floor. `tested-accel`
 
 ### AMD SVM (AMD-V)
-- [ ] Detect: `CPUID 8000_0001:ECX.SVM[2]`; enable `EFER.SVME`; NPT via VMCB. `modeled`
-      (extends the existing fme/SME detect scaffold.)
+- [~] Detect: `CPUID 8000_0001:ECX.SVM[2]`; enable `EFER.SVME`; NPT via VMCB. `modeled`
+      (extends the existing fme/SME detect scaffold.) DETECT done:
+      `mon_hal_svm_usable` checks CPUID + `VM_CR.SVMDIS` (firmware fuse-off); the
+      `EFER.SVME` enable + NPT/VMCB bring-up remains the `tested-accel` half.
 - [ ] VMCB for kernel-as-guest; identity **NPT**; `VMRUN`; `#VMEXIT` handler. `tested-tcg` → `tested-accel`
 - [ ] Intercept CR/EFER writes + privileged insns. `tested-accel`
 
 ### ARM (AArch64) virtualization
-- [ ] Detect EL2 availability / VHE (`ID_AA64MMFR1_EL1.VH`). `modeled`
+- [x] Detect EL2 availability / VHE (`ID_AA64MMFR1_EL1.VH`). `modeled`
+      `mon_hal_arm_el2_usable` (`ID_AA64PFR0_EL1.EL2` field) +
+      `mon_hal_arm_vhe_present` (`ID_AA64MMFR1_EL1.VH` field).
 - [ ] Run the kernel at EL1 under a monitor at EL2; identity **stage-2** translation
       (`VTTBR_EL2`/`VTCR_EL2`). `modeled` → `tested-accel`
 - [ ] Trap via `HCR_EL2` (TVM/TRVM/privileged-access traps) the operations that
       would disable the floor. `tested-accel`
 
 ### RISC-V hypervisor extension
-- [ ] Detect the H-extension (`misa` H bit / SBI). `modeled`
+- [x] Detect the H-extension (`misa` H bit / SBI). `modeled`
+      `mon_hal_riscv_h_usable` checks `misa` bit 7 (H = letter-index 7).
 - [ ] Run the kernel in VS-mode under HS-mode monitor; identity **G-stage**
       (two-stage) translation (`hgatp`). `modeled` → `tested-accel`
 - [ ] Trap supervisor CSR writes that would disarm the floor. `tested-accel`

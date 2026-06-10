@@ -44,7 +44,7 @@ Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P2: seL4 Validity Track" and
       predicate result to the theorem table before the runner passes.
 - [x] Wired into the verification entry point.
 
-## P2 — define the property set precisely (status: modeled → none yet tested)
+## P2 — define the property set precisely (status: all 12 `proven`)
 
 - [x] capability derivation invariant (no amplification)        — INV-CAP-DERIVATION
 - [x] authority confinement (no single-domain global mint)      — INV-NO-GLOBAL-MINT
@@ -96,14 +96,36 @@ For EVERY invariant add positive + negative test vectors that call the predicate
 
 ## P2 — map the model onto the real system (the hard part)
 
-- [ ] Map the bitmask authority model onto the actual capability/policy schema
-      (`policy_graph_check.nxh` + the real domain definitions once Trust
-      Partitioning lands).
-- [ ] Map compiler unsafe capabilities to authority-graph edges (a module that
-      can write CR3 holds AUTH over page-table persistence, etc.).
-- [ ] Map signed artifacts to TCB changes (which signatures expand authority).
-- [ ] Generate the domain authority bitmasks from the signed capability policy
-      rather than hand-asserting them, so the invariants check *real* config.
+DONE (2026-06-10): `scripts/test/derive_authority.py` (run by the Track-3
+runner inside `test_nhl_security_guards.ps1`) GENERATES the authority bitmasks
+from the four real policy sources and re-proves the invariants against them
+(~194 checks, fail-closed; detection meta-tested with a planted PTE-writer
+violation). Full mapping + derivation record: `docs/track3-invariant-proofs.md`.
+
+- [x] Map the bitmask authority model onto the actual capability/policy schema:
+      per-domain obtainable authority is enumerated through the REAL
+      `security_policy_graph_edge_is_valid` / `requires_threshold` predicates
+      (interpreted from production NHL source) over all (src, dst, cap,
+      threshold). New domains added later (e.g. Trust Partitioning) are picked
+      up automatically — the derivation enumerates the module's constants.
+- [x] Map compiler unsafe capabilities to authority-graph edges: each module in
+      the signed `$KernelModules` build list is scanned for `unsafe <cap>;`
+      declarations (compiler-enforced via `_require_cap`) and `nk_pt_window`
+      bracketing; kernel_io → AUTH_DMA_MAP, PTE-writer → AUTH_MEMORY_GRANT.
+      Named bindings (scheduler = frame_pacing+cpu_acct, ipc/dispatch =
+      input_dispatch+net_dhcp_dispatch) derive mask 0x00 and satisfy their
+      invariants; the policy modules themselves hold zero capabilities.
+- [x] Map signed artifacts to TCB changes: artifact class → TCB authority
+      (BOOT/KERNEL/HYPERVISOR/UPDATE/RECOVERY → AUTH_GLOBAL, POLICY/CONFIG →
+      AUTH_INSTALL_POLICY, DRIVER → AUTH_DMA_MAP, APP → derived app max),
+      checked against the real `security_threshold_class_min_count` /
+      `class_quorum_ok` tables: every TCB-expanding class needs ≥2 (global
+      classes ≥3) signatures; single-key expansion rejected by the predicates.
+- [x] Generate the domain authority bitmasks from the signed capability policy
+      rather than hand-asserting them: app masks derive from the real
+      `MANIFEST_*` table in `syscall_caps.inc` (inside the KERNEL.ENV-signed
+      image); all 10 manifests lack all six non-app authorities, max app
+      authority is AUTH_PERSIST, within the derived DOMAIN_APP bound.
 
 ## P2 — promote `tested` → `proven` (long horizon, do not overclaim)
 
@@ -112,17 +134,34 @@ For EVERY invariant add positive + negative test vectors that call the predicate
       check ALL states per invariant by brute force).
 - [x] Add an exhaustive checker that proves each invariant holds over the full
       bounded state space (this is a real, if modest, machine-checked result).
-- [ ] Write proof-oriented docs per P0 invariant stating the theorem, the bound,
-      and the checked state count.
-- [ ] Keep a precise containment claim table: component → authority it cannot
-      obtain, with the invariant id and proof status.
+- [x] Write proof-oriented docs per P0 invariant stating the theorem, the bound,
+      and the checked state count. DONE (2026-06-10):
+      `docs/track3-invariant-proofs.md` §1 — all 12 theorems with exact bounds;
+      2,278,404 predicate evaluations total, zero mismatches.
+- [x] Keep a precise containment claim table: component → authority it cannot
+      obtain, with the invariant id and proof status. DONE (2026-06-10):
+      `docs/track3-invariant-proofs.md` §3, including the real-config binding
+      column (which derivation source backs each claim).
 
-## Done definition for Track 3
+## Done definition for Track 3 — COMPLETE 2026-06-10
 
-- [ ] Every chosen property has a `modeled` predicate, `tested` vectors, and a
+- [x] Every chosen property has a `modeled` predicate, `tested` vectors, and a
       `proven` exhaustive check over the bounded authority space.
-- [ ] The authority bitmasks are derived from real signed policy, not hand-set.
-- [ ] A containment claim table maps each single-component compromise to the
-      authority it provably cannot gain.
-- [ ] No claim exceeds what is checked; hardware-total-compromise is explicitly
-      out of scope.
+      (12 invariants; vectors + exhaustive checks run by
+      `test_nhl_invariants.ps1` inside the guards entry point.)
+- [x] The authority bitmasks are derived from real signed policy, not hand-set.
+      (`scripts/test/derive_authority.py`; sources: signed app manifests,
+      policy graph, compiler unsafe caps over the signed build list,
+      artifact-class quorum tables.)
+- [x] A containment claim table maps each single-component compromise to the
+      authority it provably cannot gain. (`docs/track3-invariant-proofs.md` §3.)
+- [x] No claim exceeds what is checked; hardware-total-compromise is explicitly
+      out of scope. (Honesty statement at the top of the proofs doc: these are
+      exhaustive bounded checks + mechanical policy derivation, NOT a
+      code-to-spec refinement proof; below-ring-0 / DMA / physical RAM capture
+      belong to Tracks 4/5.)
+
+Track 3 is CLOSED. Future work that touches it (new invariants, Trust
+Partitioning domains, new compiler capabilities) follows the maintenance
+section of `docs/track3-invariant-proofs.md` — it extends the track without
+reopening it.

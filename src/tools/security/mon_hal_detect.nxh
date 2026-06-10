@@ -1,0 +1,144 @@
+# THREAT: a compromised ring-0 disarming the below-ring-0 floor, or a spoofed capability claim selecting a non-existent monitor tier.
+# NHL-native Track 5 monitor-HAL capability detection (`modeled` maturity).
+#
+# This module owns the vendor-neutral DETECT + back-end-SELECT + FALLBACK half of
+# the `mon_hal` interface. It is pure policy: CPUID/MSR/system-register bit
+# predicates plus the boot-time tier selection, with no privileged-mode entry.
+# Bringing up VMXON/VMRUN/EL2/G-stage (the enter_root/make_guest half) is the
+# separate `tested-accel` work tracked in Track 5 G1; this module is what those
+# back-ends register against and what SYS_SYSINFO publishes.
+#
+# HONEST MATURITY: `modeled`. A predicate returning "usable" means the ISA
+# advertises the virtualization facility and it is not firmware-locked-off â€” NOT
+# that NexusOS has launched a guest under it. The only path proven on TCG is the
+# FALLBACK contract (floor-only); see security claims in the Track 5 doc.
+
+module "security_mon_hal_detect";
+
+global mon_hal_select_backend;
+global mon_hal_vmx_usable;
+global mon_hal_svm_usable;
+global mon_hal_arm_el2_usable;
+global mon_hal_riscv_h_usable;
+global mon_hal_status;
+
+# Architecture tags fed in by the live boot probe (it already knows the ISA).
+const MONHAL_ARCH_X86 = 0;
+const MONHAL_ARCH_ARM = 1;
+const MONHAL_ARCH_RISCV = 2;
+
+# Selected back-end tier (published via SYS_SYSINFO, fail-soft like CET/SMAP).
+const MONHAL_TIER_FLOOR_ONLY = 0;
+const MONHAL_TIER_INTEL_VTX = 1;
+const MONHAL_TIER_AMD_SVM = 2;
+const MONHAL_TIER_ARM_EL2 = 3;
+const MONHAL_TIER_RISCV_H = 4;
+
+# SYS_SYSINFO status codes (shared SECST_* convention).
+const MONHAL_ST_OFF = 0;
+const MONHAL_ST_ACTIVE = 1;
+const MONHAL_ST_FLOOR_ONLY = 2;
+
+# Intel VT-x: CPUID.1:ECX bit 5; IA32_FEATURE_CONTROL (0x3A) bit 0 = lock,
+# bit 2 = VMXON-outside-SMX enable. VMX is usable when supported AND either the
+# control MSR is unlocked (firmware leaves it to the OS) OR it is locked WITH the
+# outside-SMX-enable bit set. A locked MSR without that bit means firmware has
+# fused VMX off.
+const CPUID1_ECX_VMX = 0x20;
+const IA32_FEATURE_CONTROL = 0x3A;
+const FEATCTL_LOCK = 0x01;
+const FEATCTL_VMXON_OUTSIDE_SMX = 0x04;
+
+fn mon_hal_vmx_usable(cpuid1_ecx, feature_control) {
+    if (cpuid1_ecx & CPUID1_ECX_VMX) == 0 { return 0; }
+    if (feature_control & FEATCTL_LOCK) == 0 { return 1; }
+    if (feature_control & FEATCTL_VMXON_OUTSIDE_SMX) != 0 { return 1; }
+    return 0;
+}
+
+# EPT / unrestricted-guest capability lives in the HIGH dword (allowed-1 bits) of
+# IA32_VMX_PROCBASED_CTLS2 (0x48B): bit 33 (high bit 1) = enable-EPT, bit 39
+# (high bit 7) = unrestricted-guest. The identity second-stage map (Track 5 G1)
+# needs EPT; without it the tier degrades toward floor-only.
+const VMX_PROCBASED2_HI_EPT = 0x02;
+const VMX_PROCBASED2_HI_UNRESTRICTED = 0x80;
+
+fn mon_hal_vmx_ept_supported(procbased_ctls2_hi) {
+    if (procbased_ctls2_hi & VMX_PROCBASED2_HI_EPT) != 0 { return 1; }
+    return 0;
+}
+
+fn mon_hal_vmx_unrestricted_guest(procbased_ctls2_hi) {
+    if (procbased_ctls2_hi & VMX_PROCBASED2_HI_UNRESTRICTED) != 0 { return 1; }
+    return 0;
+}
+
+# AMD SVM: CPUID 8000_0001:ECX bit 2. VM_CR (0xC0010114) bit 4 = SVMDIS; if set
+# AND CPUID 8000_000A:EDX bit 2 (SvmLock) reports it locked, SVM is fused off.
+# Usable = advertised AND not disabled-and-locked.
+const CPUID_AMD_EXT1_ECX_SVM = 0x04;
+const MSR_AMD64_VM_CR = 0xC0010114;
+const VM_CR_SVMDIS = 0x10;
+
+fn mon_hal_svm_usable(cpuid_ext1_ecx, vm_cr) {
+    if (cpuid_ext1_ecx & CPUID_AMD_EXT1_ECX_SVM) == 0 { return 0; }
+    if (vm_cr & VM_CR_SVMDIS) != 0 { return 0; }
+    return 1;
+}
+
+# ARM AArch64: EL2 implemented = ID_AA64PFR0_EL1.EL2 (bits 11:8) != 0. VHE =
+# ID_AA64MMFR1_EL1.VH (bits 11:8) != 0. We require EL2 to exist; VHE is reported
+# but not required (a non-VHE EL2 still hosts a stage-2 monitor).
+const ID_AA64PFR0_EL2_SHIFT = 8;
+const ID_AA64MMFR1_VH_SHIFT = 8;
+const AA64_FIELD_MASK = 0x0F;
+
+fn mon_hal_arm_el2_usable(id_aa64pfr0) {
+    let el2 = (id_aa64pfr0 >> ID_AA64PFR0_EL2_SHIFT) & AA64_FIELD_MASK;
+    if el2 != 0 { return 1; }
+    return 0;
+}
+
+fn mon_hal_arm_vhe_present(id_aa64mmfr1) {
+    let vh = (id_aa64mmfr1 >> ID_AA64MMFR1_VH_SHIFT) & AA64_FIELD_MASK;
+    if vh != 0 { return 1; }
+    return 0;
+}
+
+# RISC-V: the hypervisor extension is misa bit (H - A) = bit 7. (Where SBI hides
+# misa from S-mode, the live probe substitutes the SBI-reported value; the bit
+# semantics are identical.)
+const MISA_H_BIT = 0x80;
+
+fn mon_hal_riscv_h_usable(misa) {
+    if (misa & MISA_H_BIT) != 0 { return 1; }
+    return 0;
+}
+
+# Boot-time back-end selection. Each *_usable result is computed by the live
+# probe for the running ISA and passed in; this picks the tier. The FALLBACK
+# contract: anything not virtualization-usable resolves to FLOOR_ONLY, under
+# which Track 6 runs unchanged on the software floor.
+fn mon_hal_select_backend(arch, vmx_usable, svm_usable, arm_el2_usable, riscv_h_usable) {
+    if arch == MONHAL_ARCH_X86 {
+        if vmx_usable != 0 { return MONHAL_TIER_INTEL_VTX; }
+        if svm_usable != 0 { return MONHAL_TIER_AMD_SVM; }
+        return MONHAL_TIER_FLOOR_ONLY;
+    }
+    if arch == MONHAL_ARCH_ARM {
+        if arm_el2_usable != 0 { return MONHAL_TIER_ARM_EL2; }
+        return MONHAL_TIER_FLOOR_ONLY;
+    }
+    if arch == MONHAL_ARCH_RISCV {
+        if riscv_h_usable != 0 { return MONHAL_TIER_RISCV_H; }
+        return MONHAL_TIER_FLOOR_ONLY;
+    }
+    return MONHAL_TIER_FLOOR_ONLY;
+}
+
+# SYS_SYSINFO status mapping. FLOOR_ONLY is reported explicitly (not OFF) so the
+# Settings row reads "monitor: software floor" rather than implying a failure.
+fn mon_hal_status(tier) {
+    if tier == MONHAL_TIER_FLOOR_ONLY { return MONHAL_ST_FLOOR_ONLY; }
+    return MONHAL_ST_ACTIVE;
+}

@@ -253,6 +253,21 @@ VBE_KQUORUM_BASE_OFF    equ 0xA0   ; u64 base of loaded KQUORUM.ENV (0 = none)
 VBE_KQUORUM_SIZE_OFF    equ 0xA8   ; u64 byte length
 KQUORUM_MAX_SIZE        equ 0x2000 ; 8 KiB cap (header + 18B payload + sigs)
 
+; --- Track 2 loader-side KERNEL.BIN envelope (KERNEL.ENV) -------------------
+; The last "no unsigned input" residual: KERNEL.ENV is a kernel-class
+; quorum-signed envelope whose 32-byte payload is the SHA-256 of the
+; KERNEL.BIN container file. The loader publishes (base,size) of the loaded
+; envelope AND of the PRISTINE container bytes it read from disk (the
+; trampoline copies the payload out, so the firmware-allocated read buffer
+; stays byte-identical to the at-rest file). kernel_env_verify_boot
+; (envelope_gate.nxh, kmain K5) re-hashes those pristine bytes and verifies
+; the envelope FAIL-CLOSED — missing/rejected/mismatched = kernel panic.
+VBE_KERNENV_BASE_OFF    equ 0xB0   ; u64 base of loaded KERNEL.ENV (0 = none)
+VBE_KERNENV_SIZE_OFF    equ 0xB8   ; u64 byte length
+VBE_KIMG_BASE_OFF       equ 0xC0   ; u64 base of pristine KERNEL.BIN file bytes
+VBE_KIMG_SIZE_OFF       equ 0xC8   ; u64 byte length actually read
+KERNENV_MAX_SIZE        equ 0x2000 ; 8 KiB cap (header + 32B payload + sigs)
+
 ; Feature bits — MUST stay in lockstep with src/kernel/nexushlk/boot_features.nxh.
 ; (asm callers — e.g. the SYS_DISPLAY_SET_MODE gate — use these names.)
 FEAT_CURSOR_DRAW           equ 1

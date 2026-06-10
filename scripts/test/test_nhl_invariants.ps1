@@ -142,6 +142,13 @@ Write-Host '[nhl-invariants] prove bounded 7-bit authority space exhaustively...
 & python $Evaluator --exhaustive
 if ($LASTEXITCODE -ne 0) { throw 'invariant exhaustive authority check failed.' }
 
+# P3 mapping: the authority bitmasks are DERIVED from the real signed policy
+# (app manifests, policy graph, compiler unsafe caps, artifact-class quorums)
+# and re-checked against the real predicates — never hand-asserted.
+Write-Host '[nhl-invariants] derive authority bitmasks from real signed policy...' -ForegroundColor Yellow
+& python (Join-Path $PSScriptRoot 'derive_authority.py')
+if ($LASTEXITCODE -ne 0) { throw 'policy-derived authority check failed.' }
+
 $OutDir = Join-Path ([System.IO.Path]::GetTempPath()) ('nhl-invariants-' + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 try {

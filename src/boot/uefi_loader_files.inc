@@ -489,6 +489,18 @@ load_envelopes:
     mov edi, VBE_KQUORUM_BASE_OFF
     mov ebp, KQUORUM_MAX_SIZE
     call load_opt_file
+    lea rsi, [s_kernenv_path]
+    mov edi, VBE_KERNENV_BASE_OFF
+    mov ebp, KERNENV_MAX_SIZE
+    call load_opt_file
+    ; Publish the PRISTINE KERNEL.BIN container bytes (read by load_kernel
+    ; into firmware pages; the trampoline copies the payload OUT of this
+    ; buffer, so it stays byte-identical to the at-rest file) for
+    ; kernel_env_verify_boot's re-hash.
+    mov rax, [v_kernel_addr]
+    mov [abs VBE_INFO + VBE_KIMG_BASE_OFF], rax
+    mov rax, [v_ksize]
+    mov [abs VBE_INFO + VBE_KIMG_SIZE_OFF], rax
     pop rbp
     pop rdi
     pop rsi

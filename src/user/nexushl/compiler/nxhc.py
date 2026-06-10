@@ -1687,11 +1687,33 @@ _VALID_UNSAFE_CAPS={
     "kernel_priv",
     "kernel_io",
     "kernel_int",
+    # Exact-authority kernel caps (nhl-beyond-zero-trust-todo.md "Split unsafe
+    # capabilities by exact authority instead of broad categories"). Each names a
+    # single privileged hardware authority so a security module can declare only
+    # what it touches instead of the broad `kernel_priv`. The broad `kernel_priv`
+    # remains a SUPERSET that satisfies any of these (see _require_cap), so legacy
+    # modules that already declare it keep compiling unchanged.
+    "kernel_creg",     # control-register writes (write_cr0 / write_cr4)
+    "kernel_pgtable",  # page-table / TLB authority (write_cr3, invlpg)
+    "kernel_dtable",   # descriptor-table loads (lgdt, ltr)
+    "kernel_idtable",  # interrupt-table loads (lidt)
+}
+
+# Narrow kernel caps that the broad `kernel_priv` is allowed to stand in for, so
+# splitting an intrinsic off kernel_priv does not break modules that still
+# declare the broad cap.
+_KERNEL_PRIV_SUBSUMES={
+    "kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable",
 }
 
 def _require_cap(cg, cap, what):
-    if cap not in getattr(cg,"unsafe_caps",set()):
-        raise SyntaxError(f"{what} requires `unsafe {cap};`")
+    caps=getattr(cg,"unsafe_caps",set())
+    if cap in caps:
+        return
+    # The broad kernel_priv authority subsumes the narrow exact-authority caps.
+    if cap in _KERNEL_PRIV_SUBSUMES and "kernel_priv" in caps:
+        return
+    raise SyntaxError(f"{what} requires `unsafe {cap};`")
 
 def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False):
     global LAST_SIGS
@@ -3307,6 +3329,14 @@ def gen_expr(st,e):
                     _require_cap(cg,"kernel_io",f"kernel intrinsic {name}()")
                 elif name=="intn":
                     _require_cap(cg,"kernel_int","kernel intn()")
+                elif name in ("write_cr0","write_cr4"):
+                    _require_cap(cg,"kernel_creg",f"kernel intrinsic {name}()")
+                elif name in ("write_cr3","invlpg"):
+                    _require_cap(cg,"kernel_pgtable",f"kernel intrinsic {name}()")
+                elif name in ("lgdt","ltr"):
+                    _require_cap(cg,"kernel_dtable",f"kernel intrinsic {name}()")
+                elif name=="lidt":
+                    _require_cap(cg,"kernel_idtable","kernel intrinsic lidt()")
                 else:
                     _require_cap(cg,"kernel_priv",f"kernel intrinsic {name}()")
             if name=="rdmsr":

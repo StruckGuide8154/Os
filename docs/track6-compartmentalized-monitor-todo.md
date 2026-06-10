@@ -108,13 +108,20 @@ Design rules for the set:
 
 ## Phase C3 — make isolation machine-checkable (feeds Track 3)
 
-- [ ] Add invariants to `invariant_check.nxh`:
+- [x] Add invariants to `invariant_check.nxh`:
       `INV-COMPARTMENT-ONE-AUTHORITY` (a compartment's authority bitmask is a
       singleton), `INV-COMPARTMENT-NO-CROSS-MAP` (no compartment holds map
       authority over another's region), `INV-COMPARTMENT-NO-AUTH-LAUNDER`
-      (trampoline transfers no caller authority). `modeled`
-- [ ] Positive/negative vectors + exhaustive bounded check over the compartment
-      authority space (same vehicle as the existing 9 invariants). `tested-tcg`
+      (trampoline transfers no caller authority). **LANDED 2026-06-10** — three
+      `fn`s in `invariant_check.nxh`, compiles `--target kernel --forbid-asm
+      --deny-unsafe`. `proven`
+- [x] Positive/negative vectors + exhaustive bounded check over the compartment
+      authority space (same vehicle as the existing 12 invariants). **LANDED** —
+      `.invariant` + `.vectors` files under `tests/security/invariants/`;
+      `eval_invariants.py` exhaustive specs prove all three over their full
+      bounded spaces (one-authority 128, no-cross-map 32,768, no-auth-launder
+      2,097,152 evaluations; the launder theorem quantifies over every caller
+      authority to prove the predicate is constant in it). `tested-tcg`
 - [ ] Containment claim table: compartment → exactly the authority it has, and the
       authorities it provably cannot reach.
 

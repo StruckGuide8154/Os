@@ -1,0 +1,16 @@
+# INV-COMPARTMENT-NO-AUTH-LAUNDER vectors —
+# predicate inv_compartment_no_auth_launder(caller_auth, callee_auth, effective_auth).
+invariant=INV-COMPARTMENT-NO-AUTH-LAUNDER
+predicate=inv_compartment_no_auth_launder
+# effective == callee, regardless of a powerful caller — no laundering
+case=accept | 127, 4, 4
+# powerless caller, callee keeps its own authority
+case=accept | 0, 8, 8
+# caller and callee identical, effective matches callee
+case=accept | 2, 2, 2
+# THE violation: caller authority bled into the callee's effective set
+case=reject | 64, 4, 68
+# effective widened to the caller's authority entirely
+case=reject | 32, 1, 32
+# effective narrowed away from the callee's own authority
+case=reject | 0, 8, 0

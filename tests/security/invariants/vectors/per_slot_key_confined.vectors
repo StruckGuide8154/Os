@@ -1,0 +1,14 @@
+# INV-PER-SLOT-KEY-CONFINED vectors —
+# predicate inv_per_slot_key_confined(key_slot, live_slot, authenticates).
+invariant=INV-PER-SLOT-KEY-CONFINED
+predicate=inv_per_slot_key_confined
+# key used for its own slot
+case=accept | 3, 3, 1
+# foreign-slot key, but no auth attempt — vacuous
+case=accept | 3, 9, 0
+# same slot, no auth
+case=accept | 0, 0, 0
+# THE violation: slot-3 key reused against slot 9
+case=reject | 3, 9, 1
+# slot-11 key reused against slot 0
+case=reject | 11, 0, 1

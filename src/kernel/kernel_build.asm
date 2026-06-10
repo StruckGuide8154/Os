@@ -95,6 +95,14 @@ section .text
 section .text
 %include "build/nxh/ed25519_check.asm"
 section .text
+; CMOS RTC wallclock -> unix seconds (verifier-clock source for the gate).
+%include "build/nxh/rtc_time.asm"
+section .text
+; Persistent anti-rollback floors: per-class monotonic minimums in a reserved
+; data.img sector, loaded before any admission and ratcheted by accepted
+; envelopes (fail-soft to the build-time floors without ATA media).
+%include "build/nxh/floor_store.asm"
+section .text
 ; Track 2 admission gate: binds envelope_verify_signed into the boot-chain
 ; (SYSSIG.ENV, fail-closed) + update-path (KUPDATE.ENV) call sites, with the
 ; verified-artifact hash cache in front of the Ed25519 crypto.

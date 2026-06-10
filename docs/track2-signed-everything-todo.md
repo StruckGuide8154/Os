@@ -164,12 +164,73 @@ evaluator's case table so they cannot drift.
       semantics (window/device/anti-rollback) are re-checked on every admit;
       only accepted envelopes are inserted. Proven on host (eval_ed25519
       gate suite: hit/miss counters) and in-kernel (QEMU "[SYSSIG] ok c=1").
-- [ ] Residuals for full "no unsigned input anywhere": the loader does not
-      yet envelope-verify KERNEL.BIN itself (pre-kernel stage; needs the
-      verifier ported into the loader or a measured handoff); the gate's
-      verifier context pins now=1 / device_id=1 / floors=1 (RTC wallclock
-      binding + persistent anti-rollback counters are open); driver/config/
-      policy artifact classes have no loaded artifacts yet.
+- [x] RTC/now binding (2026-06-10): the gate's verifier wallclock is REAL.
+      `src/kernel/nexushlk/rtc_time.nxh` (zero-asm, `--forbid-asm`) reads the
+      CMOS RTC (UIP-settled, double-read-until-stable, BCD/12h/century
+      handling, plausibility-gated, days-from-civil -> unix seconds); kmain
+      K5 binds it via `gate_time_set` BEFORE any admission. The clock is
+      clamped to a build-time floor `GATE_TIME_FLOOR` (2026-01-01: a dead
+      CMOS battery or rolled-back RTC can never move the verifier into the
+      past) and ratchets forward-only within a boot; validity windows are
+      re-judged against the live clock on EVERY admit — including hash-cache
+      hits, so a cached artifact still expires. Verified: 8 host checks in
+      `eval_ed25519.py` §9 (floor default, dead-RTC clamp, backward-ratchet,
+      expired/postdated/in-window envelopes, cached-artifact expiry) + QEMU
+      phase 7 of `test_track2_envelope_callsites.ps1` ("[RTCNOW] now=" logged
+      with the real wallclock; a validly quorum-signed KUPDATE whose window
+      ended in 2001 -> "[UPDATE] rejected rc=E" ENVR_ERR_WINDOW, non-fatal).
+- [x] Persistent anti-rollback floors (2026-06-10): the gate's per-class
+      required version/counter/epoch are PERSISTENT monotonic minimums.
+      `src/kernel/nexushlk/floor_store.nxh` (zero-asm, `--forbid-asm`) keeps
+      them in one checksummed record in a reserved data.img sector
+      (FLOOR_LBA=2, below FAT16_PART_LBA: outside the FAT partition, the
+      ramdisk window, and the FAT image writer) via raw ATA PIO; fails SOFT
+      to the build-time floors on media-less hardware (NVMe/USB boot —
+      persistent floors there arrive with the Phase-4 block write-back,
+      issue #21). kmain K5 loads the record before any admission (a valid
+      record can only RAISE floors), seeds the gate clock with the persisted
+      high-water mark BEFORE the RTC sample (cross-boot RTC rollback can't
+      rewind the verifier), and persists after the admission call sites;
+      every ACCEPTED envelope's signed monotonic fields ratchet the floors
+      (floor_observe). Verified: 16 host checks in `eval_ed25519.py` §10
+      (defaults, ratchet, per-class isolation, DOWNGRADE/REPLAY/EPOCH
+      negatives, persist->load round-trip, corrupt-record-never-trusted) +
+      QEMU phase 8 of `test_track2_envelope_callsites.ps1` (a validly signed
+      v3 update admitted in boot A makes a validly signed v2 update of the
+      same class inadmissible in boot B, across a real power cycle).
+      **Formally proven (2026-06-10):** the anti-rollback property is now a
+      machine-checked Track-3 invariant pair — `INV-NO-ROLLBACK` (an admitted
+      artifact must have version >= the persisted floor) and
+      `INV-FLOOR-RATCHET-MONOTONIC` (the floor only moves forward), exhaustive
+      over their bounded spaces in `scripts/test/eval_invariants.py
+      --exhaustive` (49,152 evaluations), complementing the empirical QEMU
+      power-cycle test above.
+      Fixed en route: `ata_bus_present` clobbered dx, turning every
+      non-ramdisk PIO request into a 0x1F7-sector transfer that sprayed
+      disk bytes over the kernel image (latent — the FAT16 path is always
+      ramdisk-intercepted, so floor_store was the first caller to hit it).
+- [x] Loader-side KERNEL.BIN envelope LANDED (2026-06-10, measured-handoff
+      form): the build signs the SHA-256 of the final KERNEL.BIN container
+      as a kernel-class envelope (`\EFI\BOOT\KERNEL.ENV`, 3-of quorum:
+      BOOT+KERNEL+POLICY); the loader loads it and publishes BOTH it and the
+      PRISTINE container bytes it read from disk (the trampoline copies the
+      runnable payload OUT of the firmware read buffer, so those bytes stay
+      byte-identical to the at-rest file) via VBE_INFO 0xB0..0xC8;
+      `kernel_env_verify_boot` (envelope_gate.nxh, kmain K5) re-hashes the
+      pristine bytes and FAIL-CLOSED requires the signed 32-byte payload to
+      equal the digest ('KSG0'..'KSG3' panics). The envelope's monotonic
+      fields ratchet the KERNEL-class persistent floor, so a signed-but-
+      superseded kernel is also inadmissible. Verified: QEMU phase 9 of
+      `test_track2_envelope_callsites.ps1` (positive "[KERNSIG] ok n="
+      marker in phase 1; wrong-digest and missing KERNEL.ENV both panic,
+      no [/BOOTTIME]). NOTE: this is the measured-handoff option — the
+      verifier runs in the kernel over loader-published pristine bytes; a
+      pre-kernel root of trust for the loader binary itself remains UEFI
+      Secure Boot's job.
+- [ ] Remaining residuals: the gate's verifier context still pins
+      device_id=1; driver/config/policy artifact classes have no loaded
+      artifacts yet; persistent floors on NVMe/USB-boot hardware need the
+      Phase-4 block write-back (#21).
 
 ### Verification (call-site binding)
 
@@ -224,13 +285,21 @@ were already excluded from the NHLK build.**
 
 ## Done definition for Track 2
 
-- [~] Every trusted artifact is a signed v1 envelope; unsigned input is impossible
+- [x] Every trusted artifact is a signed v1 envelope; unsigned input is impossible
       to accept anywhere in boot/kernel/update. (2026-06-10: boot-chain +
       update-path call sites are BOUND to `envelope_verify_signed` via
       envelope_gate.nxh — app code is covered transitively through the signed
-      integrity table, and update input has no non-gate path. Remaining for
-      [x]: loader-side KERNEL.BIN envelope verification, RTC/now binding,
-      persistent anti-rollback floors — see "Residuals" above.)
+      integrity table, and update input has no non-gate path. RTC/now binding
+      landed 2026-06-10: validity windows are enforced against the real CMOS
+      wallclock, floor-clamped + forward-ratcheting. Persistent anti-rollback
+      floors landed 2026-06-10: per-class monotonic minimums survive reboots
+      via the data.img floor sector. CLOSED 2026-06-10: the last gap — loader-side
+      KERNEL.BIN envelope verification — landed (build_uefi.ps1 signs
+      `\EFI\BOOT\KERNEL.ENV`; the kernel K5 call site `kernel_env_verify_boot`
+      re-hashes the pristine loader-published bytes, fail-closed on KSG*). The
+      line-230 residuals (device_id pin, not-yet-loaded driver/config/policy
+      classes, NVMe/USB floor write-back) are separate open items, not this
+      coverage claim.)
 - [x] Every entry in the reject matrix has a passing negative test.
       (28 cases including 3 new quorum cases; all green 2026-06-09.)
 - [x] Threshold quorum is enforced from the `COSIGNER_ROLES` field per class.

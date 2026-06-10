@@ -287,9 +287,17 @@ fn kmain() {
     # verified above must ALSO arrive inside a threshold-Ed25519-signed
     # envelope (SYSSIG.ENV, fail-closed panic), and any staged update artifact
     # (KUPDATE.ENV) is admitted/rejected only through the same signed gate.
+    floor_store_load();           # persistent anti-rollback floors (fail-soft
+                                  # to the build-time floors without media)
+    gate_time_set(floor_time_high()); # cross-boot clock high-water first, so a
+                                  # rolled-back RTC can't rewind the verifier
+    gate_time_set(rtc_now_unix()); # then the live CMOS sample (ratchet: max wins)
     syssig_verify_boot();
+    kernel_env_verify_boot();     # loader-side KERNEL.BIN envelope (fail-closed)
     boot_update_check();
     boot_quorum_check();              # staged KQUORUM.ENV: dual-quorum ratchet
+    floor_persist(gate_time_now());   # write ratcheted floors + clock high-water
+                                      # back the same boot they advanced
     bootlog2(TAG_K, D0 + 5);          # K5: app integrity manifest ready
 
     l3_install_syscall_stack_pt();    # per-slot syscall-stack guard pages

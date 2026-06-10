@@ -364,6 +364,80 @@ def exhaustive_specs(mod):
             'expect': lambda args: 0 if (args[3] != 0 and args[0] != args[1]
                                          and args[2] == 0) else 1,
         },
+        # Track 6 (compartmentalized monitor) C3 containment invariants.
+        'INV-COMPARTMENT-ONE-AUTHORITY': {
+            'predicate': 'inv_compartment_one_authority',
+            'cases': ((auth,) for auth in AUTH_SPACE),
+            'expect': lambda args: 1 if (args[0] != 0
+                                         and (args[0] & (args[0] - 1)) == 0)
+                                   else 0,
+        },
+        'INV-COMPARTMENT-NO-CROSS-MAP': {
+            'predicate': 'inv_compartment_no_cross_map',
+            'cases': ((comp, target, present)
+                      for comp in AUTH_SPACE
+                      for target in AUTH_SPACE
+                      for present in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1])
+                                   else 0,
+        },
+        # The expected fn IGNORES caller_auth while the case space quantifies
+        # over it: any caller-dependent behaviour (authority laundering) would
+        # surface as a mismatch. Effective must equal callee, always.
+        'INV-COMPARTMENT-NO-AUTH-LAUNDER': {
+            'predicate': 'inv_compartment_no_auth_launder',
+            'cases': ((caller, callee, effective)
+                      for caller in AUTH_SPACE
+                      for callee in AUTH_SPACE
+                      for effective in AUTH_SPACE),
+            'expect': lambda args: 1 if args[2] == args[1] else 0,
+        },
+        # Track 4 (leak != elevation) replay-binding invariants. Each authenticator
+        # is bound to a per-context nonce; presenting it in a foreign context must
+        # fail closed. Same theorem schema (context binding defeats replay), three
+        # distinct real diversification axes (boot epoch / slot id / launch perm).
+        'INV-EPHEMERAL-NO-REPLAY': {
+            'predicate': 'inv_ephemeral_no_replay',
+            'cases': ((secret, live, auth)
+                      for secret in AUTH_SPACE
+                      for live in AUTH_SPACE
+                      for auth in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1]) else 0,
+        },
+        'INV-PER-SLOT-KEY-CONFINED': {
+            'predicate': 'inv_per_slot_key_confined',
+            'cases': ((key_slot, live_slot, auth)
+                      for key_slot in AUTH_SPACE
+                      for live_slot in AUTH_SPACE
+                      for auth in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1]) else 0,
+        },
+        'INV-SYSCALL-PERM-PER-LAUNCH': {
+            'predicate': 'inv_syscall_perm_per_launch',
+            'cases': ((blob_perm, live_perm, dispatches)
+                      for blob_perm in AUTH_SPACE
+                      for live_perm in AUTH_SPACE
+                      for dispatches in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1]) else 0,
+        },
+        # Track 2 (signed everything) anti-rollback invariants. Ordering, not
+        # equality: an admitted artifact must meet the floor, and the floor only
+        # moves forward. The version/floor axes range over the full bounded space.
+        'INV-NO-ROLLBACK': {
+            'predicate': 'inv_no_rollback',
+            'cases': ((version, floor, admitted)
+                      for version in AUTH_SPACE
+                      for floor in AUTH_SPACE
+                      for admitted in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] >= args[1]) else 0,
+        },
+        'INV-FLOOR-RATCHET-MONOTONIC': {
+            'predicate': 'inv_floor_ratchet_monotonic',
+            'cases': ((old_floor, new_floor)
+                      for old_floor in AUTH_SPACE
+                      for new_floor in AUTH_SPACE),
+            'expect': lambda args: 1 if args[1] >= args[0] else 0,
+        },
     }
 
 

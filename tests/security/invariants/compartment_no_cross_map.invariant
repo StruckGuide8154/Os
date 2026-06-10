@@ -1,0 +1,10 @@
+# No Track-6 compartment may hold page-map authority over another compartment's
+# region; PT-MON's map edits are confined to the holder's own region so one
+# compromised compartment cannot remap a peer's pages.
+invariant=INV-COMPARTMENT-NO-CROSS-MAP
+title=No compartment maps another compartment's region
+statement=A present map authority is permitted only when comp_region == target_region; a present map authority over a foreign region is a violation. Absent map authority is vacuously safe.
+compromised=Any single monitor compartment holding map authority
+denied_authority=AUTH_MEMORY_GRANT over a foreign compartment region
+predicate=inv_compartment_no_cross_map
+status=proven

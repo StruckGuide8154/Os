@@ -1,3 +1,4 @@
+# THREAT: an authority-graph edit that widens privilege or creates a confused-deputy path past the proven seL4-style invariants.
 # NHL-native authority-graph INVARIANT kernel (seL4 validity track).
 #
 # This module encodes the machine-checkable invariants that bound damage after a
@@ -30,6 +31,15 @@ global inv_release_no_observation;
 global inv_recovery_no_measure_bypass;
 global inv_ipc_no_deputy_laundering;
 global inv_app_mem_isolation;
+global inv_compartment_one_authority;
+global inv_compartment_no_cross_map;
+global inv_compartment_no_auth_launder;
+global inv_context_bound;
+global inv_ephemeral_no_replay;
+global inv_per_slot_key_confined;
+global inv_syscall_perm_per_launch;
+global inv_no_rollback;
+global inv_floor_ratchet_monotonic;
 
 # Authority bits. One bit per mintable authority in the model.
 const AUTH_MEMORY_GRANT = 1;       # map/grant memory to another domain
@@ -153,7 +163,7 @@ fn inv_recovery_no_measure_bypass(recovery_mode, measured_hash, expected_hash, p
 
 # No confused deputy: when a deputy (proxy) performs an operation on behalf of
 # a requester, the exercised authority must be a subset of BOTH the requester's
-# and the deputy's own authority — a peer cannot launder authority the
+# and the deputy's own authority â€” a peer cannot launder authority the
 # requester never had, and a requester cannot push the deputy past its own.
 fn inv_ipc_no_deputy_laundering(requester_auth, deputy_auth, op_auth) {
     if inv_subset(op_auth, requester_auth) == 0 {
@@ -174,6 +184,136 @@ fn inv_app_mem_isolation(reader_ns, owner_ns, shared_handle, access_granted) {
         return 1;
     }
     if shared_handle != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+# --- Track 6 (compartmentalized "-1" monitor) containment invariants --------
+#
+# The monitor is decomposed into single-authority compartments (PT/KEY/HASH/
+# CAP/DMA/LOAD-MON). These three predicates make the C1 isolation claim
+# machine-checkable (Track 6 Phase C3): one authority each, no cross-region
+# map, and no authority laundering across the trampoline.
+
+# COMPARTMENT-ONE-AUTHORITY: a compartment's authority bitmask is a singleton â€”
+# it owns exactly one mintable authority. Zero authority (a powerless
+# compartment is still a violation of the "owns exactly one" model) and any
+# bitmask with two or more bits set both fail closed. Singleton iff the mask is
+# a non-zero power of two: `auth != 0 && (auth & (auth - 1)) == 0`.
+fn inv_compartment_one_authority(comp_auth) {
+    if comp_auth == 0 {
+        return 0;
+    }
+    if (comp_auth & (comp_auth - 1)) == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+# COMPARTMENT-NO-CROSS-MAP: no compartment holds page-map authority over
+# another compartment's region. Map authority may be exercised only over the
+# holder's own region; a present map authority targeting a foreign region is
+# the violation. When no map authority is asserted, nothing is mapped and the
+# state is vacuously safe.
+fn inv_compartment_no_cross_map(comp_region, target_region, map_present) {
+    if map_present == 0 {
+        return 1;
+    }
+    if comp_region == target_region {
+        return 1;
+    }
+    return 0;
+}
+
+# COMPARTMENT-NO-AUTH-LAUNDER: the cross-compartment trampoline transfers NO
+# caller authority. After a trampoline cross, the callee runs with exactly its
+# own authority regardless of who called it. The theorem is that this predicate
+# is CONSTANT in caller_auth (the runner quantifies over all caller values):
+# the effective authority must equal the callee's own authority, so a caller
+# can neither widen nor narrow what the callee may do.
+fn inv_compartment_no_auth_launder(caller_auth, callee_auth, effective_auth) {
+    if effective_auth == callee_auth {
+        return 1;
+    }
+    return 0;
+}
+
+# --- Track 4 (leak != elevation) replay-binding invariants -------------------
+#
+# These encode, as machine-checked theorems, the load-bearing Track-4 Part D
+# claim that a secret recovered from a RAM dump of boot/slot/launch A does NOT
+# authorize on a fresh boot/slot/launch B. Each authenticator is bound to a
+# per-context nonce (per-boot epoch, per-slot id, per-launch syscall
+# permutation); presenting it in a different context must fail closed. The
+# primitive states the binding once; the three named invariants bind it to the
+# three real diversification axes audited in
+# docs/track4-data-egress-elevation-matrix.md (barriers 1, 2/4, 3).
+
+# A context-bound authenticator validates only when the presented context
+# matches the live context. When it does not authenticate at all, the state is
+# vacuously safe (nothing was accepted).
+fn inv_context_bound(secret_ctx, live_ctx, authenticates) {
+    if authenticates == 0 {
+        return 1;
+    }
+    if secret_ctx == live_ctx {
+        return 1;
+    }
+    return 0;
+}
+
+# Barrier (1): per-boot ephemeral secrets. A canary/nonce/mem-key drawn in
+# boot A (epoch_a) is statistically unrelated to boot B (epoch_b); a dumped one
+# authenticates only against its own boot epoch.
+fn inv_ephemeral_no_replay(secret_epoch, live_epoch, authenticates) {
+    return inv_context_bound(secret_epoch, live_epoch, authenticates);
+}
+
+# Barriers (2)+(4): per-slot key + per-slot ASLR slide. A key/slide minted for
+# slot i never authenticates for slot j; a leaked one is confined to its slot.
+fn inv_per_slot_key_confined(key_slot, live_slot, authenticates) {
+    return inv_context_bound(key_slot, live_slot, authenticates);
+}
+
+# Barrier (3): heterogeneous per-launch syscall numbering. A static exploit
+# blob built against launch A's permutation dispatches to its intended
+# privileged handler only under that same permutation; under launch B's
+# permutation it lands elsewhere (out-of-range -> .sc_invalid). "dispatches"
+# means "reaches the intended handler"; the theorem is it cannot under a
+# foreign permutation.
+fn inv_syscall_perm_per_launch(blob_perm_id, live_perm_id, dispatches) {
+    return inv_context_bound(blob_perm_id, live_perm_id, dispatches);
+}
+
+# --- Track 2 (signed everything) anti-rollback invariants -------------------
+#
+# The persistent floor store (floor_store.nxh) and the RTC forward-ratchet keep
+# a monotonic per-class minimum (version/counter/epoch + clock high-water) in a
+# checksummed data.img sector, loaded before any admission and ratcheted by
+# every accepted envelope. These two theorems state the anti-rollback property
+# the QEMU phase-8 power-cycle test exercises empirically.
+
+# NO-ROLLBACK: a signed artifact is admitted only when its version is at least
+# the persisted floor. A validly-signed but superseded artifact (version below
+# the floor a later build already ratcheted past) is inadmissible. When nothing
+# is admitted the state is vacuously safe.
+fn inv_no_rollback(artifact_version, floor_version, admitted) {
+    if admitted == 0 {
+        return 1;
+    }
+    if artifact_version >= floor_version {
+        return 1;
+    }
+    return 0;
+}
+
+# FLOOR-RATCHET-MONOTONIC: the persisted floor only ever moves forward. A
+# ratchet that would lower the stored minimum (a rollback of the floor itself)
+# is rejected; equal or higher is accepted. This is the forward-ratchet that
+# makes NO-ROLLBACK durable across a power cycle.
+fn inv_floor_ratchet_monotonic(old_floor, new_floor) {
+    if new_floor >= old_floor {
         return 1;
     }
     return 0;

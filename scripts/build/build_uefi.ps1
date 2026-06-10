@@ -233,6 +233,10 @@ $KernelModules = @(
     # Real Ed25519 threshold-signature crypto for the envelope
     # (envelope_verify_signed = structure + semantics + signatures).
     @{ src = 'src\kernel\nexushlk\ed25519_check.nxh'; out = 'build\nxh\ed25519_check.asm' },
+    # CMOS RTC wallclock (unix seconds) for the gate's verifier context.
+    @{ src = 'src\kernel\nexushlk\rtc_time.nxh'; out = 'build\nxh\rtc_time.asm' },
+    # Persistent anti-rollback floors (data.img FLOOR_LBA sector, fail-soft).
+    @{ src = 'src\kernel\nexushlk\floor_store.nxh'; out = 'build\nxh\floor_store.asm' },
     # Track 2 artifact admission gate: binds envelope_verify_signed into the
     # boot-chain (SYSSIG.ENV) + update-path (KUPDATE.ENV) call sites, with the
     # verified-artifact hash cache in front of the Ed25519 crypto.
@@ -442,6 +446,21 @@ Write-Host '[2c] Building KASLR fixup table and wrapping KERNEL.BIN...' -Foregro
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED' -ForegroundColor Red; exit 1 }
 $sz = (Get-Item "$ESP\KERNEL.BIN").Length
 Write-Host "  OK - KERNEL.BIN ($sz bytes, wrapped)" -ForegroundColor Green
+
+# 2c2. Track 2 loader-side kernel envelope: sign the SHA-256 of the final
+# KERNEL.BIN container as a KERNEL-class envelope -> ESP\KERNEL.ENV. The
+# kernel's K5 call site (kernel_env_verify_boot) re-hashes the pristine
+# loader-read container bytes and verifies fail-closed.
+Write-Host '[2c2] Signing KERNEL.ENV (Track 2 kernel envelope)...' -ForegroundColor Yellow
+$kimgHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.IO.File]::ReadAllBytes("$ESP\KERNEL.BIN"))
+$kimgHashPath = Join-Path $BUILD_DIR 'kernel_env_payload.bin'
+[System.IO.File]::WriteAllBytes($kimgHashPath, $kimgHash)
+& python (Join-Path $Root 'scripts\build\write_envelope.py') `
+    --payload $kimgHashPath --out "$ESP\KERNEL.ENV" `
+    --type kernel --device-id 1
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - KERNEL.ENV signing' -ForegroundColor Red; exit 1 }
+$sz = (Get-Item "$ESP\KERNEL.ENV").Length
+Write-Host "  OK - KERNEL.ENV ($sz bytes)" -ForegroundColor Green
 
 # 3. Create data disk image with FAT16 filesystem (for ATA PIO access by kernel)
 Write-Host '[3/3] Creating FAT16 data disk (data.img)...' -ForegroundColor Yellow
@@ -690,6 +709,7 @@ if ($CopyToE -or -not $PSBoundParameters.ContainsKey('CopyToE')) {
             Copy-Item "$ESP\KERNEL.BIN"  $eEfi -Force
             Copy-Item "$ESP\APPS.BIN"    $eEfi -Force
             Copy-Item "$ESP\SYSSIG.ENV"  $eEfi -Force
+            Copy-Item "$ESP\KERNEL.ENV"  $eEfi -Force
             Copy-Item "$ESP\DATA.IMG"    $eEfi -Force
             Write-Host '  OK - E:\EFI\BOOT\ updated (boot-ready)' -ForegroundColor Green
         } catch {
