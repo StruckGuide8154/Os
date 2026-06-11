@@ -1,0 +1,10 @@
+# Track 4 barriers (2)+(4): per-slot keys and per-slot ASLR slides are minted
+# per slot install. A key or gadget address recovered for slot i must not
+# authenticate / transfer to slot j.
+invariant=INV-PER-SLOT-KEY-CONFINED
+title=A per-slot key is confined to its own slot
+statement=A slot key authenticates only when its slot id equals the live (target) slot id; a leaked key from another slot fails closed. Vacuously safe when it does not authenticate.
+compromised=A dump attacker reusing slot i's key/slide against slot j
+denied_authority=Authentication for any slot other than the key's own
+predicate=inv_per_slot_key_confined
+status=proven

@@ -1,3 +1,4 @@
+# THREAT: a binary built for the wrong platform/feature target being admitted, or a downgrade that silently disables a required capability.
 # NHL-native app compatibility checker kernel.
 #
 # Security internals may change, but app-facing service ABI decisions must be

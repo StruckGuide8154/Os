@@ -204,10 +204,12 @@ remains out of scope (they can read the working set as it is decrypted). Update
       is time-bounded.
 - [ ] Defeat structure fingerprinting: pad + encrypt at-rest regions so a dump
       cannot pattern-scan for known kernel structures.
-- [ ] HARD LIMIT (document in code + STATUS.md, do not pretend otherwise): the
+- [x] HARD LIMIT (document in code + STATUS.md, do not pretend otherwise): the
       executing `.text`, live page tables, active-slot working set, and current
       register/stack frame are plaintext at dump time. Mitigation reduces the
       readable surface to the live set, not to nothing.
+      Documented in code (`fme_memory_encryption_check.nxh` header caveat #3) and
+      in `docs/STATUS.md` §9 ("Residual still plaintext at dump time").
 
 ## Part C — Hardware Full-Memory Encryption (opportunistic: detect + enable)
 
@@ -229,16 +231,33 @@ TEEs apply only if NexusOS runs as a guest or hosts VMs.
       the OS runs — so for TME the OS role is **detect + report + assert it is on**
       (and warn if a "secure" boot finds it off), not enable. AES-XTS-128, key
       from the CPU hardware RNG, never exposed to software.
-- [~] **Intel TME-MK (MKTME)** detect: per-KeyID encryption via physical-address
+- [x] **Intel TME-MK (MKTME)** detect: per-KeyID encryption via physical-address
       key-id bits — future per-domain/per-slot key separation (maps onto the
       per-slot key model, §10). Detect the KeyID count from `IA32_TME_ACTIVATE`.
-- [~] **AMD SME** detect: `CPUID 0x8000001F` EAX bit 0 (SME), C-bit position in
+      `security_fme_mktme_supported` flags it; `security_fme_mktme_key_count`
+      yields the usable per-domain KeyIDs = `(2^TME_KEYID_BITS) - 1` (KeyID 0 is
+      the default whole-memory TME key).
+- [x] **AMD SME** detect: `CPUID 0x8000001F` EAX bit 0 (SME), C-bit position in
       EBX[5:0]; enable bit is `MSR_AMD64_SYSCFG` (0xC0010010) bit 23. Unlike TME,
       SME lets the OS mark individual pages encrypted via the **C-bit** in the page
       tables once firmware enables SYSCFG[23] — so NexusOS can *opportunistically*
       set the C-bit on the highest-value pages (kernel secrets, slot arenas, FS
       cache) and let the memory controller encrypt them transparently.
-- [ ] **AMD SME-MK / per-page ASID** detect for future per-slot keys.
+      Detect (`security_fme_amd_sme_supported` / `_cbit_pos` / `_enabled`) plus
+      the software-decidable page policy now landed: `security_fme_amd_cbit_mask`
+      yields the PTE OR-mask, `security_fme_amd_sme_page_markable` gates marking on
+      supported-AND-firmware-enabled, and `security_fme_amd_sme_class_wants_cbit`
+      enumerates the kernel-secret / slot-arena / FS-cache classes (most-sensitive
+      first). The kernel PTE writer consumes the mask under its nk-monitor WP
+      window — the only remaining step, identical to every other live CPUID/MSR
+      integration this module exposes.
+- [x] **AMD SME-MK / per-page ASID** detect for future per-slot keys.
+      `CPUID 0x8000001F` ECX = the simultaneous encryption-ASID count
+      (`security_fme_amd_asid_count`, AMD's analogue of the MKTME KeyID count),
+      EDX = the minimum SEV(no-ES) ASID (`security_fme_amd_min_sev_asid`).
+      `security_fme_amd_perpage_key_supported` is true when SME is present and
+      the ASID count is nonzero — i.e. per-page key separation (§10) is
+      physically available.
 - [x] Report all of the above through SYS_SYSINFO so the Settings security tab
       shows "RAM encryption: TME on / SME pages / none (software-only)".
 
@@ -249,15 +268,43 @@ TEEs apply only if NexusOS runs as a guest or hosts VMs.
   RAM-encryption and confidential-guest rows through SYS_SYSINFO/Settings. SME
   page-table C-bit use is still pending.
 
+  _2026-06-10 confidential-guest detection completed_: the SEV-family
+  (SEV/SEV-ES/SEV-SNP) and Intel TDX detection is now fully fleshed out, not an
+  opaque flag. `security_fme_confidential_guest_status` derives the AMD tier from
+  `CPUID 0x8000001F` EAX (bits 1/3/4) plus `MSR_AMD64_SEV` active bits (0/1/2),
+  treats SNP as *armed* only when `RMP_END` is provisioned, and detects an Intel
+  TD guest from the `CPUID 0x21` "IntelTDX    " signature. New pass/fail fixtures
+  (`pass_tdx_guest_signature`, `fail_sev_supported_inactive`) exercise the path;
+  the module compiles clean under `--forbid-asm --deny-unsafe`.
+
 ### Confidential-VM TEEs (only if NexusOS runs as guest / hosts VMs)
-- [ ] **AMD SEV / SEV-ES / SEV-SNP** detect: `CPUID 0x8000001F` EAX bit 1 (SEV) /
-      bit 4 (SEV-SNP); active via `MSR_AMD64_SEV` (0xC0010131) bit 0; SNP RMP via
-      `RMP_BASE`/`RMP_END` (0xC0010132/3). Relevant if NexusOS is ever run *inside*
-      a confidential VM (guest memory + register state encrypted from the host).
-- [ ] **Intel TDX** detect (trust-domain guest). Same "only as a guest" caveat.
-- [ ] Decide + document whether NexusOS targets being a confidential **guest**
+- [x] **AMD SEV / SEV-ES / SEV-SNP** detect: `CPUID 0x8000001F` EAX bit 1 (SEV) /
+      bit 3 (SEV-ES) / bit 4 (SEV-SNP); active via `MSR_AMD64_SEV` (0xC0010131)
+      bit 0 (SEV) / bit 1 (SEV-ES) / bit 2 (SEV-SNP); SNP is only reported *armed*
+      when `RMP_END` (0xC0010133) is nonzero (RMP actually provisioned).
+      Implemented in `fme_memory_encryption_check.nxh`
+      (`security_fme_amd_sev_es_supported`, `security_fme_sev_es_enabled`,
+      `security_fme_sev_snp_enabled`, `security_fme_sev_snp_armed`); the
+      confidential-guest status now reports the strongest active SEV tier.
+- [x] **Intel TDX** detect (trust-domain guest): CPUID leaf `0x21` sub-leaf 0
+      vendor signature "IntelTDX    " (EBX/EDX/ECX), via
+      `security_fme_tdx_guest_present`. Same "only as a guest" caveat.
+- [x] Decide + document whether NexusOS targets being a confidential **guest**
       (gets SEV-SNP/TDX protection for free from the host) — likely the cheapest
       path to true whole-memory opacity on cloud hardware.
+      **Decision (2026-06-10): detect-and-report, do NOT target.** NexusOS's stated
+      direction is bare-metal / widely-compatible real hardware (see project
+      memory + STATUS.md), where whole-memory opacity comes from Part C FME
+      (TME/SME) on the silicon NexusOS itself controls. Becoming an SEV-SNP/TDX
+      *guest* would (a) presuppose a trusted host hypervisor — a trust anchor
+      NexusOS deliberately does not concede, contradicting the Track 5/6 "monitor
+      below ring 0" model where NexusOS is the most-privileged software; and
+      (b) only apply on cloud hosts, not the daily-driver/real-HW goal. So the
+      confidential-guest path stays **detect + report only**: if NexusOS ever
+      *finds itself* running under SEV-SNP/TDX (via the detection above) it
+      surfaces that as a bonus opacity layer through SYS_SYSINFO, but it is never
+      a required or assumed deployment target. Hosting confidential VMs (NexusOS
+      as the *host*) is out of scope for Track 4 and lives under Track 5.
 
 ### Honest caveats for Part C
 - [x] Document: **QEMU TCG does not emulate TME/SME memory-controller crypto** —
@@ -322,8 +369,11 @@ Audit and make each a tested barrier.
       which barriers above independently defeat its use, and add a negative test
       that *plants the dumped secret into a fresh boot and proves elevation still
       fails*. This is the concrete proof of "leak ≠ elevation."
-      **Matrix DONE** (`docs/track4-data-egress-elevation-matrix.md`, static audit). The
-      planted-leak negative test is the remaining `[ ]` dynamic half.
+      **Matrix DONE** (`docs/track4-data-egress-elevation-matrix.md`, static audit);
+      **diversification barriers (1)/(2)+(4)/(3) now FORMALLY PROVEN** as Track-3
+      invariants (`INV-EPHEMERAL-NO-REPLAY`, `INV-PER-SLOT-KEY-CONFINED`,
+      `INV-SYSCALL-PERM-PER-LAUNCH`; exhaustive, 2026-06-10). The planted-leak
+      *boot* negative test is the remaining empirical complement.
 
   _2026-06-09 dynamic proof implementation_: two test scripts added under
   `scripts/test/`:

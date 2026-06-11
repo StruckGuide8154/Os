@@ -1,0 +1,7 @@
+checker=fme_memory_encryption_check
+expect=fail
+case=sev_supported_but_not_active_reports_off
+cpuid_8000001f_eax=0x02
+msr_amd64_sev_lo=0x00
+rmp_end=0x00
+expected_confidential_status=SECST_OFF

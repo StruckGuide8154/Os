@@ -1,3 +1,4 @@
+# THREAT: sub-quorum approval or a single stolen key satisfying a rule that requires a signer threshold.
 # NHL-native threshold rule policy kernel.
 #
 # The trusted rule set is deliberately small: reject malformed quorum rules,

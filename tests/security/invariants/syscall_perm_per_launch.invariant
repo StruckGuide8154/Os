@@ -1,0 +1,11 @@
+# Track 4 barrier (3): heterogeneous, per-launch syscall numbering. A static
+# exploit blob built against launch A's permutation reaches its intended
+# privileged handler only under that same permutation; under launch B it lands
+# out-of-range and is rejected.
+invariant=INV-SYSCALL-PERM-PER-LAUNCH
+title=A dump-built syscall blob does not dispatch under a fresh permutation
+statement=A blob's hardcoded syscall number reaches its intended handler only when the blob's assumed permutation equals the live launch permutation; under a foreign permutation it fails closed. Vacuously safe when it does not dispatch.
+compromised=A dump attacker running a static exploit blob on a later launch
+denied_authority=Dispatch to the intended handler under any foreign launch permutation
+predicate=inv_syscall_perm_per_launch
+status=proven

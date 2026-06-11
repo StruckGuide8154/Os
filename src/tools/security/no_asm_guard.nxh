@@ -1,3 +1,4 @@
+# THREAT: raw assembly smuggled into the trusted zero-asm NHL path, bypassing compiler-enforced safety.
 # NHL-native no-ASM guard policy kernel.
 #
 # Host wrappers may collect files and print results, but the trusted rule set

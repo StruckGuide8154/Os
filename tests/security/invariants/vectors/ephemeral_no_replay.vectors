@@ -1,0 +1,14 @@
+# INV-EPHEMERAL-NO-REPLAY vectors —
+# predicate inv_ephemeral_no_replay(secret_epoch, live_epoch, authenticates).
+invariant=INV-EPHEMERAL-NO-REPLAY
+predicate=inv_ephemeral_no_replay
+# secret presented against its own boot epoch — authenticates
+case=accept | 42, 42, 1
+# secret from another epoch but not even presented for auth — vacuous
+case=accept | 7, 99, 0
+# matching epoch, no auth attempt
+case=accept | 0, 0, 0
+# THE violation: a dumped secret from boot A (epoch 7) replayed on boot B (99)
+case=reject | 7, 99, 1
+# different epoch, replay attempt
+case=reject | 100, 3, 1

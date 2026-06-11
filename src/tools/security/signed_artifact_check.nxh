@@ -1,3 +1,4 @@
+# THREAT: acceptance of an unsigned or forged artifact anywhere on the trusted boot/kernel/update path.
 # NHL-native signed artifact policy kernel.
 #
 # Host wrappers may load bytes and report diagnostics; this module owns the

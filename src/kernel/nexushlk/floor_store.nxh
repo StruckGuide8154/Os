@@ -1,0 +1,288 @@
+# ============================================================================
+# floor_store.nxh - Track 2 PERSISTENT anti-rollback floors.
+#
+# Closes the "verifier context pins required version/counter/epoch = 1" Track-2
+# residual: the admission gate's per-class monotonic floors (and the verifier
+# clock's high-water mark) survive reboots, so a validly signed but SUPERSEDED
+# artifact cannot be replayed by power-cycling the machine.
+#
+# Persistence medium: one dedicated 512-byte sector (FLOOR_LBA = 2) in the
+# reserved boot-header zone of the QEMU IDE data disk (build/data.img) — below
+# FAT16_PART_LBA, so it is OUTSIDE the FAT16 partition, outside the loader's
+# DATA.IMG ramdisk window (ata.asm's ramdisk intercept never claims it), and
+# untouched by build_uefi.ps1's FAT image writer. Reads/writes go through raw
+# ATA PIO (ata_read_sectors / ata_write_sectors, default drive 0xE0 = the
+# data disk). On hardware without legacy IDE (NVMe/USB boot) the float-bus
+# probe fails instantly and this module FAILS SOFT to the build-time floors —
+# exactly the pre-this-module behavior — and logs it; persistent floors there
+# arrive with the Phase-4 block-device write-back (issue #21).
+#
+# Threat model: defends against REPLAY of old signed artifacts across reboots
+# and cross-boot RTC rollback. A physical attacker who rewrites the boot
+# medium (and so this sector) is out of scope per STATUS.md §9 — and erasing
+# the record only lowers floors back to the build-time constants, i.e. to the
+# protection level that existed before this module.
+#
+# Record layout (one sector, little-endian):
+#   off 0   : magic 'N','X','F','L'
+#   off 4   : format version (u32, == 1)
+#   off 8   : verifier-clock high-water mark (u64 unix seconds)
+#   off 16  : generation (u32, +1 per persist — observability/wear signal)
+#   off 20  : checksum (u32, position-weighted byte sum over the record with
+#             this field skipped; corruption detector, not an authenticator)
+#   off 24  : 9 artifact classes x { version u32, counter u32, epoch u32 }
+#             (class k at off 24 + (k-1)*12), end = off 132; rest zero.
+#
+# Semantics:
+#   - RAM floors initialize to the build-time defaults (1/1/1 per class);
+#     a valid record can only RAISE them (max-merge), never lower.
+#   - envelope_gate.nxh consults floor_required_*(class) on every admission
+#     and reports each ACCEPTED envelope's signed monotonic fields via
+#     floor_observe(), which ratchets the RAM floors forward.
+#   - kmain K5 calls floor_store_load() before any admission, feeds
+#     floor_time_high() into gate_time_set(), and calls floor_persist(now)
+#     after the boot/update/quorum call sites so raised floors hit the disk
+#     the same boot the newer artifact was admitted.
+#   - The clock high-water persists only when it advanced >= FLOOR_TIME_SLACK
+#     (so the sector is not rewritten every boot just for clock drift).
+# ============================================================================
+
+module "floor_store";
+
+unsafe raw_mem;          # lb/sb over the sector buffer
+unsafe implicit_extern;  # &floor_* module-local data
+
+global floor_store_load;
+global floor_persist;
+global floor_observe;
+global floor_required_version;
+global floor_required_counter;
+global floor_required_epoch;
+global floor_time_high;
+global floor_store_abi_version;
+
+extern ata_read_sectors;   # (rdi=LBA, rsi=buf, edx=count) -> 0 ok / -1 err
+extern ata_write_sectors;  # same contract
+extern serial_puts;
+extern serial_crlf;
+extern ser_print_hex64;
+
+const FLOOR_LBA = 2;             # reserved boot-header sector, see module header
+const FLOOR_MAGIC = 0x4C46584E;  # 'NXFL' LE
+const FLOOR_FMT = 1;
+const FLOOR_CLASS_MAX = 9;       # signed_envelope.nxh ART_* classes 1..9
+const FLOOR_REC_BYTES = 132;
+const FLOOR_DEFAULT = 1;         # build-time floor (former GATE_REQUIRED_*)
+const FLOOR_TIME_SLACK = 600;    # persist clock high-water in >=10min steps
+
+data floor_buf: 512;             # sector I/O buffer
+data floor_ver: 10 x 4;          # ACTIVE per-class floors (entry 0 unused)
+data floor_ctr: 10 x 4;
+data floor_epo: 10 x 4;
+data floor_thw: 1 x 8;           # clock high-water (RAM copy of record off 8)
+data floor_gen: 1 x 4;           # record generation (RAM copy of off 16)
+data floor_dirty: 1;             # RAM floors ahead of the persisted record
+data floor_media: 1;             # 1 = the floor sector is readable (writable)
+data floor_init: 1;
+
+data s_floor_none:   13 = [91,70,76,79,79,82,93,32,110,111,110,101,0];                      # "[FLOOR] none"
+data s_floor_blank:  14 = [91,70,76,79,79,82,93,32,98,108,97,110,107,0];                    # "[FLOOR] blank"
+data s_floor_loaded: 18 = [91,70,76,79,79,82,93,32,108,111,97,100,101,100,32,103,61,0];     # "[FLOOR] loaded g="
+data s_floor_pers:   21 = [91,70,76,79,79,82,93,32,112,101,114,115,105,115,116,101,100,32,103,61,0];  # "[FLOOR] persisted g="
+data s_floor_fail:   21 = [91,70,76,79,79,82,93,32,112,101,114,115,105,115,116,32,102,97,105,108,0];  # "[FLOOR] persist fail"
+
+fn floor_store_abi_version() {
+    return 1;
+}
+
+fn floor_rd_u32(p) {
+    return lb(p) | (lb(p + 1) << 8) | (lb(p + 2) << 16) | (lb(p + 3) << 24);
+}
+
+fn floor_wr_u32(p, v) {
+    sb(p, v & 255);
+    sb(p + 1, (v >> 8) & 255);
+    sb(p + 2, (v >> 16) & 255);
+    sb(p + 3, (v >> 24) & 255);
+}
+
+# Position-weighted byte sum over [0, FLOOR_REC_BYTES) with the checksum
+# field (off 20..23) treated as absent. Detects torn/corrupt sectors; a
+# failed check is handled as "no record" (build-time floors), never trusted.
+fn floor_checksum() {
+    let acc = 0x464C4F4F;
+    let i = 0;
+    while i < FLOOR_REC_BYTES {
+        if i < 20 {
+            acc = (acc + (lb(&floor_buf + i) * (i + 3))) & 0xFFFFFFFF;
+        }
+        if i >= 24 {
+            acc = (acc + (lb(&floor_buf + i) * (i + 3))) & 0xFFFFFFFF;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn floor_ensure_init() {
+    if lb(&floor_init) != 0 { return 0; }
+    let k = 1;
+    while k <= FLOOR_CLASS_MAX {
+        sw(&floor_ver + k * 4, FLOOR_DEFAULT);
+        sw(&floor_ctr + k * 4, FLOOR_DEFAULT);
+        sw(&floor_epo + k * 4, FLOOR_DEFAULT);
+        k = k + 1;
+    }
+    sb(&floor_init, 1);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Load the persisted record (kmain K5, BEFORE any admission). Fail-soft:
+# unreadable media or an invalid record leaves the build-time floors active.
+# A valid record can only raise floors (max-merge against the defaults).
+# ---------------------------------------------------------------------------
+fn floor_store_load() {
+    floor_ensure_init();
+    let rc = ata_read_sectors(FLOOR_LBA, &floor_buf, 1);
+    if rc != 0 {
+        sb(&floor_media, 0);
+        serial_puts(&s_floor_none);
+        serial_crlf();
+        return 1;
+    }
+    sb(&floor_media, 1);
+    let valid = 1;
+    if floor_rd_u32(&floor_buf) != FLOOR_MAGIC { valid = 0; }
+    if floor_rd_u32(&floor_buf + 4) != FLOOR_FMT { valid = 0; }
+    if valid != 0 {
+        if floor_rd_u32(&floor_buf + 20) != floor_checksum() { valid = 0; }
+    }
+    if valid == 0 {
+        # Media works but no (or corrupt) record yet: build-time floors stay
+        # active; the first persist writes a fresh record.
+        serial_puts(&s_floor_blank);
+        serial_crlf();
+        return 2;
+    }
+    sq(&floor_thw, lq(&floor_buf + 8));
+    sw(&floor_gen, floor_rd_u32(&floor_buf + 16));
+    let k = 1;
+    while k <= FLOOR_CLASS_MAX {
+        let o = &floor_buf + 24 + (k - 1) * 12;
+        let v = floor_rd_u32(o);
+        if v > lw(&floor_ver + k * 4) { sw(&floor_ver + k * 4, v); }
+        v = floor_rd_u32(o + 4);
+        if v > lw(&floor_ctr + k * 4) { sw(&floor_ctr + k * 4, v); }
+        v = floor_rd_u32(o + 8);
+        if v > lw(&floor_epo + k * 4) { sw(&floor_epo + k * 4, v); }
+        k = k + 1;
+    }
+    serial_puts(&s_floor_loaded);
+    call ser_print_hex64(rdi: lw(&floor_gen));
+    serial_crlf();
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# The gate's verifier context: per-class required monotonic minimums.
+# Out-of-range classes answer an impossible floor (fail closed at the caller:
+# no envelope carries a u32 field >= 2^32, and class range is already enforced
+# structurally, so this path is unreachable in practice).
+# ---------------------------------------------------------------------------
+fn floor_required_version(kind) {
+    floor_ensure_init();
+    if kind < 1 { return 0xFFFFFFFF; }
+    if kind > FLOOR_CLASS_MAX { return 0xFFFFFFFF; }
+    return lw(&floor_ver + kind * 4);
+}
+
+fn floor_required_counter(kind) {
+    floor_ensure_init();
+    if kind < 1 { return 0xFFFFFFFF; }
+    if kind > FLOOR_CLASS_MAX { return 0xFFFFFFFF; }
+    return lw(&floor_ctr + kind * 4);
+}
+
+fn floor_required_epoch(kind) {
+    floor_ensure_init();
+    if kind < 1 { return 0xFFFFFFFF; }
+    if kind > FLOOR_CLASS_MAX { return 0xFFFFFFFF; }
+    return lw(&floor_epo + kind * 4);
+}
+
+fn floor_time_high() {
+    return lq(&floor_thw);
+}
+
+# ---------------------------------------------------------------------------
+# Forward-ratchet the RAM floors from an ACCEPTED envelope's signed monotonic
+# fields (called by envelope_gate.nxh after a successful admission only).
+# ---------------------------------------------------------------------------
+fn floor_observe(kind, version, counter, epoch) {
+    floor_ensure_init();
+    if kind < 1 { return 0; }
+    if kind > FLOOR_CLASS_MAX { return 0; }
+    if version > lw(&floor_ver + kind * 4) {
+        sw(&floor_ver + kind * 4, version);
+        sb(&floor_dirty, 1);
+    }
+    if counter > lw(&floor_ctr + kind * 4) {
+        sw(&floor_ctr + kind * 4, counter);
+        sb(&floor_dirty, 1);
+    }
+    if epoch > lw(&floor_epo + kind * 4) {
+        sw(&floor_epo + kind * 4, epoch);
+        sb(&floor_dirty, 1);
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Write the ratcheted record back (kmain K5, after the admission call sites).
+# Returns 0 written, 1 nothing to write, 2 no media / write failed (floors
+# stay raised in RAM for this boot; logged, non-fatal).
+# ---------------------------------------------------------------------------
+fn floor_persist(now) {
+    floor_ensure_init();
+    if now > lq(&floor_thw) + FLOOR_TIME_SLACK {
+        sq(&floor_thw, now);
+        sb(&floor_dirty, 1);
+    }
+    if lb(&floor_dirty) == 0 { return 1; }
+    if lb(&floor_media) == 0 {
+        serial_puts(&s_floor_fail);
+        serial_crlf();
+        return 2;
+    }
+    let i = 0;
+    while i < 512 {
+        sb(&floor_buf + i, 0);
+        i = i + 1;
+    }
+    floor_wr_u32(&floor_buf, FLOOR_MAGIC);
+    floor_wr_u32(&floor_buf + 4, FLOOR_FMT);
+    sq(&floor_buf + 8, lq(&floor_thw));
+    sw(&floor_gen, lw(&floor_gen) + 1);
+    floor_wr_u32(&floor_buf + 16, lw(&floor_gen));
+    let k = 1;
+    while k <= FLOOR_CLASS_MAX {
+        let o = &floor_buf + 24 + (k - 1) * 12;
+        floor_wr_u32(o, lw(&floor_ver + k * 4));
+        floor_wr_u32(o + 4, lw(&floor_ctr + k * 4));
+        floor_wr_u32(o + 8, lw(&floor_epo + k * 4));
+        k = k + 1;
+    }
+    floor_wr_u32(&floor_buf + 20, floor_checksum());
+    let rc = ata_write_sectors(FLOOR_LBA, &floor_buf, 1);
+    if rc != 0 {
+        serial_puts(&s_floor_fail);
+        serial_crlf();
+        return 2;
+    }
+    sb(&floor_dirty, 0);
+    serial_puts(&s_floor_pers);
+    call ser_print_hex64(rdi: lw(&floor_gen));
+    serial_crlf();
+    return 0;
+}

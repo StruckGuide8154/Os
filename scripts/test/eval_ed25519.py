@@ -35,8 +35,10 @@ MODULES = [
     os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.nxh'),
     os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'envelope_reader.nxh'),
     os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'ed25519_check.nxh'),
-    # Track 2 call-site binding: the admission gate + the SHA-256 it uses.
+    # Track 2 call-site binding: the admission gate + the SHA-256 it uses
+    # + the persistent anti-rollback floors the gate's verifier context reads.
     os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'crypto.nxh'),
+    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'floor_store.nxh'),
     os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'envelope_gate.nxh'),
 ]
 
@@ -60,7 +62,11 @@ class PanicCalled(Exception):
 # is a no-op on the host; the panic sink raises so the fail-closed control
 # flow stays observable.
 STUB_NOOP_FNS = {'serial_puts', 'serial_crlf', 'svg_dump_putc',
-                 'ser_print_hex64'}
+                 'ser_print_hex64',
+                 # Host ATA: "success" (0) with the sector buffer left as-is,
+                 # so floor_persist -> floor_store_load round-trips through
+                 # floor_store's own floor_buf encode/decode/checksum path.
+                 'ata_read_sectors', 'ata_write_sectors'}
 STUB_PANIC_FNS = {'kernel_panic_canary'}
 
 
@@ -432,8 +438,8 @@ def main():
     # 5. artifact admission gate (envelope_gate.nxh): the boot/update call-site
     # binding + the verified-artifact hash cache. The gate computes the payload
     # SHA-256 itself (crypto.nxh, the real kernel implementation) and pins its
-    # own verifier context (now=1, device_id=1, floors=1), so envelopes here
-    # are built with the matching write_envelope.py defaults.
+    # own verifier context (device_id=1; floors from floor_store.nxh, build
+    # default 1), so envelopes here match the write_envelope.py defaults.
     gkw = dict(kind=5, domain=5, role=4, device_id=1, device_class=0,
                not_before=0, not_after=0xFFFFFFFF,
                version=1, rollback=1, epoch=1,
@@ -661,6 +667,104 @@ def main():
           u.call('gate_quorum_active_min', 7) == 3 and
           u.call('gate_quorum_active_required', 7) == 0x0C,
           'rc=%d' % u.lw(u.data_addr['kquorum_rc']))
+
+    # 9. RTC/now binding (gate_time_set / gate_time_now): envelope validity
+    # windows are judged against a REAL, floor-clamped, forward-ratcheting
+    # verifier clock — including on hash-cache hits.
+    FLOOR = 1767225600                       # 2026-01-01 UTC (GATE_TIME_FLOOR)
+    ENVR_ERR_WINDOW = 14
+    check('verifier clock defaults to the build floor',
+          u.call('gate_time_now') == FLOOR)
+    u.call('gate_time_set', 5)               # dead-CMOS / rolled-back sample
+    check('dead-RTC sample clamps to the floor (never the past)',
+          u.call('gate_time_now') == FLOOR)
+    NOW = 1781136000                         # 2026-06-11 UTC
+    u.call('gate_time_set', NOW)
+    check('RTC sample binds the verifier clock', u.call('gate_time_now') == NOW)
+    u.call('gate_time_set', NOW - 86400)
+    check('clock never moves backward within a boot (ratchet)',
+          u.call('gate_time_now') == NOW)
+
+    # upd_kw (update class) is untouched by the section-8 class-5/7 ratchets.
+    exp_kw = dict(upd_kw); exp_kw.update(not_after=1000000000)
+    rc = admit(we.build_envelope(payload=b'expired update', **exp_kw),
+               ART_UPDATE)
+    check('expired envelope rejected against the live clock (WINDOW)',
+          rc == ENVR_ERR_WINDOW, 'rc=%d' % rc)
+    fut_kw = dict(upd_kw); fut_kw.update(not_before=NOW + 86400)
+    rc = admit(we.build_envelope(payload=b'postdated update', **fut_kw),
+               ART_UPDATE)
+    check('not-yet-valid envelope rejected (WINDOW)',
+          rc == ENVR_ERR_WINDOW, 'rc=%d' % rc)
+    win_kw = dict(upd_kw); win_kw.update(not_before=NOW - 100,
+                                         not_after=NOW + 100)
+    win_env = we.build_envelope(payload=b'windowed update', **win_kw)
+    rc = admit(win_env, ART_UPDATE)
+    check('tight window spanning now admitted', rc == 0, 'rc=%d' % rc)
+    u.call('gate_time_set', NOW + 200)       # the window expires mid-boot
+    rc = admit(win_env, ART_UPDATE)
+    check('cached (already-verified) artifact still expires against the '
+          'live clock', rc == ENVR_ERR_WINDOW, 'rc=%d' % rc)
+
+    # 10. Persistent anti-rollback floors (floor_store.nxh): the gate's
+    # required version/counter/epoch come from the floor table, ratchet
+    # forward on every ACCEPTED envelope's signed monotonic fields, and
+    # round-trip through the persisted sector record (host ATA stubs leave
+    # floor_buf intact, so persist->load exercises the real encode/decode/
+    # checksum path).
+    ENVR_ERR_EPOCH, ENVR_ERR_DOWNGRADE, ENVR_ERR_REPLAY = 15, 16, 17
+    rc = u.call('floor_store_load')         # kmain K5 order: load before admits
+    check('first boot: readable media, no record yet (blank)',
+          rc == 2, 'rc=%d' % rc)
+    check('floors default to the build-time constant (1)',
+          u.call('floor_required_version', ART_UPDATE) == 1 and
+          u.call('floor_required_counter', ART_UPDATE) == 1 and
+          u.call('floor_required_epoch', ART_UPDATE) == 1)
+    check('out-of-range class answers an impossible floor (fail closed)',
+          u.call('floor_required_version', 0) == 0xFFFFFFFF and
+          u.call('floor_required_epoch', 10) == 0xFFFFFFFF)
+    v3_kw = dict(upd_kw); v3_kw.update(version=3, rollback=2, epoch=2)
+    rc = admit(we.build_envelope(payload=b'update v3', **v3_kw), ART_UPDATE)
+    check('newer (v3/c2/e2) update admitted', rc == 0, 'rc=%d' % rc)
+    check('accepted envelope ratchets the class floors',
+          u.call('floor_required_version', ART_UPDATE) == 3 and
+          u.call('floor_required_counter', ART_UPDATE) == 2 and
+          u.call('floor_required_epoch', ART_UPDATE) == 2)
+    check('floors are per-class (app class unaffected)',
+          u.call('floor_required_version', ART_APP) == 1)
+    old_kw = dict(v3_kw); old_kw.update(version=2)
+    rc = admit(we.build_envelope(payload=b'superseded v2', **old_kw),
+               ART_UPDATE)
+    check('superseded version rejected (DOWNGRADE)',
+          rc == ENVR_ERR_DOWNGRADE, 'rc=%d' % rc)
+    old_kw = dict(v3_kw); old_kw.update(rollback=1)
+    rc = admit(we.build_envelope(payload=b'replayed counter', **old_kw),
+               ART_UPDATE)
+    check('superseded rollback counter rejected (REPLAY)',
+          rc == ENVR_ERR_REPLAY, 'rc=%d' % rc)
+    old_kw = dict(v3_kw); old_kw.update(epoch=1)
+    rc = admit(we.build_envelope(payload=b'stale epoch', **old_kw),
+               ART_UPDATE)
+    check('stale revocation epoch rejected (EPOCH)',
+          rc == ENVR_ERR_EPOCH, 'rc=%d' % rc)
+    rc = u.call('floor_persist', NOW + 200)
+    check('raised floors persist to the floor sector', rc == 0, 'rc=%d' % rc)
+    check('persist advances the clock high-water',
+          u.call('floor_time_high') == NOW + 200)
+    rc = u.call('floor_persist', NOW + 200)
+    check('clean floors skip the sector rewrite', rc == 1, 'rc=%d' % rc)
+    rc = u.call('floor_store_load')
+    check('persisted record loads back (magic/fmt/checksum ok)',
+          rc == 0, 'rc=%d' % rc)
+    check('reload keeps the ratcheted floors (max-merge)',
+          u.call('floor_required_version', ART_UPDATE) == 3)
+    fb = u.data_addr['floor_buf']
+    u.mem[fb + 30] ^= 0xFF                  # corrupt a class field on "disk"
+    rc = u.call('floor_store_load')
+    check('corrupt record detected by checksum -> treated as blank',
+          rc == 2, 'rc=%d' % rc)
+    check('corrupt record is never trusted (floors unchanged)',
+          u.call('floor_required_version', ART_UPDATE) == 3)
 
     if FAILURES:
         sys.stderr.write('[ed25519] FAIL — %d problem(s):\n' % len(FAILURES))

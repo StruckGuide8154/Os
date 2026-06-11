@@ -16,6 +16,82 @@ if ($LASTEXITCODE -ne 0) {
     throw 'zero-asm kernel intrinsic fixture failed to compile'
 }
 
+Write-Host '[nxhc-security] compile exact-authority kernel cap fixture (narrow caps only)' -ForegroundColor Yellow
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\exact_authority_caps.nxh') `
+    -o (Join-Path $OutDir 'exact_authority_caps.asm') `
+    -L $LibDir --target kernel --embed --forbid-asm
+if ($LASTEXITCODE -ne 0) {
+    throw 'exact-authority kernel cap fixture failed to compile with narrow caps'
+}
+
+Write-Host '[nxhc-security] reject privileged intrinsic held under the wrong exact authority' -ForegroundColor Yellow
+$OldEAP2 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\exact_authority_wrong.nxh') `
+    -o (Join-Path $OutDir 'exact_authority_wrong.asm') `
+    -L $LibDir --target kernel --embed *> $null
+$WrongAuthExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAP2
+if ($WrongAuthExit -eq 0) {
+    throw 'exact-authority gate accepted lgdt() while only kernel_creg was declared'
+}
+
+Write-Host '[nxhc-security] reject privileged intrinsic from a ring-3 user app' -ForegroundColor Yellow
+# Proves user apps cannot request privileged intrinsics: the gate keys off the
+# build target, so write_cr0() is rejected under --target user even though the
+# fixture declares the matching kernel_creg authority.
+$OldEAP3 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\user_privileged_forbidden.nxh') `
+    -o (Join-Path $OutDir 'user_privileged_forbidden.asm') `
+    -L $LibDir *> $null
+$UserPrivExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAP3
+if ($UserPrivExit -eq 0) {
+    throw 'user target accepted write_cr0() (privileged intrinsic leaked into a ring-3 app)'
+}
+
+Write-Host '[nxhc-security] reject raw memory builtin without the raw_mem capability' -ForegroundColor Yellow
+$OldEAP4 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\raw_mem_forbidden.nxh') `
+    -o (Join-Path $OutDir 'raw_mem_forbidden.asm') `
+    -L $LibDir --target kernel --embed *> $null
+$RawMemDenyExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAP4
+if ($RawMemDenyExit -eq 0) {
+    throw 'kernel target accepted sq() raw store without unsafe raw_mem'
+}
+
+Write-Host '[nxhc-security] accept the same raw store once raw_mem is declared' -ForegroundColor Yellow
+# Positive companion: proves the gate keys off the capability, not the builtin.
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\raw_mem_caps.nxh') `
+    -o (Join-Path $OutDir 'raw_mem_caps.asm') `
+    -L $LibDir --target kernel --embed
+if ($LASTEXITCODE -ne 0) {
+    throw 'raw_mem fixture failed to compile with the raw_mem capability declared'
+}
+
+Write-Host '[nxhc-security] reject an unknown unsafe capability declaration' -ForegroundColor Yellow
+# Proves the unsafe-capability namespace is a closed allowlist: a typo'd or
+# invented authority is a hard parse error, never a silently-ignored gate.
+$OldEAP5 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\nxh_kernel\unknown_cap_forbidden.nxh') `
+    -o (Join-Path $OutDir 'unknown_cap_forbidden.asm') `
+    -L $LibDir --target kernel --embed *> $null
+$UnknownCapExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAP5
+if ($UnknownCapExit -eq 0) {
+    throw 'compiler accepted an unknown unsafe capability declaration'
+}
+
 Write-Host '[nxhc-security] compile guarded boot layout fixture' -ForegroundColor Yellow
 python $Compiler `
     (Join-Path $Root 'tests\nxh_boot\boot_layout.nxh') `

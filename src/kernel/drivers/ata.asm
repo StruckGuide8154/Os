@@ -275,8 +275,15 @@ ata_write_sectors:
 ; is no controller responding. Returns eax=1 if a controller appears present,
 ; eax=0 if absent. No spin, no PIT dependency: safe to call with interrupts off.
 ata_bus_present:
+    ; Preserve rdx: ata_read/write_sectors call this BEFORE consuming their
+    ; edx=sector_count argument. Clobbering dx here turned every PIO request
+    ; into a 0x1F7(=503)-sector transfer that sprayed disk bytes over the
+    ; kernel image (latent until the first sub-FAT16_PART_LBA caller, since
+    ; ramdisk-intercepted I/O returns before reaching this probe).
+    push rdx
     mov dx, ATA_STATUS
     in al, dx
+    pop rdx
     cmp al, 0xFF
     je .abp_absent
     mov eax, 1

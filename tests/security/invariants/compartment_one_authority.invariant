@@ -1,0 +1,10 @@
+# Each Track-6 monitor compartment owns exactly one mintable authority; the
+# decomposition is pointless if a compartment can hold two (it would re-merge
+# the authorities a compromise must not combine).
+invariant=INV-COMPARTMENT-ONE-AUTHORITY
+title=A compartment's authority bitmask is a singleton
+statement=A compartment authority mask is valid iff exactly one bit is set (a non-zero power of two); zero authority or two-or-more bits is a violation.
+compromised=Any single monitor compartment (PT/KEY/HASH/CAP/DMA/LOAD-MON)
+denied_authority=Any second authority bit beyond the compartment's one
+predicate=inv_compartment_one_authority
+status=proven

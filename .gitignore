@@ -11,10 +11,13 @@ worktrees/
 /sandbox_shadow/
 /tools/agentchat/
 
-# Build output and artifacts (binaries, disk images, screenshots, logs)
-build/
-!tools/build/
-!tools/build/extract_kaslr_fixups.py
+# Build output and artifacts (binaries, disk images, screenshots, logs).
+# Anchored to the repo root: `build/` (unanchored) also matched the SOURCE dirs
+# scripts/build/ and tools/build/, silently hiding tracked-source tooling
+# (ed25519_host.py / write_envelope.py / build_probe.ps1) from `git add` — which
+# broke CI's Ed25519 eval with ModuleNotFoundError. Only the root output dir is
+# an artifact dir.
+/build/
 
 # Python caches
 __pycache__/

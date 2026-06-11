@@ -1,0 +1,10 @@
+# Track 4 barrier (1): every authenticator-bearing secret is re-drawn per boot
+# (RDTSC^RDRAND folded through the qrng seed). A secret lifted from a RAM dump
+# of boot A is unrelated to boot B and must not authenticate there.
+invariant=INV-EPHEMERAL-NO-REPLAY
+title=A dumped per-boot secret does not authenticate on a fresh boot
+statement=An ephemeral secret authenticates only when its boot epoch equals the live boot epoch; presented against a different epoch it fails closed. Vacuously safe when it does not authenticate.
+compromised=A one-shot RAM-dump attacker replaying a recovered canary/nonce/mem-key
+denied_authority=Authentication on any boot other than the secret's own
+predicate=inv_ephemeral_no_replay
+status=proven

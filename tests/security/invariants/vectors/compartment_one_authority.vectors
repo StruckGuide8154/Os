@@ -1,0 +1,18 @@
+# INV-COMPARTMENT-ONE-AUTHORITY vectors —
+# predicate inv_compartment_one_authority(comp_auth).
+invariant=INV-COMPARTMENT-ONE-AUTHORITY
+predicate=inv_compartment_one_authority
+# each real compartment owns exactly one authority bit — accept
+case=accept | AUTH_MEMORY_GRANT
+case=accept | AUTH_SIGN_MEASUREMENT
+case=accept | AUTH_DMA_MAP
+# a high singleton bit is still a singleton
+case=accept | 64
+# powerless compartment — violates "owns exactly one"
+case=reject | 0
+# two authorities fused into one compartment — the decomposition is defeated
+case=reject | 3
+# memory-grant + persist together
+case=reject | 9
+# all bits set
+case=reject | 127

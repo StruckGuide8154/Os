@@ -1,0 +1,10 @@
+# The cross-compartment trampoline transfers no caller authority: the callee
+# always runs with exactly its own authority. Proven by quantifying over every
+# caller authority and requiring the predicate to be constant in it.
+invariant=INV-COMPARTMENT-NO-AUTH-LAUNDER
+title=The trampoline launders no caller authority
+statement=Effective authority after a trampoline cross must equal the callee's own authority for every caller authority value; the predicate is constant in caller_auth, so neither widening nor narrowing can occur.
+compromised=A compromised caller compartment crossing the trampoline
+denied_authority=Any caller authority bleeding into the callee's effective set
+predicate=inv_compartment_no_auth_launder
+status=proven

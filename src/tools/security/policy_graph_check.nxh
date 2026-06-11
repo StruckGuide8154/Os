@@ -1,3 +1,4 @@
+# THREAT: a capability policy graph that grants an unintended cross-compartment edge (authority laundering).
 # NHL-native capability policy graph checker kernel.
 #
 # Host launchers may enumerate policy files, but graph safety decisions belong

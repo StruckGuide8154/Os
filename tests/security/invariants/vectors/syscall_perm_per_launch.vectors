@@ -1,0 +1,14 @@
+# INV-SYSCALL-PERM-PER-LAUNCH vectors —
+# predicate inv_syscall_perm_per_launch(blob_perm_id, live_perm_id, dispatches).
+invariant=INV-SYSCALL-PERM-PER-LAUNCH
+predicate=inv_syscall_perm_per_launch
+# blob built against the live launch permutation — dispatches as intended
+case=accept | 5, 5, 1
+# blob assumes a stale permutation but does not reach the handler — vacuous
+case=accept | 2, 8, 0
+# same permutation, no dispatch
+case=accept | 0, 0, 0
+# THE violation: a blob built under permutation 2 dispatching under live perm 8
+case=reject | 2, 8, 1
+# permutation 13 blob under live permutation 1
+case=reject | 13, 1, 1

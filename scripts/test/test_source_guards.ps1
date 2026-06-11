@@ -186,4 +186,20 @@ if ($themeLibContent -match '(?m)^str\s+theme_(palette|state)\s*=') {
     throw 'theme.nxh theme_palette/theme_state must not be string literals; they must start zeroed.'
 }
 
+Write-Host '[guards] Checking security modules carry a threat note...' -ForegroundColor Yellow
+# Presubmit (nhl-beyond-zero-trust P0): every trusted security module under
+# src/tools/security must declare, in a header comment, the adversary/threat it
+# defends against. Catching a module that ships without one keeps the security
+# surface self-documenting and forces authors to state intent. Marker: a line
+# matching `# THREAT:` anywhere in the file header.
+$securityModuleDir = Join-Path $Root 'src\tools\security'
+$securityModules = @(Get-ChildItem -LiteralPath $securityModuleDir -File -Filter '*.nxh' | Sort-Object Name)
+if ($securityModules.Count -eq 0) {
+    throw "No NHL security modules found under $securityModuleDir -- guard cannot be trusted."
+}
+foreach ($mod in $securityModules) {
+    Assert-Match $mod.FullName '(?m)^#\s*THREAT:\s*\S' "Security module $($mod.Name) is missing a `# THREAT:` header note describing the adversary it defends against."
+}
+Write-Host "[guards]   $($securityModules.Count) security module(s) carry a threat note." -ForegroundColor DarkGray
+
 Write-Host '[guards] PASS' -ForegroundColor Green

@@ -1,0 +1,11 @@
+# Track 2 anti-rollback: a signed artifact is admissible only if its version is
+# at least the persisted per-class floor (floor_store.nxh, FLOOR_LBA=2). A
+# validly-signed but superseded version a later build ratcheted past must be
+# rejected — signature validity alone is not sufficient.
+invariant=INV-NO-ROLLBACK
+title=A superseded signed artifact is inadmissible below the floor
+statement=An admitted artifact must have version >= the persisted floor version; admitting a version below the floor is a violation. Vacuously safe when nothing is admitted.
+compromised=An attacker replaying an old validly-signed artifact after a newer one ratcheted the floor
+denied_authority=Admission of any artifact version below the persisted floor
+predicate=inv_no_rollback
+status=proven

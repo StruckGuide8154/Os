@@ -1,0 +1,15 @@
+module "raw_mem_caps";
+
+# Positive companion to raw_mem_forbidden.nxh: the SAME raw store compiles once
+# the module declares the `unsafe raw_mem` authority it touches. Pairing the two
+# fixtures proves the gate keys off the capability, not the builtin name.
+unsafe raw_mem;
+
+global nxh_test_raw_mem_caps;
+
+data scratch: 8 = 0;
+
+fn nxh_test_raw_mem_caps() {
+    sq(&scratch, 1);   # raw store -> allowed under unsafe raw_mem
+    return lq(&scratch);
+}

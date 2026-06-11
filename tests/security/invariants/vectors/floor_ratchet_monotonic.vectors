@@ -1,0 +1,14 @@
+# INV-FLOOR-RATCHET-MONOTONIC vectors —
+# predicate inv_floor_ratchet_monotonic(old_floor, new_floor).
+invariant=INV-FLOOR-RATCHET-MONOTONIC
+predicate=inv_floor_ratchet_monotonic
+# ratchet forward
+case=accept | 5, 9
+# idempotent re-write at the same floor
+case=accept | 7, 7
+# from zero floor upward
+case=accept | 0, 1
+# THE violation: lowering the floor (rollback of the floor itself)
+case=reject | 9, 5
+# any decrease
+case=reject | 100, 0

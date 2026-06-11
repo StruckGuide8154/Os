@@ -1,3 +1,4 @@
+# THREAT: raw user data or secrets leaking through release logging/trace format strings.
 # NHL-native release privacy guard policy kernel.
 #
 # Host wrappers may walk the tree and print diagnostics, but release privacy

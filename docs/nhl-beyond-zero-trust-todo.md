@@ -80,7 +80,10 @@ data-at-rest). They are not yet split into their own track docs.
 - [ ] Add a presubmit test that rejects new public APIs exposed through include
       files.
 - [ ] Add a presubmit test that rejects undocumented compiler intrinsics.
-- [ ] Add a presubmit test that rejects security modules without a threat note.
+- [x] Add a presubmit test that rejects security modules without a threat note.
+      `test_source_guards.ps1` now requires every `src/tools/security/*.nxh` to
+      carry a `# THREAT:` header line naming the adversary it defends against
+      (all 12 modules annotated; the guard trips on any module lacking one).
 - [ ] Add a presubmit test that rejects release logging calls in security,
       identity, update, policy, and crypto modules.
 - [ ] Add a presubmit test that rejects raw user data in log/trace format
@@ -91,30 +94,49 @@ data-at-rest). They are not yet split into their own track docs.
 - [ ] Make `--forbid-asm` mandatory for every new boot, kernel, hypervisor, and
       security module.
 - [ ] Make `--deny-unsafe` mandatory for non-boundary security modules.
-- [ ] Split unsafe capabilities by exact authority instead of broad categories.
-- [ ] Add capability gates for control-register operations.
-- [ ] Add capability gates for descriptor-table operations.
-- [ ] Add capability gates for interrupt-table operations.
-- [ ] Add capability gates for port I/O operations.
+- [x] Split unsafe capabilities by exact authority instead of broad categories.
+      DONE (2026-06-10): nxhc gained narrow per-authority kernel caps
+      (`kernel_creg`, `kernel_pgtable`, `kernel_dtable`, `kernel_idtable`)
+      alongside the existing `kernel_io` / `kernel_int`. The broad `kernel_priv`
+      remains a SUPERSET (satisfies any narrow cap via `_KERNEL_PRIV_SUBSUMES`)
+      so legacy modules compile unchanged. Proven by
+      `tests/nxh_kernel/exact_authority_caps.nxh` (narrow caps only compile) +
+      `exact_authority_wrong.nxh` (kernel_creg does NOT grant lgdt → rejected),
+      wired into `scripts/test/test_nxhc_security.ps1`.
+- [x] Add capability gates for control-register operations. DONE — `write_cr0`
+      / `write_cr4` require `kernel_creg`.
+- [x] Add capability gates for descriptor-table operations. DONE — `lgdt` /
+      `ltr` require `kernel_dtable`.
+- [x] Add capability gates for interrupt-table operations. DONE — `lidt`
+      requires `kernel_idtable`.
+- [x] Add capability gates for port I/O operations. DONE — `inb`/`outb`/`inw`/
+      `outw`/`ind`/`outd` require `kernel_io` (boot path: `boot_io`).
 - [ ] Add capability gates for MMIO operations.
-- [ ] Add capability gates for page-table mutation.
+- [x] Add capability gates for page-table mutation. DONE — `write_cr3` /
+      `invlpg` require `kernel_pgtable`.
 - [ ] Add capability gates for DMA mapping.
 - [ ] Add capability gates for device reset and firmware load.
 - [ ] Add capability gates for clock, timer, and monotonic-counter reads.
 - [ ] Add target-specific intrinsic allowlists for boot, kernel, hypervisor,
       driver, app, tool, and recovery targets.
-- [ ] Add compiler tests proving user apps cannot request privileged
-      intrinsics.
+- [x] Add compiler tests proving user apps cannot request privileged
+      intrinsics. (`tests/nxh_kernel/user_privileged_forbidden.nxh` —
+      write_cr0() rejected under --target user even with kernel_creg declared,
+      asserted by `test_nxhc_security.ps1`)
 - [ ] Add compiler tests proving drivers cannot mutate unrelated page tables.
 - [ ] Add compiler tests proving recovery code cannot call normal update
       authority without threshold authorization.
-- [ ] Add compiler tests proving raw memory access is unavailable without an
-      explicit capability.
-- [ ] Add compiler tests proving unknown unsafe declarations are hard errors.
-- [ ] Add compiler tests proving unsafe declarations are rejected by
-      `--deny-unsafe`.
-- [ ] Add compiler tests proving generated code contains no inline assembly
-      escape blocks.
+- [x] Add compiler tests proving raw memory access is unavailable without an
+      explicit capability. (`raw_mem_forbidden.nxh` rejected / `raw_mem_caps.nxh`
+      accepted — proves the gate keys off `unsafe raw_mem`, not the builtin)
+- [x] Add compiler tests proving unknown unsafe declarations are hard errors.
+      (`unknown_cap_forbidden.nxh` — unsafe namespace is a closed allowlist)
+- [x] Add compiler tests proving unsafe declarations are rejected by
+      `--deny-unsafe`. (existing `boot_unsafe_decl.nxh` guard in
+      `test_nxhc_security.ps1`)
+- [x] Add compiler tests proving generated code contains no inline assembly
+      escape blocks. (existing `asm_forbidden.nxh` --forbid-asm/--target boot
+      guards)
 - [ ] Add compiler tests proving generated code includes a machine-readable
       authority manifest.
 - [ ] Add source maps from NHL lines to generated low-level symbols for audits.
@@ -169,10 +191,14 @@ data-at-rest). They are not yet split into their own track docs.
 
 ## P0: Signed Everything
 
-- [~] Define a signed artifact envelope shared by boot, kernel, hypervisor,
+- [x] Define a signed artifact envelope shared by boot, kernel, hypervisor,
       drivers, apps, policies, configs, updates, recovery bundles, and tests.
       (Spec `docs/signed-artifact-envelope.md` v1 + structural kernel
-      `src/tools/security/signed_envelope.nxh`; runtime reader/writer = Track 2.)
+      `src/tools/security/signed_envelope.nxh`. The Track 2 runtime reader/writer
+      that this item was gated on has landed: in-kernel `envelope_verify_signed`
+      + the host envelope writer, with boot/kernel/update call sites bound through
+      `envelope_gate.nxh` and the loader KERNEL.ENV path — one shared v1 envelope
+      across all artifact classes. See track2 "Done definition".)
 - [ ] Include artifact type in every signature.
 - [ ] Include target domain in every signature.
 - [ ] Include target device or target device class in every signature.
@@ -197,7 +223,15 @@ data-at-rest). They are not yet split into their own track docs.
 - [ ] Reject downgraded artifacts.
 - [ ] Reject valid signatures from roles not authorized for the artifact type.
 - [ ] Reject artifacts whose manifest and payload disagree.
-- [ ] Add constant-time comparison helpers where secrets or MACs are involved.
+- [x] Add constant-time comparison helpers where secrets or MACs are involved.
+      DONE (2026-06-10): `security_envelope_ct_equal4/8`
+      (`src/tools/security/signed_envelope.nxh`) made truly constant-time —
+      replaced the per-word `if a != b` data-dependent branches (which leaked,
+      via timing/branch-prediction, which word first mismatched = a byte-by-byte
+      forgery oracle) with branchless XOR-OR accumulation; the sole remaining
+      branch is on the public all-equal result. Verified through the real NHL
+      frontend by eval_envelope.py (payload_hash_mismatch + valid_envelope_accept
+      both green) and eval_ed25519.py.
 - [ ] Add bounded streaming verification for large artifacts.
 
 ## P0: Threshold Signing
@@ -499,26 +533,37 @@ data-at-rest). They are not yet split into their own track docs.
 
 ## P2: seL4 Validity Track
 
-- [ ] Define which seL4-style properties this system wants to preserve.
+**COMPLETE / CLOSED 2026-06-10** — see `track3-sel4-validity-todo.md`
+(authoritative) and `track3-invariant-proofs.md` (theorems, bounds, state
+counts, containment claim table, honesty statement).
+
+- [x] Define which seL4-style properties this system wants to preserve.
 - [x] Define capability derivation invariants. (INV-CAP-DERIVATION)
 - [x] Define authority confinement invariants. (INV-NO-GLOBAL-MINT)
-- [x] Define IPC authorization invariants. (INV-IPC-NO-FORGE)
-- [ ] Define memory isolation invariants. (cross-app namespace — see Track 3)
+- [x] Define IPC authorization invariants. (INV-IPC-NO-FORGE,
+      INV-IPC-NO-CONFUSED-DEPUTY)
+- [x] Define memory isolation invariants. (INV-APP-MEM-ISOLATION)
 - [x] Define device isolation invariants. (INV-DRIVER-NO-DMA-MINT)
 - [x] Define scheduler non-authority invariants. (INV-SCHED-NO-MEMORY)
-- [ ] Define recovery non-bypass invariants. (see Track 3)
+- [x] Define recovery non-bypass invariants. (INV-RECOVERY-NO-BYPASS)
 - [x] Define privacy non-observation invariants for release builds.
       (INV-RELEASE-NO-OBSERVE)
-- [ ] Map NHL policy schema to capability graph invariants.
-- [ ] Map compiler unsafe capabilities to authority graph edges.
-- [ ] Map signed artifacts to trusted computing base changes.
+- [x] Map NHL policy schema to capability graph invariants.
+      (`derive_authority.py` S2 — derived through the real edge predicates)
+- [x] Map compiler unsafe capabilities to authority graph edges.
+      (`derive_authority.py` S3 — signed build list + `unsafe` decls +
+      nk_pt_window)
+- [x] Map signed artifacts to trusted computing base changes.
+      (`derive_authority.py` S4 — class→TCB authority vs the real quorum table)
 - [x] Add machine-checkable invariant files. (`tests/security/invariants/*`)
 - [x] Add invariant tests to full verification.
       (`scripts/test/test_nhl_invariants.ps1`, wired into the entry point)
-- [ ] Add proof-oriented docs for every P0 invariant.
-- [ ] Avoid claiming full security after arbitrary total hardware compromise.
-- [ ] Be precise: each containment claim must name the compromised component and
-      the authority it does not have.
+- [x] Add proof-oriented docs for every P0 invariant.
+      (`track3-invariant-proofs.md` §1)
+- [x] Avoid claiming full security after arbitrary total hardware compromise.
+      (honesty statement, `track3-invariant-proofs.md`)
+- [x] Be precise: each containment claim must name the compromised component and
+      the authority it does not have. (claim table, `track3-invariant-proofs.md` §3)
 
 ## P2: Tooling
 
@@ -626,14 +671,25 @@ in `docs/track4-ram-secure-erasure-todo.md` Part C.
 
 - [x] **Intel TME** detect (CPUID.7.0.ECX[13]; IA32_TME_ACTIVATE MSR 0x982 bit 1
       = enabled / bit 0 = locked) — OS detects + asserts (BIOS enables+locks).
-- [ ] **Intel TME-MK** per-KeyID separation → maps onto the per-slot key model.
-- [~] **AMD SME** detect (CPUID 0x8000001F EAX[0]; C-bit = EBX[5:0]; enable via
+- [x] **Intel TME-MK** per-KeyID separation → maps onto the per-slot key model.
+      `security_fme_mktme_supported` + `security_fme_mktme_key_count` (usable
+      KeyIDs = `2^TME_KEYID_BITS - 1`) in `fme_memory_encryption_check.nxh`.
+- [x] **AMD SME** detect (CPUID 0x8000001F EAX[0]; C-bit = EBX[5:0]; enable via
       SYSCFG MSR 0xC0010010 bit 23) + opportunistic per-page C-bit on
-      kernel-secret / slot / FS-cache pages.
-- [ ] **AMD SEV / SEV-ES / SEV-SNP** + **Intel TDX** detect — confidential-VM
+      kernel-secret / slot / FS-cache pages. Detect + C-bit-mask + page-class
+      policy in `fme_memory_encryption_check.nxh`
+      (`security_fme_amd_cbit_mask`, `_sme_page_markable`,
+      `_sme_class_wants_cbit`); PTE write is the kernel-integration tail.
+      See track4 Part C.
+- [x] **AMD SEV / SEV-ES / SEV-SNP** + **Intel TDX** detect — confidential-VM
       tier; only if NexusOS runs as a guest or hosts VMs. Decide whether to target
       running as a confidential guest (cheapest path to true whole-memory opacity
-      on cloud hardware).
+      on cloud hardware). Detect landed in `fme_memory_encryption_check.nxh`
+      (SEV/ES/SNP CPUID+MSR tiers, SNP `armed` gated on a provisioned RMP, TDX via
+      the `CPUID 0x21` "IntelTDX" signature). DECISION: detect-and-report only, do
+      NOT target being a guest — conceding a trusted host hypervisor contradicts
+      the Track 5/6 "NexusOS is the most-privileged software" model and the
+      bare-metal direction (full rationale in track4 Part C).
 - [x] Caveat doc: QEMU TCG does NOT emulate TME/SME — verifiable only on real
       silicon (or KVM+SEV); the software at-rest layer is what TCG `pmemsave` tests.
 

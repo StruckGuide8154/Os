@@ -1,3 +1,4 @@
+# THREAT: a malformed or forged envelope structure (overread/field confusion) slipping past the reader.
 # NHL-native signed artifact ENVELOPE structure policy kernel.
 #
 # `signed_artifact_check.nxh` owns the *semantic* field validity (role-for-type,
@@ -173,28 +174,22 @@ fn security_envelope_stream_bounds_ok(total_len, header_len, field_count, payloa
     return 1;
 }
 
-# Constant-control-flow equality helpers for decoded hash/MAC words. The caller
-# still owns byte loading; these helpers avoid early return on secret mismatch.
+# Constant-time equality helpers for decoded hash/MAC words. The caller still
+# owns byte loading. These accumulate XOR differences with NO secret-dependent
+# branch â€” every per-word `if` is gone, so the comparison cost is identical
+# whether the secret matches in word 0 or word 7. A per-word branch (the prior
+# form) leaks via timing/branch-prediction which word first mismatched, which is
+# a byte-by-byte forgery oracle against a MAC/hash gate. The single final branch
+# depends only on the public boolean result (all words equal vs not), never on
+# where a mismatch occurred, so it carries no secret-dependent timing.
 fn security_envelope_ct_equal4(a0, a1, a2, a3, b0, b1, b2, b3) {
-    let diff = 0;
-    if a0 != b0 { diff = diff | 1; }
-    if a1 != b1 { diff = diff | 1; }
-    if a2 != b2 { diff = diff | 1; }
-    if a3 != b3 { diff = diff | 1; }
+    let diff = (a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3);
     if diff == 0 { return 1; }
     return 0;
 }
 
 fn security_envelope_ct_equal8(a0, a1, a2, a3, a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7) {
-    let diff = 0;
-    if a0 != b0 { diff = diff | 1; }
-    if a1 != b1 { diff = diff | 1; }
-    if a2 != b2 { diff = diff | 1; }
-    if a3 != b3 { diff = diff | 1; }
-    if a4 != b4 { diff = diff | 1; }
-    if a5 != b5 { diff = diff | 1; }
-    if a6 != b6 { diff = diff | 1; }
-    if a7 != b7 { diff = diff | 1; }
+    let diff = (a0 ^ b0) | (a1 ^ b1) | (a2 ^ b2) | (a3 ^ b3) | (a4 ^ b4) | (a5 ^ b5) | (a6 ^ b6) | (a7 ^ b7);
     if diff == 0 { return 1; }
     return 0;
 }

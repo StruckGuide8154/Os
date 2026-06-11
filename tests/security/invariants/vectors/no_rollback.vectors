@@ -1,0 +1,14 @@
+# INV-NO-ROLLBACK vectors —
+# predicate inv_no_rollback(artifact_version, floor_version, admitted).
+invariant=INV-NO-ROLLBACK
+predicate=inv_no_rollback
+# artifact at the floor — admissible
+case=accept | 5, 5, 1
+# artifact above the floor — admissible
+case=accept | 9, 5, 1
+# below the floor but not admitted — vacuously safe
+case=accept | 2, 5, 0
+# THE violation: a superseded artifact (v2) admitted below a v5 floor
+case=reject | 2, 5, 1
+# floor ratcheted to 100, an old v3 still rejected
+case=reject | 3, 100, 1
