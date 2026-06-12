@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - architectural register / MSR / MMIO-base constants (src/kernel/arch)
+; Grit - architectural register / MSR / MMIO-base constants (src/kernel/arch)
 ; ----------------------------------------------------------------------------
 ; Named values for the magic literals previously baked into the APIC, I/O APIC
 ; and ACPI-RSDP drivers. Each constant cites the spec section it comes from so

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS active NIC dispatcher
+; Grit active NIC dispatcher
 ; ----------------------------------------------------------------------------
 ; Stable kernel-facing network surface used by syscalls/apps and protocol
 ; modules. Backends register a small ops record, and the dispatcher picks the

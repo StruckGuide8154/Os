@@ -34,7 +34,7 @@ state {
     gpu_buf: 32;
 }
 
-str product_name   = "GritOS";
+str product_name   = "Grit";
 str product_ver    = "Version 3.0";
 str product_tag    = "Graphical x86-64 desktop OS";
 str logo_text      = "N";
@@ -43,10 +43,10 @@ str tab_overview   = "Overview";
 str tab_system     = "System";
 str tab_credits    = "Credits";
 
-str intro_1        = "GritOS is a compact graphical OS";
+str intro_1        = "Grit is a compact graphical OS";
 str intro_2        = "with built-in apps and FAT16 storage";
 str intro_3        = "plus a GritHL user-app layer.";
-str status_over    = "About GritOS";
+str status_over    = "About Grit";
 str status_sys     = "Live system information";
 str status_credits = "Project credits";
 
@@ -67,8 +67,8 @@ str gpu_none       = "basic framebuffer";
 str gpu_780m       = "AMD Radeon 780M";
 str gpu_amd        = "AMD display";
 
-str credit_1       = "GritOS Project";
-str credit_2       = "(c) 2026 GritOS contributors";
+str credit_1       = "Grit Project";
+str credit_2       = "(c) 2026 Grit contributors";
 str credit_3       = "Kernel: hand-written x86-64 assembly";
 str credit_4       = "Apps: GritHL and shared GUI library";
 str credit_5       = "Boot targets: BIOS and UEFI";

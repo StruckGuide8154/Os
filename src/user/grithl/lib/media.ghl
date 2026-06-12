@@ -1,6 +1,6 @@
 # GritHL media library.
 #
-# Header-parsing helpers for the GritOS native image (NIC1) and video
+# Header-parsing helpers for the Grit native image (NIC1) and video
 # (NBA1) container formats. Pixel blit happens kernel-side
 # (src/kernel/gui/media_viewer.asm); this lib is for ghl apps that need to
 # read header fields - for instance, an explorer thumbnail strip that wants

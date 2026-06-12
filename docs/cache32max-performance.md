@@ -1,4 +1,4 @@
-# GritOS Cache32Max Performance Profile
+# Grit Cache32Max Performance Profile
 
 `Cache32Max` is an experimental profile for cache-first development on an
 8-core Ryzen-class system. It keeps the normal boot profile unchanged while

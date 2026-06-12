@@ -1,5 +1,5 @@
 # ============================================================================
-# Media Player - image and video viewer for GritOS native formats.
+# Media Player - image and video viewer for Grit native formats.
 #
 # This is the THIN app shell. Everything reusable (control-bar layout,
 # hit-testing, scrub math, seek state machine) lives in

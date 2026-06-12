@@ -2,7 +2,7 @@
 %define GRIT_WINDOW_INC
 
 ; ============================================================================
-; GritOS v3.0 - User Window/App Constants
+; Grit v3.0 - User Window/App Constants
 ; Shared constants for built-in apps and future external user apps.
 ; ============================================================================
 

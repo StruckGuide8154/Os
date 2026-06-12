@@ -207,7 +207,7 @@ def enc_tlv(field_id, value, id_width=None, len_width=None):
 CTX = dict(now=1000, device_id=0x11, device_class=0x22,
            required_version=5, required_counter=3, required_epoch=2)
 
-PAYLOAD = b'GritOS test artifact payload bytes'
+PAYLOAD = b'Grit test artifact payload bytes'
 
 
 def base_fields(unit, payload):

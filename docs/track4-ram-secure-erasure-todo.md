@@ -1,6 +1,6 @@
 # Track 4 - RAM-Only / Anti-Forensic Memory
 
-Goal: GritOS runs entirely from RAM (volatile - nothing survives power-off) and
+Goal: Grit runs entirely from RAM (volatile - nothing survives power-off) and
 reduces what a memory dump can reveal to the smallest possible, clearly-bounded
 residual. Driven by the requirement: "make it RAM-only for now, where if a RAM
 dump was taken nothing would be readable or reversible."
@@ -288,8 +288,8 @@ exactly like the existing CET / SMAP / KPTI scaffolds: **detection always
 compiled, enable behind a build gate, hard no-op (and clean boot) on CPUs/VMs
 without it, status exposed via SYS_SYSINFO** (200..240 security-status range).
 
-Two families - bare-metal FME applies to GritOS directly; the confidential-VM
-TEEs apply only if GritOS runs as a guest or hosts VMs.
+Two families - bare-metal FME applies to Grit directly; the confidential-VM
+TEEs apply only if Grit runs as a guest or hosts VMs.
 
 ### Bare-metal full-memory encryption (directly applicable)
 - [x] **Intel TME** detect: `CPUID.7.0.ECX[13]` (TME) enumerates MSRs
@@ -308,7 +308,7 @@ TEEs apply only if GritOS runs as a guest or hosts VMs.
 - [x] **AMD SME** detect: `CPUID 0x8000001F` EAX bit 0 (SME), C-bit position in
       EBX[5:0]; enable bit is `MSR_AMD64_SYSCFG` (0xC0010010) bit 23. Unlike TME,
       SME lets the OS mark individual pages encrypted via the **C-bit** in the page
-      tables once firmware enables SYSCFG[23] - so GritOS can *opportunistically*
+      tables once firmware enables SYSCFG[23] - so Grit can *opportunistically*
       set the C-bit on the highest-value pages (kernel secrets, slot arenas, FS
       cache) and let the memory controller encrypt them transparently.
       Detect (`security_fme_amd_sme_supported` / `_cbit_pos` / `_enabled`) plus
@@ -345,7 +345,7 @@ TEEs apply only if GritOS runs as a guest or hosts VMs.
   (`pass_tdx_guest_signature`, `fail_sev_supported_inactive`) exercise the path;
   the module compiles clean under `--forbid-asm --deny-unsafe`.
 
-### Confidential-VM TEEs (only if GritOS runs as guest / hosts VMs)
+### Confidential-VM TEEs (only if Grit runs as guest / hosts VMs)
 - [x] **AMD SEV / SEV-ES / SEV-SNP** detect: `CPUID 0x8000001F` EAX bit 1 (SEV) /
       bit 3 (SEV-ES) / bit 4 (SEV-SNP); active via `MSR_AMD64_SEV` (0xC0010131)
       bit 0 (SEV) / bit 1 (SEV-ES) / bit 2 (SEV-SNP); SNP is only reported *armed*
@@ -357,21 +357,21 @@ TEEs apply only if GritOS runs as a guest or hosts VMs.
 - [x] **Intel TDX** detect (trust-domain guest): CPUID leaf `0x21` sub-leaf 0
       vendor signature "IntelTDX    " (EBX/EDX/ECX), via
       `security_fme_tdx_guest_present`. Same "only as a guest" caveat.
-- [x] Decide + document whether GritOS targets being a confidential **guest**
+- [x] Decide + document whether Grit targets being a confidential **guest**
       (gets SEV-SNP/TDX protection for free from the host) - likely the cheapest
       path to true whole-memory opacity on cloud hardware.
-      **Decision (2026-06-10): detect-and-report, do NOT target.** GritOS's stated
+      **Decision (2026-06-10): detect-and-report, do NOT target.** Grit's stated
       direction is bare-metal / widely-compatible real hardware (see project
       memory + STATUS.md), where whole-memory opacity comes from Part C FME
-      (TME/SME) on the silicon GritOS itself controls. Becoming an SEV-SNP/TDX
+      (TME/SME) on the silicon Grit itself controls. Becoming an SEV-SNP/TDX
       *guest* would (a) presuppose a trusted host hypervisor - a trust anchor
-      GritOS deliberately does not concede, contradicting the Track 5/6 "monitor
-      below ring 0" model where GritOS is the most-privileged software; and
+      Grit deliberately does not concede, contradicting the Track 5/6 "monitor
+      below ring 0" model where Grit is the most-privileged software; and
       (b) only apply on cloud hosts, not the daily-driver/real-HW goal. So the
-      confidential-guest path stays **detect + report only**: if GritOS ever
+      confidential-guest path stays **detect + report only**: if Grit ever
       *finds itself* running under SEV-SNP/TDX (via the detection above) it
       surfaces that as a bonus opacity layer through SYS_SYSINFO, but it is never
-      a required or assumed deployment target. Hosting confidential VMs (GritOS
+      a required or assumed deployment target. Hosting confidential VMs (Grit
       as the *host*) is out of scope for Track 4 and lives under Track 5.
 
 ### Honest caveats for Part C

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Application Framework + Built-in Apps
+; Grit v3.0 - Application Framework + Built-in Apps
 ; Split into per-app/source includes to keep userland code maintainable while
 ; preserving the monolithic kernel build.
 ; ============================================================================

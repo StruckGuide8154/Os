@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Mouse Cursor Rendering
+; Grit v3.0 - Mouse Cursor Rendering
 ; Draws cursor to front buffer, saves/restores background
 ; ============================================================================
 bits 64

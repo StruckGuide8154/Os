@@ -396,7 +396,7 @@ def main():
 
     # 4. signed envelopes through envelope_verify_signed
     import write_envelope as we
-    payload = b'GritOS signed-envelope crypto test payload'
+    payload = b'Grit signed-envelope crypto test payload'
     kw = dict(payload=payload, kind=5, domain=5, role=4,
               device_id=0x11, device_class=0,
               not_before=500, not_after=2000,

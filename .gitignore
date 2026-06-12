@@ -48,7 +48,7 @@ admin_*.backup
 admin_*.rsc
 
 # Dropped source archives after extraction into source-owned folders
-GritOS Design System.zip
+Grit Design System.zip
 dist/
 
 # Quantum entropy seed -- PRIVATE BUILD SECRET. The raw bytes must never be

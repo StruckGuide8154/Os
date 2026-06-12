@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - SPI Controller Driver
+; Grit v3.0 - SPI Controller Driver
 ; Supports:
 ;   - AMD FCH GSPI (fixed MMIO 0xFEC00000)
 ;   - AMD Sensor Fusion Hub (PCI 0x1022:0x15E4, BAR0)

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Physical Page Allocator
+; Grit v3.0 - Physical Page Allocator
 ; Bitmap-based, 4KB pages, initialized from E820 memory map
 ; ============================================================================
 bits 64

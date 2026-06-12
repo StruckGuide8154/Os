@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ACPI PCI Enumerator (MCFG)
+; Grit v3.0 - ACPI PCI Enumerator (MCFG)
 ; Dynamically lists PCIe MMIO assignments using ACPI MCFG table
 ; ============================================================================
 bits 64

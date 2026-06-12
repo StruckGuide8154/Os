@@ -1,6 +1,6 @@
-# GritOS Multi-Core (SMP Work Queue)
+# Grit Multi-Core (SMP Work Queue)
 
-This document describes how GritOS uses more than one CPU core, and how to
+This document describes how Grit uses more than one CPU core, and how to
 offload expensive work so the GUI stays responsive.
 
 ## Goal
@@ -12,7 +12,7 @@ the boot CPU keeps drawing frames at full speed.
 
 ## Model: worker-core offload
 
-GritOS does **not** schedule whole apps preemptively across cores. It uses a
+Grit does **not** schedule whole apps preemptively across cores. It uses a
 simpler, lower-risk model:
 
 - **BSP (boot processor, CPU 0)** runs the kernel, the GUI render loop, drivers,

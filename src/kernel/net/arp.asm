@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS ARP protocol module
+; Grit ARP protocol module
 ; ----------------------------------------------------------------------------
 ; Generic ARP resolver above net_nic_tx_frame/net_nic_poll_rx. Drivers only
 ; move Ethernet frames; ARP cache and packet format live here.

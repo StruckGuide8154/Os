@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - System Constants
+; Grit v3.0 - System Constants
 ; ============================================================================
 
 %include "boot_memory.inc"
@@ -77,7 +77,7 @@ FRAMEBUFFER_SIZE    equ (SCREEN_WIDTH * SCREEN_HEIGHT * 4)  ; 3145728 = ~3MB
 ; VBE info offsets live in boot_memory.inc.
 
 ; --- Colors (32-bit 0x00RRGGBB, stored as BGRX in memory) ---
-; GritOS design-system light palette semantic tokens.
+; Grit design-system light palette semantic tokens.
 COLOR_BG_BASE       equ 0x00F5F6FA   ; #F5F6FA
 COLOR_SURFACE_1     equ 0x00FFFFFF   ; #FFFFFF
 COLOR_SURFACE_2     equ 0x00ECEFF4   ; #ECEFF4

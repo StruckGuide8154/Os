@@ -23,7 +23,7 @@
 ;
 ; ---------------------------------------------------------------------------
 ; THE EXISTING (NON-KPTI) ADDRESS-SPACE MODEL  (what this extends)
-;   GritOS runs on ONE shared PML4 at PAGE_TABLE_ADDR (0x70000), built by the
+;   Grit runs on ONE shared PML4 at PAGE_TABLE_ADDR (0x70000), built by the
 ;   loader (uefi_loader.asm setup_paging / stage2.asm):
 ;       PML4[0] -> PDPT0 (0x71000)  - covers 0..512 GiB, USER branch (the app
 ;                                     arena PDEs live under here)

@@ -1,4 +1,4 @@
-# GritHL core library - thin typed wrappers over GritOS syscalls.
+# GritHL core library - thin typed wrappers over Grit syscalls.
 # Each wrapper emits exactly one syscall. No hidden allocation.
 # Syscall numbers match src/include/syscall_user.inc.
 

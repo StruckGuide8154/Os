@@ -1,4 +1,4 @@
-# GritOS Usermode Reference
+# Grit Usermode Reference
 
 This document covers the ring-3 callback path, the user app layout, and the
 main exported usermode-facing entrypoints.

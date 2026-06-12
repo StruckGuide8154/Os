@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - FAT16 Filesystem Driver
+; Grit v3.0 - FAT16 Filesystem Driver
 ; Reads/writes files from a FAT16 partition starting at a fixed sector offset
 ; ============================================================================
 bits 64

@@ -1,4 +1,4 @@
-; font_8x16.inc - GritOS bitmap font 8x16
+; font_8x16.inc - Grit bitmap font 8x16
 ; Embedded form of formats/font_8x16.nft (byte-identical).
 ; ASCII printable (32..127). Source: JetBrains Mono Bold @ 16px, threshold > 96/255.
 

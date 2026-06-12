@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Kernel log ring buffer + F12 overlay viewer
+; Grit v3.0 - Kernel log ring buffer + F12 overlay viewer
 ; ----------------------------------------------------------------------------
 ; debug_print appends each line into a fixed-size ring; F12 toggles a
 ; full-screen overlay showing the last N lines. Up/Down arrows scroll while
@@ -349,7 +349,7 @@ klog_flush_and_reboot:
     jmp .kf_hang
 
 section .data
-klog_hdr: db "[ GritOS klog -- F12 close  Up/Down scroll  F11 flush+reboot ]", 0
+klog_hdr: db "[ Grit klog -- F12 close  Up/Down scroll  F11 flush+reboot ]", 0
 klog_ftr: db "klog overlay -- live ring buffer", 0
 align 8
 klog_bad_idt:

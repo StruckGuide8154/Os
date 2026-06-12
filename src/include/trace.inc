@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Function signature and trace macros
+; Grit v3.0 - Function signature and trace macros
 ; ============================================================================
 
 %ifndef TRACE_INC

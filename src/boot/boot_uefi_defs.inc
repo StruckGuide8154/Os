@@ -5,7 +5,7 @@
 ; ============================================================================
 
 ; ============================================================================
-; GritOS v2.0 - UEFI Graphical Operating System
+; Grit v2.0 - UEFI Graphical Operating System
 ; 100% x86-64 Assembly. No C. No Rust. No libraries.
 ; Features: GOP framebuffer, 8x8 bitmap font, graphical desktop + text shell
 ; ============================================================================

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - Per-slot network destination policy (security_todo.md §7)
+; Grit - Per-slot network destination policy (security_todo.md §7)
 ; ----------------------------------------------------------------------------
 ; CAP_NET is binary: a slot either may touch the network or may not. This
 ; module layers an OPT-IN, per-app destination allowlist on top of CAP_NET,

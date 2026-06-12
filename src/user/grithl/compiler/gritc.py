@@ -970,7 +970,7 @@ def _writes_reg_canons(code):
                 "nop","cld","std","FN_BEGIN","FN_ARG","FN_END"):
         return set()
     if mnem=="syscall":
-        # GritOS syscalls are not a normal System-V call boundary and the
+        # Grit syscalls are not a normal System-V call boundary and the
         # kernel-side dispatcher is free to reuse GPRs. Do not forward or
         # promote values through it as if any non-frame GPR survived.
         return set(_SYSCALL_CLOBBERED)
@@ -1463,7 +1463,7 @@ def _regalloc_one_fn(seg, safe_callees=None):
         return seg
     # SOUNDNESS GATE (leaf-only promotion): a slot promoted into a callee-saved
     # GPR is only safe if that register is guaranteed intact across the slot's
-    # whole live range. Two GritOS realities break the textbook "callee-saved
+    # whole live range. Two Grit realities break the textbook "callee-saved
     # survives a call" assumption:
     #   * a `syscall` is NOT a System-V boundary - the kernel dispatcher reuses
     #     GPRs and clobbers rbx/rbp across the entry (see syscall_entry notes);

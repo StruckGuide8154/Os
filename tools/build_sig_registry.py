@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a GritOS function signature registry from NASM sources.
+"""Build a Grit function signature registry from NASM sources.
 
 The kernel currently builds as one flat NASM translation unit, so there are no
 object files to scrape in the normal build. This pass reads FN_BEGIN/FN_ARG

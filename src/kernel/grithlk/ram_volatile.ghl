@@ -2,7 +2,7 @@
 # ram_volatile.ghl - Track 4 Part A: RAM-only / volatile secret scrubbing.
 # ZERO-ASM (gritc.py --target kernel --forbid-asm).
 #
-# GritOS runs entirely from RAM (the FS image is served from the session-only
+# Grit runs entirely from RAM (the FS image is served from the session-only
 # ramdisk; ata_write_sectors never propagates back to DATA.IMG, and the
 # ramdisk_flush write-back path is an unimplemented stub - see
 # docs/track4-ram-secure-erasure-todo.md Part A items 1-2). This module supplies

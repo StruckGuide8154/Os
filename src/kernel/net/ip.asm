@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS IPv4 protocol module
+; Grit IPv4 protocol module
 ; ----------------------------------------------------------------------------
 ; Generic packet construction above the selected NIC. Drivers must not build IP
 ; packets; they only transmit complete Ethernet frames through net_nic_tx_frame.

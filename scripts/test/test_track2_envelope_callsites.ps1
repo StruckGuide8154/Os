@@ -178,7 +178,7 @@ try {
     # ---- Phase 3: signed staged update accepted ----------------------------
     Write-Host '[track2-callsites] Phase 3: quorum-signed KUPDATE.ENV staged...' -ForegroundColor Yellow
     $updPayload = Join-Path $BuildDir 'track2_test_update_payload.bin'
-    [System.IO.File]::WriteAllBytes($updPayload, [System.Text.Encoding]::ASCII.GetBytes('GritOS staged update test artifact'))
+    [System.IO.File]::WriteAllBytes($updPayload, [System.Text.Encoding]::ASCII.GetBytes('Grit staged update test artifact'))
     & python (Join-Path $Root 'scripts\build\write_envelope.py') `
         --payload $updPayload --out $KupdPath --type update --device-id 1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for KUPDATE.ENV' }

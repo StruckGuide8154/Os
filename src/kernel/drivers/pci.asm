@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - PCI Driver
+; Grit v3.0 - PCI Driver
 ; Basic mechanism to read/write PCI configuration space
 ; ============================================================================
 bits 64

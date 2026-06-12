@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS Media Player - kernel-side renderer & timeline driver.
+; Grit Media Player - kernel-side renderer & timeline driver.
 ;
 ; This file lives inside the user app blob (apps.asm) but its main entry
 ; point `app_media_draw` is registered as a window draw fn, which means
@@ -12,7 +12,7 @@
 ;   Pixel I/O   : direct writes to `[bb_addr + y*pitch + x*4]` (UEFI GOP
 ;                 framebuffer, BGRA). No iGPU acceleration, no SIMD -
 ;                 plain scalar code that is portable across every machine
-;                 GritOS boots on. See docs/media-formats.md → "Scope".
+;                 Grit boots on. See docs/media-formats.md → "Scope".
 ;   Timing      : the global 100 Hz PIT `tick_count`. Per-window state
 ;                 stored slot-local (see media.ghl `state { ... }`) so
 ;                 two players can coexist.

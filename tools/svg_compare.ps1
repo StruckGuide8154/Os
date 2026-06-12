@@ -1,14 +1,14 @@
 # SVG render-comparison harness.
 #
-# Compares how the GritOS svg2 rasterizer draws glass-ribbons.svg against a
+# Compares how the Grit svg2 rasterizer draws glass-ribbons.svg against a
 # reference renderer (Microsoft Edge), to surface where curves/lines are wrong
 # or detail is missing -- independent of anti-aliasing.
 #
-#   1. GritOS  - boots the OS in QEMU and issues the serial console command
+#   1. Grit  - boots the OS in QEMU and issues the serial console command
 #      0x01 'g'. The kernel forces the glass-ribbons SVG wallpaper, re-renders
 #      it through svg2, and streams the wallpaper-cache image (a clean copy
 #      with no icons/windows) over COM1, downsampled to 160x90.
-#   2. Reference - Edge headless screenshots the same SVG at the GritOS source
+#   2. Reference - Edge headless screenshots the same SVG at the Grit source
 #      resolution, then it is downsampled with the identical nearest-neighbour
 #      mapping so any letterboxing matches.
 #
@@ -19,12 +19,12 @@
 #   * color - mean per-channel delta where both painted something.
 #
 # Outputs (build/):
-#   svg_grit.ppm  - GritOS render (160x90)
+#   svg_grit.ppm  - Grit render (160x90)
 #   svg_edge.ppm   - Edge render    (160x90)
 #   svg_diff.ppm   - shape-diff heatmap:
 #                      green = both renderers painted here (agree)
-#                      red   = GritOS painted, Edge did not (spurious/wrong)
-#                      blue  = Edge painted, GritOS did not (missing detail)
+#                      red   = Grit painted, Edge did not (spurious/wrong)
+#                      blue  = Edge painted, Grit did not (missing detail)
 #                      black = both background
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File tools/svg_compare.ps1 [-SkipBuild]
@@ -55,7 +55,7 @@ if (-not $SkipBuild) {
 }
 
 # Stripped glass-ribbons SVG for the reference render: the feTurbulence noise
-# is dropped so random noise cannot dominate a structural diff. (GritOS keeps
+# is dropped so random noise cannot dominate a structural diff. (Grit keeps
 # the noise rect, but its 4% alpha makes it negligible after blur.)
 $StrippedSvg = Join-Path $Build 'glass-ribbons-stripped.svg'
 & python -c @"
@@ -69,8 +69,8 @@ open(r'$StrippedSvg', 'w', encoding='utf-8', newline='\n').write(s)
 "@
 if ($LASTEXITCODE -ne 0) { throw 'failed to write stripped SVG' }
 
-# --- 2. GritOS render via QEMU + serial ------------------------------------
-Write-Host '[svg-compare] booting GritOS in QEMU...' -ForegroundColor Cyan
+# --- 2. Grit render via QEMU + serial ------------------------------------
+Write-Host '[svg-compare] booting Grit in QEMU...' -ForegroundColor Cyan
 Stop-Qemu
 Start-Sleep -Seconds 1
 
@@ -163,7 +163,7 @@ for ($i = 0; $i -lt $W * $H; $i++) {
     $grit[$i*3+1] = [Convert]::ToInt32($hexStr.Substring($o+2, 2), 16)
     $grit[$i*3+2] = [Convert]::ToInt32($hexStr.Substring($o+4, 2), 16)
 }
-Write-Host "[svg-compare] captured GritOS render (source ${srcW}x${srcH} -> ${W}x${H})" -ForegroundColor Green
+Write-Host "[svg-compare] captured Grit render (source ${srcW}x${srcH} -> ${W}x${H})" -ForegroundColor Green
 
 # --- 3. Reference render via Edge headless ----------------------------------
 $edgePaths = @(
@@ -367,10 +367,10 @@ $meanColor  = if ($colorN -gt 0) { $colorSum / $colorN } else { 0.0 }
 
 Write-Host ''
 Write-Host '======== SVG render comparison ========' -ForegroundColor Cyan
-Write-Host ("  comparison raster : {0} x {1}  (GritOS source {2} x {3})" -f $W, $H, $srcW, $srcH)
+Write-Host ("  comparison raster : {0} x {1}  (Grit source {2} x {3})" -f $W, $H, $srcW, $srcH)
 Write-Host ("  shape agreement   : {0:N2}%  (same geometry, ignoring 1px AA edges)" -f $shapeAgree)
-Write-Host ("  missing detail    : {0:N2}%  (Edge painted geometry GritOS lacks)" -f $missing) -ForegroundColor Yellow
-Write-Host ("  spurious / wrong  : {0:N2}%  (GritOS painted geometry Edge lacks)" -f $spurious) -ForegroundColor Yellow
+Write-Host ("  missing detail    : {0:N2}%  (Edge painted geometry Grit lacks)" -f $missing) -ForegroundColor Yellow
+Write-Host ("  spurious / wrong  : {0:N2}%  (Grit painted geometry Edge lacks)" -f $spurious) -ForegroundColor Yellow
 Write-Host ("  mean color delta  : {0:N1} / 255  (where both painted)" -f $meanColor)
 Write-Host ("  ink pixels        : agree={0}  edge-band={1}  grit-only={2}  edge-only={3}" -f $bothInk, $edgeBand, $gritOnly, $edgeOnly)
 Write-Host '  outputs           : build/svg_{grit,edge,diff}.png  (+ .ppm)'

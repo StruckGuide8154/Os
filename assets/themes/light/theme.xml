@@ -1,5 +1,5 @@
 <theme>
-  <meta name="light" display="Light" author="GritOS" />
+  <meta name="light" display="Light" author="Grit" />
   <palette>
     <color name="bg_base"     value="0xF5F6FA" />
     <color name="surface"     value="0xFFFFFF" />

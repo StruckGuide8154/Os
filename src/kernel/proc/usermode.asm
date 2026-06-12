@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Usermode Transition
+; Grit v3.0 - Usermode Transition
 ; Clean L3 callback path for app draw/click/key handlers.
 ; ============================================================================
 bits 64

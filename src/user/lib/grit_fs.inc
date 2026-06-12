@@ -2,7 +2,7 @@
 %define GRIT_FS_INC
 
 ; ============================================================================
-; GritOS v3.0 - Usermode Filesystem Kit
+; Grit v3.0 - Usermode Filesystem Kit
 ; Stable helpers for FAT16-backed user apps. The kernel keeps directory-entry
 ; handles opaque; apps may inspect the copied 32-byte entry returned by
 ; SYS_FS_ENTRY but must mutate files through these syscalls.

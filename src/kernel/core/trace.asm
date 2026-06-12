@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Append-only trace ring with parent-hash causal chain
+; Grit v3.0 - Append-only trace ring with parent-hash causal chain
 ; ============================================================================
 bits 64
 

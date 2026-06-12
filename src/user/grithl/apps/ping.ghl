@@ -73,7 +73,7 @@ str dhcp_busy   = "DHCP test: acquiring...";
 str dhcp_ok     = "DHCP test: lease acquired";
 str dhcp_fail   = "DHCP test: failed";
 
-str status_bar_text = "GritOS network panel";
+str status_bar_text = "Grit network panel";
 
 # ------------------------------------------------------------------
 # tiny formatting helpers (same style as about.ghl / settings.ghl)

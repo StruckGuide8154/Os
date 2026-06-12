@@ -1,4 +1,4 @@
-; font_24x48.inc - GritOS bitmap font 24x48
+; font_24x48.inc - Grit bitmap font 24x48
 ; Embedded form of formats/font_24x48.nft (byte-identical).
 ; ASCII printable (32..127). Source: JetBrains Mono Bold @ 48px, threshold > 96/255.
 

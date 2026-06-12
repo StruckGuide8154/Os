@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - MADT Parser
+; Grit v3.0 - MADT Parser
 ; Used for parsing ACPI Multiple APIC Description Table
 ; ============================================================================
 bits 64

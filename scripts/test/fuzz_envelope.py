@@ -218,7 +218,7 @@ def canonicalize(blob):
 # Corpus: valid envelopes across every artifact class
 # ---------------------------------------------------------------------------
 
-PAYLOADS = [b'', b'A', b'GritOS fuzz corpus payload ' * 3, bytes(range(256))]
+PAYLOADS = [b'', b'A', b'Grit fuzz corpus payload ' * 3, bytes(range(256))]
 
 
 def corpus_fields(unit, kind, domain, payload, target_kind):

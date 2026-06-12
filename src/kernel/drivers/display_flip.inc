@@ -505,7 +505,7 @@ FN_BEGIN display_set_mode, 0, 0, FN_RET_SCALAR
 
     ; Real AMD display hardware is driven by the AMD provider. It accepts the
     ; firmware/native GOP mode and rejects unsafe non-native switches for now,
-    ; so GritOS never pokes Bochs VBE ports on AMD laptops.
+    ; so Grit never pokes Bochs VBE ports on AMD laptops.
     cmp byte [amd_display_active], 1
     jne .try_bochs_vbe
     call amd_display_set_mode

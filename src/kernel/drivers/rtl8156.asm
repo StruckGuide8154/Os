@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Realtek RTL8152/RTL8156 USB Ethernet backend
+; Grit v3.0 - Realtek RTL8152/RTL8156 USB Ethernet backend
 ; ----------------------------------------------------------------------------
 ; Raw USB path for Realtek r8152-family NICs passed through to QEMU with WinUSB
 ; / Zadig. This is intentionally small, but it includes the pieces the RTL8139

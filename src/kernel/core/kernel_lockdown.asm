@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Read-only kernel after init (security_todo.md §9)
+; Grit v3.0 - Read-only kernel after init (security_todo.md §9)
 ; ----------------------------------------------------------------------------
 ; After kernel_main finishes setup, mark the kernel's executable image
 ; read-only at the page-table level so any kernel-side self-modification

@@ -1,6 +1,6 @@
-# Contributing to GritOS
+# Contributing to Grit
 
-Thanks for your interest in GritOS, a hobbyist x86-64 operating system written
+Thanks for your interest in Grit, a hobbyist x86-64 operating system written
 in assembly. Contributions, bug reports, and ideas are welcome.
 
 ## Security first
@@ -25,7 +25,7 @@ push protection are enabled on this repository and will block such pushes.
 
 ## Building & running
 
-GritOS targets UEFI (GOP framebuffer). Common entry points:
+Grit targets UEFI (GOP framebuffer). Common entry points:
 
 - Build: `scripts/build/build_uefi.ps1` (run from the repo root).
 - Run in QEMU: `scripts/run/run_uefi.ps1`.

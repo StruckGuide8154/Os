@@ -18,7 +18,7 @@ $qemuArgs = @(
     '-serial', "file:$LOG",
     '-monitor', 'telnet:127.0.0.1:4444,server,nowait',
     '-no-reboot',
-    '-name', 'GritOS_UEFI'
+    '-name', 'Grit_UEFI'
 )
 Start-Process -FilePath $QEMU -ArgumentList $qemuArgs -WindowStyle Hidden | Out-Null
 Write-Host "QEMU launched, serial -> $LOG"

@@ -1,4 +1,4 @@
-# GritOS Defense-in-Depth Architecture (Separation-Kernel Topology)
+# Grit Defense-in-Depth Architecture (Separation-Kernel Topology)
 
 Canonical picture of the layered, capability-mediated, attested architecture, and
 the design rules that make an iOS-class exploit chain both **unreachable** and

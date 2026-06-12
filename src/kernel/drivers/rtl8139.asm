@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - RTL8139 Ethernet + minimal ARP/ICMP probe
+; Grit v3.0 - RTL8139 Ethernet + minimal ARP/ICMP probe
 ; ----------------------------------------------------------------------------
 ; QEMU user-net default: guest 10.0.2.15, gateway 10.0.2.2.
 ; Provides a serial-triggered ICMP echo request path for basic network bring-up.

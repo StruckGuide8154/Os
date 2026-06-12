@@ -1,6 +1,6 @@
 # GritHL - Safe Higher-Level Assembly Language
 
-GritHL (`.ghl`) is the supported SDK path for GritOS ring-3 apps. It targets
+GritHL (`.ghl`) is the supported SDK path for Grit ring-3 apps. It targets
 the existing callback/syscall ABI so larger apps can be written, read, and
 refactored without hand-tracking registers, while every emitted instruction
 stays inside the syscall boundary documented in `docs/syscalls.md`.

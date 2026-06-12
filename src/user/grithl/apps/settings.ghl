@@ -155,7 +155,7 @@ str prefix_current= "Current: ";
 str prefix_native = "Native:  ";
 str mode_ok       = "Ready";
 str mode_failed   = "Mode switch failed";
-str status_hint   = "GritOS Settings";
+str status_hint   = "Grit Settings";
 
 # General tab strings.
 str lbl_ram       = "RAM: ";

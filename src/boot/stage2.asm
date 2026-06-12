@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Stage 2 Bootloader
+; Grit v3.0 - Stage 2 Bootloader
 ; Loaded at 0x7E00 by MBR. Enters long mode and jumps to kernel at 0x100000.
 ; Flow: A20 -> E820 -> VESA -> Load Kernel -> Paging -> PM -> LM -> Kernel
 ; ============================================================================

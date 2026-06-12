@@ -1,4 +1,4 @@
-# GritOS Syscall ABI
+# Grit Syscall ABI
 
 This is the current ring-3 syscall surface exported by
 `C:\Users\user\Documents\new\src\kernel\proc\syscall.asm` and wrapped by

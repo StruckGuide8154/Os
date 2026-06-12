@@ -1,4 +1,4 @@
-# GritOS Kernel Function Reference
+# Grit Kernel Function Reference
 
 This is the exported kernel surface grouped by subsystem. It is intentionally
 organized by owning file first so bug-fixing starts at the right module.

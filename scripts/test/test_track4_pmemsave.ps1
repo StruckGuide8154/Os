@@ -40,7 +40,7 @@
 #
 #   STATIC-STRING sentinels that must NEVER appear in plaintext (data hygiene):
 #     These are cleartext secrets that should never be in plaintext in DRAM,
-#     e.g. well-known test passwords or private keys. For GritOS the only
+#     e.g. well-known test passwords or private keys. For Grit the only
 #     embedded literal that would be a real secret is the QRNG seed, which is
 #     compiled in - but its presence is the documented residual (it is in the
 #     read-only .text, always visible), so we do NOT check for its absence.
@@ -445,10 +445,10 @@ try {
             Write-Host "    UEFI firmware ('BdsDxe') present: $($ovmfHits.Count) hits - OVMF text, irreducible." -ForegroundColor DarkGray
         }
         # Check for kernel code identity string (always in .text, not scrubbed)
-        $gritBytes = [System.Text.Encoding]::ASCII.GetBytes('GritOS')
+        $gritBytes = [System.Text.Encoding]::ASCII.GetBytes('Grit')
         $gritHits  = Search-BytePattern $postBytes $gritBytes
         if ($gritHits.Count -gt 0) {
-            Write-Host "    Kernel string ('GritOS') present: $($gritHits.Count) hits - kernel .text, documented live residual." -ForegroundColor DarkGray
+            Write-Host "    Kernel string ('Grit') present: $($gritHits.Count) hits - kernel .text, documented live residual." -ForegroundColor DarkGray
         }
         Write-Host '    These residuals are named in docs/track4-ram-secure-erasure-todo.md §Part A "HARD LIMIT".' -ForegroundColor DarkGray
     }

@@ -1,9 +1,9 @@
 ; ============================================================================
-; GritOS Diagnostic - UEFI Mouse Probe (BOOTX64.EFI)
+; Grit Diagnostic - UEFI Mouse Probe (BOOTX64.EFI)
 ; ----------------------------------------------------------------------------
 ; Goal: find a UEFI pointer protocol path that actually delivers mouse and
 ; touchpad movement on the Acer Nitro V16 AI (AMD Ryzen AI 9 HX / Strix Point /
-; Radeon 890M). The current GritOS kernel cannot drive xHCI input on that
+; Radeon 890M). The current Grit kernel cannot drive xHCI input on that
 ; hardware. UEFI firmware drivers DO work (mouse + touchpad work in BIOS), so
 ; this probe stays inside UEFI Boot Services forever and tries every protocol
 ; UEFI exposes for pointer input.

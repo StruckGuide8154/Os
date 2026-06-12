@@ -1,4 +1,4 @@
-# GritOS Verification
+# Grit Verification
 
 This page is normative for structural edits.
 

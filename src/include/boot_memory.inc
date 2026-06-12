@@ -1,7 +1,7 @@
 %ifndef BOOT_MEMORY_INC
 %define BOOT_MEMORY_INC
 
-; GritOS boot memory contract.
+; Grit boot memory contract.
 ; Keep loader, paging, and kernel users on one map while relocation work lands.
 
 STAGE2_LOAD_ADDR    equ 0x7E00

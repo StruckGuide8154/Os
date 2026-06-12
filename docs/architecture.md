@@ -1,4 +1,4 @@
-# GritOS Architecture
+# Grit Architecture
 
 This is the current high-level flow through the OS, written for maintainers who
 need to change code without losing track of responsibility boundaries.

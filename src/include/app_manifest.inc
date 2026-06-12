@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - Per-app integrity manifest (FORMAT CONTRACT)
+; Grit - Per-app integrity manifest (FORMAT CONTRACT)
 ; docs/per-app-integrity-manifest.md
 ; ----------------------------------------------------------------------------
 ; This file is the SHARED format contract between the build side

@@ -2,7 +2,7 @@
 
 Goal: produce evidence of the *kind* that makes seL4 credible - explicit,
 mechanically-checkable invariants over the authority graph - adapted honestly to
-this project. This is the only track that lets GritOS make a defensible
+this project. This is the only track that lets Grit make a defensible
 "≥ seL4 on the properties we chose" claim instead of marketing.
 
 **Honesty rule (non-negotiable):** seL4 has a machine-checked *proof* from C code

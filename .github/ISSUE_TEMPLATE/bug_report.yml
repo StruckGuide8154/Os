@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a non-security bug in GritOS
+description: Report a non-security bug in Grit
 labels: ["bug"]
 body:
   - type: markdown

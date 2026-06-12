@@ -1,4 +1,4 @@
-# GritOS Resource Formats
+# Grit Resource Formats
 
 Three custom file formats for icons, fonts, and palettes. All three are:
 
@@ -131,7 +131,7 @@ Header = 16 bytes. Payload starts on an 8-byte boundary.
 
 Rows are stored **top-to-bottom**. Within a row, **left-to-right**. No padding between rows.
 
-### Standard GritOS icon set
+### Standard Grit icon set
 
 | Size    | bpp | Header | Payload | Total | Use case |
 |---------|-----|--------|---------|-------|----------|
@@ -220,7 +220,7 @@ Header = 16 bytes.
 - For widths > 8: each row spans `ceil(w/8)` bytes; bit 7 of byte 0 is the leftmost pixel, bit 7 of byte 1 is the 9th pixel, and so on.
 - Rows stored top-to-bottom, contiguous.
 
-### Standard GritOS fonts
+### Standard Grit fonts
 
 All three cover ASCII printable + space (codepoints 32..127, 96 glyphs). Source: JetBrains Mono Bold rasterized at native pixel size.
 

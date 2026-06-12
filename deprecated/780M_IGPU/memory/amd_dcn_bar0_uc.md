@@ -117,7 +117,7 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
   diag emit path is commented out in main.asm `real_boot_diag_dump`).
   Without DMUB, the screen sits at UEFI default (max) regardless of
   what Windows had set - confirmed empirically: setting min in Windows
-  shows min in Windows after reboot, but max in GritOS, then still min
+  shows min in Windows after reboot, but max in Grit, then still min
   back in Windows. Preference is stored somewhere persistent, but
   application of it requires DMUB or an EC PWM path.
 

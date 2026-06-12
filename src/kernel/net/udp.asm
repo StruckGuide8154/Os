@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS UDP protocol module
+; Grit UDP protocol module
 ; ----------------------------------------------------------------------------
 ; Generic IPv4/UDP transport above net_nic_tx_frame. Callers provide payloads
 ; and ports; this module handles next-hop ARP resolution and UDP framing.

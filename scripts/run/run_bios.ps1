@@ -9,14 +9,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $QEMU = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
-$IMG = (Join-Path $Root 'build\GritOS.img')
+$IMG = (Join-Path $Root 'build\Grit.img')
 $LOG = (Join-Path $Root 'serial.log')
 
 if (-not $GuestMemory) {
     $GuestMemory = if ($PerfProfile -eq 'Cache32Max') { '32M' } else { '512M' }
 }
 
-Write-Host "Booting GritOS (BIOS) in QEMU with $PerfProfile, $GuestMemory RAM..." -ForegroundColor Cyan
+Write-Host "Booting Grit (BIOS) in QEMU with $PerfProfile, $GuestMemory RAM..." -ForegroundColor Cyan
 $displayArg = if ($Headless) { 'none' } else { 'gtk,grab-on-hover=on,show-cursor=on,window-close=on' }
 $serialArg = if ($SerialTcp) { 'tcp:127.0.0.1:5555,server=on,wait=off' } else { "file:$LOG" }
 $qemuArgs = @(
@@ -24,7 +24,7 @@ $qemuArgs = @(
     '-m', $GuestMemory,
     '-vga', 'std',
     '-display', $displayArg,
-    '-name', 'GritOS',
+    '-name', 'Grit',
     '-serial', $serialArg,
     '-device', 'nec-usb-xhci,id=xhci',
     '-device', 'usb-mouse,bus=xhci.0'

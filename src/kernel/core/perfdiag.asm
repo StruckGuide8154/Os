@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Cache32Max CPU/cache/frequency diagnostics
+; Grit v3.0 - Cache32Max CPU/cache/frequency diagnostics
 ; ============================================================================
 bits 64
 

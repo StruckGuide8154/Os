@@ -1,13 +1,13 @@
 # Security Policy
 
-GritOS is a hobbyist x86-64 operating system written in assembly. Although it
+Grit is a hobbyist x86-64 operating system written in assembly. Although it
 is not production software, the project takes security research seriously and
 welcomes good-faith reports of vulnerabilities in the OS, its build tooling, and
 its supporting scripts.
 
 ## Supported Versions
 
-GritOS is pre-1.0 and ships from a single mainline. Security fixes are applied
+Grit is pre-1.0 and ships from a single mainline. Security fixes are applied
 to the default branch (`master`); tagged prereleases are snapshots and are not
 individually patched.
 
@@ -60,7 +60,7 @@ We will credit reporters in the advisory unless you ask to remain anonymous.
 
 ### In scope
 
-- The GritOS kernel, boot path, drivers, and userspace under `src/`.
+- The Grit kernel, boot path, drivers, and userspace under `src/`.
 - Build and analysis tooling under `tools/` and `scripts/` (including the
   Python tooling and the QRNG seed tooling under `tools/quantum/`).
 - Memory-safety, privilege-escalation, sandbox-escape (syscall capability /
@@ -97,7 +97,7 @@ To qualify for safe harbor you must:
 
 - Make a good-faith effort to avoid privacy violations, data destruction, and
   service interruption to others.
-- Only test against your own instances/builds of GritOS - do **not** target
+- Only test against your own instances/builds of Grit - do **not** target
   other people's systems, infrastructure, or accounts.
 - Report any vulnerability you discover promptly and give us reasonable time to
   remediate before public disclosure (we ask for coordinated disclosure).
@@ -106,7 +106,7 @@ To qualify for safe harbor you must:
 
 If in doubt about whether a specific action is authorized, ask us first via the
 Private Vulnerability Reporting channel above and we will clarify. This safe
-harbor applies only to legal claims under the control of the GritOS
+harbor applies only to legal claims under the control of the Grit
 maintainers; it does not bind third parties.
 
 ## Coordinated Disclosure

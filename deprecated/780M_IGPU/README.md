@@ -41,7 +41,7 @@ Two reasons:
    family. Other AMD generations need different register layouts, firmware
    blobs, and SMU message sets. Other vendors (Intel, Nvidia, ARM Mali)
    share nothing.
-2. **Pivot to widely-compatible interfaces only.** GritOS will rely on
+2. **Pivot to widely-compatible interfaces only.** Grit will rely on
    UEFI GOP for the framebuffer (already working via `fbperf.asm` with WC
    mapping). Future acceleration, if any, will target portable abstractions
    (Vulkan-via-loader or compute-via-host) rather than per-vendor MMIO

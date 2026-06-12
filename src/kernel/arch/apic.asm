@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Local APIC Driver
+; Grit v3.0 - Local APIC Driver
 ; Used for handling hardware interrupts on modern systems
 ; ============================================================================
 bits 64

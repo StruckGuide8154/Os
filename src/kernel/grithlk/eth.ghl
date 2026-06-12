@@ -1,5 +1,5 @@
 # ============================================================================
-# eth.ghl - GritOS network Ethernet/IP helpers.  ZERO-ASM.
+# eth.ghl - Grit network Ethernet/IP helpers.  ZERO-ASM.
 # Owns net_checksum: the Internet (one's-complement) checksum used by IP / ICMP
 # / UDP / TCP headers. Structured GritHLK port of the former eth.asm leaf.
 # ============================================================================

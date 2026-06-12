@@ -22,7 +22,7 @@ szExplorerTitle db "File Explorer", 0
 szTermTitle     db "Terminal", 0
 szNotepadTitle  db "Notepad", 0
 szSettingsTitle db "Settings", 0
-szAboutTitle    db "About GritOS", 0
+szAboutTitle    db "About Grit", 0
 szTaskMgrTitle  db "Task Manager", 0
 szPingTitle     db "Networking", 0
 szMediaTitle    db "Media Player", 0
@@ -177,14 +177,14 @@ term_debug_buf   times 1024 db 0
 term_echo_buf    times 128 db 0
 
 ; --- Terminal strings ---
-szTermWelcome   db "GritOS Terminal v3.0", 0
+szTermWelcome   db "Grit Terminal v3.0", 0
 szTermVer       db "Type 'help' for commands", 0
 szTermHelpHint  db "----------------------------", 0
 szTermPrompt    db "C:\> ", 0
 szCursor        db "_", 0
 szCmdUnknown    db "  Unknown command. Type help.", 0
 szCmdHelpOut    db "  help cd dir ver cls debug restart exit", 0
-szCmdVerOut     db "  GritOS v3.0 (x86-64)", 0
+szCmdVerOut     db "  Grit v3.0 (x86-64)", 0
 szCmdDirOut     db "  Documents  Pictures  System", 0
 szCmdCdErr      db "  Directory not found.", 0
 szEmptyDir      db "(empty)", 0
@@ -262,11 +262,11 @@ extern scr_height
 
 ; --- About strings ---
 szIconN         db "N", 0
-szAboutName     db "GritOS", 0
+szAboutName     db "Grit", 0
 szAboutVer      db "Version 3.0", 0
 szAboutArch     db "x86-64 Assembly Kernel", 0
 szAboutDesc     db "A graphical desktop OS", 0
-szAboutCopy     db "(c) 2026 GritOS Project", 0
+szAboutCopy     db "(c) 2026 Grit Project", 0
 
 ; Paint strings
 szPaintTitle db "Paint", 0

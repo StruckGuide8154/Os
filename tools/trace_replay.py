@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Symbolize GritOS trace dump records from serial logs."""
+"""Symbolize Grit trace dump records from serial logs."""
 
 from __future__ import annotations
 

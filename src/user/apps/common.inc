@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Application Framework + Built-in Apps
+; Grit v3.0 - Application Framework + Built-in Apps
 ; Each app provides: draw_fn(rdi=window_ptr), click_fn(rdi=window_ptr,
 ;   rsi=client_x, rdx=client_y), key_fn(rdi=window_ptr, esi=key_event)
 ; Window struct offsets (from window.asm):
