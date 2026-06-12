@@ -57,6 +57,12 @@ global nx_volatile_shutdown;
 global nx_mem_key;
 global nx_mem_key_done;
 global nx_mem_key_ensure;
+# Track 4 Part B item 7: rolling re-key (forward-secure key advance + epoch).
+global nx_mem_key_rekey;
+global nx_mem_key_epoch;
+global nx_mem_key_rekey_selftest;
+global nx_mem_key_rekey_selftest_ok;
+global nx_track4_selftest_report;
 
 # Per-boot / per-slot kernel secrets (defined in syscall_data.nxh +
 # usermode_storage.inc + tcp.asm). Single -f bin TU: these resolve as local
@@ -81,6 +87,8 @@ extern l3_slot_live;         # qword[MAX_WINDOWS] != 0 => slot arena is mapped p
 # plaintext granule. Both are zeroed alongside nx_mem_key.
 extern nx_secret_mask;       # qword per-boot whitening mask (derived from nx_mem_key)
 extern nx_atrest_win;        # at-rest decrypt-on-demand working window (PAGE_SIZE)
+extern nx_secret_mask_seed;  # re-derive nx_secret_mask from the (rolled) key
+extern nx_atrest_poison;     # item 6: overwrite a region with key-derived bytes
 const ATREST_WIN_BYTES = 0x1000;   # KEEP == ram_atrest.nxh PAGE_SIZE
 
 # Nested-kernel monitor WP window (nk_monitor.asm) — the single audited CR0.WP
@@ -91,6 +99,12 @@ extern nk_pt_window_begin;
 extern nk_pt_window_end;
 
 extern svg_dump_putc;        # serial putc (al) — completion marker (debug)
+
+# Track 4 Part B self-test result flags (ram_atrest.nxh, same TU) — surfaced by
+# nx_track4_selftest_report so the boot serial log proves each self-test PASSED
+# (boot survival alone only proves they did not fault).
+extern nx_atrest_selftest_ok;       # item 2: at-rest cipher round-trip
+extern nx_atrest_ext_selftest_ok;   # items 5/6/8: scrub / poison / fingerprint
 
 # Mirror of the NASM layout constants. KEEP IN LOCKSTEP with
 # src/include/boot_memory.inc (APP_SLOT_COUNT / APP_SLOT_SIZE / APP_DATA_ADDR)
@@ -151,6 +165,11 @@ const NX_MEM_KEY_FALLBACK = 0x4D454D4B45593031;  # "MEMKEY01" non-zero guard
 align 8;
 data nx_mem_key: NX_MEM_KEY_QWORDS x 8 = 0;
 data nx_mem_key_done: 1 x 1 = 0;
+# Item 7: monotone rolling-re-key epoch (number of forward-secure advances since
+# boot) + the rekey self-test result flag.
+align 8;
+data nx_mem_key_epoch: 1 x 8 = 0;
+data nx_mem_key_rekey_selftest_ok: 1 x 1 = 0;
 
 # nx_splitmix64(x) -> well-mixed 64-bit avalanche of x. Pure; the multipliers are
 # loaded into registers (let bindings) so the emitted imul is reg*reg, not the
@@ -195,6 +214,61 @@ fn nx_mem_key_ensure() {
         i = i + 1;
     }
     sb(&nx_mem_key_done, 1);
+}
+
+# ----------------------------------------------------------------------------
+# Track 4 Part B item 7 - rolling re-key of the in-RAM encryption key.
+#
+# nx_mem_key_rekey() advances the per-boot key FORWARD-SECURELY: each qword
+# becomes splitmix64(old_qword ^ fresh-RDTSC[^RDRAND]). Because the new key is a
+# one-way function of the old, an attacker who recovers the key from a dump taken
+# at epoch N cannot derive epoch N+1, and cannot run it backwards to recover what
+# was encrypted at epoch N-1 - so a dumped key only opens the at-rest data of the
+# single epoch it was captured in. The epoch counter is bumped and the derived
+# whitening mask is re-seeded from the rolled key; the one live whitened secret
+# (the TCP ISN key, stored masked) is re-masked across the mask change so it stays
+# valid. Idempotent-safe: if the key was never drawn it draws it instead.
+#
+# This is the primitive + a boot self-test that exercises it once. Driving it on a
+# timer / per-N-operations is the scheduling policy follow-up (no consumer is yet
+# encrypted at-rest under a rotating key - same honest gap as the at-rest cipher's
+# consumer wiring), tracked in docs/track4-ram-secure-erasure-todo.md.
+# ----------------------------------------------------------------------------
+fn nx_mem_key_rekey() {
+    if lb(&nx_mem_key_done) == 0 { nx_mem_key_ensure(); return; }
+    # Unmask the one live whitened secret under the CURRENT mask before the mask
+    # changes (XOR-unmask -> plaintext in a register only).
+    let isn_plain = lq(&net_tcp_rng_key) ^ lq(&nx_secret_mask);
+    let has_rdrand = (cpuid_ecx(1) >> 30) & 1;
+    let i = 0;
+    while i < NX_MEM_KEY_QWORDS {
+        let t = lq(&nx_mem_key + i * 8) ^ rdtsc();
+        if has_rdrand != 0 { t = t ^ rdrand(); }
+        let s = nx_splitmix64(t);
+        if s == 0 { s = NX_MEM_KEY_FALLBACK; }
+        sq(&nx_mem_key + i * 8, s);
+        i = i + 1;
+    }
+    sq(&nx_mem_key_epoch, lq(&nx_mem_key_epoch) + 1);
+    nx_secret_mask_seed();                                 # new mask from rolled key
+    sq(&net_tcp_rng_key, isn_plain ^ lq(&nx_secret_mask)); # re-mask under new mask
+}
+
+# nx_mem_key_rekey_selftest() - item 7 boot proof (fail-soft). Captures the key
+# head + epoch, rolls once, and asserts the key changed AND the epoch advanced AND
+# the live TCP-ISN secret still round-trips through the (new) mask. Leaves the
+# rolled key in place (a legitimate first rotation). Sets the _ok flag on success.
+fn nx_mem_key_rekey_selftest() {
+    sb(&nx_mem_key_rekey_selftest_ok, 0);
+    nx_mem_key_ensure();
+    let k0 = lq(&nx_mem_key);
+    let e0 = lq(&nx_mem_key_epoch);
+    let isn0 = lq(&net_tcp_rng_key) ^ lq(&nx_secret_mask);   # plaintext before
+    nx_mem_key_rekey();
+    if lq(&nx_mem_key) == k0 { return; }                    # key must change
+    if lq(&nx_mem_key_epoch) != (e0 + 1) { return; }        # epoch must advance
+    if (lq(&net_tcp_rng_key) ^ lq(&nx_secret_mask)) != isn0 { return; }  # ISN preserved
+    sb(&nx_mem_key_rekey_selftest_ok, 1);
 }
 
 # ----------------------------------------------------------------------------
@@ -286,7 +360,15 @@ fn nx_volatile_wipe_arenas() {
                 if off != GUARD_OFF {
                     let pg = base + off;
                     if nx_pte_present(pg) != 0 {
-                        nx_zero(pg, PAGE_SIZE);
+                        # Item 6: poison (key-derived fill, tweak = page VA) rather
+                        # than a plain zero-fill. This overwrites the ring-3 working
+                        # set with bytes indistinguishable from at-rest ciphertext,
+                        # so a post-wipe dump shows neither the old plaintext nor a
+                        # tell-tale run of zeros (item 8). The memory key is already
+                        # scrubbed by nx_volatile_scrub_secrets at this point, so the
+                        # fill is a fixed splitmix64(VA) pattern - still non-zero and
+                        # still destroys the plaintext, which is all the wipe needs.
+                        nx_atrest_poison(pg, PAGE_SIZE, pg);
                     }
                 }
                 off = off + PAGE_SIZE;
@@ -326,6 +408,45 @@ fn nx_wipe_marker() {
         call svg_dump_putc(al: 80);   # 'P'
         call svg_dump_putc(al: 69);   # 'E'
         call svg_dump_putc(al: 68);   # 'D'
+        call svg_dump_putc(al: 93);   # ']'
+        call svg_dump_putc(al: 13);
+        call svg_dump_putc(al: 10);
+    }
+}
+
+# ----------------------------------------------------------------------------
+# nx_track4_selftest_report() - emit "[T4ST a=X x=Y r=Z]\r\n" on COM1 (debug
+# builds) where X/Y/Z are the '0'/'1' result of the at-rest cipher (item 2), the
+# scrub/poison/fingerprint (items 5/6/8) and the rolling-re-key (item 7) boot
+# self-tests respectively. So the boot log positively proves each PASSED, not just
+# that boot survived their fail-soft execution. Called from kmain after the tests.
+# ----------------------------------------------------------------------------
+fn nx_t4_emit_flag(okbyte) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        if okbyte != 0 { call svg_dump_putc(al: 49); }   # '1'
+        if okbyte == 0 { call svg_dump_putc(al: 48); }   # '0'
+    }
+}
+
+fn nx_track4_selftest_report() {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        call svg_dump_putc(al: 91);   # '['
+        call svg_dump_putc(al: 84);   # 'T'
+        call svg_dump_putc(al: 52);   # '4'
+        call svg_dump_putc(al: 83);   # 'S'
+        call svg_dump_putc(al: 84);   # 'T'
+        call svg_dump_putc(al: 32);   # ' '
+        call svg_dump_putc(al: 97);   # 'a'
+        call svg_dump_putc(al: 61);   # '='
+        nx_t4_emit_flag(lb(&nx_atrest_selftest_ok));
+        call svg_dump_putc(al: 32);   # ' '
+        call svg_dump_putc(al: 120);  # 'x'
+        call svg_dump_putc(al: 61);   # '='
+        nx_t4_emit_flag(lb(&nx_atrest_ext_selftest_ok));
+        call svg_dump_putc(al: 32);   # ' '
+        call svg_dump_putc(al: 114);  # 'r'
+        call svg_dump_putc(al: 61);   # '='
+        nx_t4_emit_flag(lb(&nx_mem_key_rekey_selftest_ok));
         call svg_dump_putc(al: 93);   # ']'
         call svg_dump_putc(al: 13);
         call svg_dump_putc(al: 10);

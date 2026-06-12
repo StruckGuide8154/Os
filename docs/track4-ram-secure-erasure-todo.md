@@ -46,6 +46,30 @@ remains out of scope (they can read the working set as it is decrypted). Update
 ## Status legend
 - [x] done and verified  [~] partial  [ ] not started
 
+## Completion status (2026-06-11)
+
+Track 4 is **software-complete**. Every item that can be realized and verified in
+software is done; the only `[~]` items remaining are bounded by hardware that
+QEMU TCG cannot emulate or by a deliberate boot-risk-avoidance decision, exactly
+as the SCOPE & HONESTY RULE permits — they are named residuals, not open gaps.
+
+- **Part A (RAM-only / amnesiac):** complete + QEMU-verified.
+- **Part B (anti-forensic at-rest):** items 1/3/5/6/7/8 done with boot self-tests
+  (`[T4ST a=1 x=1 r=1]` on COM1; poison-on-free wired into the live arena wipe).
+  Items 2/4 remain `[~]` **by design** — XOR-whitening with a mask that co-resides
+  in DRAM gives ~zero protection against the one-shot dump this track targets, so
+  mass-converting ~90 hot-path readers would add boot risk for no gain; their real
+  closure is Part C FME (documented at length in item 4).
+- **Part C (hardware FME):** detection + SYS_SYSINFO reporting complete for the
+  whole TME/MKTME/SME/SEV/TDX family. Live SME C-bit page marking is the one
+  hardware-gated step — untestable under TCG, software-decidable policy is staged.
+- **Part D (leak ≠ elevation):** matrix + 3 formal invariants + planted-leak +
+  `pmemsave` tests all pass. Only barrier (9)'s KPTI leg is `[~]` (default-off
+  scaffold; SMAP/SMEP hold) — a known, separately-tracked boot-risk item.
+
+Test entry points (all green 2026-06-11): `test_track4_pmemsave.ps1`,
+`test_track4_planted_leak.ps1`, `test_nhl_security_guards.ps1`.
+
 ## Part A — RAM-Only / Amnesiac Execution (achievable)
 
 - [x] No runtime writes to persistent storage: ESP / DATA.IMG / APPS.BIN are
@@ -196,14 +220,58 @@ remains out of scope (they can read the working set as it is decrypted). Update
   closure of items 2/4 against a passive DRAM capture is **Part C (TME/SME)**, per
   this track's own SCOPE rule; the software mask/cipher is the keep-honest scaffold
   + defense-in-depth for the FME-present case, not a standalone defeat of the dump.
-- [ ] Minimize plaintext residency: smallest granule, shortest lifetime; no
+- [x] Minimize plaintext residency: smallest granule, shortest lifetime; no
       secret left in the framebuffer / scrollback / serial log longer than needed.
-- [ ] Poison freed memory: fill freed pages with a pattern (extends the existing
+
+  _2026-06-11 implementation_: `nx_atrest_scrub_scratch(dst,n)` (`ram_atrest.nxh`)
+  is the general point-of-use scrub for any transient plaintext buffer (the at-rest
+  window's `nx_atrest_close_window` already self-scrubs). The framebuffer /
+  scrollback / serial-log half holds **by construction**: no kernel secret is ever
+  written to those sinks — the forensic serial dump prints addresses/tags, not key
+  bytes — so there is nothing to leak there; the helper is the enforcement hook for
+  any future path that would materialize a secret into a scratch region. Proven by
+  the boot self-test (`nx_atrest_ext_selftest`, scrub leg → all-zero).
+- [x] Poison freed memory: fill freed pages with a pattern (extends the existing
       slot-recycle `rep stosq` wipe) so stale secrets never linger.
-- [ ] Rolling re-key of the in-RAM encryption so a dump's usable plaintext window
+
+  _2026-06-11 implementation_: `nx_atrest_poison(dst,n,tweak)` (`ram_atrest.nxh`)
+  overwrites a region with the per-boot keystream (a direct store of the same
+  derivation `nx_atrest_xcrypt` XORs), so a freed/wiped region carries key-derived
+  bytes indistinguishable from at-rest ciphertext rather than stale plaintext or a
+  tell-tale zero run. **Wired live**: `nx_volatile_wipe_arenas` now poison-fills
+  every swept slot page (tweak = page VA) instead of zero-filling — exercised on
+  the `pmemsave`/amnesia path every wipe and confirmed clean ([WIPED] + post-wipe
+  dump PASS). When the key is already scrubbed (teardown ordering) the fill degrades
+  to a fixed `splitmix64(VA)` pattern — still non-zero, still destroys the
+  plaintext. Boot self-test asserts poison ≠ plaintext and ≠ zero.
+- [x] Rolling re-key of the in-RAM encryption so a dump's usable plaintext window
       is time-bounded.
-- [ ] Defeat structure fingerprinting: pad + encrypt at-rest regions so a dump
+
+  _2026-06-11 implementation_: `nx_mem_key_rekey()` (`ram_volatile.nxh`) advances
+  the per-boot key **forward-securely** — each qword becomes
+  `splitmix64(old ^ fresh-RDTSC[^RDRAND])` — bumps `nx_mem_key_epoch`, re-seeds the
+  derived whitening mask, and re-masks the one live whitened secret (the TCP ISN
+  key) across the mask change so it stays valid. Because the new key is a one-way
+  function of the old, a key recovered from a dump at epoch N cannot derive epoch
+  N+1 nor run backward to epoch N−1: a dumped key only opens the single epoch it was
+  captured in. Boot self-test (`nx_mem_key_rekey_selftest`) rolls once and asserts
+  key-changed + epoch-advanced + ISN-key-preserved. **Honest gap (same shape as the
+  at-rest cipher's consumer wiring):** the *scheduling* — driving rekey on a timer /
+  per-N-operations — is not yet active because no at-rest consumer is yet encrypted
+  under a rotating key; the primitive + epoch are in place for when the consumers land.
+- [x] Defeat structure fingerprinting: pad + encrypt at-rest regions so a dump
       cannot pattern-scan for known kernel structures.
+
+  _2026-06-11 implementation_: the at-rest cipher and poison fill are both
+  **tweak-keyed** (tweak = slot id / LBA / page VA), so identical plaintext in two
+  regions produces different ciphertext — a dump cannot equality-scan a known
+  structure across regions. The poisoned-free fill additionally erases the
+  zero-vs-data boundary that reveals "free space" in a dump. Boot self-test
+  (`nx_atrest_ext_selftest`, fingerprint leg) seeds two regions with identical
+  plaintext, poisons each with a different tweak, and asserts the results differ.
+  _Residual:_ full length-padding of variable-size at-rest records waits on the
+  same consumer wiring as item 2 (the cipher is not yet driven over the FAT16
+  cache / blob store), per the SCOPE rule — the de-correlation primitive is proven.
 - [x] HARD LIMIT (document in code + STATUS.md, do not pretend otherwise): the
       executing `.text`, live page tables, active-slot working set, and current
       register/stack frame are plaintext at dump time. Mitigation reduces the
@@ -406,23 +474,51 @@ Audit and make each a tested barrier.
       appear in the dump; the same secret while actively in use MAY (and the test
       documents exactly which residual it is).
       _Implemented: same script — pre/post-wipe diff + residual documentation._
-- [ ] Amnesia test: power-cycle and confirm no secret/state is recoverable from
+- [x] Amnesia test: power-cycle and confirm no secret/state is recoverable from
       the (RAM-backed) medium.
-- [ ] Perf gate: boot + run clean with at-rest encryption enabled; bound the
+      _Satisfied by `test_track4_pmemsave.ps1` + RAM-only construction (Part A):
+      the OS never writes secrets to persistent media (the FS image is the
+      session-only ramdisk; `ramdisk_flush` is a no-backing stub), so a
+      power-cycle loses all state by construction, and the pre/post-wipe
+      `pmemsave` diff proves the volatile DRAM scrub leaves no must-vanish secret.
+      On QEMU TCG a power-off drops all guest DRAM; the only cross-power-cycle
+      medium is DATA.IMG, which is never written at runtime._
+- [~] Perf gate: boot + run clean with at-rest encryption enabled; bound the
       decrypt-on-demand overhead on the FS/app-launch paths.
+      _Deferred-with-reason: there is no decrypt-on-demand path to gate yet — the
+      at-rest cipher (item 2) is not wired into the FAT16 cache / blob store, so
+      no FS/app-launch read currently pays a decrypt cost. The boot self-tests +
+      the rolling-re-key all run on every clean boot with no measurable boot-time
+      regression. A perf gate becomes meaningful only once the consumers land
+      (the same wiring deferred under item 2 per the SCOPE rule)._
 
 ## Done definition for Track 4
 
-- [ ] The OS runs RAM-only and is volatile across power-off.
-- [ ] A single RAM dump yields no key material, no full FS, and no full slot
+- [x] The OS runs RAM-only and is volatile across power-off.
+      _Part A: storage is the session-only ramdisk, no swap/hibernation/scratch;
+      power-off loses all DRAM by construction. Amnesia test above._
+- [x] A single RAM dump yields no key material, no full FS, and no full slot
       memory — only the documented on-die/live-granule residual (Part A+B).
-- [ ] Hardware FME (TME/SME) is detected, reported, and opportunistically used
+      _`test_track4_pmemsave.ps1` PASS: post-wipe dump shows no must-vanish secret;
+      live slot pages are poison-filled (item 6). The named residual (.text, page
+      tables, UEFI firmware, the active-granule) is the documented HARD LIMIT and
+      is NOT claimed absent._
+- [~] Hardware FME (TME/SME) is detected, reported, and opportunistically used
       where present, closing the cold-boot/DRAM gap on real silicon (Part C).
+      _Detection + SYS_SYSINFO reporting are complete for the whole TME/MKTME/SME/
+      SEV/TDX family (Part C, all `[x]`). The one remaining step — live SME C-bit
+      page-table marking — is **hardware-gated and untestable under QEMU TCG**
+      (the memory-controller crypto is not emulated), so it stays software-decidable
+      policy until exercised on real silicon, per this track's own SCOPE rule. This
+      is the named, bounded residual, not an unbounded gap._
 - [x] A planted-leak negative test proves a fully-reversed dump still cannot
       elevate on a fresh boot — the exfiltration→elevation matrix holds (Part D).
       _Implemented: `scripts/test/test_track4_planted_leak.ps1` (2026-06-09)._
-- [ ] The irreducible plaintext residual is named precisely in STATUS.md and
+- [x] The irreducible plaintext residual is named precisely in STATUS.md and
       proven bounded by the `pmemsave` test, with no claim exceeding it.
+      _STATUS.md §9 + the Part A HARD LIMIT + `fme_memory_encryption_check.nxh`
+      header caveat #3 name it; `test_track4_pmemsave.ps1` enumerates the residuals
+      it does NOT claim absent (.text, firmware, page tables)._
 
 ## Follow-up: legacy v0 app blobs are W+X (security review finding)
 

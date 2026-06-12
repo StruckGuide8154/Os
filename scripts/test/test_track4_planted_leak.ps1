@@ -108,7 +108,9 @@ $RequiredSymbols = @(
     'nx_volatile_wipe_halt',       # barrier (1): wipe-on-shutdown
     'nx_volatile_panic_scrub',     # barrier (1): wipe-on-panic/tamper
     'nk_pt_window_begin',          # barrier (7): W^X nk-monitor window
-    'slot_cap_hmac'                # barrier (6): cap-mask HMAC
+    'slot_cap_hmac',               # barrier (6): cap-mask HMAC
+    'nx_atrest_poison',            # Part B item 6: poison freed memory
+    'nx_mem_key_rekey'             # Part B item 7: forward-secure rolling re-key
 )
 
 # Serial markers emitted by a clean boot — confirms the OS booted far enough

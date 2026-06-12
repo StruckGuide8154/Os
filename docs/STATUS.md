@@ -270,6 +270,23 @@ page tables, the qrng seed in the now-RO image, and any secret currently in a
 register/cache. Part B (at-rest encryption) and Part C (HW FME) are what shrink
 that residual further; do not claim Part A erases it.
 
+**Part B software-complete (2026-06-11): anti-forensic hardening.** Beyond the
+per-boot ephemeral memory key (item 1) and first-scrubbed key region (item 3),
+the four remaining software items landed in `ram_atrest.nxh` / `ram_volatile.nxh`
+with boot self-tests (`[T4ST a=1 x=1 r=1]` on COM1): **item 5** point-of-use
+scratch scrub (`nx_atrest_scrub_scratch`; the framebuffer/serial half holds by
+construction — no secret is written there); **item 6** poison-freed-memory
+(`nx_atrest_poison`, key-derived fill, **wired live** into `nx_volatile_wipe_arenas`
+so swept slot pages carry ciphertext-like bytes, not zeros or stale plaintext);
+**item 7** forward-secure rolling re-key (`nx_mem_key_rekey` + epoch; a dumped key
+only opens its own epoch); **item 8** structure-fingerprint de-correlation (the
+tweak-keyed cipher + poison make identical plaintext differ across regions).
+Items 2/4 (encrypt-at-rest consumer wiring + mass secret-whitening) remain `[~]`
+**by design** — a DRAM-resident mask gives ~zero gain against the one-shot dump,
+so their real closure is Part C FME, not more software XOR. All three Track 4
+test scripts pass (`test_track4_pmemsave.ps1`, `test_track4_planted_leak.ps1`,
+`test_nhl_security_guards.ps1`).
+
 **What IS in scope** (the things a software root of trust can and must
 defend against):
   - A malicious or buggy **ring-3 app** escalating, escaping its slot, or

@@ -274,6 +274,9 @@ fn kmain() {
     nx_mem_key_ensure();              # Track 4 Part B: draw the per-boot ephemeral memory key (canary final)
     nx_secret_mask_seed();            # Track 4 Part B item 4: derive the per-boot secret-whitening mask from nx_mem_key
     nx_atrest_selftest();             # Track 4 Part B item 2: round-trip the at-rest cipher under the live key (fail-soft)
+    nx_atrest_ext_selftest();         # Track 4 Part B items 5/6/8: scrub-scratch / poison-fill / fingerprint de-correlation (fail-soft)
+    nx_mem_key_rekey_selftest();      # Track 4 Part B item 7: forward-secure rolling re-key (fail-soft, leaves one legit rotation)
+    nx_track4_selftest_report();      # surface the Part B self-test results on COM1 (debug builds): [T4ST a=1 x=1 r=1]
     bootlog2(TAG_K, D0 + 4);          # K4: descriptors/canary/cap HMAC ready
 
     measured_boot_init();             # fold boot stages -> mb_digest

@@ -64,6 +64,13 @@ global nx_atrest_win;
 global nx_atrest_selftest;
 global nx_atrest_selftest_ok;
 
+# Items 5/6/8 primitives + their combined boot self-test (item 7 rolling re-key
+# lives in ram_volatile.nxh, the key owner).
+global nx_atrest_poison;          # item 6: overwrite freed memory with key-derived bytes
+global nx_atrest_scrub_scratch;   # item 5: zero a transient plaintext scratch buffer
+global nx_atrest_ext_selftest;
+global nx_atrest_ext_selftest_ok;
+
 # Item 4 whitening: per-boot mask + unmask/mask helpers + the seed entry called
 # from nx_mem_key_ensure once the key is final.
 global nx_secret_mask;
@@ -89,6 +96,13 @@ data nx_atrest_win: PAGE_SIZE x 1 = 0;
 align 8;
 data nx_atrest_st_buf: 32 x 1 = 0;
 data nx_atrest_selftest_ok: 1 x 1 = 0;
+
+# Items 5/6/8 boot self-test fixtures (two distinct regions so the fingerprint
+# de-correlation check can compare them) + a combined result flag.
+align 8;
+data nx_atrest_ext_a: 32 x 1 = 0;
+data nx_atrest_ext_b: 32 x 1 = 0;
+data nx_atrest_ext_selftest_ok: 1 x 1 = 0;
 
 # Item 4: the per-boot whitening mask (kernel .data, scrubbed with nx_mem_key).
 align 8;
@@ -211,4 +225,105 @@ fn nx_atrest_selftest() {
         i = i + 1;
     }
     sb(&nx_atrest_selftest_ok, 1);
+}
+
+# ----------------------------------------------------------------------------
+# Item 6 - poison freed memory. nx_atrest_poison(dst, n, tweak) OVERWRITES
+# [dst, dst+n) with the per-boot keystream (same derivation as nx_atrest_xcrypt,
+# but a direct store rather than an XOR). Unlike a plain zero-fill it (a) destroys
+# any stale plaintext that lingered in a freed page, and (b) leaves key-derived
+# bytes that are indistinguishable from at-rest ciphertext in a dump - so a freed
+# region neither leaks its old contents nor advertises itself as "free space"
+# (item 8: defeat structure fingerprinting). When called on a teardown path AFTER
+# the key was scrubbed, nx_mem_key is zero and the fill degrades to a fixed
+# splitmix64(tweak ^ j) pattern - still non-zero and still overwrites the
+# plaintext, which is all the wipe path needs.
+# ----------------------------------------------------------------------------
+fn nx_atrest_poison(dst, n, tweak) {
+    let j = 0;
+    let off = 0;
+    while (off + 8) <= n {
+        let ks = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        sq(dst + off, ks);
+        off = off + 8;
+        j = j + 1;
+    }
+    if off < n {
+        let kt = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        while off < n {
+            sb(dst + off, kt & 0xFF);
+            kt = kt >> 8;
+            off = off + 1;
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Item 5 - minimize plaintext residency. nx_atrest_scrub_scratch(dst, n) zeroes a
+# transient plaintext scratch buffer the instant a consumer is done with it, so a
+# decrypted granule is never left sitting in DRAM longer than its point-of-use.
+# (nx_atrest_close_window already does this for the at-rest window; this is the
+# general helper for any caller that materializes a secret into a scratch buffer.)
+# The policy half - "no secret left in the framebuffer / scrollback / serial log
+# longer than needed" - holds by construction today: no kernel secret is ever
+# written to those sinks (the forensic serial dump prints addresses/tags, not key
+# bytes), so there is nothing there to scrub; this helper is the enforcement hook
+# for any future code path that would.
+# ----------------------------------------------------------------------------
+fn nx_atrest_scrub_scratch(dst, n) {
+    let i = 0;
+    while (i + 8) <= n {
+        sq(dst + i, 0);
+        i = i + 8;
+    }
+    while i < n {
+        sb(dst + i, 0);
+        i = i + 1;
+    }
+}
+
+# ----------------------------------------------------------------------------
+# nx_atrest_ext_selftest() - boot proof for items 5/6/8 (fail-soft, no boot-flow
+# effect). Proves, under the LIVE per-boot key:
+#   * item 6 (poison): poisoning a known-plaintext region overwrites it with
+#     non-zero, non-plaintext bytes;
+#   * item 8 (fingerprint de-correlation): two regions poisoned with DIFFERENT
+#     tweaks do NOT collide - a dump cannot pattern-scan a known structure across
+#     regions (the tweak = region identity breaks the equality);
+#   * item 5 (residency): scrub_scratch returns a region to all-zero.
+# Sets nx_atrest_ext_selftest_ok=1 only if all three hold.
+# ----------------------------------------------------------------------------
+fn nx_atrest_ext_selftest() {
+    sb(&nx_atrest_ext_selftest_ok, 0);
+    # Seed both fixtures with the SAME known plaintext (0x00..0x1F).
+    let i = 0;
+    while i < 32 {
+        sb(&nx_atrest_ext_a + i, i & 0xFF);
+        sb(&nx_atrest_ext_b + i, i & 0xFF);
+        i = i + 1;
+    }
+    let p0 = lq(&nx_atrest_ext_a);
+    # Item 6: poison region A with tweak = its own address.
+    nx_atrest_poison(&nx_atrest_ext_a, 32, &nx_atrest_ext_a);
+    if lq(&nx_atrest_ext_a) == p0 { return; }   # must not equal plaintext
+    if lq(&nx_atrest_ext_a) == 0  { return; }   # must not be a bare zero-fill
+    # Item 8: poison region B with a DIFFERENT tweak; identical plaintext must
+    # NOT produce identical poisoned bytes (de-correlated by tweak).
+    nx_atrest_poison(&nx_atrest_ext_b, 32, &nx_atrest_ext_b);
+    i = 0;
+    let differ = 0;
+    while i < 32 {
+        if lb(&nx_atrest_ext_a + i) != lb(&nx_atrest_ext_b + i) { differ = 1; }
+        i = i + 1;
+    }
+    if differ == 0 { return; }
+    # Item 5: scrub returns the scratch region to all-zero.
+    nx_atrest_scrub_scratch(&nx_atrest_ext_a, 32);
+    i = 0;
+    while i < 32 {
+        if lb(&nx_atrest_ext_a + i) != 0 { return; }
+        i = i + 1;
+    }
+    nx_atrest_scrub_scratch(&nx_atrest_ext_b, 32);
+    sb(&nx_atrest_ext_selftest_ok, 1);
 }
