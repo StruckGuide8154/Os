@@ -1,0 +1,782 @@
+# ============================================================================
+# ed25519_check.ghl - zero-asm RFC 8032 Ed25519 verification + the Track-2
+# envelope threshold-signature check (the "actual signature crypto" the
+# envelope reader was waiting on).
+#
+# Public symbols:
+#   ed25519_verify(pub32, msg, msg_len, sig64)       -> 1 valid / 0 invalid
+#   ed25519_envelope_sigs_ok(base, signed_len, sig_total,
+#                            min_count, allowed_mask, required_mask) -> 1/0
+#   envelope_verify_signed(...same 9 args as envelope_verify...)
+#       -> ENVR_OK / ENVR_ERR_* / ENVR_ERR_SIGCRYPTO(22)
+#
+# Implementation notes (all chosen so the host eval harness, which executes
+# this exact source through the production gritc frontend, has IDENTICAL
+# semantics to the compiled kernel):
+#   - Field elements mod p = 2^255-19 are 8 little-endian 32-bit digits.
+#     Every fe_* routine returns a CANONICAL (< p) result.
+#   - All 64-bit intermediates stay below 2^64 (digit products are accumulated
+#     one at a time with carry), so `imul`/`add` never wrap, and nothing with
+#     bit 63 set is ever fed to a signed compare.
+#   - SHA-512 words are masked with ED_M64 after every combining step, which
+#     is a no-op on hardware (AND with all-ones) and makes the arbitrary-
+#     precision host evaluation match the hardware's mod-2^64 wrap exactly.
+#   - Borrow/carry chains are computed via the +2^32 bias trick so no
+#     intermediate is ever negative.
+#   - Points are extended twisted-Edwards coordinates (X, Y, Z, T), 4 fe's
+#     at struct offsets +0/+32/+64/+96. The hwcd unified addition formula is
+#     complete on this curve, so the same routine doubles and adds.
+#   - Scratch state is global and single-threaded, like crypto.ghl: envelope
+#     verification runs on the boot/update path before concurrent callers.
+#
+# DEV KEYS: ed_role_pubs holds the six threshold-role public keys derived by
+# scripts/build/ed25519_host.py from fixed development seeds (no secrecy -
+# production signing re-bakes this table from HSM-held keys). The eval
+# harness asserts this table matches the host derivation so they cannot
+# drift.
+# ============================================================================
+
+module "ed25519_check";
+
+unsafe raw_mem;          # lb/sb over fe digit arrays, hash state, envelopes
+
+global ed25519_verify;
+global ed25519_envelope_sigs_ok;
+global envelope_verify_signed;
+global ed25519_last_verified_roles;
+global ed25519_check_abi_version;
+
+const ED_M32 = 0xFFFFFFFF;
+const ED_M64 = 0xFFFFFFFFFFFFFFFF;
+const ENVR_ERR_SIGCRYPTO = 22;   # bad/missing threshold signature crypto
+
+# ---- curve / scalar-field constants (little-endian 32-bit digits) ----------
+data ed_p: 8 x 4 = [0xFFFFFFED, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF];
+data ed_l: 8 x 4 = [0x5CF5D3ED, 0x5812631A, 0xA2F79CD6, 0x14DEF9DE, 0x00000000, 0x00000000, 0x00000000, 0x10000000];
+data ed_d2: 8 x 4 = [0x26B2F159, 0xEBD69B94, 0x8283B156, 0x00E0149A, 0xEEF3D130, 0x198E80F2, 0x56DFFCE7, 0x2406D9DC];
+data ed_sqrtm1: 8 x 4 = [0x4A0EA0B0, 0xC4EE1B27, 0xAD2FE478, 0x2F431806, 0x3DFBD7A7, 0x2B4D0099, 0x4FC1DF0B, 0x2B832480];
+data ed_gx: 8 x 4 = [0x8F25D51A, 0xC9562D60, 0x9525A7B2, 0x692CC760, 0xFDD6DC5C, 0xC0A4E231, 0xCD6E53FE, 0x216936D3];
+data ed_gy: 8 x 4 = [0x66666658, 0x66666666, 0x66666666, 0x66666666, 0x66666666, 0x66666666, 0x66666666, 0x66666666];
+# exponent byte strings (LE) for fe_pow: p-2 (inversion), (p-5)/8 (sqrt path)
+data ed_exp_pm2: 32 = [0xEB,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x7F];
+data ed_exp_p58: 32 = [0xFD,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x0F];
+
+# ---- DEV threshold-role public keys (roles 1..6, 32 bytes each) ------------
+# 1=BOOT 2=KERNEL 3=POLICY 4=UPDATE 5=RECOVERY 6=AUDIT (threshold_check.ghl)
+data ed_role_pubs: 192 = [
+    0xE9,0xEF,0xA7,0x62,0xA8,0xE9,0x3E,0x76,0x65,0xB8,0x43,0xAC,0x58,0x8B,0x48,0x99,
+    0x09,0x0D,0x71,0x8A,0x0F,0xFF,0x4B,0x75,0xF7,0x74,0x94,0xEC,0x17,0x1B,0x93,0x59,
+    0xE5,0x67,0xED,0xD6,0xF9,0xEF,0xD8,0xC7,0xB1,0xBD,0xA0,0x03,0x49,0x7B,0x56,0xED,
+    0xDA,0xC2,0x8C,0xAA,0xA1,0x8A,0x6A,0xC3,0xAB,0xC7,0x69,0x9C,0x16,0x3A,0x2D,0xB4,
+    0x98,0xD2,0xA0,0xC7,0xF6,0x50,0x21,0x79,0x1D,0xE7,0x39,0xAA,0x03,0x47,0x51,0x1C,
+    0x71,0x78,0xB2,0x2E,0xB8,0x32,0xEE,0xC5,0xBC,0xF3,0xD4,0x1F,0x85,0xBC,0xA9,0x9B,
+    0xEA,0x2C,0x68,0x2A,0x55,0x99,0x45,0x7E,0x97,0xF9,0x73,0x73,0x7E,0x31,0x7B,0x40,
+    0xD3,0x8A,0x44,0x60,0x8A,0x1E,0xFD,0x26,0xE2,0xF0,0xBD,0x3B,0xE4,0x5D,0x0A,0x4B,
+    0x9E,0x00,0xD7,0x47,0x19,0x6E,0x1E,0x8B,0xED,0x5A,0x90,0x7D,0x21,0xA6,0x58,0x5B,
+    0x83,0x75,0x4D,0xAB,0xDE,0x6D,0xE1,0x10,0xA9,0xE6,0xAC,0x6D,0xE3,0xC8,0xD9,0xCF,
+    0xFA,0x5D,0x13,0xC5,0x0F,0x0C,0xE4,0x97,0xC1,0x49,0x9D,0xC1,0x83,0x17,0xCA,0x7E,
+    0x93,0x42,0x54,0x5B,0x83,0x13,0x8C,0x37,0xF5,0x57,0xF4,0x29,0x59,0xDB,0x1D,0x31,
+];
+
+# ---- SHA-512 ---------------------------------------------------------------
+data sha512_k: 80 x 8 = [
+    0x428A2F98D728AE22, 0x7137449123EF65CD, 0xB5C0FBCFEC4D3B2F, 0xE9B5DBA58189DBBC,
+    0x3956C25BF348B538, 0x59F111F1B605D019, 0x923F82A4AF194F9B, 0xAB1C5ED5DA6D8118,
+    0xD807AA98A3030242, 0x12835B0145706FBE, 0x243185BE4EE4B28C, 0x550C7DC3D5FFB4E2,
+    0x72BE5D74F27B896F, 0x80DEB1FE3B1696B1, 0x9BDC06A725C71235, 0xC19BF174CF692694,
+    0xE49B69C19EF14AD2, 0xEFBE4786384F25E3, 0x0FC19DC68B8CD5B5, 0x240CA1CC77AC9C65,
+    0x2DE92C6F592B0275, 0x4A7484AA6EA6E483, 0x5CB0A9DCBD41FBD4, 0x76F988DA831153B5,
+    0x983E5152EE66DFAB, 0xA831C66D2DB43210, 0xB00327C898FB213F, 0xBF597FC7BEEF0EE4,
+    0xC6E00BF33DA88FC2, 0xD5A79147930AA725, 0x06CA6351E003826F, 0x142929670A0E6E70,
+    0x27B70A8546D22FFC, 0x2E1B21385C26C926, 0x4D2C6DFC5AC42AED, 0x53380D139D95B3DF,
+    0x650A73548BAF63DE, 0x766A0ABB3C77B2A8, 0x81C2C92E47EDAEE6, 0x92722C851482353B,
+    0xA2BFE8A14CF10364, 0xA81A664BBC423001, 0xC24B8B70D0F89791, 0xC76C51A30654BE30,
+    0xD192E819D6EF5218, 0xD69906245565A910, 0xF40E35855771202A, 0x106AA07032BBD1B8,
+    0x19A4C116B8D2D0C8, 0x1E376C085141AB53, 0x2748774CDF8EEB99, 0x34B0BCB5E19B48A8,
+    0x391C0CB3C5C95A63, 0x4ED8AA4AE3418ACB, 0x5B9CCA4F7763E373, 0x682E6FF3D6B2B8A3,
+    0x748F82EE5DEFB2FC, 0x78A5636F43172F60, 0x84C87814A1F0AB72, 0x8CC702081A6439EC,
+    0x90BEFFFA23631E28, 0xA4506CEBDE82BDE9, 0xBEF9A3F7B2C67915, 0xC67178F2E372532B,
+    0xCA273ECEEA26619C, 0xD186B8C721C0C207, 0xEADA7DD6CDE0EB1E, 0xF57D4F7FEE6ED178,
+    0x06F067AA72176FBA, 0x0A637DC5A2C898A6, 0x113F9804BEF90DAE, 0x1B710B35131C471B,
+    0x28DB77F523047D84, 0x32CAAB7B40C72493, 0x3C9EBE0A15C9BEBC, 0x431D67C49C100D4C,
+    0x4CC5D4BECB3E42B6, 0x597F299CFC657E2A, 0x5FCB6FAB3AD6FAEC, 0x6C44198C4A475817,
+];
+
+data ed_sh_h: 8 x 8;
+data ed_sh_w: 80 x 8;
+data ed_sh_buf: 128;
+data ed_sh_buflen: 1;
+data ed_sh_total: 8;
+data ed_sh_out: 64;
+
+# ---- scratch (single-threaded; see header note) -----------------------------
+data ed_mul_t: 16 x 4;     # 512-bit product
+data ed_red_t: 9 x 4;      # reduction fold
+data ed_pw_b: 8 x 4;       # fe_pow base copy
+data ed_pw_r: 8 x 4;       # fe_pow accumulator
+# point-add temporaries (a,b,c,d,e,f,g,h + 2 sub/add scratch)
+data ed_pa_ta: 8 x 4;
+data ed_pa_tb: 8 x 4;
+data ed_pa_tc: 8 x 4;
+data ed_pa_td: 8 x 4;
+data ed_pa_te: 8 x 4;
+data ed_pa_tf: 8 x 4;
+data ed_pa_tg: 8 x 4;
+data ed_pa_th: 8 x 4;
+data ed_pa_t1: 8 x 4;
+data ed_pa_t2: 8 x 4;
+# decompress temporaries
+data ed_dc_u: 8 x 4;
+data ed_dc_v: 8 x 4;
+data ed_dc_x: 8 x 4;
+data ed_dc_t1: 8 x 4;
+data ed_dc_t2: 8 x 4;
+data ed_dc_chk: 8 x 4;
+# verify working set
+data ed_pt_a: 32 x 4;      # decompressed public key A
+data ed_pt_r: 32 x 4;      # decompressed R from the signature
+data ed_pt_b: 32 x 4;      # basepoint B
+data ed_pt_p1: 32 x 4;     # [S]B
+data ed_pt_p2: 32 x 4;     # [h]A + R
+data ed_sm_q: 32 x 4;      # scalar-mult input copy
+data ed_sc_s: 8 x 4;       # signature scalar S
+data ed_sc_h: 8 x 4;       # H(R||A||M) mod L
+data ed_eq_t1: 8 x 4;      # projective-equality cross products
+data ed_eq_t2: 8 x 4;
+
+# ============================================================================
+# little-endian loads/stores built from byte ops (alignment-free)
+# ============================================================================
+fn ed_rd_u32(p) {
+    return lb(p) | (lb(p + 1) << 8) | (lb(p + 2) << 16) | (lb(p + 3) << 24);
+}
+
+fn ed_wr_u32(p, v) {
+    sb(p, v & 0xFF);
+    sb(p + 1, (v >> 8) & 0xFF);
+    sb(p + 2, (v >> 16) & 0xFF);
+    sb(p + 3, (v >> 24) & 0xFF);
+}
+
+# digit access on a 32-bit-digit big number at ptr
+fn ed_dig(a, i) { return lw(a + i * 4) & ED_M32; }
+fn ed_setdig(a, i, v) { sw(a + i * 4, v & ED_M32); }
+
+# ============================================================================
+# generic n-digit big-number helpers (digits are 32-bit, little-endian)
+# ============================================================================
+fn ed_big_zero(r, n) {
+    let i = 0;
+    while i < n { ed_setdig(r, i, 0); i = i + 1; }
+    return 0;
+}
+
+fn ed_big_copy(r, a, n) {
+    let i = 0;
+    while i < n { ed_setdig(r, i, ed_dig(a, i)); i = i + 1; }
+    return 0;
+}
+
+# 0 if a == b, 1 if a > b, 2 if a < b
+fn ed_big_cmp(a, b, n) {
+    let i = n - 1;
+    while i >= 0 {
+        let da = ed_dig(a, i);
+        let db = ed_dig(b, i);
+        if da > db { return 1; }
+        if da < db { return 2; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# r = a + b (n digits); returns the carry out (0/1). Aliasing-safe.
+fn ed_big_add(r, a, b, n) {
+    let carry = 0;
+    let i = 0;
+    while i < n {
+        let s = ed_dig(a, i) + ed_dig(b, i) + carry;
+        ed_setdig(r, i, s);
+        carry = s >> 32;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# r = a - b (n digits); returns the borrow out (0/1). The +2^32 bias keeps
+# every intermediate non-negative (no signed-wrap divergence). Aliasing-safe.
+fn ed_big_sub(r, a, b, n) {
+    let borrow = 0;
+    let i = 0;
+    while i < n {
+        let s = ed_dig(a, i) + 0x100000000 - ed_dig(b, i) - borrow;
+        ed_setdig(r, i, s);
+        borrow = 1 - (s >> 32);
+        i = i + 1;
+    }
+    return borrow;
+}
+
+# r = r << 1 (n digits); top carry returned (callers keep values small enough
+# that it is always 0).
+fn ed_big_shl1(r, n) {
+    let carry = 0;
+    let i = 0;
+    while i < n {
+        let s = (ed_dig(r, i) << 1) | carry;
+        ed_setdig(r, i, s);
+        carry = (s >> 32) & 1;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# ============================================================================
+# field arithmetic mod p = 2^255 - 19 (8 digits, canonical < p in/out)
+# ============================================================================
+fn ed_fe_canon(r) {
+    while ed_big_cmp(r, &ed_p, 8) != 2 {
+        ed_big_sub(r, r, &ed_p, 8);
+    }
+    return 0;
+}
+
+fn ed_fe_set_small(r, v) {
+    ed_big_zero(r, 8);
+    ed_setdig(r, 0, v);
+    return 0;
+}
+
+fn ed_fe_add(r, a, b) {
+    ed_big_add(r, a, b, 8);      # a,b < p so the carry out is 0
+    ed_fe_canon(r);
+    return 0;
+}
+
+fn ed_fe_sub(r, a, b) {
+    let borrow = ed_big_sub(r, a, b, 8);
+    if borrow != 0 {
+        ed_big_add(r, r, &ed_p, 8);   # discard carry: (a-b+2^256)+p-2^256
+    }
+    return 0;
+}
+
+# ed_mul_t = a * b (8x8 -> 16 digits). One product per step + carry keeps the
+# 64-bit accumulator below 2^64.
+fn ed_big_mul8(a, b) {
+    ed_big_zero(&ed_mul_t, 16);
+    let i = 0;
+    while i < 8 {
+        let carry = 0;
+        let ai = ed_dig(a, i);
+        let j = 0;
+        while j < 8 {
+            let acc = ed_dig(&ed_mul_t, i + j) + ai * ed_dig(b, j) + carry;
+            ed_setdig(&ed_mul_t, i + j, acc);
+            carry = acc >> 32;
+            j = j + 1;
+        }
+        ed_setdig(&ed_mul_t, i + 8, carry);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# r = ed_mul_t mod p, canonical. 2^256 = 2p + 38, so x = hi*2^256 + lo
+# folds as lo + hi*38 (twice, then a tiny third fold, then canon).
+fn ed_fe_reduce512(r) {
+    # first fold: ed_red_t(9) = lo8 + hi8*38
+    let carry = 0;
+    let i = 0;
+    while i < 8 {
+        let acc = ed_dig(&ed_mul_t, i) + ed_dig(&ed_mul_t, i + 8) * 38 + carry;
+        ed_setdig(&ed_red_t, i, acc);
+        carry = acc >> 32;
+        i = i + 1;
+    }
+    ed_setdig(&ed_red_t, 8, carry);     # <= 38
+    # second fold: r8 = low8 + top*38
+    let top = ed_dig(&ed_red_t, 8);
+    let acc2 = ed_dig(&ed_red_t, 0) + top * 38;
+    ed_setdig(r, 0, acc2);
+    let carry2 = acc2 >> 32;
+    i = 1;
+    while i < 8 {
+        let acc3 = ed_dig(&ed_red_t, i) + carry2;
+        ed_setdig(r, i, acc3);
+        carry2 = acc3 >> 32;
+        i = i + 1;
+    }
+    # third fold: a final carry of 1 means +2^256 == +38 (mod p), and the low
+    # digits are tiny at that point so this cannot carry again.
+    if carry2 != 0 {
+        ed_setdig(r, 0, ed_dig(r, 0) + 38);
+    }
+    ed_fe_canon(r);
+    return 0;
+}
+
+fn ed_fe_mul(r, a, b) {
+    ed_big_mul8(a, b);
+    ed_fe_reduce512(r);
+    return 0;
+}
+
+fn ed_fe_sq(r, a) {
+    ed_fe_mul(r, a, a);
+    return 0;
+}
+
+# r = base ^ exp, exp given as a 32-byte little-endian string. Square-and-
+# multiply MSB-first; r may alias base (base is copied first).
+fn ed_fe_pow(r, base, exp) {
+    ed_big_copy(&ed_pw_b, base, 8);
+    ed_fe_set_small(&ed_pw_r, 1);
+    let i = 255;
+    while i >= 0 {
+        ed_fe_sq(&ed_pw_r, &ed_pw_r);
+        let bit = (lb(exp + (i >> 3)) >> (i & 7)) & 1;
+        if bit != 0 {
+            ed_fe_mul(&ed_pw_r, &ed_pw_r, &ed_pw_b);
+        }
+        i = i - 1;
+    }
+    ed_big_copy(r, &ed_pw_r, 8);
+    return 0;
+}
+
+fn ed_fe_from_bytes(r, p) {
+    let i = 0;
+    while i < 8 {
+        ed_setdig(r, i, ed_rd_u32(p + i * 4));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ed_fe_is_zero(a) {
+    let i = 0;
+    while i < 8 {
+        if ed_dig(a, i) != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ============================================================================
+# point ops - extended twisted-Edwards (X,Y,Z,T at +0/+32/+64/+96)
+# ============================================================================
+fn ed_pt_identity(p) {
+    ed_fe_set_small(p, 0);          # X
+    ed_fe_set_small(p + 32, 1);     # Y
+    ed_fe_set_small(p + 64, 1);     # Z
+    ed_fe_set_small(p + 96, 0);     # T
+    return 0;
+}
+
+fn ed_pt_copy(r, p) {
+    ed_big_copy(r, p, 32);
+    return 0;
+}
+
+# r = p + q  (hwcd unified addition; complete on this curve, so it also
+# doubles). All inputs are read into temporaries before r is written, so
+# r may alias p and/or q.
+fn ed_pt_add(r, p, q) {
+    ed_fe_sub(&ed_pa_t1, p + 32, p);            # Y1 - X1
+    ed_fe_sub(&ed_pa_t2, q + 32, q);            # Y2 - X2
+    ed_fe_mul(&ed_pa_ta, &ed_pa_t1, &ed_pa_t2); # A
+    ed_fe_add(&ed_pa_t1, p + 32, p);            # Y1 + X1
+    ed_fe_add(&ed_pa_t2, q + 32, q);            # Y2 + X2
+    ed_fe_mul(&ed_pa_tb, &ed_pa_t1, &ed_pa_t2); # B
+    ed_fe_mul(&ed_pa_tc, p + 96, q + 96);       # T1*T2
+    ed_fe_mul(&ed_pa_tc, &ed_pa_tc, &ed_d2);    # C = 2d*T1*T2
+    ed_fe_mul(&ed_pa_td, p + 64, q + 64);       # Z1*Z2
+    ed_fe_add(&ed_pa_td, &ed_pa_td, &ed_pa_td); # D = 2*Z1*Z2
+    ed_fe_sub(&ed_pa_te, &ed_pa_tb, &ed_pa_ta); # E = B - A
+    ed_fe_sub(&ed_pa_tf, &ed_pa_td, &ed_pa_tc); # F = D - C
+    ed_fe_add(&ed_pa_tg, &ed_pa_td, &ed_pa_tc); # G = D + C
+    ed_fe_add(&ed_pa_th, &ed_pa_tb, &ed_pa_ta); # H = B + A
+    ed_fe_mul(r, &ed_pa_te, &ed_pa_tf);         # X3 = E*F
+    ed_fe_mul(r + 32, &ed_pa_tg, &ed_pa_th);    # Y3 = G*H
+    ed_fe_mul(r + 64, &ed_pa_tf, &ed_pa_tg);    # Z3 = F*G
+    ed_fe_mul(r + 96, &ed_pa_te, &ed_pa_th);    # T3 = E*H
+    return 0;
+}
+
+# r = [s]q, s an 8-digit scalar (< L so bits 253..255 are clear, but the loop
+# covers all 256 anyway). Double-and-add MSB-first; q is copied so r may
+# alias q.
+fn ed_pt_scalarmult(r, s, q) {
+    ed_pt_copy(&ed_sm_q, q);
+    ed_pt_identity(r);
+    let i = 255;
+    while i >= 0 {
+        ed_pt_add(r, r, r);
+        let bit = (ed_dig(s, i >> 5) >> (i & 31)) & 1;
+        if bit != 0 {
+            ed_pt_add(r, r, &ed_sm_q);
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Decompress 32 bytes at b into point r. Returns 1 ok / 0 reject.
+fn ed_pt_decompress(r, b) {
+    # y = low 255 bits, must already be canonical (< p)
+    ed_fe_from_bytes(r + 32, b);
+    ed_setdig(r + 32, 7, ed_dig(r + 32, 7) & 0x7FFFFFFF);
+    if ed_big_cmp(r + 32, &ed_p, 8) != 2 { return 0; }
+    let sign = lb(b + 31) >> 7;
+    # u = y^2 - 1, v = d*y^2 + 1  (x^2 = u/v)
+    ed_fe_sq(&ed_dc_t1, r + 32);                 # y^2
+    ed_fe_set_small(&ed_dc_t2, 1);
+    ed_fe_sub(&ed_dc_u, &ed_dc_t1, &ed_dc_t2);   # u
+    ed_fe_mul(&ed_dc_v, &ed_dc_t1, &ed_d2);      # 2d*y^2
+    # halve: we have 2d*y^2; v = d*y^2 + 1 = (2d*y^2)*inv2 + 1. Cheaper to
+    # recompute with d = 2d * inv(2)? Avoid an extra constant: v = d*y^2 + 1
+    # via (2d*y^2 + 2) * inv(2) would need inv2 anyway, so just multiply u/v
+    # forms by 2: x^2 = u/v = (2u)/(2v) - scale both sides instead.
+    # 2v = 2d*y^2 + 2:
+    ed_fe_add(&ed_dc_t2, &ed_dc_t2, &ed_dc_t2);  # 2
+    ed_fe_add(&ed_dc_v, &ed_dc_v, &ed_dc_t2);    # 2v
+    ed_fe_add(&ed_dc_u, &ed_dc_u, &ed_dc_u);     # 2u
+    # x = (2u) * (2v)^3 * ((2u) * (2v)^7) ^ ((p-5)/8)
+    ed_fe_sq(&ed_dc_t1, &ed_dc_v);               # v2
+    ed_fe_mul(&ed_dc_t2, &ed_dc_t1, &ed_dc_v);   # v3
+    ed_fe_sq(&ed_dc_t1, &ed_dc_t2);              # v6
+    ed_fe_mul(&ed_dc_t1, &ed_dc_t1, &ed_dc_v);   # v7
+    ed_fe_mul(&ed_dc_t1, &ed_dc_t1, &ed_dc_u);   # u*v7
+    ed_fe_pow(&ed_dc_t1, &ed_dc_t1, &ed_exp_p58);
+    ed_fe_mul(&ed_dc_x, &ed_dc_u, &ed_dc_t2);    # u*v3
+    ed_fe_mul(&ed_dc_x, &ed_dc_x, &ed_dc_t1);    # candidate x
+    # check v*x^2 == u  or  v*x^2 == -u (then multiply by sqrt(-1))
+    ed_fe_sq(&ed_dc_t1, &ed_dc_x);
+    ed_fe_mul(&ed_dc_chk, &ed_dc_t1, &ed_dc_v);  # v*x^2
+    if ed_big_cmp(&ed_dc_chk, &ed_dc_u, 8) != 0 {
+        ed_fe_set_small(&ed_dc_t2, 0);
+        ed_fe_sub(&ed_dc_t1, &ed_dc_t2, &ed_dc_u);   # -u
+        if ed_big_cmp(&ed_dc_chk, &ed_dc_t1, 8) != 0 { return 0; }
+        ed_fe_mul(&ed_dc_x, &ed_dc_x, &ed_sqrtm1);
+    }
+    if ed_fe_is_zero(&ed_dc_x) != 0 {
+        if sign != 0 { return 0; }
+    }
+    if (ed_dig(&ed_dc_x, 0) & 1) != sign {
+        ed_fe_set_small(&ed_dc_t2, 0);
+        ed_fe_sub(&ed_dc_x, &ed_dc_t2, &ed_dc_x);
+    }
+    ed_big_copy(r, &ed_dc_x, 8);                 # X
+    ed_fe_set_small(r + 64, 1);                  # Z
+    ed_fe_mul(r + 96, r, r + 32);                # T = X*Y
+    return 1;
+}
+
+# projective equality: X1*Z2 == X2*Z1 and Y1*Z2 == Y2*Z1
+fn ed_pt_eq(p, q) {
+    ed_fe_mul(&ed_eq_t1, p, q + 64);
+    ed_fe_mul(&ed_eq_t2, q, p + 64);
+    if ed_big_cmp(&ed_eq_t1, &ed_eq_t2, 8) != 0 { return 0; }
+    ed_fe_mul(&ed_eq_t1, p + 32, q + 64);
+    ed_fe_mul(&ed_eq_t2, q + 32, p + 64);
+    if ed_big_cmp(&ed_eq_t1, &ed_eq_t2, 8) != 0 { return 0; }
+    return 1;
+}
+
+# ============================================================================
+# SHA-512 (streaming, mirrors the crypto.ghl SHA-256 structure)
+# ============================================================================
+fn ed_ror64(x, n) {
+    return ((x >> n) | (x << (64 - n))) & ED_M64;
+}
+
+fn ed_sh_bsig0(x) { return ed_ror64(x, 28) ^ ed_ror64(x, 34) ^ ed_ror64(x, 39); }
+fn ed_sh_bsig1(x) { return ed_ror64(x, 14) ^ ed_ror64(x, 18) ^ ed_ror64(x, 41); }
+fn ed_sh_ssig0(x) { return ed_ror64(x, 1) ^ ed_ror64(x, 8) ^ (x >> 7); }
+fn ed_sh_ssig1(x) { return ed_ror64(x, 19) ^ ed_ror64(x, 61) ^ (x >> 6); }
+fn ed_sh_ch(x, y, z) { return (x & y) ^ ((x ^ ED_M64) & z); }
+fn ed_sh_maj(x, y, z) { return (x & y) ^ (x & z) ^ (y & z); }
+
+fn ed_rd_be64(p) {
+    return (lb(p) << 56) | (lb(p + 1) << 48) | (lb(p + 2) << 40)
+         | (lb(p + 3) << 32) | (lb(p + 4) << 24) | (lb(p + 5) << 16)
+         | (lb(p + 6) << 8) | lb(p + 7);
+}
+
+fn ed_wr_be64(p, v) {
+    sb(p, (v >> 56) & 0xFF);
+    sb(p + 1, (v >> 48) & 0xFF);
+    sb(p + 2, (v >> 40) & 0xFF);
+    sb(p + 3, (v >> 32) & 0xFF);
+    sb(p + 4, (v >> 24) & 0xFF);
+    sb(p + 5, (v >> 16) & 0xFF);
+    sb(p + 6, (v >> 8) & 0xFF);
+    sb(p + 7, v & 0xFF);
+}
+
+fn ed_sha512_init() {
+    sq(&ed_sh_h + 0,  0x6A09E667F3BCC908);
+    sq(&ed_sh_h + 8,  0xBB67AE8584CAA73B);
+    sq(&ed_sh_h + 16, 0x3C6EF372FE94F82B);
+    sq(&ed_sh_h + 24, 0xA54FF53A5F1D36F1);
+    sq(&ed_sh_h + 32, 0x510E527FADE682D1);
+    sq(&ed_sh_h + 40, 0x9B05688C2B3E6C1F);
+    sq(&ed_sh_h + 48, 0x1F83D9ABFB41BD6B);
+    sq(&ed_sh_h + 56, 0x5BE0CD19137E2179);
+    sq(&ed_sh_total, 0);
+    sb(&ed_sh_buflen, 0);
+    return 0;
+}
+
+fn ed_sha512_compress(block) {
+    let i = 0;
+    while i < 16 {
+        sq(&ed_sh_w + i * 8, ed_rd_be64(block + i * 8));
+        i = i + 1;
+    }
+    while i < 80 {
+        let v = (ed_sh_ssig1(lq(&ed_sh_w + (i - 2) * 8)) + lq(&ed_sh_w + (i - 7) * 8)
+               + ed_sh_ssig0(lq(&ed_sh_w + (i - 15) * 8)) + lq(&ed_sh_w + (i - 16) * 8)) & ED_M64;
+        sq(&ed_sh_w + i * 8, v);
+        i = i + 1;
+    }
+    let a = lq(&ed_sh_h + 0);  let b = lq(&ed_sh_h + 8);
+    let c = lq(&ed_sh_h + 16); let d = lq(&ed_sh_h + 24);
+    let e = lq(&ed_sh_h + 32); let f = lq(&ed_sh_h + 40);
+    let g = lq(&ed_sh_h + 48); let h = lq(&ed_sh_h + 56);
+    i = 0;
+    while i < 80 {
+        let t1 = (h + ed_sh_bsig1(e) + ed_sh_ch(e, f, g)
+                + lq(&sha512_k + i * 8) + lq(&ed_sh_w + i * 8)) & ED_M64;
+        let t2 = (ed_sh_bsig0(a) + ed_sh_maj(a, b, c)) & ED_M64;
+        h = g; g = f; f = e; e = (d + t1) & ED_M64;
+        d = c; c = b; b = a; a = (t1 + t2) & ED_M64;
+        i = i + 1;
+    }
+    sq(&ed_sh_h + 0,  (lq(&ed_sh_h + 0) + a) & ED_M64);
+    sq(&ed_sh_h + 8,  (lq(&ed_sh_h + 8) + b) & ED_M64);
+    sq(&ed_sh_h + 16, (lq(&ed_sh_h + 16) + c) & ED_M64);
+    sq(&ed_sh_h + 24, (lq(&ed_sh_h + 24) + d) & ED_M64);
+    sq(&ed_sh_h + 32, (lq(&ed_sh_h + 32) + e) & ED_M64);
+    sq(&ed_sh_h + 40, (lq(&ed_sh_h + 40) + f) & ED_M64);
+    sq(&ed_sh_h + 48, (lq(&ed_sh_h + 48) + g) & ED_M64);
+    sq(&ed_sh_h + 56, (lq(&ed_sh_h + 56) + h) & ED_M64);
+    return 0;
+}
+
+fn ed_sha512_update(src, len) {
+    let p = src;
+    let left = len;
+    sq(&ed_sh_total, lq(&ed_sh_total) + len);
+    while left > 0 {
+        let used = lb(&ed_sh_buflen);
+        if used == 0 {
+            while left >= 128 {
+                ed_sha512_compress(p);
+                p = p + 128;
+                left = left - 128;
+            }
+            if left == 0 { return 0; }
+        }
+        let take = 128 - used;
+        if take > left { take = left; }
+        let i = 0;
+        while i < take {
+            sb(&ed_sh_buf + used + i, lb(p + i));
+            i = i + 1;
+        }
+        used = used + take;
+        sb(&ed_sh_buflen, used);
+        p = p + take;
+        left = left - take;
+        if used == 128 {
+            ed_sha512_compress(&ed_sh_buf);
+            sb(&ed_sh_buflen, 0);
+        }
+    }
+    return 0;
+}
+
+fn ed_sha512_final(out) {
+    let bit_len = lq(&ed_sh_total) * 8;
+    let used = lb(&ed_sh_buflen);
+    sb(&ed_sh_buf + used, 0x80);
+    used = used + 1;
+    if used > 112 {
+        while used < 128 {
+            sb(&ed_sh_buf + used, 0);
+            used = used + 1;
+        }
+        ed_sha512_compress(&ed_sh_buf);
+        used = 0;
+    }
+    while used < 120 {
+        sb(&ed_sh_buf + used, 0);
+        used = used + 1;
+    }
+    # 128-bit big-endian length; messages here are far below 2^61 bytes so the
+    # high qword of the bit count is always 0 (it occupies bytes 112..119).
+    ed_wr_be64(&ed_sh_buf + 112, 0);
+    ed_wr_be64(&ed_sh_buf + 120, bit_len);
+    ed_sha512_compress(&ed_sh_buf);
+    let i = 0;
+    while i < 8 {
+        ed_wr_be64(out + i * 8, lq(&ed_sh_h + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ============================================================================
+# scalar reduction mod L over the 64-byte SHA-512 output (bitwise long
+# division: 512 shifts, simple and exactly mirrors the host semantics)
+# ============================================================================
+fn ed_sc_reduce64(r, h64) {
+    ed_big_zero(r, 8);
+    let i = 511;
+    while i >= 0 {
+        ed_big_shl1(r, 8);     # r < L < 2^253, so the shifted value fits
+        let bit = (lb(h64 + (i >> 3)) >> (i & 7)) & 1;
+        if bit != 0 {
+            ed_setdig(r, 0, ed_dig(r, 0) | 1);
+        }
+        if ed_big_cmp(r, &ed_l, 8) != 2 {
+            ed_big_sub(r, r, &ed_l, 8);
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# ============================================================================
+# RFC 8032 Ed25519 signature verification
+# ============================================================================
+fn ed25519_check_abi_version() {
+    return 1;
+}
+
+# pub32: public key bytes; msg/msg_len: signed bytes; sig64: R(32) || S(32).
+# Returns 1 only if the signature is valid.
+fn ed25519_verify(pub32, msg, msg_len, sig64) {
+    if pub32 == 0 { return 0; }
+    if sig64 == 0 { return 0; }
+    if ed_pt_decompress(&ed_pt_a, pub32) == 0 { return 0; }
+    if ed_pt_decompress(&ed_pt_r, sig64) == 0 { return 0; }
+    # S must be canonical (< L) - rejects signature malleability
+    ed_fe_from_bytes(&ed_sc_s, sig64 + 32);
+    if ed_big_cmp(&ed_sc_s, &ed_l, 8) != 2 { return 0; }
+    # h = SHA-512(R || A || M) mod L
+    ed_sha512_init();
+    ed_sha512_update(sig64, 32);
+    ed_sha512_update(pub32, 32);
+    ed_sha512_update(msg, msg_len);
+    ed_sha512_final(&ed_sh_out);
+    ed_sc_reduce64(&ed_sc_h, &ed_sh_out);
+    # basepoint B in extended coordinates
+    ed_big_copy(&ed_pt_b, &ed_gx, 8);
+    ed_big_copy(&ed_pt_b + 32, &ed_gy, 8);
+    ed_fe_set_small(&ed_pt_b + 64, 1);
+    ed_fe_mul(&ed_pt_b + 96, &ed_gx, &ed_gy);
+    # accept iff [S]B == R + [h]A
+    ed_pt_scalarmult(&ed_pt_p1, &ed_sc_s, &ed_pt_b);
+    ed_pt_scalarmult(&ed_pt_p2, &ed_sc_h, &ed_pt_a);
+    ed_pt_add(&ed_pt_p2, &ed_pt_p2, &ed_pt_r);
+    return ed_pt_eq(&ed_pt_p1, &ed_pt_p2);
+}
+
+# ============================================================================
+# Track-2 envelope threshold-signature check
+# ============================================================================
+fn ed25519_role_pubkey(role) {
+    if role < 1 { return 0; }
+    if role > 6 { return 0; }
+    return &ed_role_pubs + (role - 1) * 32;
+}
+
+# Verify the detached signature block of an envelope whose STRUCTURE has
+# already been accepted by envelope_verify:
+#   base       : envelope start
+#   signed_len : header_len + payload_len (the canonical signed bytes)
+#   sig_total  : signature-block length (validated multiple of 64, <= 4096)
+#   min_count / allowed_mask / required_mask: the validated COSIGNER_ROLES
+# Each 64-byte signature may satisfy at most one role; a role counts once.
+# Accept iff >= min_count distinct allowed roles verified and every
+# required role verified.
+fn ed25519_envelope_sigs_ok(base, signed_len, sig_total, min_count, allowed_mask, required_mask) {
+    let count = sig_total >> 6;
+    let verified = 0;
+    let i = 0;
+    while i < count {
+        let sp = base + signed_len + i * 64;
+        let role = 1;
+        let matched = 0;
+        while role <= 6 {
+            if matched == 0 {
+                let bit = 1 << (role - 1);
+                if (allowed_mask & bit) != 0 {
+                    if (verified & bit) == 0 {
+                        if ed25519_verify(ed25519_role_pubkey(role), base, signed_len, sp) != 0 {
+                            verified = verified | bit;
+                            matched = 1;
+                        }
+                    }
+                }
+            }
+            role = role + 1;
+        }
+        i = i + 1;
+    }
+    # Publish the distinct-role set that actually verified, BEFORE the quorum
+    # verdict: the quorum-change tracking path (envelope_gate.ghl) re-judges
+    # this same set against BOTH the old and the new quorum rule.
+    sw(&ed_verified_roles, verified);
+    if security_threshold_popcount6(verified) < min_count { return 0; }
+    if (verified & required_mask) != required_mask { return 0; }
+    return 1;
+}
+
+# Role bitmask of the signatures that cryptographically verified during the
+# most recent ed25519_envelope_sigs_ok run. Only meaningful immediately after
+# a FRESH (non-cached) envelope_verify_signed call on the same envelope.
+data ed_verified_roles: 1 x 4;
+
+fn ed25519_last_verified_roles() {
+    return lw(&ed_verified_roles);
+}
+
+# Full verification: structure + semantics (envelope_verify) AND real
+# Ed25519 threshold signatures over the canonical bytes. This is the entry
+# point boot/update call sites bind to.
+fn envelope_verify_signed(base, total_len, computed_hash, now, device_id, device_class, required_version, required_counter, required_epoch) {
+    let rc = envelope_verify(base, total_len, computed_hash, now, device_id, device_class, required_version, required_counter, required_epoch);
+    if rc != 0 { return rc; }
+    # Structure is fully validated; re-read the header geometry and the
+    # COSIGNER_ROLES field (id 10) for the quorum parameters.
+    let header_len = lb(base + 12) | (lb(base + 13) << 8);
+    let payload_len = lb(base + 14) | (lb(base + 15) << 8) | (lb(base + 16) << 16) | (lb(base + 17) << 24);
+    let p = base + 18;
+    let hdr_end = base + header_len;
+    let min_count = 0;
+    let allowed_mask = 0;
+    let required_mask = 0;
+    while p < hdr_end {
+        let id_width = lb(p);
+        let field_id = envelope_rd_scalar(p + 1, id_width);
+        let len_width = lb(p + 1 + id_width);
+        let field_len = envelope_rd_scalar(p + 2 + id_width, len_width);
+        let vptr = p + 2 + id_width + len_width;
+        if field_id == 10 {
+            min_count = lb(vptr) | (lb(vptr + 1) << 8);
+            allowed_mask = lb(vptr + 2) | (lb(vptr + 3) << 8);
+            required_mask = lb(vptr + 4) | (lb(vptr + 5) << 8);
+        }
+        p = vptr + field_len;
+    }
+    let signed_len = header_len + payload_len;
+    let sig_total = total_len - signed_len;
+    if ed25519_envelope_sigs_ok(base, signed_len, sig_total, min_count, allowed_mask, required_mask) == 0 {
+        return ENVR_ERR_SIGCRYPTO;
+    }
+    return 0;
+}

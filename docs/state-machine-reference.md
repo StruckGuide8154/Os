@@ -1,4 +1,4 @@
-# NexusOS State Machine Reference
+# GritOS State Machine Reference
 
 This document describes the important maintainer-level state machines and
 interaction flows for GUI/input/USB subsystems.
@@ -330,6 +330,6 @@ Lifecycle:
 
 Important rule:
 
-- The current directory cache is part of the FAT16 driver’s state machine.
+- The current directory cache is part of the FAT16 driver's state machine.
   Bugs involving stale entries, invalid handles, or path confusion usually live
   here or at the syscall boundary.

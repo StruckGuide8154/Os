@@ -25,7 +25,7 @@
 #      validity window EXPIRED in 2001 (--not-after 1000000000) is rejected
 #      ("[UPDATE] rejected rc=E" = ENVR_ERR_WINDOW) despite valid quorum
 #      signatures -- proving windows are judged against real time.
-#   8. Persistent anti-rollback floors (floor_store.nxh): boot A admits a
+#   8. Persistent anti-rollback floors (floor_store.ghl): boot A admits a
 #      validly signed v3 update ("[FLOOR] persisted g="); after a full
 #      power cycle, boot B reloads the floors from the data.img floor
 #      sector ("[FLOOR] loaded g=") and rejects a validly signed v2 update
@@ -65,7 +65,7 @@ $SerialPort = 5555
 $SerialLog  = Join-Path $BuildDir 'track2_callsites_serial.log'
 
 function Reset-FloorSector {
-    # Zero the persistent anti-rollback floor sector (floor_store.nxh
+    # Zero the persistent anti-rollback floor sector (floor_store.ghl
     # FLOOR_LBA = 2) of the QEMU IDE data disk so phase 8 starts from (and
     # the suite leaves behind) the build-time floors.
     $dataImg = Join-Path $BuildDir 'data.img'
@@ -178,7 +178,7 @@ try {
     # ---- Phase 3: signed staged update accepted ----------------------------
     Write-Host '[track2-callsites] Phase 3: quorum-signed KUPDATE.ENV staged...' -ForegroundColor Yellow
     $updPayload = Join-Path $BuildDir 'track2_test_update_payload.bin'
-    [System.IO.File]::WriteAllBytes($updPayload, [System.Text.Encoding]::ASCII.GetBytes('NexusOS staged update test artifact'))
+    [System.IO.File]::WriteAllBytes($updPayload, [System.Text.Encoding]::ASCII.GetBytes('GritOS staged update test artifact'))
     & python (Join-Path $Root 'scripts\build\write_envelope.py') `
         --payload $updPayload --out $KupdPath --type update --device-id 1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'write_envelope.py failed for KUPDATE.ENV' }

@@ -1,0 +1,26 @@
+# GritHL SVG2 - named constants for path-data command bytes.
+#
+# Path commands are single ASCII letters.  We compare them as integer byte
+# values; naming them here keeps call sites readable and avoids drifting
+# numeric literals across modules.
+
+const PCMD_M = 77      # 'M' moveto absolute
+const PCMD_m = 109     # 'm' moveto relative
+const PCMD_L = 76      # 'L' lineto absolute
+const PCMD_l = 108     # 'l' lineto relative
+const PCMD_H = 72      # 'H' horiz abs
+const PCMD_h = 104     # 'h' horiz rel
+const PCMD_V = 86      # 'V' vert abs
+const PCMD_v = 118     # 'v' vert rel
+const PCMD_C = 67      # 'C' cubic abs
+const PCMD_c = 99      # 'c' cubic rel
+const PCMD_S = 83      # 'S' smooth cubic abs
+const PCMD_s = 115     # 's' smooth cubic rel
+const PCMD_Q = 81      # 'Q' quad abs
+const PCMD_q = 113     # 'q' quad rel
+const PCMD_T = 84      # 'T' smooth quad abs
+const PCMD_t = 116     # 't' smooth quad rel
+const PCMD_A = 65      # 'A' arc abs
+const PCMD_a = 97      # 'a' arc rel
+const PCMD_Z = 90      # 'Z' closepath
+const PCMD_z = 122     # 'z' closepath

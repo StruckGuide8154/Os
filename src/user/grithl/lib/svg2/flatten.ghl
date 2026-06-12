@@ -1,0 +1,242 @@
+# GritHL SVG2 - curve flattening.
+#
+# Cubic / quadratic Beziers and elliptical arcs are subdivided into line
+# segments and pushed into the polygon buffer (svg2.raster.poly_add).  Inputs
+# are 16.16 fixed-point coordinates in destination space (after matrix
+# transform).  The flatness threshold is in fixed pixels (~1/4 px).
+
+use svg2.raster
+use svg2.matrix
+use svg2.fixed
+
+const FLAT_TOL_FX = 16384        # 0.25 px
+const FLAT_MAX_DEPTH = 18
+
+# Recursively subdivide a cubic Bezier; emit endpoint when flat enough.
+fn flatten_cubic(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, depth) {
+    # Flatness test: max distance of control points to the chord.
+    # Approx via |p1 - 2*p0 + p?| terms scaled - cheap heuristic.
+    let dx = p3x - p0x;
+    let dy = p3y - p0y;
+    let d1 = fx_abs(fx_mul(p1x - p0x, dy) - fx_mul(p1y - p0y, dx));
+    let d2 = fx_abs(fx_mul(p2x - p0x, dy) - fx_mul(p2y - p0y, dx));
+    let len2 = fx_mul(dx, dx) + fx_mul(dy, dy);
+    let flat = 0;
+    if depth >= FLAT_MAX_DEPTH { flat = 1; }
+    else {
+        # Flat when (d1+d2)/chord <= tol, i.e. control points lie within tol
+        # of the chord. Compared as (d1+d2) <= tol*chord rather than squaring
+        # both sides: for large curves (ribbon paths span ~2000px) (d1+d2)^2
+        # overflows 64-bit, which previously aborted subdivision early and
+        # left curves chorded into coarse straight edges.
+        if d1 + d2 <= fx_mul(FLAT_TOL_FX, fx_sqrt(len2 + FX_ONE)) { flat = 1; }
+    }
+    if flat == 1 {
+        poly_add(p3x, p3y);
+        return;
+    }
+    # de Casteljau midpoint subdivision
+    let m01x = (p0x + p1x) / 2;
+    let m01y = (p0y + p1y) / 2;
+    let m12x = (p1x + p2x) / 2;
+    let m12y = (p1y + p2y) / 2;
+    let m23x = (p2x + p3x) / 2;
+    let m23y = (p2y + p3y) / 2;
+    let m012x = (m01x + m12x) / 2;
+    let m012y = (m01y + m12y) / 2;
+    let m123x = (m12x + m23x) / 2;
+    let m123y = (m12y + m23y) / 2;
+    let mx = (m012x + m123x) / 2;
+    let my = (m012y + m123y) / 2;
+    flatten_cubic(p0x, p0y, m01x, m01y, m012x, m012y, mx, my, depth + 1);
+    flatten_cubic(mx, my, m123x, m123y, m23x, m23y, p3x, p3y, depth + 1);
+}
+
+fn flatten_quad(p0x, p0y, p1x, p1y, p2x, p2y, depth) {
+    let dx = p2x - p0x;
+    let dy = p2y - p0y;
+    let d = fx_abs(fx_mul(p1x - p0x, dy) - fx_mul(p1y - p0y, dx));
+    let flat = 0;
+    if depth >= FLAT_MAX_DEPTH { flat = 1; }
+    else {
+        # (d/chord <= tol), compared without squaring to avoid 64-bit
+        # overflow on large curves (see flatten_cubic).
+        let len2 = fx_mul(dx, dx) + fx_mul(dy, dy);
+        if d <= fx_mul(FLAT_TOL_FX, fx_sqrt(len2 + FX_ONE)) { flat = 1; }
+    }
+    if flat == 1 { poly_add(p2x, p2y); return; }
+    let m01x = (p0x + p1x) / 2;
+    let m01y = (p0y + p1y) / 2;
+    let m12x = (p1x + p2x) / 2;
+    let m12y = (p1y + p2y) / 2;
+    let mx = (m01x + m12x) / 2;
+    let my = (m01y + m12y) / 2;
+    flatten_quad(p0x, p0y, m01x, m01y, mx, my, depth + 1);
+    flatten_quad(mx, my, m12x, m12y, p2x, p2y, depth + 1);
+}
+
+# Approximate elliptical arc via 4 cubic Beziers (one per quadrant).
+# Inputs: start (x0,y0), end (x1,y1), radii rx,ry (>0), rotation angle (fx rad),
+# large_arc_flag, sweep_flag.  All 16.16 fixed.
+# Implementation uses the standard SVG arc -> center parameterization, then
+# emits 1..4 cubic sub-arcs in equal angular steps.
+fn flatten_arc(x0, y0, rx, ry, x_axis_rot, large_arc, sweep, x1, y1) {
+    if rx == 0 {
+        poly_add(x1, y1);
+        return;
+    }
+    if ry == 0 {
+        poly_add(x1, y1);
+        return;
+    }
+    let arx = fx_abs(rx);
+    let ary = fx_abs(ry);
+    let cs = fx_cos(x_axis_rot);
+    let sn = fx_sin(x_axis_rot);
+
+    # Step 1: translate so midpoint of (x0,y0)-(x1,y1) is origin, then rotate.
+    let dx2 = (x0 - x1) / 2;
+    let dy2 = (y0 - y1) / 2;
+    let x1p = fx_mul(cs, dx2) + fx_mul(sn, dy2);
+    let y1p = fx_mul(0 - sn, dx2) + fx_mul(cs, dy2);
+
+    # Ensure radii large enough.
+    let lam = fx_div(fx_mul(x1p, x1p), fx_mul(arx, arx))
+            + fx_div(fx_mul(y1p, y1p), fx_mul(ary, ary));
+    if lam > FX_ONE {
+        let s = fx_sqrt(lam);
+        arx = fx_mul(arx, s);
+        ary = fx_mul(ary, s);
+    }
+
+    let rx2 = fx_mul(arx, arx);
+    let ry2 = fx_mul(ary, ary);
+    let x1p2 = fx_mul(x1p, x1p);
+    let y1p2 = fx_mul(y1p, y1p);
+    let denom = fx_mul(rx2, y1p2) + fx_mul(ry2, x1p2);
+    let num = fx_mul(rx2, ry2) - denom;
+    if num < 0 { num = 0; }
+    let factor = fx_sqrt(fx_div(num, denom + 1));
+    if large_arc == sweep { factor = 0 - factor; }
+    let cxp = fx_mul(factor, fx_div(fx_mul(arx, y1p), ary));
+    let cyp = fx_mul(factor, 0 - fx_div(fx_mul(ary, x1p), arx));
+
+    let cx = fx_mul(cs, cxp) - fx_mul(sn, cyp) + (x0 + x1) / 2;
+    let cy = fx_mul(sn, cxp) + fx_mul(cs, cyp) + (y0 + y1) / 2;
+
+    # Step 3: compute start angle theta1 and delta-theta.
+    let ux = fx_div(x1p - cxp, arx);
+    let uy = fx_div(y1p - cyp, ary);
+    let vx = fx_div(0 - x1p - cxp, arx);
+    let vy = fx_div(0 - y1p - cyp, ary);
+
+    # angle(u) = atan2(uy,ux); we approximate atan2 via cheap sign-based form.
+    let theta1 = atan2_fx(uy, ux);
+    let dot = fx_mul(ux, vx) + fx_mul(uy, vy);
+    let norm_u = fx_sqrt(fx_mul(ux, ux) + fx_mul(uy, uy));
+    let norm_v = fx_sqrt(fx_mul(vx, vx) + fx_mul(vy, vy));
+    let cos_d = fx_div(dot, fx_mul(norm_u, norm_v) + 1);
+    if cos_d > FX_ONE { cos_d = FX_ONE; }
+    if cos_d < (0 - FX_ONE) { cos_d = 0 - FX_ONE; }
+    let dtheta = acos_fx(cos_d);
+    let cross = fx_mul(ux, vy) - fx_mul(uy, vx);
+    if cross < 0 { dtheta = 0 - dtheta; }
+    if sweep == 0 {
+        if dtheta > 0 { dtheta = dtheta - FX_TWO_PI; }
+    } else {
+        if dtheta < 0 { dtheta = dtheta + FX_TWO_PI; }
+    }
+
+    # Step 4: split into N segments where each <= pi/2.
+    let n_seg = 1;
+    let abs_dt = dtheta;
+    if abs_dt < 0 { abs_dt = 0 - abs_dt; }
+    while abs_dt > FX_HALF_PI {
+        n_seg = n_seg + 1;
+        abs_dt = abs_dt - FX_HALF_PI;
+    }
+    let seg_dt = dtheta / n_seg;
+    # Bezier control-point distance for a circular arc of angle a:
+    # alpha = (4/3) * tan(a/4)
+    let half_seg = seg_dt / 2;
+    let cs_h = fx_cos(half_seg);
+    let sn_h = fx_sin(half_seg);
+    let tan_q = fx_div(FX_ONE - cs_h, sn_h + 1);
+    let alpha = fx_mul(tan_q, 87381);   # 4/3 in 16.16 = 87381
+
+    let theta = theta1;
+    let sx = x0;
+    let sy = y0;
+    let i = 0;
+    while i < n_seg {
+        let t2 = theta + seg_dt;
+        let cs1 = fx_cos(theta);
+        let sn1 = fx_sin(theta);
+        let cs2 = fx_cos(t2);
+        let sn2 = fx_sin(t2);
+        # Unit-circle endpoints
+        let e1x = cs1;
+        let e1y = sn1;
+        let e2x = cs2;
+        let e2y = sn2;
+        # Tangents
+        let t1x = 0 - sn1;
+        let t1y = cs1;
+        let t2x = 0 - sn2;
+        let t2y = cs2;
+        let c1x = e1x + fx_mul(alpha, t1x);
+        let c1y = e1y + fx_mul(alpha, t1y);
+        let c2x = e2x - fx_mul(alpha, t2x);
+        let c2y = e2y - fx_mul(alpha, t2y);
+        # Map unit circle -> ellipse: scale by (arx,ary), rotate by x_axis_rot, translate by (cx,cy).
+        let p1ax = fx_mul(arx, c1x);
+        let p1ay = fx_mul(ary, c1y);
+        let p2ax = fx_mul(arx, c2x);
+        let p2ay = fx_mul(ary, c2y);
+        let p3ax = fx_mul(arx, e2x);
+        let p3ay = fx_mul(ary, e2y);
+        let c1xR = fx_mul(cs, p1ax) - fx_mul(sn, p1ay) + cx;
+        let c1yR = fx_mul(sn, p1ax) + fx_mul(cs, p1ay) + cy;
+        let c2xR = fx_mul(cs, p2ax) - fx_mul(sn, p2ay) + cx;
+        let c2yR = fx_mul(sn, p2ax) + fx_mul(cs, p2ay) + cy;
+        let exR  = fx_mul(cs, p3ax) - fx_mul(sn, p3ay) + cx;
+        let eyR  = fx_mul(sn, p3ax) + fx_mul(cs, p3ay) + cy;
+        flatten_cubic(sx, sy, c1xR, c1yR, c2xR, c2yR, exR, eyR, 0);
+        sx = exR;
+        sy = eyR;
+        theta = t2;
+        i = i + 1;
+    }
+}
+
+# atan2 approximation in 16.16 radians.  Octant-folded, polynomial in t=min/max.
+fn atan2_fx(y, x) {
+    let ax = fx_abs(x);
+    let ay = fx_abs(y);
+    if ax == 0 {
+        if ay == 0 { return 0; }
+        if y > 0 { return FX_HALF_PI; }
+        return 0 - FX_HALF_PI;
+    }
+    let swap = 0;
+    let a = ax;
+    let b = ay;
+    if ay > ax { swap = 1; a = ay; b = ax; }
+    let t = fx_div(b, a);
+    # atan(t) ~ t * (FX_PI/4) + t*(1-|t|)*(0.2447 + 0.0663*|t|)
+    let at = fx_mul(t, 51472)
+           + fx_mul(fx_mul(t, FX_ONE - fx_abs(t)),
+                    16032 + fx_mul(4347, fx_abs(t)));
+    if swap == 1 { at = FX_HALF_PI - at; }
+    if x < 0 { at = FX_PI - at; }
+    if y < 0 { at = 0 - at; }
+    return at;
+}
+
+# acos via sqrt + atan2: acos(c) = atan2(sqrt(1-c^2), c)
+fn acos_fx(c) {
+    let one_m = FX_ONE - fx_mul(c, c);
+    if one_m < 0 { one_m = 0; }
+    let s = fx_sqrt(one_m);
+    return atan2_fx(s, c);
+}

@@ -1,0 +1,118 @@
+# ============================================================================
+# GritHLK syscall data section (Stage 1 of docs/ghlk-syscall-rearchitecture.md).
+#
+# This module re-expresses the UNCONDITIONAL, const-sized data/bss symbols that
+# used to live in src/kernel/proc/syscall_data.inc, using zero-asm `data`/`global`
+# declarations (gritc.py --target kernel). It emits the SAME global symbols with
+# the SAME names, widths, counts, alignment, and initial values.
+#
+# Compile:
+#   python src/user/grithl/compiler/gritc.py src/kernel/grithlk/syscall_data.ghl \
+#       -o build/ghl/syscall_data.asm -L src/user/grithl/lib --embed --target kernel
+#
+# %include'd by kernel_build.asm under `section .data` (these are RW data/bss
+# symbols, NOT .text), at the position the syscall cluster used to pull them in.
+#
+# WHAT STAYS IN syscall_data.inc (and why - the compiler can express neither):
+#   * Every %ifdef-gated block (ENABLE_DEBUG_SERIAL: xcap_log_count,
+#     xdsp_seen_bitmap, sc_postcond_args/valid; ENABLE_SHADOW_STACK_POC:
+#     shadow_poc_saved_rsp; ENABLE_SYSCALL_PERM: sc_slot_perm_*). GHLK `data`
+#     has no conditional-compilation construct.
+#   * slot_syscall_allow + its SC_ALLOW_BYTES equ - sized by syscall_table_count,
+#     a NASM assembly-time equ ((syscall_table_end - syscall_table)/ENTRY_SIZE).
+#     The compiler resolves a `data` count to a literal integer at compile time,
+#     so it cannot track the table's true size; hardcoding it would silently
+#     drift if a handler is added/removed. Kept in asm so NASM resolves it.
+#
+# Constant values mirror their constants.inc / syscall_caps.inc / syscall_trace.inc
+# equ definitions (verified 2026-06-02):
+#   MAX_WINDOWS = APP_SLOT_COUNT = 12 ; CAP_CORE = 0x01 ; SC_BUDGET_PER_TICK = 4096
+#   SC_GUI_BUDGET_PER_TICK = 8192
+#   CAP_AUDIT_ENTRIES = 64 ; CAP_AUDIT_ENT_SIZE = 16
+#   SC_TRACE_SLOT_BYTES = SC_TRACE_RING_ENTRIES(16) * SC_TRACE_ENT_SIZE(16) = 256
+#   SC_TRACE_HIST_SLOTS = 128
+# ============================================================================
+
+module "syscall_data";
+
+const MAX_WINDOWS          = 12;
+const CAP_CORE             = 0x01;
+const SC_BUDGET_PER_TICK   = 4096;
+const SC_GUI_BUDGET_PER_TICK = 8192;
+const CAP_AUDIT_ENTRIES    = 64;
+const CAP_AUDIT_ENT_SIZE   = 16;
+const SC_TRACE_SLOT_BYTES  = 256;
+const SC_TRACE_HIST_SLOTS  = 128;
+
+global syscall_count;
+global kernel_canary;
+global slot_sc_budget;
+global slot_gui_budget;
+
+# Monotonic syscall counter.
+data syscall_count: 1 x 8 = 0;
+
+# Stack/structure canary. align 8 then the qword.
+align 8;
+data kernel_canary: 1 x 8 = 0;
+
+# Network single-flight busy flags.
+data sc_net_ping_busy: 1 x 1 = 0;
+data sc_net_tcp_busy:  1 x 1 = 0;
+data sc_net_dns_busy:  1 x 1 = 0;
+
+# Ring-3 SYSCALL demo greeting (NUL-terminated).
+data szHelloUser = "-> Hello from RING 3 (via SYSCALL)!";
+
+# Per-slot effective capability mask LOW byte. Default-deny: every slot boots at
+# CAP_CORE. The mask widened to 16 bits (CAP_FS split into read/write/delete);
+# the high byte lives in the parallel slot_cap_mask_hi[] below. Keeping the low
+# byte a standalone array means every byte-wide reader of the coarse low caps
+# (dispatcher GUI-exempt test, security/audit paths) stays unchanged.
+align 8;
+data slot_cap_mask: MAX_WINDOWS x 1 = CAP_CORE;
+
+# Per-slot capability mask HIGH byte (CAP_FS_READ/WRITE/DELETE etc.). BSS-zero =
+# 0 because CAP_CORE has no high bits. Written together with slot_cap_mask and
+# the authenticator by cap_mask_store; folded into slot_cap_hmac so a flip in
+# either byte is detected at the dispatcher gate.
+align 8;
+data slot_cap_mask_hi: MAX_WINDOWS x 1 = 0;
+
+# Per-slot capability-cache authenticator paralleling slot_cap_mask[]. Seeded at
+# boot by slot_cap_hmac_init once kernel_canary holds its final value. Exported
+# so the Track 4 volatile scrub (ram_volatile.ghl) can zero it on teardown.
+global slot_cap_hmac;
+align 8;
+data slot_cap_hmac: MAX_WINDOWS x 1 = 0;
+
+# Capability-transition audit ring. cap_audit_head = monotonic event counter;
+# (head & idx mask) selects the next record. Records are CAP_AUDIT_ENT_SIZE bytes.
+align 8;
+data cap_audit_head: 1 x 4 = 0;
+align 16;
+data cap_audit_ring: CAP_AUDIT_ENTRIES * CAP_AUDIT_ENT_SIZE x 1 = 0;
+
+# Per-slot syscall rate-limiting token bucket. One word/slot, refilled to
+# SC_BUDGET_PER_TICK each PIT tick.
+align 16;
+data slot_sc_budget: MAX_WINDOWS x 2 = SC_BUDGET_PER_TICK;
+
+# Per-slot GUI/frame syscall budget. GUI rows use this instead of bypassing
+# rate limiting entirely.
+align 16;
+data slot_gui_budget: MAX_WINDOWS x 2 = SC_GUI_BUDGET_PER_TICK;
+
+# Per-slot security-reject strike counter (auto-kill at SC_STRIKE_LIMIT).
+align 16;
+data slot_sc_strikes: MAX_WINDOWS x 2 = 0;
+
+# Always-on per-syscall trace ring + per-slot histogram (kernel BSS, outside the
+# ring-3 arena). ring: last N records/slot; head: u16 event counter/slot; hist:
+# saturating u16 counters keyed by syscall number, fuelling the anomaly scanner.
+align 16;
+data sc_trace_ring: MAX_WINDOWS * SC_TRACE_SLOT_BYTES x 1 = 0;
+align 16;
+data sc_trace_head: MAX_WINDOWS x 2 = 0;
+align 16;
+data sc_trace_hist: MAX_WINDOWS * SC_TRACE_HIST_SLOTS x 2 = 0;

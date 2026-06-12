@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - VESA VBE Mode Setup
+; GritOS v3.0 - VESA VBE Mode Setup
 ; Must be called in 16-bit real mode (uses INT 10h)
 ; Saves framebuffer info to VBE_INFO_ADDR (0x9000)
 ; ============================================================================

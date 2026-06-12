@@ -94,7 +94,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 
     ; NIC slot? Hand the event to rtl8156_consume_event, which runs
     ; handle_frame + requeues the bulk-IN. This is the single consumer of NIC
-    ; RX events — DHCP / ARP / ICMP all derive their state from frames the
+    ; RX events - DHCP / ARP / ICMP all derive their state from frames the
     ; consume_event path delivers, no per-syscall xHCI polling.
     extern rtl8156_active, rtl8156_slot_id, rtl8156_consume_event
     cmp byte [rtl8156_active], 1
@@ -313,7 +313,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     USBHID_MMIO_ASSERT rsi, MMIO_XHCI_WINDOW
     add rsi, 0x400
     mov ebx, [rsi + rax + XHCI_PORTSC]
-    and ebx, ~XHCI_PORTSC_PED            ; PED is RW1C — don't disable port
+    and ebx, ~XHCI_PORTSC_PED            ; PED is RW1C - don't disable port
     ; Change bits are RW1C: reading them as 1 and writing back 1 clears them.
     mov [rsi + rax + XHCI_PORTSC], ebx
 .psc_no_ack:
@@ -417,7 +417,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     ; Code 6 = STALL (endpoint halted) is the common case. Per xHCI spec
     ; 4.6.8 it can be cleared with a Reset Endpoint command + Set TR Dequeue
     ; Pointer; no need to nuke the whole controller. Linux usbhid does the
-    ; same dance. Slot1 only — slot2 falls through to full re-init.
+    ; same dance. Slot1 only - slot2 falls through to full re-init.
     cmp byte [usb_dbg_errcode], 6
     jne .full_reinit
     ; Only attempt lightweight recovery if slot1 is active and the failing
@@ -427,7 +427,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     call usb_recover_stall_slot1
     test eax, eax
     jz .full_reinit
-    jmp .loop                ; recovery succeeded — drain more events
+    jmp .loop                ; recovery succeeded - drain more events
 .full_reinit:
     jmp .retry_init  ; Use the retry logic from above
 
@@ -482,7 +482,7 @@ usb_hid_requeue_slot1_one:
 ;      reset & un-halt; required by USB spec even if xHCI half already cleared)
 ;   3. Zero the interrupt transfer ring and reset enqueue/cycle
 ;   4. Set TR Dequeue Pointer command (xHCI side: arm ring at our new start)
-;   5. Requeue interrupt reads & doorbell — endpoint resumes Running
+;   5. Requeue interrupt reads & doorbell - endpoint resumes Running
 ; Returns EAX=1 on success, 0 on failure (caller should fall back to full
 ; re-init). Slot1 must be active before calling.
 ; ============================================================================
@@ -543,7 +543,7 @@ usb_recover_stall_slot1:
 
     ; --- 4. Set TR Dequeue Pointer command ---
     ; DW0 = ring_addr_lo | DCS=1 (next TRB has cycle 1 → matches xhci_int_cycle)
-    ; DW1 = ring_addr_hi (0 — ring lives below 4G)
+    ; DW1 = ring_addr_hi (0 - ring lives below 4G)
     ; DW2 = StreamID:0 / SCT:0 (mouse EP isn't streaming)
     ; DW3 = TRB_SET_TR_DEQUEUE | (SlotID << 24) | (EpID << 16)
     mov r8d, XHCI_INT_RING_ADDR

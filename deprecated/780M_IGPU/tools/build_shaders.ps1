@@ -1,5 +1,5 @@
 # ============================================================================
-# build_shaders.ps1 — compile AMDGCN shader sources to embedded blobs.
+# build_shaders.ps1 - compile AMDGCN shader sources to embedded blobs.
 #
 # Inputs  : tools/gpu/shaders/*.s         (hand-written GFX11 assembly)
 # Outputs : src/resources/gpu/*.bin       (raw .text payload, ramdisk-ready)
@@ -9,12 +9,12 @@
 # Toolchain requirement: LLVM >= 17 with the AMDGPU target built in.
 # The script does NOT auto-install LLVM. If clang/llvm-objdump/llvm-objcopy
 # are missing it prints what to install and exits non-zero so CI surfaces it.
-# This keeps the main build (build_uefi.ps1) independent of LLVM — shader
+# This keeps the main build (build_uefi.ps1) independent of LLVM - shader
 # blobs are pre-built and checked in.
 #
 # Future-proofing:
 #   * Each .s file is compiled independently. Add new shaders by dropping
-#     them into shaders/ — the loop picks them up.
+#     them into shaders/ - the loop picks them up.
 #   * GPU target ($Mcpu) is a parameter; flip to gfx1151 etc. without
 #     touching this script.
 #   * Disassembly is always produced so reviewers can verify against the

@@ -1,6 +1,6 @@
-# Beyond-Zero-Trust Security Roadmap for NexusHL/NHL
+# Beyond-Zero-Trust Security Roadmap for GritHL/GHL
 
-Scope: NexusHL/NHL only. This note describes the desired security architecture
+Scope: GritHL/GHL only. This note describes the desired security architecture
 for new high-level language, compiler, package, app, and release work. It does
 not authorize changes to boot, kernel, driver, or legacy assembly surfaces.
 
@@ -16,7 +16,7 @@ No new implementation path described here may use assembly.
 - No "temporary" assembly shim for key handling, verification, packaging,
   signing, or policy enforcement.
 
-If a required primitive cannot be expressed in NexusHL/NHL or a memory-safe host
+If a required primitive cannot be expressed in GritHL/GHL or a memory-safe host
 tool, the work is blocked until the primitive has a typed, audited high-level
 interface with narrow authority and tests. Legacy generated NASM may remain as
 part of the existing build pipeline, but this roadmap does not add to it and
@@ -24,7 +24,7 @@ does not depend on hand-written assembly.
 
 ## Security Objective
 
-Move NexusHL/NHL from "do not trust app code" to "assume any single layer can be
+Move GritHL/GHL from "do not trust app code" to "assume any single layer can be
 compromised and still preserve bounded damage." The model is inspired by seL4's
 style of explicit authority, small verifiable interfaces, and invariants that
 can be checked mechanically, but it is adapted for this project rather than
@@ -47,7 +47,7 @@ The target state:
 This roadmap assumes stronger adversaries than ordinary zero-trust designs.
 
 - A user app may be malicious.
-- A NexusHL/NHL package may be malicious.
+- A GritHL/GHL package may be malicious.
 - The compiler frontend may contain a bug.
 - A maintainer workstation may be compromised.
 - A build worker may be compromised.
@@ -62,7 +62,7 @@ as disaster recovery conditions rather than normal containment cases.
 
 ## Partitioned Authority
 
-NexusHL/NHL authority should be represented as small named capabilities, not as
+GritHL/GHL authority should be represented as small named capabilities, not as
 ambient trust.
 
 Required partitions:
@@ -91,7 +91,7 @@ Rules:
 - Cross-partition calls must pass through typed interfaces that validate
   handles, lengths, ownership, and lifetime.
 
-For NexusHL/NHL apps, syscall wrappers remain the only supported runtime
+For GritHL/GHL apps, syscall wrappers remain the only supported runtime
 boundary. Future wrappers should be grouped by capability class so an app can
 request, for example, window drawing without receiving filesystem or device
 access.
@@ -117,7 +117,7 @@ closed.
 
 ## Threshold Signing
 
-No single key should be able to ship trusted NexusHL/NHL software.
+No single key should be able to ship trusted GritHL/GHL software.
 
 Required signing classes:
 
@@ -154,7 +154,7 @@ The release system should reject unsigned or partially signed state.
 
 Artifacts requiring signatures:
 
-- NexusHL/NHL source snapshots.
+- GritHL/GHL source snapshots.
 - Package manifests.
 - Capability policy files.
 - Compiler/toolchain binaries or source digest pins.
@@ -200,7 +200,7 @@ Rules:
 Privacy verification should include:
 
 - Static scan for logging, telemetry, networking, and persistent identifier
-  APIs in NexusHL/NHL host tools and packages.
+  APIs in GritHL/GHL host tools and packages.
 - Manifest field requiring an explicit `release_privacy = "no_logging"` style
   declaration.
 - Release gate that rejects debug flags, trace sinks, or diagnostic channels.
@@ -212,7 +212,7 @@ separately signed as a debug build.
 
 ## Compromise Containment
 
-### Compromised NexusHL/NHL App
+### Compromised GritHL/GHL App
 
 Expected containment:
 
@@ -277,12 +277,12 @@ Expected containment:
 
 ## Verification Gates
 
-Merge gates for NexusHL/NHL security changes:
+Merge gates for GritHL/GHL security changes:
 
 - Documentation updated for every new capability, primitive, manifest field, or
   signing rule.
 - No new `.asm` or `.inc` path introduced.
-- No inline `asm` in any proposed new NexusHL/NHL implementation.
+- No inline `asm` in any proposed new GritHL/GHL implementation.
 - Compiler rejects unknown critical policy fields.
 - Compiler rejects undeclared capabilities.
 - Runtime launcher rejects unsigned or over-authorized packages.
@@ -337,7 +337,7 @@ Security mechanisms must stay small enough to audit.
 
 ### Phase 1: Policy Inventory
 
-- Define the initial NexusHL/NHL capability namespace.
+- Define the initial GritHL/GHL capability namespace.
 - Define canonical manifest encoding.
 - Document current runtime syscall groups and map them to future capability
   classes.
@@ -382,7 +382,7 @@ Security mechanisms must stay small enough to audit.
 
 ## Acceptance Criteria
 
-The roadmap is complete when a NexusHL/NHL stable release can prove:
+The roadmap is complete when a GritHL/GHL stable release can prove:
 
 - No new implementation path used `.asm`, `.inc`, or inline `asm`.
 - Every artifact needed to build, verify, install, and launch is signed.

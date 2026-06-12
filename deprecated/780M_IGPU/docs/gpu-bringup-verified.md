@@ -1,6 +1,6 @@
-# GFX11 bring-up — what verified on Strix Point hardware (2026-05-26)
+# GFX11 bring-up - what verified on Strix Point hardware (2026-05-26)
 
-Reference for tasks H/I/J that **landed on real silicon** — every value, offset,
+Reference for tasks H/I/J that **landed on real silicon** - every value, offset,
 and sequence that produced `state=4` on the Acer Nitro V16 (gfx1150) boot.
 
 This file is canon. If something stops working in the future, diff what
@@ -51,9 +51,9 @@ safe; speculative writes are not.
 
 ---
 
-## Stage H — SMU mailbox (`amd_smu.asm`)
+## Stage H - SMU mailbox (`amd_smu.asm`)
 
-### MP1 (SMU) SMN segment — **VERIFIED**
+### MP1 (SMU) SMN segment - **VERIFIED**
 
 | Symbol | SMN address | Notes |
 |---|---|---|
@@ -62,15 +62,15 @@ safe; speculative writes are not.
 | `C2PMSG_82` (arg) | `0x03B10A48` | `MP1_BASE_SMN + 0x0292 * 4` |
 | `C2PMSG_90` (resp) | `0x03B10A68` | `MP1_BASE_SMN + 0x029A * 4` |
 
-### Mailbox protocol — **VERIFIED**
+### Mailbox protocol - **VERIFIED**
 
 1. Poll `C2PMSG_90` until non-zero (drains stale response)
 2. Write 0 to `C2PMSG_90`
 3. Write argument to `C2PMSG_82`
 4. Write message ID to `C2PMSG_66` ← kicks SMU
-5. Poll `C2PMSG_90` until non-zero — value is the response
+5. Poll `C2PMSG_90` until non-zero - value is the response
 
-### PPSMC message IDs — **smu_v13_0_4 (Strix), VERIFIED**
+### PPSMC message IDs - **smu_v13_0_4 (Strix), VERIFIED**
 
 | ID | Name | Behaviour observed |
 |---|---|---|
@@ -81,7 +81,7 @@ safe; speculative writes are not.
 > Task H's job is just to confirm the mailbox is alive and ask the SMU
 > not to clock-gate GFX away while we touch it.
 
-### Stage-H state after success — **VERIFIED**
+### Stage-H state after success - **VERIFIED**
 
 ```
 state=2 (GPU_STATE_GFX_POWERED)
@@ -90,20 +90,20 @@ SMN c2p90=00000013 c2p66=00000013 c2p82=00000013
 ```
 
 GFX `SCRATCH_REG0` round-tripped with `0xCAFEF00D` (separate from the SMU
-work — proves GC MMIO is alive after DisallowGfxOff).
+work - proves GC MMIO is alive after DisallowGfxOff).
 
 ---
 
-## Stage I — GFXHUB context-0 page table (`amd_gmc.asm`)
+## Stage I - GFXHUB context-0 page table (`amd_gmc.asm`)
 
-### Hub choice — **VERIFIED**
+### Hub choice - **VERIFIED**
 
 GFX clients (CP/MEC/RLC/shaders) translate through **GFXHUB** (`regGCVM_*`),
 NOT MMHUB (`regMMVM_*`). MMHUB serves DCN/VCN/SDMA-MM. The original task
-ticket said "GCVM_CONTEXT0_*" and that turned out to be correct — we wasted
+ticket said "GCVM_CONTEXT0_*" and that turned out to be correct - we wasted
 one boot programming MMHUB before catching this.
 
-### GC block base — **VERIFIED**
+### GC block base - **VERIFIED**
 
 ```
 GC_BASE = 0x00001260 * 4 = 0x4980  (byte offset within BAR0)
@@ -112,7 +112,7 @@ GC_BASE = 0x00001260 * 4 = 0x4980  (byte offset within BAR0)
 All `regGCVM_*` offsets are GC-block-relative dwords; absolute dword =
 `(GC_BASE / 4) + reg_dword`.
 
-### GFXHUB context-0 register offsets — **VERIFIED**
+### GFXHUB context-0 register offsets - **VERIFIED**
 
 | Symbol | Dword (within GC) | Notes |
 |---|---|---|
@@ -124,12 +124,12 @@ All `regGCVM_*` offsets are GC-block-relative dwords; absolute dword =
 | `GCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32` | `0x0C9C` | inclusive end, in pages |
 | `GCVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32` | `0x0C9D` | |
 | `GCVM_INVALIDATE_ENG0_REQ` | `0x0D90` | |
-| `GCVM_INVALIDATE_ENG0_ACK` | `0x0DA0` | **ENG0 never acks** — reserved for KIQ |
+| `GCVM_INVALIDATE_ENG0_ACK` | `0x0DA0` | **ENG0 never acks** - reserved for KIQ |
 | `GCVM_L2_PROTECTION_FAULT_STATUS` | `0x0C31` | |
 | `GCVM_L2_PROTECTION_FAULT_ADDR_LO32` | `0x0C34` | |
 | `GCVM_L2_PROTECTION_FAULT_ADDR_HI32` | `0x0C35` | |
 
-### Memory map for Stage I — **VERIFIED**
+### Memory map for Stage I - **VERIFIED**
 
 ```
 GPU_PT_ROOT     = 0x10000000   (4 KiB)
@@ -137,18 +137,18 @@ GPU_WORK_BASE   = 0x10000000   (identity range)
 PT covers       = 0x10000000 .. 0x10200000  (2 MiB single block)
 ```
 
-### The single PTE — **VERIFIED**
+### The single PTE - **VERIFIED**
 
 ```
 PTE = GPU_WORK_BASE              ; 0x10000000 (PFN already aligned)
     | GPU_PTE_RWX                ; VALID|SYSTEM|COHERENT|READ|WRITE|EXECUTE
-    | GPU_PTE_BLOCK              ; bit 54 — "this non-leaf entry IS the leaf"
+    | GPU_PTE_BLOCK              ; bit 54 - "this non-leaf entry IS the leaf"
 ```
 
 NASM gotcha: `OR rax, GPU_PTE_BLOCK` won't fit in `OR-imm32` because bit
 54 is set. Use `mov rbx, GPU_PTE_BLOCK; or rax, rbx`.
 
-### Stage-I sequence — **VERIFIED**
+### Stage-I sequence - **VERIFIED**
 
 1. Zero the PT region (`rep stosq`)
 2. Write the single PTE at offset 0 of `GPU_PT_ROOT`
@@ -160,10 +160,10 @@ NASM gotcha: `OR rax, GPU_PTE_BLOCK` won't fit in `OR-imm32` because bit
 8. Write `INVALIDATE_ENG0_REQ = 0x00F80001`
    - bit 0 (PER_VMID_INVALIDATE_REQ[0]) = 1
    - bits 23..19 (INVALIDATE_L2_PTES + L2_PDE0..2 + L1_PTES) = 1
-9. Poll `INVALIDATE_ENG0_ACK[0]` — **expected to time out** on ENG0 (KIQ-reserved); proceed regardless
-10. Read fault status / faddr for diag — non-zero is expected and informational
+9. Poll `INVALIDATE_ENG0_ACK[0]` - **expected to time out** on ENG0 (KIQ-reserved); proceed regardless
+10. Read fault status / faddr for diag - non-zero is expected and informational
 
-### Stage-I state after success — **VERIFIED**
+### Stage-I state after success - **VERIFIED**
 
 ```
 state=3 (GPU_STATE_GMC_READY)
@@ -177,7 +177,7 @@ GMC faddr=D8B2EA4BD4F2EA4F     ← garbage-looking, but that's a real fault on
 
 - **Invalidate ENG0 does not ack on bare metal**; that's KIQ's engine. Driver-
   usable engines start at index 3 per Linux's `vm_inv_eng_bitmap = 0x1FFF8`.
-  For Wave-1 we just skip the ack — there's nothing to flush on a fresh PT.
+  For Wave-1 we just skip the ack - there's nothing to flush on a fresh PT.
 - **The fault after context enable is real and expected.** When you enable
   ctx 0, every GFX client immediately starts translating through your PT.
   Anything that touches outside the 2 MiB window faults. Future waves should
@@ -186,9 +186,9 @@ GMC faddr=D8B2EA4BD4F2EA4F     ← garbage-looking, but that's a real fault on
 
 ---
 
-## Stage J — CP GFX ring + doorbell (`amd_cp_ring.asm`)
+## Stage J - CP GFX ring + doorbell (`amd_cp_ring.asm`)
 
-### CP register offsets — **VERIFIED**
+### CP register offsets - **VERIFIED**
 
 | Symbol | Dword (within GC) |
 |---|---|
@@ -200,7 +200,7 @@ GMC faddr=D8B2EA4BD4F2EA4F     ← garbage-looking, but that's a real fault on
 | `CP_RB0_WPTR` | `0x3074` |
 | `CP_RB0_WPTR_HI` | `0x3075` |
 
-### Ring memory layout — **VERIFIED**
+### Ring memory layout - **VERIFIED**
 
 ```
 GPU_CP_RING_BASE     = 0x10010000   (64 KiB)
@@ -208,7 +208,7 @@ GPU_CP_RPTR_ADDR     = 0x10020000   (4 KiB)
 GPU_CP_RING_LOG2_DWORDS = 13        (8K dwords)
 ```
 
-### CNTL value computed and verified — **VERIFIED**
+### CNTL value computed and verified - **VERIFIED**
 
 ```
 CP_RB0_CNTL_CONFIGURE = (13)
@@ -219,7 +219,7 @@ CP_RB0_CNTL_CONFIGURE = (13)
                       = 0x0A000A0D
 ```
 
-### Stage-J sequence — **VERIFIED**
+### Stage-J sequence - **VERIFIED**
 
 1. Zero `GPU_CP_RING_BASE` (64 KiB)
 2. Zero `GPU_CP_RPTR_ADDR` (4 KiB)
@@ -233,7 +233,7 @@ CP_RB0_CNTL_CONFIGURE = (13)
 10. Read BAR2 from PCI config offset `0x18` (with 64-bit BAR handling) → stash
     in `gpu_doorbell_base`
 
-### Stage-J state after success — **VERIFIED**
+### Stage-J state after success - **VERIFIED**
 
 ```
 state=4 (GPU_STATE_RING_ALLOCATED)
@@ -244,7 +244,7 @@ db=00000000260010E0
 ### CP is still halted
 
 After J, `CP_ME_CNTL` is unchanged (CP held in reset). The ring is
-configured but the CP isn't chasing it — that's what Wave-3 K/L (microcode
+configured but the CP isn't chasing it - that's what Wave-3 K/L (microcode
 load) and the eventual unhalt will fix. **This is intentional.** Releasing
 CP before microcode is loaded is a hardware hang.
 
@@ -256,9 +256,9 @@ CP before microcode is loaded is a hardware hang.
 powershell -ExecutionPolicy Bypass -File scripts\build\build_uefi.ps1 -Gfx
 ```
 
-The `-Gfx` switch flips on `-dNEXUS_GFX_BRINGUP` which:
+The `-Gfx` switch flips on `-dGRIT_GFX_BRINGUP` which:
 - Includes `src/kernel/drivers/gpu/*.asm` from `kernel_build.asm`
-- Activates the `%ifdef NEXUS_GFX_BRINGUP` diag block in `main.asm`
+- Activates the `%ifdef GRIT_GFX_BRINGUP` diag block in `main.asm`
 - Causes `gfx_bringup()` to be called from `main.asm` after `amd_dcn_probe`
 
 Deploy:
@@ -304,9 +304,9 @@ CP   step=3 cntl=0A000A0D base=04004000
 4. `base=04004000` (CP ring base in dwords)
 5. `db=` non-zero (doorbell BAR captured)
 
-If ANY of those go wrong, the regression is in H/I/J — not in Wave-3 stuff.
-Wave-3 code paths are all gated behind `NEXUS_GFX_WAVE3_FIRE` /
-`NEXUS_GFX_WAVE3_L_FIRE`, so just don't define those and you're back to
+If ANY of those go wrong, the regression is in H/I/J - not in Wave-3 stuff.
+Wave-3 code paths are all gated behind `GRIT_GFX_WAVE3_FIRE` /
+`GRIT_GFX_WAVE3_L_FIRE`, so just don't define those and you're back to
 the verified baseline.
 
 ---
@@ -320,5 +320,5 @@ Symptoms to watch for:
 - DCN goes blank → bad NBIO write disturbed display clocks
 
 Recovery: power-cycle, rebuild **without** the Wave-3 fire flags
-(`-Gfx` alone is fine — Wave-3 modules are included but unused). The
+(`-Gfx` alone is fine - Wave-3 modules are included but unused). The
 verified H/I/J path doesn't depend on anything Wave-3 ever wrote.

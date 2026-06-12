@@ -1,14 +1,14 @@
 # SVG render-comparison harness.
 #
-# Compares how the NexusOS svg2 rasterizer draws glass-ribbons.svg against a
+# Compares how the GritOS svg2 rasterizer draws glass-ribbons.svg against a
 # reference renderer (Microsoft Edge), to surface where curves/lines are wrong
 # or detail is missing -- independent of anti-aliasing.
 #
-#   1. NexusOS  - boots the OS in QEMU and issues the serial console command
+#   1. GritOS  - boots the OS in QEMU and issues the serial console command
 #      0x01 'g'. The kernel forces the glass-ribbons SVG wallpaper, re-renders
 #      it through svg2, and streams the wallpaper-cache image (a clean copy
 #      with no icons/windows) over COM1, downsampled to 160x90.
-#   2. Reference - Edge headless screenshots the same SVG at the NexusOS source
+#   2. Reference - Edge headless screenshots the same SVG at the GritOS source
 #      resolution, then it is downsampled with the identical nearest-neighbour
 #      mapping so any letterboxing matches.
 #
@@ -19,12 +19,12 @@
 #   * color - mean per-channel delta where both painted something.
 #
 # Outputs (build/):
-#   svg_nexus.ppm  - NexusOS render (160x90)
+#   svg_grit.ppm  - GritOS render (160x90)
 #   svg_edge.ppm   - Edge render    (160x90)
 #   svg_diff.ppm   - shape-diff heatmap:
 #                      green = both renderers painted here (agree)
-#                      red   = NexusOS painted, Edge did not (spurious/wrong)
-#                      blue  = Edge painted, NexusOS did not (missing detail)
+#                      red   = GritOS painted, Edge did not (spurious/wrong)
+#                      blue  = Edge painted, GritOS did not (missing detail)
 #                      black = both background
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File tools/svg_compare.ps1 [-SkipBuild]
@@ -55,7 +55,7 @@ if (-not $SkipBuild) {
 }
 
 # Stripped glass-ribbons SVG for the reference render: the feTurbulence noise
-# is dropped so random noise cannot dominate a structural diff. (NexusOS keeps
+# is dropped so random noise cannot dominate a structural diff. (GritOS keeps
 # the noise rect, but its 4% alpha makes it negligible after blur.)
 $StrippedSvg = Join-Path $Build 'glass-ribbons-stripped.svg'
 & python -c @"
@@ -69,8 +69,8 @@ open(r'$StrippedSvg', 'w', encoding='utf-8', newline='\n').write(s)
 "@
 if ($LASTEXITCODE -ne 0) { throw 'failed to write stripped SVG' }
 
-# --- 2. NexusOS render via QEMU + serial ------------------------------------
-Write-Host '[svg-compare] booting NexusOS in QEMU...' -ForegroundColor Cyan
+# --- 2. GritOS render via QEMU + serial ------------------------------------
+Write-Host '[svg-compare] booting GritOS in QEMU...' -ForegroundColor Cyan
 Stop-Qemu
 Start-Sleep -Seconds 1
 
@@ -156,14 +156,14 @@ if ($hexStr.Length -ne $expect) {
     throw "pixel hex length $($hexStr.Length), expected $expect"
 }
 
-$nexus = New-Object 'int[]' ($W * $H * 3)
+$grit = New-Object 'int[]' ($W * $H * 3)
 for ($i = 0; $i -lt $W * $H; $i++) {
     $o = $i * 6
-    $nexus[$i*3]   = [Convert]::ToInt32($hexStr.Substring($o, 2), 16)
-    $nexus[$i*3+1] = [Convert]::ToInt32($hexStr.Substring($o+2, 2), 16)
-    $nexus[$i*3+2] = [Convert]::ToInt32($hexStr.Substring($o+4, 2), 16)
+    $grit[$i*3]   = [Convert]::ToInt32($hexStr.Substring($o, 2), 16)
+    $grit[$i*3+1] = [Convert]::ToInt32($hexStr.Substring($o+2, 2), 16)
+    $grit[$i*3+2] = [Convert]::ToInt32($hexStr.Substring($o+4, 2), 16)
 }
-Write-Host "[svg-compare] captured NexusOS render (source ${srcW}x${srcH} -> ${W}x${H})" -ForegroundColor Green
+Write-Host "[svg-compare] captured GritOS render (source ${srcW}x${srcH} -> ${W}x${H})" -ForegroundColor Green
 
 # --- 3. Reference render via Edge headless ----------------------------------
 $edgePaths = @(
@@ -249,7 +249,7 @@ function Blur {
     return $out
 }
 
-$nB = Blur $nexus
+$nB = Blur $grit
 $eB = Blur $edge_
 
 # A pixel is "ink" if it diverges from the background past a small tolerance.
@@ -289,7 +289,7 @@ function Ink-Near {
 }
 
 $diff = New-Object 'int[]' ($W * $H * 3)
-$bothInk = 0; $nexusOnly = 0; $edgeOnly = 0; $edgeBand = 0
+$bothInk = 0; $gritOnly = 0; $edgeOnly = 0; $edgeBand = 0
 $colorSum = 0.0; $colorN = 0
 
 for ($y = 0; $y -lt $H; $y++) {
@@ -308,7 +308,7 @@ for ($y = 0; $y -lt $H; $y++) {
                 $edgeBand++
                 $diff[$o] = 90; $diff[$o+1] = 90; $diff[$o+2] = 0
             } else {
-                $nexusOnly++
+                $gritOnly++
                 $diff[$o] = 220; $diff[$o+1] = 0; $diff[$o+2] = 0
             }
         } elseif ($ei) {
@@ -325,7 +325,7 @@ for ($y = 0; $y -lt $H; $y++) {
     }
 }
 
-Write-Ppm (Join-Path $Build 'svg_nexus.ppm') $nexus
+Write-Ppm (Join-Path $Build 'svg_grit.ppm') $grit
 Write-Ppm (Join-Path $Build 'svg_edge.ppm')  $edge_
 Write-Ppm (Join-Path $Build 'svg_diff.ppm')  $diff
 
@@ -351,27 +351,27 @@ def ppm_to_png(src, dst):
     png += chunk(b'IDAT', zlib.compress(raw, 9))
     png += chunk(b'IEND', b'')
     open(dst, 'wb').write(png)
-for n in ('svg_nexus', 'svg_edge', 'svg_diff'):
+for n in ('svg_grit', 'svg_edge', 'svg_diff'):
     ppm_to_png(os.path.join(r'$Build', n + '.ppm'), os.path.join(r'$Build', n + '.png'))
 "@
 if ($LASTEXITCODE -ne 0) { Write-Host '[svg-compare] PNG export skipped' -ForegroundColor DarkYellow }
 
 # Shape agreement counts both-ink and edge-band (1px AA offset) as agreement;
 # only neighbourhood-isolated mismatches are real geometry errors.
-$totalInk = $bothInk + $edgeBand + $nexusOnly + $edgeOnly
+$totalInk = $bothInk + $edgeBand + $gritOnly + $edgeOnly
 $agree      = $bothInk + $edgeBand
 $shapeAgree = if ($totalInk -gt 0) { 100.0 * $agree / $totalInk } else { 100.0 }
 $missing    = if ($totalInk -gt 0) { 100.0 * $edgeOnly / $totalInk } else { 0.0 }
-$spurious   = if ($totalInk -gt 0) { 100.0 * $nexusOnly / $totalInk } else { 0.0 }
+$spurious   = if ($totalInk -gt 0) { 100.0 * $gritOnly / $totalInk } else { 0.0 }
 $meanColor  = if ($colorN -gt 0) { $colorSum / $colorN } else { 0.0 }
 
 Write-Host ''
 Write-Host '======== SVG render comparison ========' -ForegroundColor Cyan
-Write-Host ("  comparison raster : {0} x {1}  (NexusOS source {2} x {3})" -f $W, $H, $srcW, $srcH)
+Write-Host ("  comparison raster : {0} x {1}  (GritOS source {2} x {3})" -f $W, $H, $srcW, $srcH)
 Write-Host ("  shape agreement   : {0:N2}%  (same geometry, ignoring 1px AA edges)" -f $shapeAgree)
-Write-Host ("  missing detail    : {0:N2}%  (Edge painted geometry NexusOS lacks)" -f $missing) -ForegroundColor Yellow
-Write-Host ("  spurious / wrong  : {0:N2}%  (NexusOS painted geometry Edge lacks)" -f $spurious) -ForegroundColor Yellow
+Write-Host ("  missing detail    : {0:N2}%  (Edge painted geometry GritOS lacks)" -f $missing) -ForegroundColor Yellow
+Write-Host ("  spurious / wrong  : {0:N2}%  (GritOS painted geometry Edge lacks)" -f $spurious) -ForegroundColor Yellow
 Write-Host ("  mean color delta  : {0:N1} / 255  (where both painted)" -f $meanColor)
-Write-Host ("  ink pixels        : agree={0}  edge-band={1}  nexus-only={2}  edge-only={3}" -f $bothInk, $edgeBand, $nexusOnly, $edgeOnly)
-Write-Host '  outputs           : build/svg_{nexus,edge,diff}.png  (+ .ppm)'
+Write-Host ("  ink pixels        : agree={0}  edge-band={1}  grit-only={2}  edge-only={3}" -f $bothInk, $edgeBand, $gritOnly, $edgeOnly)
+Write-Host '  outputs           : build/svg_{grit,edge,diff}.png  (+ .ppm)'
 Write-Host '=======================================' -ForegroundColor Cyan

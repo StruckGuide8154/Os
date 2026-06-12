@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - I2C HID Touchpad Driver (Complete)
+; GritOS v3.0 - I2C HID Touchpad Driver (Complete)
 ;
 ; Supports:
 ;   - AMD FCH DesignWare I2C (fixed MMIO: FEDC2000-FEDC5000)
@@ -25,7 +25,7 @@ extern pci_read_conf_dword
 ; mmio_register_i2c declares i2c_base_addr's register page as the MMIO_DRV_I2C
 ; capability at probe-commit time; I2C_MMIO_ASSERT proves a [base+off] access
 ; stays inside it before the access issues. mmio_bounds_assert preserves all
-; caller registers per its ABI, but takes its inputs in rdi/rsi/edx — this macro
+; caller registers per its ABI, but takes its inputs in rdi/rsi/edx - this macro
 ; saves/restores those three so the surrounding [rsi+off] code is unperturbed.
 extern mmio_bounds_assert
 extern mmio_register_i2c

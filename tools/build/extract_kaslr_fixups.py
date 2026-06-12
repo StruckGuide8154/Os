@@ -24,7 +24,7 @@ Mechanism:
 
 Output container (matches loader expectations -- see src/boot/uefi_loader.asm):
    offset  size  field
-   0x00    8     magic "NXKASLR0" (0x3052_4C53_414B_584E little-endian)
+   0x00    8     magic "GRKASLR0" (0x3052_4C53_414B_5247 little-endian)
    0x08    4     payload_size      (u32, bytes of payload)
    0x0C    4     entry_offset      (u32, kernel entry within payload; today 0)
    0x10    4     fixup_count       (u32)
@@ -44,12 +44,12 @@ SLIDE = 0x100000
 # only used by the non-KASLR loader path; when KASLR is enabled, the loader
 # leaves the APPS boot-info fields clear so the kernel falls back to the
 # fixed-up embedded blob.
-APPS_START_MARKER = bytes((0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
+APPS_START_MARKER = bytes((0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
                            0x42, 0x53, 0x54, 0x52, 0x54, 0xDE, 0xAD, 0xBE))
-APPS_END_MARKER   = bytes((0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
+APPS_END_MARKER   = bytes((0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
                            0x42, 0x45, 0x4E, 0x44, 0x21, 0xCA, 0xFE, 0xBE))
 
-MAGIC = b"NXKASLR0"
+MAGIC = b"GRKASLR0"
 HEADER_SIZE = 0x18
 
 

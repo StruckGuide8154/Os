@@ -1,4 +1,4 @@
-# NexusOS Resource Formats
+# GritOS Resource Formats
 
 Three custom file formats for icons, fonts, and palettes. All three are:
 
@@ -18,9 +18,9 @@ NFT1_MAGIC  equ 0x3154464E   ; "NFT1"
 
 ---
 
-## 1. `.npl` — Nexus Palette
+## 1. `.npl` - Grit Palette
 
-Theme color tokens. Used for **chrome** (window backgrounds, borders, text, accents) — NOT for icons. Icons store full color directly.
+Theme color tokens. Used for **chrome** (window backgrounds, borders, text, accents) - NOT for icons. Icons store full color directly.
 
 ### File layout
 
@@ -100,9 +100,9 @@ lea     rdi, [rsi+8]           ; rdi -> RGB triples
 
 ---
 
-## 2. `.nic` — Nexus Icon
+## 2. `.nic` - Grit Icon
 
-True-color icon, optionally indexed. **Default and recommended: bpp=32** (BGRA, 4 bytes per pixel) — gives you alpha, gradients, AA, and is the fastest to blit onto a 32-bit framebuffer (one `mov` per pixel).
+True-color icon, optionally indexed. **Default and recommended: bpp=32** (BGRA, 4 bytes per pixel) - gives you alpha, gradients, AA, and is the fastest to blit onto a 32-bit framebuffer (one `mov` per pixel).
 
 ### File layout
 
@@ -131,7 +131,7 @@ Header = 16 bytes. Payload starts on an 8-byte boundary.
 
 Rows are stored **top-to-bottom**. Within a row, **left-to-right**. No padding between rows.
 
-### Standard NexusOS icon set
+### Standard GritOS icon set
 
 | Size    | bpp | Header | Payload | Total | Use case |
 |---------|-----|--------|---------|-------|----------|
@@ -176,9 +176,9 @@ lea     rsi, [rsi+16]                  ; src pixels
     jnz     .row
 ```
 
-For **binary alpha** (the icons in this design system: pixels are either fully opaque or fully transparent), drop the partial-alpha branch entirely. The whole loop becomes `mov ebx, [rsi]; test ebx, 0xFF000000; jz .skip; mov [r10], ebx; .skip:` — about 5 cycles per pixel.
+For **binary alpha** (the icons in this design system: pixels are either fully opaque or fully transparent), drop the partial-alpha branch entirely. The whole loop becomes `mov ebx, [rsi]; test ebx, 0xFF000000; jz .skip; mov [r10], ebx; .skip:` - about 5 cycles per pixel.
 
-### Asm blit (bpp=4, indexed — legacy)
+### Asm blit (bpp=4, indexed - legacy)
 
 ```nasm
 ; for each row:
@@ -192,7 +192,7 @@ For **binary alpha** (the icons in this design system: pixels are either fully o
 
 ---
 
-## 3. `.nft` — Nexus Font
+## 3. `.nft` - Grit Font
 
 1-bit-per-pixel fixed-size bitmap font, monospaced.
 
@@ -220,7 +220,7 @@ Header = 16 bytes.
 - For widths > 8: each row spans `ceil(w/8)` bytes; bit 7 of byte 0 is the leftmost pixel, bit 7 of byte 1 is the 9th pixel, and so on.
 - Rows stored top-to-bottom, contiguous.
 
-### Standard NexusOS fonts
+### Standard GritOS fonts
 
 All three cover ASCII printable + space (codepoints 32..127, 96 glyphs). Source: JetBrains Mono Bold rasterized at native pixel size.
 
@@ -278,8 +278,8 @@ ICON_BUF      = 16 KB per slot (largest 48x48 BGRA + slack)
 
 The smaller resources ship as NASM include files inside `KERNEL.BIN`:
 
-- `palette_light.inc`, `palette_dark.inc` — semantic constants + binary data
-- `font_8x16.inc`, `font_16x32.inc`, `font_24x48.inc` — byte-identical to the `.nft` files
+- `palette_light.inc`, `palette_dark.inc` - semantic constants + binary data
+- `font_8x16.inc`, `font_16x32.inc`, `font_24x48.inc` - byte-identical to the `.nft` files
 
 Icons at 32bpp are larger (10 icons × 3 sizes ≈ 140 KB), so they're loaded from FAT16 at runtime rather than embedded.
 
@@ -287,4 +287,4 @@ Icons at 32bpp are larger (10 icons × 3 sizes ≈ 140 KB), so they're loaded fr
 
 ## 6. Versioning
 
-The trailing `1` in each magic (`NPL1`, `NIC1`, `NFT1`) is the format version. Bumping to `NPL2` / `NIC2` / `NFT2` is the only forward-compat protocol — old kernels reject by magic mismatch, no ambiguity.
+The trailing `1` in each magic (`NPL1`, `NIC1`, `NFT1`) is the format version. Bumping to `NPL2` / `NIC2` / `NFT2` is the only forward-compat protocol - old kernels reject by magic mismatch, no ambiguity.

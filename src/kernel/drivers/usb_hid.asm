@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - USB HID Mouse Driver
+; GritOS v3.0 - USB HID Mouse Driver
 ; Implements USB HID protocol over XHCI
 ; ============================================================================
 bits 64
@@ -96,11 +96,11 @@ section .text
 
 ; ============================================================================
 ; USB probe log helpers. This is intentionally narrow: it persists the HID/xHCI
-; probe path to USBLOG.TXT on the Nexus FAT data volume for real-hardware boots.
+; probe path to USBLOG.TXT on the Grit FAT data volume for real-hardware boots.
 ; ============================================================================
 ; usb_log_ch / usb_log_str / usb_log_crlf / usb_log_hex_nib were migrated to
-; zero-asm NexusHLK — see src/kernel/nexushlk/usb_hid_helpers.nxh (compiled to
-; build/nxh/usb_hid_helpers.asm, %include'd by kernel_build.asm BEFORE this
+; zero-asm GritHLK - see src/kernel/grithlk/usb_hid_helpers.ghl (compiled to
+; build/ghl/usb_hid_helpers.asm, %include'd by kernel_build.asm BEFORE this
 ; file). Same global names + same custom register ABI (al/rsi in, all regs
 ; preserved). The hex/kv formatters below stay in asm and call those globals.
 
@@ -148,8 +148,8 @@ usb_log_kv16:
     call usb_log_crlf
     ret
 
-; usb_hid_flush_log was migrated to zero-asm NexusHLK —
-; see src/kernel/nexushlk/usb_hid_helpers.nxh. Same global name + ABI
+; usb_hid_flush_log was migrated to zero-asm GritHLK -
+; see src/kernel/grithlk/usb_hid_helpers.ghl. Same global name + ABI
 ; (no args; persists usb_log_buf to USBLOG.TXT via fat16_write_file).
 %include "src/kernel/drivers/usb_hid_init.inc"
 %include "src/kernel/drivers/usb_hid_poll.inc"

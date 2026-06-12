@@ -1,0 +1,218 @@
+# ============================================================================
+# syscall_validate.ghl  -  Stage 2a of docs/ghlk-syscall-rearchitecture.md
+#
+# Zero-asm GritHLK re-expression of the LEAF syscall argument validators that
+# were previously hand-written assembly in src/kernel/proc/syscall_validation.inc
+# (plus the two serial-debug leaves from syscall_support.inc). Each helper keeps
+# its ORIGINAL global symbol name and its ORIGINAL custom register ABI, so the
+# existing callers in syscall_dispatch_core.inc / the handler .inc files /
+# syscall.asm bind to these labels with no extern wiring (the kernel is one NASM
+# translation unit; this module is %include'd before syscall.asm).
+#
+# What is ported here (pure pointer-arithmetic / serial leaves - no user-memory
+# reads, so no SMAP USER_ACCESS bracket is needed):
+#     sc_get_slot_bounds, sc_range_in_bounds, sc_validate_user_range,
+#     sc_validate_user_io_range, sc_validate_callback_target,
+#     dbg_wc_hex64, dbg_wmcreate_log
+#
+# What deliberately STAYS in assembly (documented in the .inc files):
+#   - sc_validate_user_cstring / sc_validate_path_canonical: they read USER
+#     memory byte-by-byte inside USER_ACCESS_BEGIN/END brackets, which expand to
+#     stac/clac ONLY when the build defines ENABLE_SMAP. The GHLK smap_open/
+#     smap_close intrinsics emit UNCONDITIONAL stac/clac, which would #UD on a
+#     non-SMAP build - so re-expressing them would not be behavior-preserving
+#     across build configs. Left as register-exact asm.
+#   - sc_validate_from_table / sc_load_arg_for_validation: rsp-relative reads of
+#     the PUSH_ALL frame ([rsp+ALL_*]) plus KPROLOGUE/KEPILOGUE shadow-stack
+#     framing - neither expressible in structured GHLK without re-introducing
+#     raw-stack/asm escapes.
+#   - sc_resolve_dir_entry_arg: KPROLOGUE/KEPILOGUE shadow-stack framed.
+#
+# Result-passing note: the validator leaves return their boolean in RAX (EAX).
+# RAX is intentionally LEFT OUT of each fn's preserves(...) list, so it is not
+# pushed/popped by the callee-save frame. When a custom-ABI `call` is the LAST
+# statement of a fn and the fn writes no `return` after it, that call's RAX
+# result flows straight out as this fn's result (the epilogue's param write-back
+# only touches OUTPUT param regs, never RAX). This is how user_io_range and
+# callback_target forward the inner check's verdict without a read-RAX intrinsic.
+# sc_validate_user_range cannot use that trick (it needs the slot verdict mid-fn
+# to decide whether to also try the blob), so it inlines the range arithmetic
+# structurally rather than reading RAX back from sc_range_in_bounds. The standalone
+# sc_get_slot_bounds / sc_range_in_bounds globals are still emitted for the many
+# external handler callers that invoke them directly via the r8/r9 ABI.
+# ============================================================================
+
+module "syscall_validate";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over slot-bounds / validator state
+unsafe kernel_priv;      # smap_open/smap_close (stac/clac) bracket user-arg reads
+unsafe implicit_extern;  # &fn / &data resolved as same-unit kernel labels (-f bin)
+
+global sc_get_slot_bounds;
+global sc_range_in_bounds;
+global sc_validate_user_range;
+global sc_validate_user_io_range;
+global sc_validate_callback_target;
+global dbg_wc_hex64;
+global dbg_wmcreate_log;
+
+# Mirror of the NASM equ constants this module depends on. Values must stay in
+# lockstep with their definitions:
+#   APP_SLOT_SIZE   src/include/boot_memory.inc   (0x200000)
+#   APP_SLOT_COUNT  src/include/boot_memory.inc   (12)  == MAX_WINDOWS
+const APP_SLOT_SIZE = 0x200000;
+const MAX_WINDOWS   = 12;
+
+# ---------------------------------------------------------------------------
+# sc_get_slot_bounds
+#   In:  R15D = current slot id
+#   Out: R8 = slot base VA, R9 = slot end VA (base + APP_SLOT_SIZE)
+#   Clobbers RAX only; preserves everything else (matches the asm: it touched
+#   only rax/r8/r9). The slot id is clamped to 0 when >= MAX_WINDOWS, exactly as
+#   the original `cmp r15d, MAX_WINDOWS / jb .ok / xor eax,eax` did.
+# r15 is INPUT-ONLY (in preserves), so its value is restored on exit. rax is
+# scratch (in preserves too, since callers don't read it). r8/r9 are OUTPUTS:
+# NOT preserved -> their mutated values are written back to the real registers.
+# ---------------------------------------------------------------------------
+fn sc_get_slot_bounds(r15d slot, r8 base, r9 end)
+        preserves(rax, rbx, rcx, rdx, rsi, rdi, r10, r11, r12, r13, r14, r15) {
+    let s = slot;
+    if s >= MAX_WINDOWS {
+        s = 0;
+    }
+    base = s * APP_SLOT_SIZE + lq(&l3_app_arena_base_v);
+    end = base + APP_SLOT_SIZE;
+}
+
+# ---------------------------------------------------------------------------
+# sc_range_in_bounds
+#   In:  RDI = ptr, RSI = len, R8 = start, R9 = end
+#   Out: EAX = 1 if [ptr, ptr+len) lies fully inside [start, end); else 0.
+#        The add ptr+len is overflow-checked (original `jc .range_fail`).
+#   Preserves all inputs; rax carries the boolean out (rax left out of preserves).
+# ---------------------------------------------------------------------------
+fn sc_range_in_bounds(rdi uptr, rsi len, r8 start, r9 end)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if uptr < start {
+        return 0;
+    }
+    let last = uptr + len;
+    # Overflow on ptr+len (wrap below ptr) is a failure, same as `jc .range_fail`.
+    if last < uptr {
+        return 0;
+    }
+    if last > end {
+        return 0;
+    }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# sc_validate_user_range
+#   In:  RDI = ptr, RSI = len, R15 = current slot
+#   Out: EAX = 1 if the range is inside the current app slot OR the built-in
+#        user blob; else 0. Zero-length ranges are rejected up front (a 0-length
+#        "valid" pointer is meaningless and would combine with caller-side
+#        len*bpp int-overflow to slip bogus huge ranges past).
+#   Preserves RDI/RSI/R8/R9/R11 across the body (the asm push/pop'd exactly those
+#   and returned only EAX). The slot-bounds math and the two range tests are
+#   inlined structurally (same arithmetic as sc_get_slot_bounds +
+#   sc_range_in_bounds) so the slot verdict can gate the blob fallback without a
+#   read-RAX intrinsic. The overflow guard (ptr+len wrapping below ptr) and the
+#   slot-index clamp (>= MAX_WINDOWS -> 0) are preserved exactly.
+# ---------------------------------------------------------------------------
+fn sc_validate_user_range(rdi uptr, rsi len, r15d slot)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if len == 0 {
+        return 0;
+    }
+    let last = uptr + len;
+    # Overflow on ptr+len (wrap below ptr) fails outright (== asm `jc .range_fail`).
+    if last < uptr {
+        return 0;
+    }
+    # --- slot bounds (mirror of sc_get_slot_bounds) ---
+    let s = slot;
+    if s >= MAX_WINDOWS {
+        s = 0;
+    }
+    let slot_base = s * APP_SLOT_SIZE + lq(&l3_app_arena_base_v);
+    let slot_end = slot_base + APP_SLOT_SIZE;
+    if uptr >= slot_base {
+        if last <= slot_end {
+            return 1;
+        }
+    }
+    # --- built-in user blob fallback [app_blob_base_v, app_blob_end_v) ---
+    let blob_base = lq(&app_blob_base_v);
+    let blob_end = lq(&app_blob_end_v);
+    if uptr >= blob_base {
+        if last <= blob_end {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# sc_validate_user_io_range - alias kept for callers; identical contract to
+# sc_validate_user_range (the asm was a bare `call sc_validate_user_range; ret`).
+#   In: RDI = ptr, RSI = len, R15 = slot.  Out: EAX = 1/0.
+# ---------------------------------------------------------------------------
+fn sc_validate_user_io_range(rdi uptr, rsi len)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    call sc_validate_user_range(rdi: uptr, rsi: len);
+}
+
+# ---------------------------------------------------------------------------
+# sc_validate_callback_target
+#   In:  RDI = callback target, R15 = slot.
+#   Out: EAX = 1 if NULL or if 64 bytes (one cache line) of mapped code live at
+#        the entry point inside user-owned memory; else 0. A 64-byte window (vs
+#        16) is required so a 1-byte prologue at the very last slot bytes can't
+#        masquerade as a valid function entry.
+# ---------------------------------------------------------------------------
+fn sc_validate_callback_target(rdi target)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if target == 0 {
+        return 1;
+    }
+    call sc_validate_user_range(rdi: target, rsi: 64);
+}
+
+# ---------------------------------------------------------------------------
+# dbg_wc_hex64 - RSI = value -> 16 hex digits on COM1 via serial_putc.
+#   Preserves all registers (the asm push/pop'd rax,rcx,rdx,rbx). Emits the same
+#   16-char stream, MSB nibble first, lowercase 'a'..'f'.
+# ---------------------------------------------------------------------------
+fn dbg_wc_hex64(rsi value) preserves(all) {
+    let shift = 60;
+    while shift >= 0 {
+        let nib = (value >> shift) & 0x0F;
+        if nib < 10 {
+            call serial_putc(rdi: nib + 48);        # '0'
+        } else {
+            call serial_putc(rdi: nib + 87);        # 'a' - 10
+        }
+        if shift == 0 {
+            return 0;
+        }
+        shift = shift - 4;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# dbg_wmcreate_log - debug trace for SYS_WM_CREATE.
+#   In: R15 = slot, R9 = drawfn (saved before clobber, as in the asm).
+#   Emits "[WCREATE] slot=<hex16> dfn=<hex16>\r\n" on COM1. Preserves all regs.
+#   serial_puts takes its string in RDI; dbg_wc_hex64 takes the value in RSI.
+# ---------------------------------------------------------------------------
+fn dbg_wmcreate_log(r15 slot, r9 drawfn) preserves(all) {
+    call serial_puts(rdi: &dbg_wc_s1);
+    call dbg_wc_hex64(rsi: slot);
+    call serial_puts(rdi: &dbg_wc_s2);
+    call dbg_wc_hex64(rsi: drawfn);
+    call serial_crlf();
+    return 0;
+}

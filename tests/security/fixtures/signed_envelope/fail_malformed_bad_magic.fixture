@@ -1,6 +1,6 @@
 # Track-2 reject-matrix row. Executed (not just declared): the named case
 # in scripts/test/eval_envelope.py builds this envelope as real bytes and
-# runs the in-kernel reader source (envelope_reader.nxh) against it.
+# runs the in-kernel reader source (envelope_reader.ghl) against it.
 checker = signed_envelope
 expect = fail
 case = malformed envelope: bad magic

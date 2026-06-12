@@ -148,7 +148,7 @@ extern smp_alive_cores
 
 WIN_OFF_ID equ 0                       ; matches src/include/window_layout.inc
 
-%ifndef NEXUS_ENABLE_RING3_AP
+%ifndef GRIT_ENABLE_RING3_AP
 ; --- NON-AP BUILD: pass-through to call_app_l3 ------------------------------
 ; Apps run inline on the BSP when AP routing is not compiled in.
 global dispatch_app_callback
@@ -239,9 +239,9 @@ dispatch_app_callback:
     ;
     ; This budget is DELIBERATELY NOT the deadman budget: a 250 ms slam here would
     ; re-introduce the double-run/RSP-smash bug for slow-but-valid callbacks. So we
-    ; derive it as a large multiple of cb_deadman_budget (CB_AP_DEADMAN_MULT) — the
+    ; derive it as a large multiple of cb_deadman_budget (CB_AP_DEADMAN_MULT) - the
     ; relationship is now explicit (one knob, cb_deadman_budget) instead of a magic
-    ; 1500 — while still landing near ~15 s. The ACTUAL runaway protection comes
+    ; 1500 - while still landing near ~15 s. The ACTUAL runaway protection comes
     ; from the deadman + reentrancy guard on the inline re-run at .inline (which
     ; goes through cb_run_guarded), so a hung AP callback is killed on the ~250 ms
     ; deadman timescale once it falls back, not after a bare 15 s.
@@ -272,7 +272,7 @@ dispatch_app_callback:
     call wq_unlock
     ; The AP that owns this job is presumed dead (a draw/click callback should
     ; never take >200 ms), so it will not double-run the stale job. Run the
-    ; callback inline now instead of returning without drawing — otherwise the
+    ; callback inline now instead of returning without drawing - otherwise the
     ; window paints only its blank background (a white window) for this frame.
     jmp .inline
 
@@ -376,7 +376,7 @@ dispatch_app_callback:
 ; Input:  RDI = window struct ptr
 ; Output: none (drop-in replacement for the inline `call app_media_draw`)
 extern app_media_draw
-%ifndef NEXUS_ENABLE_RING3_AP
+%ifndef GRIT_ENABLE_RING3_AP
 global media_draw_dispatch
 media_draw_dispatch:
     jmp app_media_draw

@@ -1,7 +1,7 @@
 %ifndef APP_SYSNO_INC
 %define APP_SYSNO_INC
 ; ============================================================================
-; APP_SYSNO — syscall-number emission + per-app syscall-immediate fixup table
+; APP_SYSNO - syscall-number emission + per-app syscall-immediate fixup table
 ; (security_todo.md §12, heterogeneous syscall numbering per slot).
 ;
 ; Every syscall site in the built-in app blob loads the syscall number into
@@ -15,7 +15,7 @@
 ; blob), every syscall site goes through APP_SYSNO N, which:
 ;   (1) emits a hand-encoded `mov eax, imm32` (opcode 0xB8) so the 4-byte
 ;       immediate sits at a byte offset we control exactly (zero-extends into
-;       rax, identical effect to the historical `mov rax, N` for N < 2^32 —
+;       rax, identical effect to the historical `mov rax, N` for N < 2^32 -
 ;       and every syscall number is small), and
 ;   (2) records a fixup record {u32 offset-within-blob, u8 raw-sysno} into the
 ;       kernel-resident table [app_syscall_fixups_start, app_syscall_fixups_end).
@@ -26,7 +26,7 @@
 ; slot's forward permutation for each raw sysno, and patches the 4 immediate
 ; bytes in the slot copy. A slot with no permutation generated (identity) or
 ; the default (ENABLE_SYSCALL_PERM off) leaves the immediates as the raw
-; numbers — fail-safe identity.
+; numbers - fail-safe identity.
 ;
 ; STANDALONE BUILDS (APPS.BIN extract, PoC harnesses): app_blob_start is the
 ; blob anchor in every context that includes app code. The fixup table is

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - AMD Display Mode-Setting Driver
+; GritOS v3.0 - AMD Display Mode-Setting Driver
 ; Passive AMD display provider for real hardware. The first supported hardware
 ; mode is the firmware/GOP mode handed to the kernel at boot; no AMD MMIO or
 ; register programming is attempted in this phase.

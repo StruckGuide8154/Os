@@ -1,0 +1,719 @@
+# GritHL SVG2 static renderer facade.
+#
+# Module map (under lib/svg2/):
+#   fixed.ghl     - 16.16 fixed-point math (no other deps).
+#   matrix.ghl    - current matrix + 16-deep stack.  All transforms post-mul.
+#   core.ghl      - buffers, XML helpers, viewBox, legacy svg_tx/ty helpers.
+#   style.ghl     - color/style attribute parsing.
+#   transform.ghl - `transform=` parser; mutates matrix stack.
+#   paint.ghl     - paint server (solid / linear / radial gradient).
+#   raster.ghl    - polygon vertex buffer + scanline filler.
+#   flatten.ghl   - Bezier / arc subdivision into the polygon buffer.
+#   cmds.ghl      - named ASCII constants for path commands.
+#   path.ghl      - `<path d=...>` parser + filler driver.
+#   shapes.ghl    - <rect>/<circle>/<ellipse>/<line>/<text>/<poly*> (legacy
+#                   syscall path; honors matrix translate/scale only).
+#
+# Render-loop contract (svg_render_node):
+#   - Push matrix, apply node's transform.
+#   - Save inherited fill/stroke/width/opacity in locals.
+#   - Compose node's own opacity onto paint_opacity.
+#   - Dispatch tag-specific drawer.
+#   - Recurse into children.
+#   - Restore: pop matrix, restore locals.
+#
+# Adding a new tag: add one if-test in svg_render_node and a corresponding
+# drawer (typically in shapes.ghl or its own module).
+#
+# Adding a new transform: edit transform.ghl:xf_dispatch.
+
+use svg2.core
+use svg2.style
+use svg2.transform
+use svg2.shapes
+use svg2.path
+use svg2.stroke
+use svg2.matrix
+use svg2.paint
+use svg2.raster
+use svg2.fixed
+use svg2.render_ctx
+use svg2.bbox
+use svg2.filter
+use svg2.text_layout
+use svg2.clip
+use svg2.mask
+use svg2.ttf
+
+# ---------------------------------------------------------------------------
+# Defs lookup - resolves url(#id) references on fill/stroke.
+# ---------------------------------------------------------------------------
+
+# Compare the `id` attribute on `node` to the slice id_buf[0..id_len).
+# Uses svg_tag_buf as the scratch destination (16 bytes max - long ids will
+# be silently rejected as non-matches).
+fn defs_id_matches(node, id_buf, id_len) {
+    let l = xml_attr(node, "id", 2, &svg_tag_buf, SVG_TAG_MAX);
+    if l != id_len { return 0; }
+    let i = 0;
+    while i < l {
+        if lb(&svg_tag_buf + i) != lb(id_buf + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# spreadMethod attr -> 0 pad / 1 reflect / 2 repeat.
+fn defs_parse_spread(node) {
+    let l = xml_attr(node, "spreadMethod", 12, &svg_tag_buf, SVG_TAG_MAX);
+    if l <= 0 { return 0; }
+    let c0 = lb(&svg_tag_buf);
+    if c0 == 114 {                   # 'r' - reflect or repeat
+        if l >= 3 {
+            if lb(&svg_tag_buf + 2) == 102 { return 1; }   # reFlect
+        }
+        return 2;                    # repeat
+    }
+    return 0;                        # pad
+}
+
+# Walk <stop> children, configure paint server stop table.
+fn defs_parse_stops(grad_node) {
+    paint_clear_stops();
+    let child = xml_first_child(grad_node);
+    while child >= 0 {
+        if svg_tag_is(child, "stop", 4) == 1 {
+            let off_len = svg_attr(child, "offset", 6);
+            let off_fx = 0;
+            if off_len > 0 { off_fx = svg_parse_num(&svg_attr_buf, off_len, 1); }
+            if off_fx < 0 { off_fx = 0; }
+            if off_fx > FX_ONE { off_fx = FX_ONE; }
+
+            let col = svg_attr_color(child, "stop-color", 10, 0);
+            let opa_len = svg_attr(child, "stop-opacity", 12);
+            let a = 255;
+            if opa_len > 0 {
+                let opa_fx = svg_parse_num(&svg_attr_buf, opa_len, 1);
+                if opa_fx < 0 { opa_fx = 0; }
+                a = (opa_fx * 255) / FX_ONE;
+                if a > 255 { a = 255; }
+            } else {
+                let anim_fx = svg_anim_initial(child, "stop-opacity", 12);
+                if anim_fx >= 0 {
+                    a = (anim_fx * 255) / FX_ONE;
+                    if a > 255 { a = 255; }
+                    if a < 0 { a = 0; }
+                }
+            }
+            paint_add_stop(off_fx, pack_argb(col, a));
+        }
+        child = xml_next_sibling(child);
+    }
+}
+
+state {
+    defs_target_node: 4;
+    defs_target_stroke: 4;
+    defs_target_stroke_width_fx: 4;
+}
+
+fn defs_bbox_apply_paint_context() {
+    if lw(&defs_target_stroke) == 1 {
+        let pad = fx_ceil_i(lw(&defs_target_stroke_width_fx) / 2);
+        if pad < 1 { pad = 1; }
+        sw(&bbox_min_x, lw(&bbox_min_x) - pad);
+        sw(&bbox_min_y, lw(&bbox_min_y) - pad);
+        sw(&bbox_max_x, lw(&bbox_max_x) + pad);
+        sw(&bbox_max_y, lw(&bbox_max_y) + pad);
+    }
+}
+
+fn defs_units_object_bbox(node) {
+    let l = xml_attr(node, "gradientUnits", 13, &svg_tag_buf, SVG_TAG_MAX);
+    # SVG default for gradientUnits is objectBoundingBox.
+    if l <= 0 { return 1; }
+    if lb(&svg_tag_buf) == 111 { return 1; }   # 'o' -> objectBoundingBox
+    return 0;                                   # userSpaceOnUse
+}
+
+# Configure paint server from a <linearGradient> node (already validated).
+fn defs_configure_linear(node) {
+    if defs_units_object_bbox(node) == 1 {
+        if bbox_compute(lw(&defs_target_node)) == 1 {
+            defs_bbox_apply_paint_context();
+            # objectBoundingBox: x1/y1/x2/y2 are fractions (0..1) of the
+            # filled shape's device-space bounding box. Parse with a percent
+            # base of 1 so "50%" -> 0.5fx and "0.5" -> 0.5fx alike.
+            let x1f = svg_attr_num(node, "x1", 2, 1, 0);
+            let y1f = svg_attr_num(node, "y1", 2, 1, 0);
+            let x2f = svg_attr_num(node, "x2", 2, 1, FX_ONE);
+            let y2f = svg_attr_num(node, "y2", 2, 1, 0);
+            let bx = lw(&bbox_min_x);
+            let by = lw(&bbox_min_y);
+            let bw = lw(&bbox_max_x) - bx;
+            let bh = lw(&bbox_max_y) - by;
+            paint_set_linear(
+                fx_from_i(bx) + fx_mul(x1f, fx_from_i(bw)),
+                fx_from_i(by) + fx_mul(y1f, fx_from_i(bh)),
+                fx_from_i(bx) + fx_mul(x2f, fx_from_i(bw)),
+                fx_from_i(by) + fx_mul(y2f, fx_from_i(bh)),
+                defs_parse_spread(node));
+            defs_parse_stops(node);
+            return;
+        }
+    }
+    let x1 = fx_to_i(svg_attr_num(node, "x1", 2, lw(&svg_vb_w), 0));
+    let y1 = fx_to_i(svg_attr_num(node, "y1", 2, lw(&svg_vb_h), 0));
+    let x2 = fx_to_i(svg_attr_num(node, "x2", 2, lw(&svg_vb_w), fx_from_i(lw(&svg_vb_w))));
+    let y2 = fx_to_i(svg_attr_num(node, "y2", 2, lw(&svg_vb_h), 0));
+    mat_push();
+    svg_apply_gradient_transform(node);
+    mat_apply(fx_from_i(x1), fx_from_i(y1));
+    let dx1 = lw(&mat_out_x); let dy1 = lw(&mat_out_y);
+    mat_apply(fx_from_i(x2), fx_from_i(y2));
+    let dx2 = lw(&mat_out_x); let dy2 = lw(&mat_out_y);
+    mat_pop();
+    paint_set_linear(dx1, dy1, dx2, dy2, defs_parse_spread(node));
+    defs_parse_stops(node);
+}
+
+fn defs_configure_radial(node) {
+    if defs_units_object_bbox(node) == 1 {
+        if bbox_compute(lw(&defs_target_node)) == 1 {
+            defs_bbox_apply_paint_context();
+            # objectBoundingBox: cx/cy/r/fx/fy are fractions of the filled
+            # shape's device-space bounding box (parsed with percent base 1).
+            let cxf = svg_attr_num(node, "cx", 2, 1, FX_HALF);
+            let cyf = svg_attr_num(node, "cy", 2, 1, FX_HALF);
+            let rf  = svg_attr_num(node, "r",  1, 1, FX_HALF);
+            let fxf = svg_attr_num(node, "fx", 2, 1, cxf);
+            let fyf = svg_attr_num(node, "fy", 2, 1, cyf);
+            let bx = lw(&bbox_min_x);
+            let by = lw(&bbox_min_y);
+            let bw = lw(&bbox_max_x) - bx;
+            let bh = lw(&bbox_max_y) - by;
+            let rr = bw;
+            if bh < rr { rr = bh; }
+            paint_set_radial(
+                fx_from_i(bx) + fx_mul(cxf, fx_from_i(bw)),
+                fx_from_i(by) + fx_mul(cyf, fx_from_i(bh)),
+                fx_from_i(bx) + fx_mul(fxf, fx_from_i(bw)),
+                fx_from_i(by) + fx_mul(fyf, fx_from_i(bh)),
+                fx_mul(rf, fx_from_i(rr)), defs_parse_spread(node));
+            defs_parse_stops(node);
+            return;
+        }
+    }
+    let cx = fx_to_i(svg_attr_num(node, "cx", 2, lw(&svg_vb_w), fx_from_i(lw(&svg_vb_w) / 2)));
+    let cy = fx_to_i(svg_attr_num(node, "cy", 2, lw(&svg_vb_h), fx_from_i(lw(&svg_vb_h) / 2)));
+    let r  = fx_to_i(svg_attr_num(node, "r",  1, lw(&svg_vb_w), fx_from_i(lw(&svg_vb_w) / 2)));
+    let fxv = fx_to_i(svg_attr_num(node, "fx", 2, lw(&svg_vb_w), fx_from_i(cx)));
+    let fyv = fx_to_i(svg_attr_num(node, "fy", 2, lw(&svg_vb_h), fx_from_i(cy)));
+    mat_push();
+    svg_apply_gradient_transform(node);
+    mat_apply(fx_from_i(cx), fx_from_i(cy));
+    let dcx = lw(&mat_out_x); let dcy = lw(&mat_out_y);
+    mat_apply(fx_from_i(fxv), fx_from_i(fyv));
+    let dfx = lw(&mat_out_x); let dfy = lw(&mat_out_y);
+    let s = (fx_abs(lw(&mat_cur_a)) + fx_abs(lw(&mat_cur_d))) / 2;
+    if s <= 0 { s = FX_ONE; }
+    mat_pop();
+    paint_set_radial(dcx, dcy, dfx, dfy,
+                     fx_mul(fx_from_i(r), s), defs_parse_spread(node));
+    defs_parse_stops(node);
+}
+
+fn defs_configure_pattern(node) {
+    let tw = svg_attr_int(node, "width", 5, 1);
+    let th = svg_attr_int(node, "height", 6, 1);
+    if tw < 1 { tw = 1; }
+    if th < 1 { th = 1; }
+    if tw > 64 { tw = 64; }
+    if th > 64 { th = 64; }
+    let tile = filter_arena_argb(tw, th);
+    if tile != 0 {
+        let sx0 = lw(&raster_clip_x0);
+        let sy0 = lw(&raster_clip_y0);
+        let sx1 = lw(&raster_clip_x1);
+        let sy1 = lw(&raster_clip_y1);
+        let sop = lw(&paint_opacity);
+        raster_set_clip(0, 0, tw, th);
+        fctx_push_buffer(tile, tw * 4, tw, th, 0, 0);
+        mat_push();
+        mat_load_identity();
+        let px = svg_attr_int(node, "x", 1, 0);
+        let py = svg_attr_int(node, "y", 1, 0);
+        mat_translate(fx_from_i(0 - px), fx_from_i(0 - py));
+        svg_apply_transform(node);
+        let child2 = xml_first_child(node);
+        while child2 >= 0 {
+            svg_render_node(child2);
+            child2 = xml_next_sibling(child2);
+        }
+        mat_pop();
+        fctx_pop();
+        raster_set_clip(sx0, sy0, sx1, sy1);
+        sw(&paint_opacity, sop);
+        paint_set_pattern_tile(tw, th, tile);
+        return;
+    }
+    let col = 0;
+    let alpha = 255;
+    let child = xml_first_child(node);
+    while child >= 0 {
+        let c = svg_fill_color(child, -2);
+        if c != -2 {
+            if c >= 0 { col = c; }
+            paint_set_pattern_solid(tw, th, pack_argb(col, alpha));
+            return;
+        }
+        child = xml_next_sibling(child);
+    }
+    paint_set_pattern_solid(tw, th, pack_argb(col, alpha));
+}
+
+# Recursively search `parent`'s descendants for a gradient with matching id;
+# on match, configure the active paint server and return 1.
+fn defs_resolve(parent, id_buf, id_len) {
+    if parent < 0 { return 0; }
+    let child = xml_first_child(parent);
+    while child >= 0 {
+        if svg_tag_is(child, "linearGradient", 14) == 1 {
+            if defs_id_matches(child, id_buf, id_len) == 1 {
+                defs_configure_linear(child);
+                return 1;
+            }
+        }
+        if svg_tag_is(child, "radialGradient", 14) == 1 {
+            if defs_id_matches(child, id_buf, id_len) == 1 {
+                defs_configure_radial(child);
+                return 1;
+            }
+        }
+        if svg_tag_is(child, "pattern", 7) == 1 {
+            if defs_id_matches(child, id_buf, id_len) == 1 {
+                defs_configure_pattern(child);
+                return 1;
+            }
+        }
+        if defs_resolve(child, id_buf, id_len) == 1 { return 1; }
+        child = xml_next_sibling(child);
+    }
+    return 0;
+}
+
+# Detect "url(#id)" prefix in a freshly-read attribute buffer.  On match,
+# resolve the paint def and return 1.  Returns 0 if not a url() reference.
+fn paint_try_url_ref(attr_len) {
+    if attr_len < 6 { return 0; }
+    if lb(&svg_attr_buf) != 117 { return 0; }      # u
+    if lb(&svg_attr_buf + 1) != 114 { return 0; }  # r
+    if lb(&svg_attr_buf + 2) != 108 { return 0; }  # l
+    if lb(&svg_attr_buf + 3) != 40 { return 0; }   # (
+    let i = 4;
+    if lb(&svg_attr_buf + i) == 35 { i = i + 1; }  # optional '#'
+    let id_start = i;
+    while i < attr_len {
+        if lb(&svg_attr_buf + i) == 41 { break; }
+        i = i + 1;
+    }
+    return defs_resolve(xml_root(), &svg_attr_buf + id_start, i - id_start);
+}
+
+fn svg_configure_fill_paint(node, fallback_color, alpha) {
+    let l = svg_attr(node, "fill", 4);
+    if l > 0 {
+        sw(&defs_target_node, node);
+        sw(&defs_target_stroke, 0);
+        sw(&defs_target_stroke_width_fx, 0);
+        if paint_try_url_ref(l) == 1 { return 1; }
+    }
+    paint_set_solid_rgb(fallback_color, alpha);
+    return 0;
+}
+
+fn svg_configure_stroke_paint(node, fallback_color, alpha) {
+    let l = svg_attr(node, "stroke", 6);
+    if l > 0 {
+        sw(&defs_target_node, node);
+        sw(&defs_target_stroke, 1);
+        sw(&defs_target_stroke_width_fx, svg_line_width_fx(node));
+        if paint_try_url_ref(l) == 1 { return 1; }
+    }
+    let parent = xml_parent(node);
+    while parent >= 0 {
+        l = svg_attr(parent, "stroke", 6);
+        if l > 0 {
+            sw(&defs_target_node, node);
+            sw(&defs_target_stroke, 1);
+            sw(&defs_target_stroke_width_fx, svg_line_width_fx(node));
+            if paint_try_url_ref(l) == 1 { return 1; }
+            break;
+        }
+        parent = xml_parent(parent);
+    }
+    paint_set_solid_rgb(fallback_color, alpha);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Inherited-presentation helpers
+# ---------------------------------------------------------------------------
+
+# node opacity -> 0..256 multiplier (0=transparent, 256=opaque).
+# Read as fixed-point so fractional opacities (0.85, 0.4...) are honored
+# instead of rounding to 0/1. Falls back to inline style, then to an
+# <animate attributeName="opacity"> child sampled at t=0.
+fn node_opacity_256(node) {
+    let fx = svg_attr_num(node, "opacity", 7, 0, -1);
+    if fx < 0 {
+        let si = svg_style_int(node, "opacity", 7, -1);
+        if si >= 0 {
+            if si <= 1 { fx = si * FX_ONE; }
+            else { fx = (si * FX_ONE) / 256; }
+        }
+    }
+    if fx < 0 { fx = svg_anim_initial(node, "opacity", 7); }
+    if fx < 0 { return 256; }
+    let v = (fx * 256) / FX_ONE;
+    if v < 0 { return 0; }
+    if v > 256 { return 256; }
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Tag dispatch
+# ---------------------------------------------------------------------------
+
+fn render_dispatch(node) {
+    if svg_tag_is(node, "rect", 4) == 1     { svg_draw_rect(node); return; }
+    if svg_tag_is(node, "circle", 6) == 1   { svg_draw_circle(node); return; }
+    if svg_tag_is(node, "ellipse", 7) == 1  { svg_draw_ellipse(node); return; }
+    if svg_tag_is(node, "line", 4) == 1     { svg_draw_line(node); return; }
+    if svg_tag_is(node, "text", 4) == 1 {
+        text_draw_text(node, svg_fill_color(node, lw(&svg_in_fill)));
+        return;
+    }
+    if svg_tag_is(node, "polygon", 7) == 1  { svg_draw_poly(node, 1); return; }
+    if svg_tag_is(node, "polyline", 8) == 1 { svg_draw_poly(node, 0); return; }
+    if svg_tag_is(node, "path", 4) == 1     { svg_draw_path(node); return; }
+    if svg_tag_is(node, "use", 3) == 1      { svg_draw_use(node); return; }
+    if svg_tag_is(node, "image", 5) == 1    { svg_draw_image(node); return; }
+}
+
+fn is_defs_subtree(node) {
+    return svg_tag_is(node, "defs", 4);
+}
+
+# Render `node` and its children with no filter handling. Called by
+# filter.ghl:filter_render_buffered as the "render subtree into the
+# intermediate canvas" hook - the active render context is already a buffer
+# context at that point, so emit_span captures ARGB pixels. svg_filter_skip
+# is set so the recursive svg_render_node does not re-enter the filter path
+# for this same node.
+state {
+    svg_filter_skip: 4;
+    svg_use_depth: 4;
+    svg_use_id_buf: 64;
+    svg_use_id_len: 4;
+}
+
+fn filter_render_subtree(node) {
+    sw(&svg_filter_skip, 1);
+    svg_render_node(node);
+    sw(&svg_filter_skip, 0);
+}
+
+fn svg_use_parse_ref(attr_len) {
+    if attr_len <= 0 { return 0; }
+    let i = 0;
+    if attr_len >= 6 {
+        if lb(&svg_attr_buf) == 117 {
+            if lb(&svg_attr_buf + 1) == 114 {
+                if lb(&svg_attr_buf + 2) == 108 {
+                    if lb(&svg_attr_buf + 3) == 40 { i = 4; }
+                }
+            }
+        }
+    }
+    if lb(&svg_attr_buf + i) == 35 { i = i + 1; }
+    let start = i;
+    while i < attr_len {
+        if lb(&svg_attr_buf + i) == 41 { break; }
+        i = i + 1;
+    }
+    let n = i - start;
+    if n <= 0 { return 0; }
+    if n > 63 { return 0; }
+    let k = 0;
+    while k < n {
+        sb(&svg_use_id_buf + k, lb(&svg_attr_buf + start + k));
+        k = k + 1;
+    }
+    sw(&svg_use_id_len, n);
+    return n;
+}
+
+fn svg_use_id_matches(node) {
+    let want = lw(&svg_use_id_len);
+    let got = xml_attr(node, "id", 2, &svg_tag_buf, SVG_TAG_MAX);
+    if got != want { return 0; }
+    let i = 0;
+    while i < got {
+        if lb(&svg_tag_buf + i) != lb(&svg_use_id_buf + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn svg_use_find(parent) {
+    if parent < 0 { return -1; }
+    if svg_use_id_matches(parent) == 1 { return parent; }
+    let child = xml_first_child(parent);
+    while child >= 0 {
+        let hit = svg_use_find(child);
+        if hit >= 0 { return hit; }
+        child = xml_next_sibling(child);
+    }
+    return -1;
+}
+
+fn svg_draw_use(node) {
+    if lw(&svg_use_depth) >= 8 { return; }
+    let l = xml_attr(node, "href", 4, &svg_attr_buf, SVG_ATTR_MAX);
+    if l <= 0 { l = xml_attr(node, "xlink:href", 10, &svg_attr_buf, SVG_ATTR_MAX); }
+    if svg_use_parse_ref(l) == 0 { return; }
+    let target = svg_use_find(xml_root());
+    if target < 0 { return; }
+    if target == node { return; }
+    let ux = svg_attr_int(node, "x", 1, 0);
+    let uy = svg_attr_int(node, "y", 1, 0);
+    mat_push();
+    mat_translate(fx_from_i(ux), fx_from_i(uy));
+    sw(&svg_use_depth, lw(&svg_use_depth) + 1);
+    svg_render_node(target);
+    sw(&svg_use_depth, lw(&svg_use_depth) - 1);
+    mat_pop();
+}
+
+fn svg_draw_image(node) {
+    # href="#id" reuses an in-document SVG subtree. Raster data URIs with
+    # hex RGB payloads (optionally data-width/data-height) decode into scaled
+    # nearest-neighbor pixels; unsupported external URLs fall back to a sized
+    # placeholder so layout remains deterministic.
+    let l = xml_attr(node, "href", 4, &svg_attr_buf, SVG_ATTR_MAX);
+    if l <= 0 { l = xml_attr(node, "xlink:href", 10, &svg_attr_buf, SVG_ATTR_MAX); }
+    if svg_use_parse_ref(l) > 0 {
+        let target = svg_use_find(xml_root());
+        if target >= 0 {
+            mat_push();
+            mat_translate(fx_from_i(svg_attr_int(node, "x", 1, 0)),
+                          fx_from_i(svg_attr_int(node, "y", 1, 0)));
+            svg_render_node(target);
+            mat_pop();
+            return;
+        }
+    }
+    let x = svg_attr_int(node, "x", 1, 0);
+    let y = svg_attr_int(node, "y", 1, 0);
+    let w = svg_attr_int(node, "width", 5, 0);
+    let h = svg_attr_int(node, "height", 6, 0);
+    if w <= 0 { return; }
+    if h <= 0 { return; }
+    if svg_image_try_data_hex(node, l, x, y, w, h) == 1 { return; }
+    paint_set_solid_rgb(svg_fill_color(node, 0x00808080), 255);
+    raster_set_fill_rule(0);
+    poly_begin();
+    svg_xform_to_poly(x, y);
+    svg_xform_to_poly(x + w, y);
+    svg_xform_to_poly(x + w, y + h);
+    svg_xform_to_poly(x, y + h);
+    poly_end_subpath();
+    poly_fill();
+}
+
+fn svg_image_hex_at(pos) {
+    let h1 = svg_hex(lb(&svg_attr_buf + pos));
+    let h2 = svg_hex(lb(&svg_attr_buf + pos + 1));
+    if h1 < 0 { return -1; }
+    if h2 < 0 { return -1; }
+    return (h1 << 4) | h2;
+}
+
+fn svg_image_try_data_hex(node, href_len, x, y, w, h) {
+    if href_len <= 16 { return 0; }
+    if lb(&svg_attr_buf + 0) != 100 { return 0; }  # data:
+    let comma = 0;
+    while comma < href_len {
+        if lb(&svg_attr_buf + comma) == 44 { break; }
+        comma = comma + 1;
+    }
+    if comma >= href_len { return 0; }
+    let payload = comma + 1;
+    let pixels = (href_len - payload) / 6;
+    if pixels <= 0 { return 0; }
+    let iw = svg_attr_int(node, "data-width", 10, w);
+    let ih = svg_attr_int(node, "data-height", 11, h);
+    if iw <= 0 { iw = w; }
+    if ih <= 0 { ih = h; }
+    if iw * ih > pixels { return 0; }
+    let sy = 0;
+    while sy < ih {
+        let sx = 0;
+        while sx < iw {
+            let p = payload + (sy * iw + sx) * 6;
+            let rr = svg_image_hex_at(p);
+            let gg = svg_image_hex_at(p + 2);
+            let bb = svg_image_hex_at(p + 4);
+            if rr >= 0 {
+                if gg >= 0 {
+                    if bb >= 0 {
+                        paint_set_solid_rgb((rr << 16) | (gg << 8) | bb, 255);
+                        raster_set_fill_rule(0);
+                        let dx0 = x + (sx * w) / iw;
+                        let dy0 = y + (sy * h) / ih;
+                        let dx1 = x + ((sx + 1) * w) / iw;
+                        let dy1 = y + ((sy + 1) * h) / ih;
+                        poly_begin();
+                        svg_xform_to_poly(dx0, dy0);
+                        svg_xform_to_poly(dx1, dy0);
+                        svg_xform_to_poly(dx1, dy1);
+                        svg_xform_to_poly(dx0, dy1);
+                        poly_end_subpath();
+                        poly_fill();
+                    }
+                }
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Render loop
+# ---------------------------------------------------------------------------
+
+fn svg_render_node(node) {
+    if node < 0 { return; }
+
+    # Buffered-filter intercept: if this node carries a <filter> with a
+    # blur/colorMatrix primitive, hand off to filter_render_buffered, which
+    # renders this very subtree into an intermediate ARGB canvas (via
+    # filter_render_subtree, which re-enters here with svg_filter_skip=1),
+    # runs the filter pass, and composites back. The skip flag breaks the
+    # otherwise-infinite recursion.
+    if lw(&svg_filter_skip) == 0 {
+        let fop = filter_node_op(node);
+        if fop == FILTER_OP_CSS_BLUR {
+            if filter_render_css_blur(node, lw(&filter_match_sigma)) == 1 { return; }
+        } else {
+        if fop != FILTER_OP_NONE {
+            if filter_render_buffered(node, fop) == 1 { return; }
+        }
+        }
+        # Mask intercept: a node carrying mask="url(#id)" renders its subtree
+        # into an ARGB intermediate, multiplies by the mask's alpha, and
+        # composites back. filter_render_subtree (used inside mask_apply)
+        # re-enters here with svg_filter_skip set, breaking the recursion.
+        let mnode = mask_lookup(node);
+        if mnode >= 0 {
+            if mask_apply(node, mnode) == 1 { return; }
+        }
+    }
+
+    let old_fill = lw(&svg_in_fill);
+    let old_stroke = lw(&svg_in_stroke);
+    let old_width = lw(&svg_in_width);
+    let old_op = lw(&paint_opacity);
+    let old_blend = fctx_get_blend();
+
+    sw(&svg_in_fill, svg_fill_color(node, old_fill));
+    sw(&svg_in_stroke, svg_stroke_color(node, old_stroke));
+    sw(&svg_in_width, svg_line_width(node));
+    sw(&paint_opacity, (old_op * node_opacity_256(node)) / 256);
+
+    # mix-blend-mode: screen. The group in glass-ribbons.svg carries no
+    # `isolation: isolate`, so it is NOT an isolated group: each descendant
+    # composites directly against the page backdrop (and previously-drawn
+    # siblings) with the screen blend, rather than the group compositing as a
+    # unit. Routing every emitted span through the screen blend for the whole
+    # subtree reproduces that. screen() is associative/commutative, so the
+    # accumulation order across siblings does not matter.
+    let blend_mode = svg_style_mix_blend_mode(node);
+    if blend_mode == 1 {
+        fctx_set_blend(FCTX_BLEND_SCREEN);
+    }
+    if blend_mode == 2 {
+        fctx_set_blend(FCTX_BLEND_MULTIPLY);
+    }
+
+    mat_push();
+    svg_apply_transform(node);
+    filter_apply_to_current(node);
+
+    # Save the scanline clip rect, then narrow it for any clip-path on this
+    # node. Non-rect clips activate a geometry stencil; clip_restore() pops
+    # the saved stencil so nested arbitrary clips intersect correctly.
+    let saved_cx0 = lw(&raster_clip_x0);
+    let saved_cy0 = lw(&raster_clip_y0);
+    let saved_cx1 = lw(&raster_clip_x1);
+    let saved_cy1 = lw(&raster_clip_y1);
+    let saved_stencil = stencil_is_active();
+    clip_apply_to_current(node);
+
+    if is_defs_subtree(node) == 0 {
+        render_dispatch(node);
+        let child = xml_first_child(node);
+        while child >= 0 {
+            svg_render_node(child);
+            child = xml_next_sibling(child);
+        }
+    }
+
+    clip_restore();
+    if saved_stencil == 1 { stencil_activate(); }
+    raster_set_clip(saved_cx0, saved_cy0, saved_cx1, saved_cy1);
+    mat_pop();
+    sw(&svg_in_fill, old_fill);
+    sw(&svg_in_stroke, old_stroke);
+    sw(&svg_in_width, old_width);
+    sw(&paint_opacity, old_op);
+    fctx_set_blend(old_blend);
+}
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+fn svg_render(svg_buf, svg_len, x, y, w, h) {
+    if w <= 0 { return -1; }
+    if h <= 0 { return -1; }
+    if xml_parse(svg_buf, svg_len) <= 0 { return -1; }
+    let root = xml_root();
+    if root < 0 { return -1; }
+
+    svg_setup_viewbox(root, x, y, w, h);
+    sw(&svg_in_fill, 0x00000000);
+    sw(&svg_in_stroke, -1);
+    sw(&svg_in_width, 1);
+
+    mat_init();
+    mat_translate(fx_from_i(lw(&svg_dst_x)), fx_from_i(lw(&svg_dst_y)));
+    mat_scale(lw(&svg_sx), lw(&svg_sy));
+    mat_translate(fx_from_i(0 - lw(&svg_vb_x)), fx_from_i(0 - lw(&svg_vb_y)));
+
+    paint_init();
+    raster_set_clip(x, y, x + w, y + h);
+    fctx_init_screen(x, y, x + w, y + h);
+    filter_arena_reset();
+    raster_set_fill_rule(0);
+
+    let bg = svg_style_color(root, "background", 10, -1);
+    if bg >= 0 {
+        syscall(SYS_GUI_RECT, x, y, w, h, bg);
+    }
+    svg_render_node(root);
+    return 0;
+}

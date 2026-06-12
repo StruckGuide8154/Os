@@ -148,7 +148,7 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     ; Install a default v1 W^X manifest spanning the legitimate code window
     ; [L3_APP_CODE_OFF, L3_SHADOW_WIN_OFF). Without this, l3_apply_wx_policy
     ; would force the whole slot W+NX and *no* user code could execute ???
-    ; legacy NexusHL apps (which never call SYS_WX_INSTALL_MANIFEST) would
+    ; legacy GritHL apps (which never call SYS_WX_INSTALL_MANIFEST) would
     ; page-fault on the first instruction of their drawfn. Apps that want a
     ; tighter range (e.g. excluding their .data tail) can still override via
     ; SYS_WX_INSTALL_MANIFEST at runtime.

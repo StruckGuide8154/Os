@@ -97,7 +97,7 @@ kernel_open_file_in_notepad:
     test eax, eax
     jz .kop_empty
     ; Clamp the byte count to the scratch capacity; fat16_read_file is
-    ; expected to honour edx, but defence-in-depth — this is the only
+    ; expected to honour edx, but defence-in-depth - this is the only
     ; bound between an attacker-controlled file size and the parse loop.
     cmp eax, NP_BUF_SIZE - 1
     jbe .kop_size_ok
@@ -199,7 +199,7 @@ kernel_open_file_in_notepad:
     USER_ACCESS_END
 
     ; Clear scratch so we don't leave file bytes in the kernel image's master
-    ; copy (defence-in-depth — nothing should read them, but stale file
+    ; copy (defence-in-depth - nothing should read them, but stale file
     ; content lingering in kernel .data is a needless info-leak surface).
     push rdi
     push rax
@@ -232,7 +232,7 @@ kernel_open_file_in_notepad:
 ; ============================================================================
 ; kernel_open_file_in_media - runs in kernel context. Launches Media Player
 ; for an arbitrary FAT16 entry (NIC, NBA, or any future codec) and reads the
-; file bytes into the new window's slot at APP_SLOT_BMP_FILE_OFF — the same
+; file bytes into the new window's slot at APP_SLOT_BMP_FILE_OFF - the same
 ; offset `app_media_draw` probes for the magic on every frame.
 ;
 ; Mirrors kernel_open_file_in_notepad: the heavy lifting must run in kernel

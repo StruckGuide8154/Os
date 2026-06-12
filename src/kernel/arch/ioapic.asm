@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - I/O APIC Driver
+; GritOS v3.0 - I/O APIC Driver
 ; Used for routing hardware interrupts from advanced controllers
 ; ============================================================================
 bits 64

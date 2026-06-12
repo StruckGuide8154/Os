@@ -15,7 +15,7 @@ rtl8139_dhcp_configure:
     inc dword [rtl_dhcp_xid]
     cmp dword [rtl_dhcp_xid], 0
     jne .xid_ok
-    mov dword [rtl_dhcp_xid], 0x4E584448
+    mov dword [rtl_dhcp_xid], 0x47524448
 .xid_ok:
     call rtl8139_send_dhcp_discover
     mov rbx, [tick_count]

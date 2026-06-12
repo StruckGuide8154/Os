@@ -115,7 +115,7 @@ app_set_window_handlers:
 ;   drag_fn(rsi=win_ptr, rdx=client_x, rcx=client_y).
 ; The WM fires drag_fn for every mouse-poll tick where the cursor has moved
 ; AND the left button is still held AND the initial press landed on this
-; window's client area. The cursor may leave the window's bounds — drag
+; window's client area. The cursor may leave the window's bounds - drag
 ; events keep flowing until the button is released. Pass 0 to detach.
 app_set_window_drag:
     push rcx
@@ -166,9 +166,9 @@ app_set_window_rclick:
     ret
 
 ; RAX = window ID. Preserve RAX.
-; The NexusHL notepad callbacks read state from the window's L3 slot copy of
+; The GritHL notepad callbacks read state from the window's L3 slot copy of
 ; the app blob. ALL per-instance notepad state must be written through this
-; helper (slot-relative) — never to the kernel image's master copy, which is
+; helper (slot-relative) - never to the kernel image's master copy, which is
 ; shared across all instances and is only a linker placeholder.
 app_seed_notepad_slot:
     push rax
@@ -218,7 +218,7 @@ app_seed_notepad_slot:
     ret
 
 ; RAX = window ID. Preserve RAX.
-; NexusHL app state is read from the per-window L3 slot. When a window slot is
+; GritHL app state is read from the per-window L3 slot. When a window slot is
 ; reused, call_app_l3 sees the existing magic and does not recopy the blob, so
 ; launch-time state resets done above would otherwise stay invisible.
 app_refresh_window_slot:
@@ -267,7 +267,7 @@ app_reset_explorer_slot:
 ;
 ; After wm_create_window_ex returns rax = slot id, narrow that slot's
 ; syscall capability mask to the app's declared manifest. Required for every
-; launch path — without this the slot keeps the CAP_ALL default and the
+; launch path - without this the slot keeps the CAP_ALL default and the
 ; sandbox is effectively off. Preserves rax / rdi / rsi so the launcher can
 ; keep treating rax as the slot id and continue its post-create work.
 extern kernel_apply_app_manifest

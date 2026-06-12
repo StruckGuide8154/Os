@@ -1,16 +1,16 @@
 ; ============================================================================
-; NexusOS - Per-slot syscall capability bits ("app manifest")
+; GritOS - Per-slot syscall capability bits ("app manifest")
 ;
 ; Each syscall is tagged with a CAP_* bit. Each slot has a current cap mask
 ; in slot_cap_mask[]. At dispatch, the kernel rejects calls whose tag is not
 ; covered by the slot's mask. Modelled on Android permissions / iOS
-; entitlements — declarative, enforced once at the syscall gate, not
+; entitlements - declarative, enforced once at the syscall gate, not
 ; sprinkled through handlers.
 ;
 ; Lifecycle:
 ;   - Every slot starts at CAP_ALL (no restriction) so legacy callers keep
 ;     working. The first time an app calls SYS_APP_DECLARE_MANIFEST(app_id)
-;     its slot mask is *narrowed* (AND-only — can never be widened) to the
+;     its slot mask is *narrowed* (AND-only - can never be widened) to the
 ;     manifest declared for that app_id in app_manifest_table.
 ;   - Declaration is one-way: a sandboxed app can never escalate, even by
 ;     re-declaring a different app's manifest. This is the iOS-entitlement
@@ -82,7 +82,7 @@ CAP_ALL         equ 0xFFFF
 ; --- Capability-transition audit ring (security_todo.md §4) -----------------
 ; Every legitimate cap-mask write (declare_manifest narrowing, the loader's
 ; kernel_apply_app_manifest, slot recycle) is appended to a fixed-size,
-; kernel-only ring so a bug that fails to narrow — or any unexpected widening —
+; kernel-only ring so a bug that fails to narrow - or any unexpected widening -
 ; leaves a forensic trail instead of being silent. Kernel-only: there is no
 ; ring-3 read syscall yet. The ring lives in syscall.asm BSS; cap_audit_log
 ; (the writer) is the single append point, driven from cap_mask_store.
@@ -99,7 +99,7 @@ CAP_AUDIT_ENTRIES   equ 64                 ; ring depth (power of two for & mask
 CAP_AUDIT_ENT_SIZE  equ 16                 ; bytes per record
 CAP_AUDIT_IDX_MASK  equ (CAP_AUDIT_ENTRIES - 1)
 
-; Reason codes (entry +7) — why the mask was rewritten.
+; Reason codes (entry +7) - why the mask was rewritten.
 CAP_AUDIT_DECLARE   equ 0x01               ; SYS_APP_DECLARE_MANIFEST narrowing
 CAP_AUDIT_APPLY     equ 0x02               ; kernel_apply_app_manifest (loader)
 CAP_AUDIT_RECYCLE   equ 0x03               ; slot recycle reset
@@ -112,12 +112,12 @@ CAP_AUDIT_OTHER     equ 0x00               ; unattributed write (e.g. boot seed)
 ; rewrite their own row; SYS_APP_DECLARE_MANIFEST only reads from it.
 ;
 ; Stay conservative: grant only what the app actually uses. A grep against
-; src/user/apps/*.inc and src/user/nexushl/apps/*.nxh is the source of truth
+; src/user/apps/*.inc and src/user/grithl/apps/*.ghl is the source of truth
 ; for what each app calls.
 
 MANIFEST_EXPLORER       equ CAP_CORE | CAP_GUI | CAP_FS | CAP_APP_CTRL
 MANIFEST_TERMINAL       equ CAP_CORE | CAP_GUI | CAP_FS | CAP_APP_CTRL | CAP_NET
-; Notepad reads and writes files but must never delete one — now expressible
+; Notepad reads and writes files but must never delete one - now expressible
 ; directly in the manifest (CAP_FS minus CAP_FS_DELETE). The SYS_FS_DELETE deny
 ; in app_syscall_deny_table stays as defense-in-depth.
 MANIFEST_NOTEPAD        equ CAP_CORE | CAP_GUI | CAP_FS_READ | CAP_FS_WRITE
@@ -136,12 +136,12 @@ MANIFEST_MEDIA          equ CAP_CORE | CAP_GUI | CAP_FS | CAP_MEDIA
 ; --- Per-app syscall allowlist (security_todo.md §2) ------------------------
 ; The CAP_* mask above is coarse: a single CAP_FS bit grants every FS syscall
 ; (read, write, delete, rename, mkdir, ...). The per-syscall allowlist is the
-; finer gate layered on top — an explicit bitmap over syscall_table_count,
+; finer gate layered on top - an explicit bitmap over syscall_table_count,
 ; one bitmap per slot, checked at the dispatcher alongside the cap mask.
 ;
 ; The bitmap is built (sc_build_allow_bitmap, syscall.asm) from the slot's
-; effective cap mask — bit i set iff syscall i's cap tag is covered by the
-; mask — and THEN the per-app explicit deny list below clears specific bits.
+; effective cap mask - bit i set iff syscall i's cap tag is covered by the
+; mask - and THEN the per-app explicit deny list below clears specific bits.
 ; This keeps each app at "exactly the syscalls it uses" without authoring a
 ; full bitmap by hand: caps give the baseline, the deny list trims the rest.
 ;
@@ -156,15 +156,15 @@ SC_SYS_FS_DELETE        equ 19         ; must track SYS_FS_DELETE in syscall_use
 
 ; --- Per-slot network destination policy (security_todo.md §7) --------------
 ; CAP_NET above is binary: a slot may touch the network or not. Layered on top
-; is an OPT-IN, per-app destination allowlist ("opt-in ATS" — App Transport
+; is an OPT-IN, per-app destination allowlist ("opt-in ATS" - App Transport
 ; Security style): a slot can declare
-;   * a DNS-suffix allowlist  — net_dns_query_a (dns.asm) rejects a hostname
+;   * a DNS-suffix allowlist  - net_dns_query_a (dns.asm) rejects a hostname
 ;                               whose suffix is not the slot's allowed suffix
-;   * a port-range allowlist  — net_tcp_connect_ipv4 (tcp.asm) rejects a
+;   * a port-range allowlist  - net_tcp_connect_ipv4 (tcp.asm) rejects a
 ;                               destination port outside [lo, hi]
 ;
 ; The policy lives in kernel BSS (parallel per-slot arrays in
-; src/include/net_slot_policy.inc — sec_net_policy_flags/_port_lo/_port_hi/
+; src/include/net_slot_policy.inc - sec_net_policy_flags/_port_lo/_port_hi/
 ; _suffix[]), modelled on slot_cap_mask[] / slot_handle_quota[]: OUTSIDE the
 ; ring-3 arena, so an app cannot widen its own destination policy. DEFAULT
 ; (BSS-zero) = NO RESTRICTION (CAP_NET alone gates, exactly as before); a
@@ -172,9 +172,9 @@ SC_SYS_FS_DELETE        equ 19         ; must track SYS_FS_DELETE in syscall_use
 ; sec_net_set_suffix. Enforcement is FAIL CLOSED within an active policy.
 ;
 ; MANIFEST DECLARATION SHAPE (for the future SYS_NET_SET_POLICY / loader hook
-; that wires these into the dispatcher — deferred, see net_slot_policy.inc):
-;   PING (CAP_NET) — diagnostic, no TCP/DNS allowlist needed.
-;   TERMINAL (CAP_NET) — the only app that opens arbitrary destinations; would
+; that wires these into the dispatcher - deferred, see net_slot_policy.inc):
+;   PING (CAP_NET) - diagnostic, no TCP/DNS allowlist needed.
+;   TERMINAL (CAP_NET) - the only app that opens arbitrary destinations; would
 ;     declare a broad/empty policy (no restriction) unless an install profile
 ;     narrows it.
 ; A representative tightened profile a packaged app could declare:

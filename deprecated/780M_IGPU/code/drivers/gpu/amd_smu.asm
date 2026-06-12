@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_smu.asm — SMU (MP1) mailbox driver + Task H (PPSMC_MSG_PowerUpGfx)
+; amd_smu.asm - SMU (MP1) mailbox driver + Task H (PPSMC_MSG_PowerUpGfx)
 ; ----------------------------------------------------------------------------
 ; Wave 1.E + Task H. Reaches the SMU through the NBIO SMN proxy (see
 ; amd_smn.asm) because on APUs (Phoenix/Strix) the SMU's C2PMSG_*
@@ -8,7 +8,7 @@
 ; Linux source-of-truth:
 ;   drivers/gpu/drm/amd/include/yellow_carp_offset.h
 ;     MP1_BASE__INST0_SEG1 = 0x0243FC00   ← the SMN-aliased segment
-;     (Phoenix / Hawk Point family — gfx 11.0.1, PCI id 1002:1900 etc.)
+;     (Phoenix / Hawk Point family - gfx 11.0.1, PCI id 1002:1900 etc.)
 ;   drivers/gpu/drm/amd/include/asic_reg/mp/mp_13_0_4_offset.h
 ;     regMP1_SMN_C2PMSG_66 = 0x0282 (dword), _82 = 0x0292, _90 = 0x029A
 ;     All three have _BASE_IDX = 1, i.e. they live in SEG1.
@@ -17,7 +17,7 @@
 ;     send_msg_with_param() uses these registers verbatim.
 ;
 ; SMN address = MP1_BASE_SMN + (reg_dword * 4).
-; Earlier guess 0x03B10000 was wrong — Phoenix SEG bases come from
+; Earlier guess 0x03B10000 was wrong - Phoenix SEG bases come from
 ; yellow_carp_offset.h, not the mp_13_0_4 header (which only carries
 ; dword offsets + BASE_IDX, with the actual bases resolved per-ASIC).
 ;
@@ -52,7 +52,7 @@ extern tick_count
 
 ; --- MP1 SMN addresses (Strix Point, mp_13_0_4 SEG4) ----------------------
 ; VERIFIED 2026-05-26 on Strix Point hardware: 0x03B10000 (SEG4 alias) is
-; what the SMU answers at. Do NOT swap this to 0x0243FC00 — that's MP0/PSP,
+; what the SMU answers at. Do NOT swap this to 0x0243FC00 - that's MP0/PSP,
 ; not MP1/SMU. Touching MP1 at the PSP base produces silence (no ack).
 %define MP1_BASE_SMN     0x03B10000
 %define SMN_MP1_C2PMSG_66  (MP1_BASE_SMN + 0x0282 * 4)     ; 0x03B10A08
@@ -78,11 +78,11 @@ smu_msg_send:
 
     ; (1) Snapshot prior response for diag, then proceed. Linux's
     ; __smu_cmn_send_msg reads C2PMSG_90 once (informational) and then
-    ; unconditionally clears it — it does NOT wait for non-zero. The old
+    ; unconditionally clears it - it does NOT wait for non-zero. The old
     ; "wait until non-zero" guard would block forever on a clean SMU where
     ; C2PMSG_90 == 0, never reaching the C2PMSG_66 kick. That's exactly
     ; what wedged stage H on a cold boot (see docs/gpu-bringup-verified.md
-    ; — the prior success relied on warm-reboot residue in C2PMSG_90).
+    ; - the prior success relied on warm-reboot residue in C2PMSG_90).
     mov  edi, SMN_MP1_C2PMSG_90
     call smn_r32
     mov  [smu_prior_resp], eax
@@ -97,7 +97,7 @@ smu_msg_send:
     mov  esi, r13d
     call smn_w32
 
-    ; (4) write message ID — kicks SMU
+    ; (4) write message ID - kicks SMU
     mov  edi, SMN_MP1_C2PMSG_66
     mov  esi, r12d
     call smn_w32
@@ -148,20 +148,20 @@ smu_msg_send:
     ret
 
 ; ---------------------------------------------------------------------------
-; uint8 smu_powerup_gfx(void)   — Task H (APU variant)
+; uint8 smu_powerup_gfx(void)   - Task H (APU variant)
 ;
-;   On Strix Point GFX is already powered by ABL at boot — there is no
+;   On Strix Point GFX is already powered by ABL at boot - there is no
 ;   PowerUpGfx message. The H stage instead:
 ;
-;     1. TestMessage — mailbox handshake sanity. smu_v13_0_4 firmware
+;     1. TestMessage - mailbox handshake sanity. smu_v13_0_4 firmware
 ;        replies with PPSMC_Result_OK (1) in C2PMSG_90 and overwrites
 ;        C2PMSG_82 with the result code (1), NOT arg+1. So success here
 ;        means "smu_last_result == OK"; we record the C2PMSG_82 reply
 ;        in smu_test_echo purely for diagnostics.
-;     2. DisallowGfxOff — pin GFX in the active state so our subsequent
+;     2. DisallowGfxOff - pin GFX in the active state so our subsequent
 ;        GMC/CP register pokes don't race against power-gating.
 ;        Non-fatal: if rejected, GFX may still be active.
-;     3. GFX scratch round-trip — confirms GC MMIO is live.
+;     3. GFX scratch round-trip - confirms GC MMIO is live.
 ; ---------------------------------------------------------------------------
 %define GFX_SCRATCH_DW    ((GC_BASE/4) + mmSCRATCH_REG0)
 %define GFX_SCRATCH_PROBE 0xCAFEF00D
@@ -169,7 +169,7 @@ smu_msg_send:
 smu_powerup_gfx:
     push rbx
 
-    ; (1) TestMessage handshake — only checks for OK ack.
+    ; (1) TestMessage handshake - only checks for OK ack.
     mov  edi, PPSMC_MSG_TestMessage
     xor  esi, esi
     call smu_msg_send
@@ -181,7 +181,7 @@ smu_powerup_gfx:
     call smn_r32
     mov  [smu_test_echo], eax
 
-    ; (2) DisallowGfxOff — best-effort. Don't fail the stage on this.
+    ; (2) DisallowGfxOff - best-effort. Don't fail the stage on this.
     mov  edi, PPSMC_MSG_DisallowGfxOff
     xor  esi, esi
     call smu_msg_send
@@ -214,7 +214,7 @@ smu_powerup_gfx:
     ret
 
 ; ---------------------------------------------------------------------------
-; uint32 smu_get_version(void) — diag / mailbox sanity check
+; uint32 smu_get_version(void) - diag / mailbox sanity check
 ; ---------------------------------------------------------------------------
 smu_get_version:
     mov  edi, PPSMC_MSG_GetSmuVersion

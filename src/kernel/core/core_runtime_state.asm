@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS kernel runtime state and cross-module constants.
+; GritOS kernel runtime state and cross-module constants.
 ; Split from the former src/kernel/core/main.asm owner file.
 ; ============================================================================
 %include "constants.inc"
@@ -58,7 +58,7 @@ global gui_initialized
 gui_initialized db 0
 ; Boot-race guard for the PIT slot-integrity scans (security_todo.md §12).
 ; gui_initialized flips at wm_init, but kernel_lockdown_ro, nk_protect_page
-; _tables and the first lazy app loads all run AFTER that — a PIT tick landing
+; _tables and the first lazy app loads all run AFTER that - a PIT tick landing
 ; in that window can hash a slot whose code bytes / syscall-perm rewrite are
 ; still settling and trip a spurious "CANARY 0 @<hash>" panic (the intermittent
 ; ~1-in-3 boot fault). kmain sets this to 1 once, immediately before the

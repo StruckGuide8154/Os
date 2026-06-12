@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Generate the NexusOS boot animation: particle-form "N" + wordmark.
+# Generate the GritOS boot animation: particle-form "N" + wordmark.
 # Output: build/BOOTANIM.NBA
 #
 # File format (little-endian):
@@ -24,7 +24,7 @@ CX, CY = W // 2, H // 2 - 6
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 OUT = os.path.join(ROOT, 'build', 'BOOTANIM.NBA')
 
-# Hand-drawn 'N' bitmap (16 cols x 20 rows) — used to sample particle targets.
+# Hand-drawn 'N' bitmap (16 cols x 20 rows) - used to sample particle targets.
 N_GLYPH = [
     "1100000000000011",
     "1100000000000011",
@@ -48,7 +48,7 @@ N_GLYPH = [
     "1100000001110011",
 ]
 
-# 5x7 ASCII font for the wordmark "NEXUSOS"
+# 5x7 ASCII font for the wordmark "GRITOS"
 FONT = {
     'N': ["10001","11001","10101","10011","10001","10001","10001"],
     'E': ["11111","10000","10000","11110","10000","10000","11111"],
@@ -216,10 +216,10 @@ def render_frame(idx, particles):
         draw_glow(buf, CX, CY, 64, 255, 200, 120, 0.18 * s)
         draw_glow(buf, CX, CY, 37, 255, 240, 180, 0.30 * s)
 
-    # Wordmark "NEXUSOS"
+    # Wordmark "GRITOS"
     wa = max(0.0, min(1.0, (t - 0.95) / 0.55))
     if wa > 0:
-        text = "NEXUSOS"
+        text = "GRITOS"
         scale = 3
         text_w = (5 + 1) * scale * len(text) - scale
         tx = CX - text_w // 2

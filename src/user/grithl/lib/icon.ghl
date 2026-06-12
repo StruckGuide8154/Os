@@ -1,0 +1,93 @@
+# GritHL icon helper.
+#
+# Apps request icons by *logical name* - "file", "folder", "back" - and the
+# active theme pack supplies the bytes. The helper hides the path
+# resolution, format dispatch, and missing-icon fallback so app draw code
+# stays a one-liner:
+#
+#     icon_render("folder", x, y, 16);
+#
+# Resolution today
+# ----------------
+# The disk-backed loader (read `assets/themes/<active>/icons/<name>.<ext>`
+# via SYS_FS_READ, dispatch through image.ghl) lands with the rest of the
+# disk-loading work. Until then `icon_render` draws a deterministic outline
+# placeholder in the active theme's accent color, so apps that wire up
+# icon calls today will start rendering real icons the moment the loader
+# is in place - no app-side change required.
+#
+# This is the same pattern the colour palette uses: public surface frozen
+# now, internals swap later.
+
+use theme
+use image
+use gui
+
+# Outline placeholder. Renders a square frame in TC_ACCENT with a single
+# diagonal stroke, sized to `size` at client coords (x,y). Mirrors how
+# missing-glyph boxes work in text rendering.
+fn icon_placeholder(win, x, y, size) {
+    let col = theme_col(TC_ACCENT);
+    let bg  = theme_col(TC_SURFACE);
+    ui_rect_at(win, x, y, size, size, bg);
+    ui_rect_at(win, x, y, size, 1, col);
+    ui_rect_at(win, x, y + size - 1, size, 1, col);
+    ui_rect_at(win, x, y, 1, size, col);
+    ui_rect_at(win, x + size - 1, y, 1, size, col);
+    # diagonal - draw as a stair of single pixels so we don't need a
+    # line primitive.
+    let i = 0;
+    while i < size {
+        ui_rect_at(win, x + i, y + i, 1, 1, col);
+        i = i + 1;
+    }
+}
+
+# Public API ---------------------------------------------------------------
+
+# Return codes from icon_render / icon_render_abs.
+#   ICON_OK         - real glyph from the active pack was rendered
+#   ICON_PLACEHOLDER - pack had no icon by that name; outline was drawn instead
+# Callers may use the return to decide between "leave space" and
+# "render a text label next to the icon" without inspecting framebuffer.
+const ICON_OK          = 0
+const ICON_PLACEHOLDER = 1
+
+# Draw an icon by logical name into a client-area rect. `name` is a
+# null-terminated string (e.g. "file"). `size` is square edge in pixels.
+# Returns ICON_OK if a real glyph was drawn, ICON_PLACEHOLDER if the
+# fallback outline was drawn instead.
+fn icon_render(win, name, x, y, size) {
+    # When the disk loader is wired, this will:
+    #   1. Build path: /themes/<active>/icons/<name>.<ext>  (try svg, bmp, ...)
+    #   2. Read bytes into a scratch buffer.
+    #   3. image_render_path(path, buf, len, abs_x, abs_y, size, size).
+    #     -> on success return ICON_OK.
+    # For now: every name resolves to the placeholder so app code that
+    # adopts the API draws something sensible today and picks up real
+    # glyphs automatically when the loader lands - no app-side change
+    # required at that point.
+    #
+    # `name` is intentionally consumed but unused. Don't drop the
+    # parameter: apps already pass logical names, and removing it would
+    # be a source-incompatible break the day the loader lands.
+    icon_placeholder(win, x, y, size);
+    return ICON_PLACEHOLDER;
+}
+
+# Absolute-coords variant for overlays (drag preview, cursor decoration).
+fn icon_render_abs(name, x, y, size) {
+    let col = theme_col(TC_ACCENT);
+    let bg  = theme_col(TC_SURFACE);
+    ui_rect(x, y, size, size, bg);
+    ui_rect(x, y, size, 1, col);
+    ui_rect(x, y + size - 1, size, 1, col);
+    ui_rect(x, y, 1, size, col);
+    ui_rect(x + size - 1, y, 1, size, col);
+    let i = 0;
+    while i < size {
+        ui_rect(x + i, y + i, 1, 1, col);
+        i = i + 1;
+    }
+    return ICON_PLACEHOLDER;
+}

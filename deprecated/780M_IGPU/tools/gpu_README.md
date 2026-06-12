@@ -1,8 +1,8 @@
-# tools/gpu — GFX11 (Strix Point, gfx1150) bring-up scaffolding
+# tools/gpu - GFX11 (Strix Point, gfx1150) bring-up scaffolding
 
 Preparation work for the Tier-3 GPU effort tracked in
 [`docs/STATUS.md`](../../docs/STATUS.md#tier-3--gfx11-gc-115-bring-up-months-high-risk).
-None of this code talks to the hardware yet — it produces the
+None of this code talks to the hardware yet - it produces the
 *ingredients* (PM4 byte streams, shader blobs, register offsets) that
 the future ring-submission code will consume.
 
@@ -11,7 +11,7 @@ the future ring-submission code will consume.
 | Path                                          | Purpose                                                     |
 |-----------------------------------------------|-------------------------------------------------------------|
 | [`pm4.py`](pm4.py)                            | Pure-Python builder for PM4 type-3 packets.                 |
-| [`test_pm4.py`](test_pm4.py)                  | Unit tests — verifies bit layouts against the AMD spec.     |
+| [`test_pm4.py`](test_pm4.py)                  | Unit tests - verifies bit layouts against the AMD spec.     |
 | [`shaders/textured_quad_vs.s`](shaders/textured_quad_vs.s) | Hand-written GFX11 vertex shader (VertexID-driven quad).    |
 | [`shaders/textured_quad_ps.s`](shaders/textured_quad_ps.s) | Matching pixel shader (texture sample → MRT0).              |
 | [`build_shaders.ps1`](build_shaders.ps1)      | Compiles `.s` → `.bin` via clang+llvm-objcopy; emits `.dis`.|
@@ -28,7 +28,7 @@ the future ring-submission code will consume.
                          ▼
 ┌─────────────┐   ┌─────────────────────┐   ┌──────────────────┐
 │ pm4.py      │──▶│ PM4 byte stream     │──▶│ CP indirect buf  │
-└─────────────┘   │ (SET_*_REG, DRAW…)  │   │ (future code)    │
+└─────────────┘   │ (SET_*_REG, DRAW...)  │   │ (future code)    │
                   └─────────────────────┘   └──────────────────┘
                                                      ▲
               ┌──────────────────────┐               │
@@ -60,7 +60,7 @@ against the AMD GFX11 ISA reference.
 ## Future-proofing notes
 
 * **Opcode table is data, not control flow.** Adding a new PM4 packet
-  is a one-liner in `pm4.py` — define `IT_FOO` and a small wrapper
+  is a one-liner in `pm4.py` - define `IT_FOO` and a small wrapper
   on `PM4Builder`. Don't grow the existing wrappers with new flags.
 * **Shader builds are independent.** Drop a new `.s` into
   `shaders/`; `build_shaders.ps1` picks it up via glob.

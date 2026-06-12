@@ -1,7 +1,7 @@
 ; ----------------------------------------------------------------------------
 ; MDIO access via the PLA_OCP_GPHY_BASE window.
 ; ----------------------------------------------------------------------------
-; rtl8156_mdio_set_base — point the GPHY indirection window at OCP_BASE_PHY.
+; rtl8156_mdio_set_base - point the GPHY indirection window at OCP_BASE_PHY.
 ; Must be called once before any mdio read/write. Linux re-points it as
 ; needed; we only ever access the 0xA000 PHY page so once is enough.
 rtl8156_mdio_set_base:
@@ -23,7 +23,7 @@ rtl8156_mdio_set_base:
     pop rax
     ret
 
-; rtl8156_mdio_read — EDI = MII reg number (0..31). Returns 16-bit value in EAX
+; rtl8156_mdio_read - EDI = MII reg number (0..31). Returns 16-bit value in EAX
 ; (low word). Caller must have set the base via rtl8156_mdio_set_base first.
 rtl8156_mdio_read:
     push rcx
@@ -58,7 +58,7 @@ rtl8156_mdio_read:
     pop rcx
     ret
 
-; rtl8156_mdio_write — EDI = MII reg, ESI = 16-bit value.
+; rtl8156_mdio_write - EDI = MII reg, ESI = 16-bit value.
 rtl8156_mdio_write:
     push rax
     push rbx
@@ -167,7 +167,7 @@ rtl8156_phy_powerup:
 
 rtl8156_vendor_init:
     ; Run the OOB exit + link-list re-init. Skipping this leaves the PHY
-    ; gated off — MDIO reads return 0 so BMSR LSTATUS never asserts and
+    ; gated off - MDIO reads return 0 so BMSR LSTATUS never asserts and
     ; rtl8156_wait_link always times out (observed on real RTL8156
     ; passthrough; the device is otherwise enumerated correctly).
     ; ----------------------------------------------------------------
@@ -371,7 +371,7 @@ rtl8156_vendor_init:
     mov rcx, RTL8156_SCRATCH_ADDR
     call rtl8156_ocp_write
 
-    ; PLA_MAR = all ones — accept any multicast hash so the filter never
+    ; PLA_MAR = all ones - accept any multicast hash so the filter never
     ; drops a frame we passed RCR. Two dword writes to cover the 8 bytes.
     mov dword [abs RTL8156_SCRATCH_ADDR], 0xFFFFFFFF
     mov edi, RTL8156_PLA_MAR
@@ -435,7 +435,7 @@ rtl8156_vendor_init:
     call rtl8156_ocp_write
 
     ; Re-clear RXDY_GATED_EN now that RX is enabled. Linux r8152.c sequences
-    ; this AFTER the PLA_CR write — clearing it beforehand alone is not
+    ; this AFTER the PLA_CR write - clearing it beforehand alone is not
     ; sufficient on r815x silicon and leaves the RX FIFO gated shut.
     mov edi, RTL8156_PLA_MISC_1 & ~3
     mov esi, RTL8156_MCU_PLA
@@ -524,7 +524,7 @@ rtl8156_wait_link:
     ;    poll blocked the whole boot until link (or timeout).
     ; Link comes up in the background; the main-loop DHCP pump and the ping ARP
     ; path retry until it does, so a slow-negotiating, later-plugged, or
-    ; different-port NIC still works — it just binds shortly after the desktop
+    ; different-port NIC still works - it just binds shortly after the desktop
     ; appears instead of holding boot hostage.
     mov edi, RTL8156_MII_BMSR
     call rtl8156_mdio_read
@@ -548,7 +548,7 @@ rtl8156_wait_link:
     call rtl8156_ser_puts
     jmp .done_ok
 .nolink_yet:
-    ; Not up yet — best-effort; background DHCP/ping retries handle it.
+    ; Not up yet - best-effort; background DHCP/ping retries handle it.
     lea rsi, [rel ser_link_wait_8156]
     call rtl8156_ser_puts
 .done_ok:

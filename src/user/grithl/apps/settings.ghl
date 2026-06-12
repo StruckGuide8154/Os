@@ -1,0 +1,851 @@
+# GritHL Settings app - tabbed redesign.
+#
+# Four tabs (Debug only appears on debug builds): General, Display, Security,
+# Debug. Each tab's content fits inside the 380x340 window with no overflow -
+# the old single-scroll layout ran past the client area. Colors resolve through
+# the active theme (UI_COL_* sentinels) so Settings follows light/dark.
+#
+# The Security tab reads the kernel's runtime hardening inventory via
+# SYS_SYSINFO selectors 200..240 (src/kernel/core/security_status.asm) and shows
+# a status pill per feature. A feature that failed to engage shows "FAILED" in
+# red instead of bricking the box - the kernel reports it rather than halting.
+
+use gui
+use svg
+
+app "Settings" { stack = 4096; }
+
+# --- Layout metrics ----------------------------------------------------------
+const PAD            = 12
+const TABBAR_H       = 26
+const CONTENT_Y0     = 34            # first content row, just below the tab bar
+
+const RES_W          = 78            # preset resolution button width
+const BG_W           = 82            # wallpaper button width
+const NATIVE_BTN_W   = 92
+const TOGGLE_COL_W   = 130
+const PILL_W         = 80            # security status pill width
+const FB_DUMP_W      = 130
+
+# --- Per-tab content Y cursors (client coords) -------------------------------
+# Display tab.
+const Y_DISP_CUR     = 34
+const Y_DISP_NAT     = 50
+const Y_DISP_NATBTN  = 48
+const Y_DISP_RESCAP  = 74
+const Y_DISP_RES     = 92
+const Y_DISP_TOG1    = 122
+const Y_DISP_TOG2    = 146
+# General tab.
+const Y_GEN_SYS      = 34
+const Y_GEN_RAM      = 56
+const Y_GEN_CPU      = 72
+const Y_GEN_GPU      = 88
+const Y_GEN_GPUID    = 104
+const Y_GEN_APP      = 130
+const Y_GEN_BG       = 152
+# Debug tab.
+const Y_DBG_TITLE    = 34
+const Y_DBG_L1       = 56
+const Y_DBG_L2       = 70
+const Y_DBG_L3       = 84
+const Y_DBG_L4       = 98
+const Y_DBG_L5       = 112
+const Y_DBG_L6       = 126
+const Y_DBG_DUMP     = 148
+# Security tab.
+const Y_SEC_SUMMARY  = 34
+const Y_SEC_LIST     = 58
+# Mouse tab.
+const Y_MOUSE_TITLE  = 34
+const Y_MOUSE_X      = 60
+const Y_MOUSE_Y      = 92
+const Y_MOUSE_HINT   = 124
+const SENSE_BTN_W    = 28          # [-] / [+] stepper width
+const SENSE_VAL_X    = 96          # value text x within row
+const SENSE_MINUS_X  = 150         # [-] button x
+const SENSE_PLUS_X   = 182         # [+] button x
+const SEC_ROW_H      = 18
+
+# --- Security status SYS_SYSINFO selectors (security_status.asm) --------------
+const SEC_SI_DEBUG   = 200
+const SEC_SI_COUNT   = 201
+const SEC_SI_ANYFAIL = 202
+const SEC_SI_READY   = 203
+const SEC_SI_FME_MODE = 204
+const SEC_SI_FEAT0   = 210
+
+# Per-feature status codes (mirror security_status.asm).
+const SECST_OFF      = 0
+const SECST_ACTIVE   = 1
+const SECST_SOFTWARE = 2
+const SECST_UNSUPP   = 3
+const SECST_FAILED   = 4
+const SEC_FME_MODE_NONE = 0
+const SEC_FME_MODE_TME  = 1
+const SEC_FME_MODE_SME  = 2
+
+# --- fbperf selectors used by the Debug tab ----------------------------------
+const FB_SI_FLIPS_TOTAL  = 100
+const FB_SI_FULL_FLIPS   = 101
+const FB_SI_RECT_FLIPS   = 102
+const FB_SI_BYTES_LO     = 103
+const FB_SI_TSC_MIN      = 107
+const FB_SI_TSC_MAX      = 108
+const FB_SI_TSC_LAST     = 109
+const FB_SI_PAT_LO       = 120
+const FB_SI_PAT_HI       = 121
+const FB_SI_MTRR_COUNT   = 123
+const FB_SI_PTE_LEVEL    = 126
+const FB_SI_CACHING_TYPE = 127
+const FB_SI_WC_ARMED     = 130
+const FB_SI_WC_ACTIVATED = 131
+const FB_SI_INIT_DONE    = 134
+const FB_SI_DUMP_SERIAL  = 199
+
+state {
+    active_tab: 4;
+    settings_flags: 4;
+    settings_last_mode_result: 4;
+    settings_bg_cache: 4;
+    current_label_buf: 24;
+    native_label_buf:  24;
+    ram_label_buf:     40;
+    cpu_label_buf:     48;
+    gpu_name_buf:      48;
+    gpu_id_buf:        56;
+    fb_line1_buf:      64;
+    fb_line2_buf:      64;
+    fb_line3_buf:      64;
+    fb_line4_buf:      64;
+    fb_line5_buf:      64;
+    fb_line6_buf:      64;
+    mouse_buf:         24;
+}
+
+# Tab + section labels.
+str tab_general   = "General";
+str tab_display   = "Display";
+str tab_security  = "Security";
+str tab_mouse     = "Mouse";
+str tab_debug     = "Debug";
+# Mouse tab strings.
+str t_pointer     = "Pointer sensitivity";
+str mouse_x_lbl   = "X axis:";
+str mouse_y_lbl   = "Y axis:";
+str sense_minus   = "-";
+str sense_plus    = "+";
+str sense_suffix  = "x";
+str mouse_hint    = "Range 0.1x - 5.0x (step 0.1)";
+str t_system      = "System";
+str t_appearance  = "Appearance";
+str t_resolution  = "Resolution";
+str t_displaysec  = "Display";
+str t_fbsec       = "Framebuffer (debug)";
+
+# Display tab strings.
+str label_vsync   = "VSync";
+str label_fps     = "Show FPS";
+str label_stretch = "Stretch to fill";
+str btn_native    = "Use Native";
+str res_800       = "800x600";
+str res_1024      = "1024x768";
+str res_1280      = "1280x720";
+str prefix_current= "Current: ";
+str prefix_native = "Native:  ";
+str mode_ok       = "Ready";
+str mode_failed   = "Mode switch failed";
+str status_hint   = "GritOS Settings";
+
+# General tab strings.
+str lbl_ram       = "RAM: ";
+str lbl_ram_suf   = " MB";
+str lbl_cpu       = "CPU: ";
+str lbl_mhz       = " MHz, ";
+str lbl_cores     = " cores";
+str prefix_gpu    = "GPU: ";
+str prefix_gpu_id = "ID: ";
+str prefix_bdf    = "  BDF: ";
+str gpu_none      = "No discrete display";
+str gpu_780m      = "AMD Radeon 780M";
+str gpu_amd       = "AMD display";
+str bg_metal      = "Metal";
+str bg_ribbons    = "Ribbons";
+str bg_bloom      = "Bloom";
+
+# Security tab strings.
+str sec_all_ok    = "All hardening features active";
+str sec_some_fail = "One or more features degraded";
+str sec_not_ready = "Status not yet available";
+str st_active     = "Active";
+str st_software   = "Software";
+str st_unsupp     = "No HW";
+str st_failed     = "FAILED";
+str st_off        = "Off";
+str st_tme_on     = "TME on";
+str st_sme_on     = "SME on";
+str st_sw_only    = "SW only";
+str sf0           = "SMEP / SMAP";
+str sf1           = "CET shadow stack";
+str sf2           = "Page-table isolation";
+str sf3           = "Syscall permutation";
+str sf4           = "KASLR";
+str sf5           = "Kernel shadow stack";
+str sf6           = "Page-table monitor";
+str sf7           = "Measured boot";
+str sf8           = "Read-only kernel";
+str sf9           = "Signed app blob";
+str sf10          = "RAM encryption";
+str sf11          = "Confidential guest";
+str sf_unknown    = "Feature";
+
+# Debug tab strings.
+str btn_dump_ser  = "Dump to serial";
+str fb_lbl_flips  = "flips t/f/r: ";
+str fb_lbl_tsc    = "tsc l/min/max: ";
+str fb_lbl_bytes  = "bytes total: ";
+str fb_lbl_pat    = "PAT: ";
+str fb_lbl_leaf   = "fb lvl/cache/mtrr#: ";
+str fb_lbl_wc     = "WC arm/act/init: ";
+
+# ---------------------------------------------------------------------------
+# Formatting helpers.
+# ---------------------------------------------------------------------------
+fn put_uint(buf, n) {
+    if n == 0 {
+        sb(buf, 48);
+        return buf + 1;
+    }
+    let p = buf;
+    while n > 0 {
+        sb(p, 48 + (n % 10));
+        p = p + 1;
+        n = n / 10;
+    }
+    let i = buf;
+    let j = p - 1;
+    while i < j {
+        let a = lb(i);
+        let b = lb(j);
+        sb(i, b);
+        sb(j, a);
+        i = i + 1;
+        j = j - 1;
+    }
+    return p;
+}
+
+fn put_hex_digit(buf, n) {
+    let d = n & 15;
+    if d < 10 {
+        sb(buf, 48 + d);
+    } else {
+        sb(buf, 55 + d);
+    }
+    return buf + 1;
+}
+
+fn put_hex16(buf, n) {
+    let p = buf;
+    p = put_hex_digit(p, n >> 12);
+    p = put_hex_digit(p, n >> 8);
+    p = put_hex_digit(p, n >> 4);
+    p = put_hex_digit(p, n);
+    return p;
+}
+
+fn put_hex32(buf, n) {
+    let p = buf;
+    p = put_hex16(p, n >> 16);
+    p = put_hex16(p, n);
+    return p;
+}
+
+fn copy_cstr(dst, src) {
+    let p = dst;
+    let s = src;
+    let c = lb(s);
+    while c != 0 {
+        sb(p, c);
+        p = p + 1;
+        s = s + 1;
+        c = lb(s);
+    }
+    return p;
+}
+
+fn fmt_labeled_res(buf, prefix, w, h) {
+    let p = copy_cstr(buf, prefix);
+    p = put_uint(p, w);
+    sb(p, 120);                        # 'x'
+    p = p + 1;
+    p = put_uint(p, h);
+    sb(p, 0);
+}
+
+# ---------------------------------------------------------------------------
+# Shared widgets.
+# ---------------------------------------------------------------------------
+fn button_frame(win, x, y, w, fill) {
+    ui_rect_at(win, x, y, w, UI_BUTTON_H, fill);
+    ui_rect_at(win, x, y, w, 1, UI_COL_BORDER_2);
+    ui_rect_at(win, x, y + UI_BUTTON_H - 1, w, 1, UI_COL_BORDER_2);
+    ui_rect_at(win, x, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
+    ui_rect_at(win, x + w - 1, y, 1, UI_BUTTON_H, UI_COL_BORDER_2);
+}
+
+fn action_button(win, x, y, w, label, active) {
+    let fill = UI_COL_SURFACE;
+    let fg = UI_COL_TEXT;
+    if active != 0 {
+        fill = UI_COL_ACCENT;
+        fg = UI_COL_TEXT_INVERT;
+    }
+    button_frame(win, x, y, w, fill);
+    ui_text_at(win, x + 5, y + 2, label, fg, fill);
+}
+
+fn section_title(win, y, label) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    ui_text_at(win, PAD, y, label, UI_COL_ACCENT, UI_COL_BG_BASE);
+    ui_rect_at(win, PAD, y + 14, cw - PAD * 2, 1, UI_COL_BORDER);
+}
+
+fn native_button_x(win) {
+    return ui_win_w(win) - UI_BORDER * 2 - PAD - NATIVE_BTN_W;
+}
+
+# ---------------------------------------------------------------------------
+# Tab bar.
+# ---------------------------------------------------------------------------
+fn sec_si(sel) {
+    return syscall(SYS_SYSINFO, sel, 0);
+}
+
+fn n_tabs() {
+    if sec_si(SEC_SI_DEBUG) != 0 {
+        return 5;
+    }
+    return 4;
+}
+
+fn tab_name(i) {
+    if i == 0 { return &tab_general; }
+    if i == 1 { return &tab_display; }
+    if i == 2 { return &tab_security; }
+    if i == 3 { return &tab_mouse; }
+    return &tab_debug;
+}
+
+fn draw_tabbar(win, n, active) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    let tw = cw / n;
+    ui_rect_at(win, 0, 0, cw, TABBAR_H, UI_COL_SURFACE_2);
+    ui_rect_at(win, 0, TABBAR_H - 1, cw, 1, UI_COL_BORDER);
+    let i = 0;
+    while i < n {
+        let tx = i * tw;
+        let fg = UI_COL_TEXT_MUTED;
+        let bg = UI_COL_SURFACE_2;
+        if i == active {
+            ui_rect_at(win, tx, 0, tw, TABBAR_H - 1, UI_COL_BG_BASE);
+            ui_rect_at(win, tx, TABBAR_H - 3, tw, 3, UI_COL_ACCENT);
+            fg = UI_COL_TEXT;
+            bg = UI_COL_BG_BASE;
+        }
+        ui_text_at(win, tx + 10, 8, tab_name(i), fg, bg);
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# General tab.
+# ---------------------------------------------------------------------------
+fn fmt_gpu_name(buf) {
+    let provider = gpu_provider();
+    let p = copy_cstr(buf, &prefix_gpu);
+    if provider == GPU_PROVIDER_780M {
+        p = copy_cstr(p, &gpu_780m);
+    } else {
+        if provider == GPU_PROVIDER_AMD {
+            p = copy_cstr(p, &gpu_amd);
+        } else {
+            p = copy_cstr(p, &gpu_none);
+        }
+    }
+    sb(p, 0);
+}
+
+fn fmt_gpu_id(buf) {
+    let id = gpu_id();
+    let vendor = id & 0xFFFF;
+    let device = (id >> 16) & 0xFFFF;
+    let p = copy_cstr(buf, &prefix_gpu_id);
+    p = put_hex16(p, vendor);
+    sb(p, 58);                         # ':'
+    p = p + 1;
+    p = put_hex16(p, device);
+    p = copy_cstr(p, &prefix_bdf);
+    p = put_hex32(p, gpu_bdf());
+    sb(p, 0);
+}
+
+fn theme_button(win, x, y, id, label) {
+    let fill = UI_COL_SURFACE;
+    let fg = UI_COL_TEXT;
+    let busy = svg_desktop_background_busy();
+    if svg_desktop_background() == id {
+        fill = UI_COL_ACCENT;
+        fg = UI_COL_TEXT_INVERT;
+    }
+    if busy != 0 {
+        fill = UI_COL_BORDER_2;
+        fg = UI_COL_TEXT_MUTED;
+    }
+    button_frame(win, x, y, BG_W, fill);
+    ui_text_at(win, x + 5, y + 2, label, fg, fill);
+}
+
+fn draw_general(win) {
+    section_title(win, Y_GEN_SYS, &t_system);
+
+    let ram_kb = sys_ram_max_kb();
+    let ram_mb = (ram_kb + 512) / 1024;
+    let p = copy_cstr(&ram_label_buf, &lbl_ram);
+    p = put_uint(p, ram_mb);
+    p = copy_cstr(p, &lbl_ram_suf);
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_GEN_RAM, &ram_label_buf, UI_COL_TEXT, UI_COL_BG_BASE);
+
+    p = copy_cstr(&cpu_label_buf, &lbl_cpu);
+    p = put_uint(p, sys_cpu_mhz());
+    p = copy_cstr(p, &lbl_mhz);
+    p = put_uint(p, sys_core_count());
+    p = copy_cstr(p, &lbl_cores);
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_GEN_CPU, &cpu_label_buf, UI_COL_TEXT, UI_COL_BG_BASE);
+
+    fmt_gpu_name(&gpu_name_buf);
+    fmt_gpu_id(&gpu_id_buf);
+    ui_text_at(win, PAD, Y_GEN_GPU,   &gpu_name_buf, UI_COL_TEXT,       UI_COL_BG_BASE);
+    ui_text_at(win, PAD, Y_GEN_GPUID, &gpu_id_buf,   UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    section_title(win, Y_GEN_APP, &t_appearance);
+    theme_button(win, ui_row_x(PAD, BG_W, 0), Y_GEN_BG, SVG_BG_LIQUID_METAL, &bg_metal);
+    theme_button(win, ui_row_x(PAD, BG_W, 1), Y_GEN_BG, SVG_BG_GLASS_RIBBONS, &bg_ribbons);
+    theme_button(win, ui_row_x(PAD, BG_W, 2), Y_GEN_BG, SVG_BG_FROSTED_BLOOM, &bg_bloom);
+}
+
+fn click_general(win, x, y) {
+    if y >= Y_GEN_BG {
+        if y < Y_GEN_BG + UI_BUTTON_H {
+            if svg_desktop_background_busy() != 0 {
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 0), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_LIQUID_METAL) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_LIQUID_METAL);
+                }
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 1), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_GLASS_RIBBONS) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_GLASS_RIBBONS);
+                }
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, BG_W, 2), Y_GEN_BG, BG_W) != 0 {
+                if svg_set_desktop_background(SVG_BG_FROSTED_BLOOM) == 0 {
+                    sw(&settings_bg_cache, SVG_BG_FROSTED_BLOOM);
+                }
+                return;
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Display tab.
+# ---------------------------------------------------------------------------
+fn sync_flags() {
+    let flags = display_flags();
+    if flags >= 0 {
+        sw(&settings_flags, flags);
+    }
+    return lw(&settings_flags);
+}
+
+fn set_mode(width, height) {
+    let rc = display_set_mode(width, height, 32);
+    sw(&settings_last_mode_result, rc);
+    if rc == 0 {
+        cursor_init();
+    }
+}
+
+fn draw_display(win) {
+    let flags = sync_flags();
+    let cur_w = display_current_width();
+    let cur_h = display_current_height();
+    let nat_w = display_native_width();
+    let nat_h = display_native_height();
+
+    section_title(win, Y_DISP_CUR - 2, &t_displaysec);
+
+    fmt_labeled_res(&current_label_buf, &prefix_current, cur_w, cur_h);
+    fmt_labeled_res(&native_label_buf,  &prefix_native,  nat_w, nat_h);
+    ui_text_at(win, PAD, Y_DISP_CUR + 18, &current_label_buf, UI_COL_TEXT,       UI_COL_BG_BASE);
+    ui_text_at(win, PAD, Y_DISP_NAT + 18, &native_label_buf,  UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    let native_active = 0;
+    if cur_w == nat_w {
+        if cur_h == nat_h {
+            native_active = 1;
+        }
+    }
+    action_button(win, native_button_x(win), Y_DISP_NATBTN + 18, NATIVE_BTN_W, &btn_native, native_active);
+
+    ui_caption(win, PAD, Y_DISP_RESCAP + 18, &t_resolution);
+    action_button(win, ui_row_x(PAD, RES_W, 0), Y_DISP_RES + 18, RES_W, &res_800,  0);
+    action_button(win, ui_row_x(PAD, RES_W, 1), Y_DISP_RES + 18, RES_W, &res_1024, 0);
+    action_button(win, ui_row_x(PAD, RES_W, 2), Y_DISP_RES + 18, RES_W, &res_1280, 0);
+
+    ui_checkbox(win, PAD,                 Y_DISP_TOG1 + 18, flags & DISPLAY_FLAG_VSYNC,   &label_vsync);
+    ui_checkbox(win, PAD + TOGGLE_COL_W,  Y_DISP_TOG1 + 18, flags & DISPLAY_FLAG_FPS,     &label_fps);
+    ui_checkbox(win, PAD,                 Y_DISP_TOG2 + 18, flags & DISPLAY_FLAG_STRETCH, &label_stretch);
+}
+
+fn toggle_flag(bit) {
+    let flags = sync_flags();
+    flags = flags ^ bit;
+    display_set_flags(flags);
+    sw(&settings_flags, flags);
+}
+
+fn click_display(win, x, y) {
+    if y >= Y_DISP_NATBTN + 18 {
+        if y < Y_DISP_NATBTN + 18 + UI_BUTTON_H {
+            if ui_button_hit(x, y, native_button_x(win), Y_DISP_NATBTN + 18, NATIVE_BTN_W) != 0 {
+                set_mode(display_native_width(), display_native_height());
+                return;
+            }
+        }
+    }
+    if y >= Y_DISP_RES + 18 {
+        if y < Y_DISP_RES + 18 + UI_BUTTON_H {
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 0), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(800, 600);
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 1), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(1024, 768);
+                return;
+            }
+            if ui_button_hit(x, y, ui_row_x(PAD, RES_W, 2), Y_DISP_RES + 18, RES_W) != 0 {
+                set_mode(1280, 720);
+                return;
+            }
+        }
+    }
+    if y >= Y_DISP_TOG1 + 18 {
+        if y < Y_DISP_TOG1 + 18 + UI_CHECK_SIZE {
+            if x >= PAD {
+                if x < PAD + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_VSYNC);
+                    return;
+                }
+            }
+            if x >= PAD + TOGGLE_COL_W {
+                if x < PAD + TOGGLE_COL_W + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_FPS);
+                    return;
+                }
+            }
+        }
+    }
+    if y >= Y_DISP_TOG2 + 18 {
+        if y < Y_DISP_TOG2 + 18 + UI_CHECK_SIZE {
+            if x >= PAD {
+                if x < PAD + UI_CHECK_SIZE {
+                    toggle_flag(DISPLAY_FLAG_STRETCH);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Security tab.
+# ---------------------------------------------------------------------------
+fn sec_feat_name(i) {
+    if i == 0 { return &sf0; }
+    if i == 1 { return &sf1; }
+    if i == 2 { return &sf2; }
+    if i == 3 { return &sf3; }
+    if i == 4 { return &sf4; }
+    if i == 5 { return &sf5; }
+    if i == 6 { return &sf6; }
+    if i == 7 { return &sf7; }
+    if i == 8 { return &sf8; }
+    if i == 9 { return &sf9; }
+    if i == 10 { return &sf10; }
+    if i == 11 { return &sf11; }
+    return &sf_unknown;
+}
+
+fn sec_status_text(code) {
+    if code == SECST_ACTIVE   { return &st_active; }
+    if code == SECST_SOFTWARE { return &st_software; }
+    if code == SECST_UNSUPP   { return &st_unsupp; }
+    if code == SECST_FAILED   { return &st_failed; }
+    return &st_off;
+}
+
+fn sec_feature_status_text(i, code) {
+    if i == 10 {
+        let mode = sec_si(SEC_SI_FME_MODE);
+        if mode == SEC_FME_MODE_TME { return &st_tme_on; }
+        if mode == SEC_FME_MODE_SME { return &st_sme_on; }
+        if code == SECST_SOFTWARE { return &st_sw_only; }
+    }
+    return sec_status_text(code);
+}
+
+fn sec_status_color(code) {
+    if code == SECST_ACTIVE   { return UI_COL_SUCCESS; }
+    if code == SECST_SOFTWARE { return UI_COL_SUCCESS; }
+    if code == SECST_FAILED   { return UI_COL_ERROR; }
+    return UI_COL_BORDER_2;
+}
+
+fn draw_security(win) {
+    let cw = ui_win_w(win) - UI_BORDER * 2;
+    let ready = sec_si(SEC_SI_READY);
+    let anyfail = sec_si(SEC_SI_ANYFAIL);
+
+    # Summary banner.
+    let banner = UI_COL_SUCCESS;
+    let msg = &sec_all_ok;
+    if ready == 0 {
+        banner = UI_COL_BORDER_2;
+        msg = &sec_not_ready;
+    } else {
+        if anyfail != 0 {
+            banner = UI_COL_ERROR;
+            msg = &sec_some_fail;
+        }
+    }
+    ui_rect_at(win, PAD, Y_SEC_SUMMARY, cw - PAD * 2, 18, banner);
+    ui_text_at(win, PAD + 6, Y_SEC_SUMMARY + 3, msg, UI_COL_TEXT_INVERT, banner);
+
+    # Per-feature rows.
+    let count = sec_si(SEC_SI_COUNT);
+    let pill_x = cw - PAD - PILL_W;
+    let y = Y_SEC_LIST;
+    let i = 0;
+    while i < count {
+        let code = sec_si(SEC_SI_FEAT0 + i);
+        ui_text_at(win, PAD, y + 2, sec_feat_name(i), UI_COL_TEXT, UI_COL_BG_BASE);
+        let col = sec_status_color(code);
+        ui_rect_at(win, pill_x, y, PILL_W, 16, col);
+        ui_text_at(win, pill_x + 6, y + 2, sec_feature_status_text(i, code), UI_COL_TEXT_INVERT, col);
+        y = y + SEC_ROW_H;
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Debug tab (only reachable when n_tabs() == 4 on a debug build).
+# ---------------------------------------------------------------------------
+fn fbperf_get(sel) {
+    return syscall(SYS_SYSINFO, sel, 0);
+}
+
+fn draw_debug(win) {
+    section_title(win, Y_DBG_TITLE, &t_fbsec);
+
+    let p = copy_cstr(&fb_line1_buf, &fb_lbl_flips);
+    p = put_uint(p, fbperf_get(FB_SI_FLIPS_TOTAL));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_FULL_FLIPS));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_RECT_FLIPS));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L1, &fb_line1_buf, UI_COL_TEXT, UI_COL_BG_BASE);
+
+    p = copy_cstr(&fb_line2_buf, &fb_lbl_tsc);
+    p = put_uint(p, fbperf_get(FB_SI_TSC_LAST));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_TSC_MIN));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_TSC_MAX));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L2, &fb_line2_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    p = copy_cstr(&fb_line3_buf, &fb_lbl_bytes);
+    p = put_uint(p, fbperf_get(FB_SI_BYTES_LO));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L3, &fb_line3_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    p = copy_cstr(&fb_line4_buf, &fb_lbl_pat);
+    p = put_hex32(p, fbperf_get(FB_SI_PAT_HI));
+    p = put_hex32(p, fbperf_get(FB_SI_PAT_LO));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L4, &fb_line4_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    p = copy_cstr(&fb_line5_buf, &fb_lbl_leaf);
+    p = put_uint(p, fbperf_get(FB_SI_PTE_LEVEL));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_CACHING_TYPE));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_MTRR_COUNT));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L5, &fb_line5_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    p = copy_cstr(&fb_line6_buf, &fb_lbl_wc);
+    p = put_uint(p, fbperf_get(FB_SI_WC_ARMED));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_WC_ACTIVATED));
+    sb(p, 47); p = p + 1;
+    p = put_uint(p, fbperf_get(FB_SI_INIT_DONE));
+    sb(p, 0);
+    ui_text_at(win, PAD, Y_DBG_L6, &fb_line6_buf, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+
+    action_button(win, PAD, Y_DBG_DUMP, FB_DUMP_W, &btn_dump_ser, 0);
+}
+
+fn click_debug(win, x, y) {
+    if y >= Y_DBG_DUMP {
+        if y < Y_DBG_DUMP + UI_BUTTON_H {
+            if ui_button_hit(x, y, PAD, Y_DBG_DUMP, FB_DUMP_W) != 0 {
+                fbperf_get(FB_SI_DUMP_SERIAL);
+                return;
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Mouse tab - per-axis pointer sensitivity (0.1x .. 5.0x).
+# Kernel stores sensitivity as tenths [1,50]; SYS_MOUSE_SENSE packs x[15:0],
+# y[31:16]. SYS_SET_MOUSE_SENSE writes the same packing (kernel re-clamps).
+# ---------------------------------------------------------------------------
+fn mouse_sense_get() {
+    return syscall(SYS_MOUSE_SENSE, 0, 0);
+}
+
+fn mouse_sense_set(sx, sy) {
+    let packed = (sx & 0xFFFF) | ((sy & 0xFFFF) << 16);
+    syscall(SYS_SET_MOUSE_SENSE, packed, 0);
+}
+
+# Format a tenths value (e.g. 25) into buf as "2.5x".
+fn fmt_sense(buf, tenths) {
+    let p = put_uint(buf, tenths / 10);
+    sb(p, 46); p = p + 1;             # '.'
+    p = put_uint(p, tenths % 10);
+    p = copy_cstr(p, &sense_suffix);
+    sb(p, 0);
+}
+
+# One sensitivity row: label, current value, [-] and [+] steppers.
+fn draw_sense_row(win, y, lbl, tenths) {
+    ui_text_at(win, PAD, y + 4, lbl, UI_COL_TEXT, UI_COL_BG_BASE);
+    fmt_sense(&mouse_buf, tenths);
+    ui_text_at(win, SENSE_VAL_X, y + 4, &mouse_buf, UI_COL_ACCENT, UI_COL_BG_BASE);
+    action_button(win, SENSE_MINUS_X, y, SENSE_BTN_W, &sense_minus, 0);
+    action_button(win, SENSE_PLUS_X,  y, SENSE_BTN_W, &sense_plus,  0);
+}
+
+fn draw_mouse(win) {
+    section_title(win, Y_MOUSE_TITLE, &t_pointer);
+    let packed = mouse_sense_get();
+    draw_sense_row(win, Y_MOUSE_X, &mouse_x_lbl, packed & 0xFFFF);
+    draw_sense_row(win, Y_MOUSE_Y, &mouse_y_lbl, (packed >> 16) & 0xFFFF);
+    ui_text_at(win, PAD, Y_MOUSE_HINT, &mouse_hint, UI_COL_TEXT_MUTED, UI_COL_BG_BASE);
+}
+
+# Clamp tenths to [1,50].
+fn clamp_sense(t) {
+    if t < 1 { return 1; }
+    if t > 50 { return 50; }
+    return t;
+}
+
+fn click_mouse(win, x, y) {
+    let packed = mouse_sense_get();
+    let sx = packed & 0xFFFF;
+    let sy = (packed >> 16) & 0xFFFF;
+
+    if y >= Y_MOUSE_X {
+        if y < Y_MOUSE_X + UI_BUTTON_H {
+            if ui_button_hit(x, y, SENSE_MINUS_X, Y_MOUSE_X, SENSE_BTN_W) != 0 {
+                mouse_sense_set(clamp_sense(sx - 1), sy); return;
+            }
+            if ui_button_hit(x, y, SENSE_PLUS_X, Y_MOUSE_X, SENSE_BTN_W) != 0 {
+                mouse_sense_set(clamp_sense(sx + 1), sy); return;
+            }
+        }
+    }
+    if y >= Y_MOUSE_Y {
+        if y < Y_MOUSE_Y + UI_BUTTON_H {
+            if ui_button_hit(x, y, SENSE_MINUS_X, Y_MOUSE_Y, SENSE_BTN_W) != 0 {
+                mouse_sense_set(sx, clamp_sense(sy - 1)); return;
+            }
+            if ui_button_hit(x, y, SENSE_PLUS_X, Y_MOUSE_Y, SENSE_BTN_W) != 0 {
+                mouse_sense_set(sx, clamp_sense(sy + 1)); return;
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Entry points.
+# ---------------------------------------------------------------------------
+fn draw(win) {
+    let n = n_tabs();
+    let tab = lw(&active_tab);
+    if tab >= n {
+        tab = 0;
+        sw(&active_tab, 0);
+    }
+
+    ui_fill_client_below(win, 0, UI_COL_BG_BASE);
+    draw_tabbar(win, n, tab);
+
+    if tab == 0 { draw_general(win); }
+    if tab == 1 { draw_display(win); }
+    if tab == 2 { draw_security(win); }
+    if tab == 3 { draw_mouse(win); }
+    if tab == 4 { draw_debug(win); }
+
+    if lw(&settings_last_mode_result) < 0 {
+        ui_status_bar(win, &mode_failed, UI_COL_ERROR);
+    } else {
+        ui_status_bar(win, &status_hint, UI_COL_SURFACE_2);
+    }
+}
+
+fn click(win, x, y) {
+    let n = n_tabs();
+    if y < TABBAR_H {
+        let cw = ui_win_w(win) - UI_BORDER * 2;
+        let tw = cw / n;
+        let idx = x / tw;
+        if idx >= n {
+            idx = n - 1;
+        }
+        sw(&active_tab, idx);
+        return;
+    }
+    let tab = lw(&active_tab);
+    if tab == 0 { click_general(win, x, y); return; }
+    if tab == 1 { click_display(win, x, y); return; }
+    if tab == 3 { click_mouse(win, x, y); return; }
+    if tab == 4 { click_debug(win, x, y); return; }
+}
+
+fn key(win, k) {
+    return;
+}

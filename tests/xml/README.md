@@ -18,7 +18,7 @@ For well-formed inputs the harness should validate:
   expected child in source order.
 - Entity decoding produces the expected bytes (`&amp;` -> `&`,
   `&#65;` -> `A`, `&#x42;` -> `B`, and internal-DTD custom entities
-  such as `<!ENTITY brand "NexusOS">`).
+  such as `<!ENTITY brand "GritOS">`).
 - CDATA preserves `<`, `&`, `>` literally.
 
 These fixtures are designed to be small enough that the smoke run can

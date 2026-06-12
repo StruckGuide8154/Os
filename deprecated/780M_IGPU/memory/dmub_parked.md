@@ -7,15 +7,15 @@ metadata:
   originSessionId: 780f13ff-57d6-48cd-9fde-01cb68641e66
 ---
 
-# DMUB bring-up — PARKED 2026-05-25
+# DMUB bring-up - PARKED 2026-05-25
 
 **Status:** Phase 1 (read-only blob parse) landed on `dev` but hardware
-shows `FW stat=00000001` (file not found at runtime — fat16 lookup or
+shows `FW stat=00000001` (file not found at runtime - fat16 lookup or
 init-order bug, not investigated). Phase 2 (reset + load + release) not
 started.
 
 **Why parked:** User clarified the real goal is "iGPU rendering stuff,"
-not panel backlight control. DMCUB does not draw pixels — it's a
+not panel backlight control. DMCUB does not draw pixels - it's a
 power/PSR/backlight microcontroller. Even a fully working DMUB mailbox
 would not move us closer to hardware-accelerated rendering. The GFX
 block (GC 11.5 on Strix) is a separate engine with its own firmware
@@ -26,8 +26,8 @@ side quest. Pivoting to either (a) faster CPU rendering paths or
 (b) GFX bring-up is the better use of time.
 
 **How to apply:** If a future task asks about DMUB, backlight, PSR,
-panel power, or hotplug — this work is the right starting point and
-the notes below are accurate. For anything 3D / compute / VCN — DMUB
+panel power, or hotplug - this work is the right starting point and
+the notes below are accurate. For anything 3D / compute / VCN - DMUB
 is irrelevant; this file does not apply.
 
 ## State on disk (2026-05-25)
@@ -40,12 +40,12 @@ is irrelevant; this file does not apply.
   + scans for `dmub_fw_meta_info` magic. Called from `=` overlay.
 - `src/kernel/drivers/amd_dcn.asm` has CW4 mailbox at VRAM
   `0x64000000/0x64002000`, 8KB rings. Last hardware photo:
-  `cmd stat=00000005` (sent + timeout — firmware in deep IPS, won't
+  `cmd stat=00000005` (sent + timeout - firmware in deep IPS, won't
   consume inbox commands).
 
 ## What was learned (keep, may apply elsewhere)
 - DCN 3.5 on Strix Point uses DCN 3.1.4-ish register layout but
-  CW6 register offsets differ — our 3.1.4 offsets returned junk
+  CW6 register offsets differ - our 3.1.4 offsets returned junk
   (`top=3C09476B` etc., should be `top=...80000000` if mapped).
 - BAR0 needs UC PT alias to MMIO-poke DMCUB; we have an 8MB UC window.
 - DMCUB boot_status bits in `SCRATCH0`: `0x12B` includes bit3 =
@@ -83,15 +83,15 @@ After good Phase 1, mirror `dmub_dcn31_setup_windows` +
 3. `DMCUB_CNTL2.SOFT_RESET=1`, then clear. Poke `DMCUB_SEC_CNTL`.
 4. Copy `inst_const` (`ucode_off + 0x100`, `0x7f5a0` bytes) into CW0
    via UC alias.
-5. Program CW0–CW7 registers per `dcn_3_1_4_offset.h` indices
-   0x0193–0x01c4 (formula `(SEG2_base=0x34C0 + idx) * 4`). Verify
+5. Program CW0-CW7 registers per `dcn_3_1_4_offset.h` indices
+   0x0193-0x01c4 (formula `(SEG2_base=0x34C0 + idx) * 4`). Verify
    offsets against DCN 3.5 header if available.
 6. Release reset. Poll `SCRATCH0` up to 500ms for
    `DAL_FW | MAILBOX_READY | HW_POWER_INIT_DONE`.
 7. Send `OUTBOX1_ENABLE` through existing mailbox path.
 
 Gate the whole thing behind `amd_dcn_dmub_fw_reload_arm: db 0` so a
-bad build doesn't blank the panel — flip to 1 only after diag looks
+bad build doesn't blank the panel - flip to 1 only after diag looks
 clean.
 
 ## DCN 3.5 expected meta values (from blob parse)

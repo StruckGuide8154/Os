@@ -45,11 +45,11 @@ extern smn_r32
 extern smn_w32
 extern tick_count
 
-; PSP (MP0) access path — UNRESOLVED on Strix Point.
+; PSP (MP0) access path - UNRESOLVED on Strix Point.
 ;
-; Attempt 1: SMN proxy at 0x03800000 — every read returned 0x13 (stale SMU
+; Attempt 1: SMN proxy at 0x03800000 - every read returned 0x13 (stale SMU
 ;            bus data). Wrong segment.
-; Attempt 2: Direct BAR0 MMIO at byte offset MP0_BASE (0x58000) — appeared
+; Attempt 2: Direct BAR0 MMIO at byte offset MP0_BASE (0x58000) - appeared
 ;            to wedge NBIO/SMN on the next boot, with SMU SMN reads returning
 ;            FFFFFFFF until full power cycle. Wrong offset.
 ;

@@ -1,4 +1,4 @@
-# Trace 03 — PIT Tick → tick_count + Wall Clock
+# Trace 03 - PIT Tick → tick_count + Wall Clock
 
 ## Entry
 
@@ -16,17 +16,17 @@ IRQ0 (vector 32) at PIT_FREQUENCY (default 100 Hz, period 10 ms).
 | 6 | pit.asm:45-48 | minutes = 0; `inc time_hours`; if <24 done | hours++ |
 | 7 | pit.asm:49 | hours = 0 (rolls over at midnight) | hours=0 |
 
-Returns. EOI handled by caller stub (NOT by pit_handler itself — verified Round 4).
+Returns. EOI handled by caller stub (NOT by pit_handler itself - verified Round 4).
 
 ## Consumers
 
-- `tick_count` (qword, 100 Hz) — used as monotonic deadline in:
+- `tick_count` (qword, 100 Hz) - used as monotonic deadline in:
   - `xhci_submit_cmd`, `usb_wait_completion`, `xhci_find_port` `.wait_reset`/`.post_reset_wait`/`.wait_ped` (Round 5)
   - `ata_wait_ready`, `ata_wait_drq` (Round 9)
   - `spi_hid_init` reset wait (Round 9)
   - `keyboard_repeat_tick` deadline check
   - FPS computation in main.asm `.rf_fps`
-- `time_hours, time_minutes` — taskbar clock render (`tb_draw` clock section).
+- `time_hours, time_minutes` - taskbar clock render (`tb_draw` clock section).
 
 ## PIT init
 
@@ -41,12 +41,12 @@ time_seconds=0, time_minutes=0, time_hours=12
 
 ## Audit-pass note
 
-- Sub-agent Round 4 flagged "pit_handler missing EOI". Verified false: EOI is in the dispatcher (isr.asm:230-234), not in the handler. This is the right design — handlers are pure subroutines.
+- Sub-agent Round 4 flagged "pit_handler missing EOI". Verified false: EOI is in the dispatcher (isr.asm:230-234), not in the handler. This is the right design - handlers are pure subroutines.
 - `tick_count` is qword: at 100 Hz, wraps after 5.8 billion years. No wraparound concern.
 
 ## Failure modes
 
-- Lost tick: if PIC EOI delayed too long, IRQ0 may queue and burst. Kernel handles gracefully — it's just a counter.
+- Lost tick: if PIC EOI delayed too long, IRQ0 may queue and burst. Kernel handles gracefully - it's just a counter.
 - Sub-ticks counter race: pit_handler is interrupt context, no other writer. Consumer reads `tick_count` are 8-byte aligned and atomic on x86.
 
 ## Invariants

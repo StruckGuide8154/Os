@@ -1,8 +1,8 @@
-# Track 5 — All-Vendor Hardware Separation Monitor (the irreducible-hardware tier)
+# Track 5 - All-Vendor Hardware Separation Monitor (the irreducible-hardware tier)
 
-Goal: provide the **two guarantees that software alone cannot** — and provide them
+Goal: provide the **two guarantees that software alone cannot** - and provide them
 on **every virtualization-capable ISA** behind one vendor-neutral interface, so
-NexusOS gets maximum hardware compatibility instead of being Intel-only. This is
+GritOS gets maximum hardware compatibility instead of being Intel-only. This is
 the hardware half of `docs/The final goal after the rest.txt`. Everything in that
 goal file that does NOT require hardware moves to **Track 6** (the compartmentalized
 software "-1" monitor); this track is *only* the residual that genuinely needs
@@ -10,13 +10,13 @@ silicon.
 
 The two irreducible-hardware guarantees (established in the Track 6 analysis):
 
-- **G1 — Privilege below ring-0 (un-disableable floor).** A software monitor lives
+- **G1 - Privilege below ring-0 (un-disableable floor).** A software monitor lives
   at the same privilege as the kernel it guards, so a compromised ring-0 can
   `clear CR0.WP` / rewrite CR3 / execute privileged instructions to disable it.
   Only a mode *beneath* ring-0 can trap those. This is what makes the Track 6
   compartments un-disableable rather than merely expensive-to-disable. (Also
   closes the existing nk_monitor SMP/AP gap where APs run with WP=0.)
-- **G2 — Device-DMA confinement.** A malicious device DMAs straight to physical
+- **G2 - Device-DMA confinement.** A malicious device DMAs straight to physical
   RAM, bypassing the CPU MMU entirely. Only an IOMMU can stop it. No CPU-side
   software substitute exists.
 
@@ -26,7 +26,7 @@ no-IOMMU boards, virt disabled in firmware) the system stays safe on the Track 6
 software floor with the two residuals documented honestly. Hardware is hardening,
 never a prerequisite for safety.
 
-Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Compromised Kernel And
+Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P0: Compromised Kernel And
 Hypervisor Containment" + Kill-Chain "opportunistic monitor/hypervisor tier".
 Depends on Track 6 (the compartments are what this tier makes un-disableable) and
 Track 2 (verify-before-map-executable).
@@ -37,13 +37,13 @@ Track 2 (verify-before-map-executable).
 
 Same discipline as Track 3. Maturity tags:
 
-- `modeled` — code exists, logic exercised on host/compiler, fails closed.
-- `tested-tcg` — exercised under QEMU **without** hardware virt (logic only:
+- `modeled` - code exists, logic exercised on host/compiler, fails closed.
+- `tested-tcg` - exercised under QEMU **without** hardware virt (logic only:
   field encode/decode, page-table math, HAL dispatch). **Does NOT mean the
-  hardware enforces anything** — TCG runs none of VMX-root / SVM / EL2 / H-mode.
-- `tested-accel` — exercised where the relevant extension actually traps
+  hardware enforces anything** - TCG runs none of VMX-root / SVM / EL2 / H-mode.
+- `tested-accel` - exercised where the relevant extension actually traps
   (KVM-nested, `-cpu host,+vmx/+svm`, ARM virt host, etc.).
-- `tested-hw` — exercised on real silicon of that vendor.
+- `tested-hw` - exercised on real silicon of that vendor.
 
 We never claim hardware enforcement from a TCG boot, and never claim a vendor's
 path works until it is at least `tested-accel` for that vendor. We never claim
@@ -54,13 +54,13 @@ safety after arbitrary total hardware compromise.
 
 ---
 
-## The vendor-neutral monitor HAL (do this FIRST — it is the compatibility story)
+## The vendor-neutral monitor HAL (do this FIRST - it is the compatibility story)
 
-Everything below plugs into one abstract interface so the rest of NexusOS, and
+Everything below plugs into one abstract interface so the rest of GritOS, and
 all of Track 6, are vendor-agnostic. Adding a new ISA = implementing the HAL, not
 touching callers.
 
-- [ ] Define `mon_hal` interface (NHL, `--forbid-asm --deny-unsafe`): `detect()`,
+- [ ] Define `mon_hal` interface (GHL, `--forbid-asm --deny-unsafe`): `detect()`,
       `enter_root()`, `make_guest(state)`, `second_stage_map(gpa, hpa, perms)`,
       `protect_region(region, perms)`, `trap_on(event-set)`, `iommu_map(dev, buf,
       perms)`, `iommu_fault_handler()`, `status()`. Vendor back-ends register
@@ -68,19 +68,19 @@ touching callers.
 - [x] Capability probe that selects a back-end at boot and publishes the chosen
       tier + per-feature availability via `SYS_SYSINFO` (200..240 range, same
       fail-soft pattern as CET/SMAP/KPTI/TME rows). `modeled`
-      `mon_hal_select_backend` (in `src/tools/security/mon_hal_detect.nxh`) picks
+      `mon_hal_select_backend` (in `src/tools/security/mon_hal_detect.ghl`) picks
       the tier from the per-vendor `*_usable` predicates; `mon_hal_status` maps it
       to a SYS_SYSINFO row.
 - [x] Fallback contract: if `detect()` finds nothing, `mon_hal` reports
       `floor-only` and Track 6 runs unchanged on the software floor. `tested-tcg`
       `mon_hal_select_backend` returns `MONHAL_TIER_FLOOR_ONLY` for every
       non-virtualizable case and `mon_hal_status` reports `FLOOR_ONLY` (a distinct
-      "software floor" row, never an error) — the only leg actually reachable on
+      "software floor" row, never an error) - the only leg actually reachable on
       QEMU TCG.
 
 ---
 
-## G1 — privilege-below-ring-0 interposition (per vendor)
+## G1 - privilege-below-ring-0 interposition (per vendor)
 
 For each vendor: bring up the root/hypervisor mode, run the existing kernel as a
 guest under an identity second-stage map (so behavior is unchanged), then trap the
@@ -125,13 +125,13 @@ events that would let a compromised ring-0 disable the Track 6 compartments
 
 ### Cross-vendor
 - [ ] Carve the monitor + every Track 6 compartment OUT of the guest's
-      second-stage map (not RO — **not present**); negative test per vendor: guest
+      second-stage map (not RO - **not present**); negative test per vendor: guest
       read of a compartment page → second-stage violation exit. `tested-accel`
 - [ ] EPT/NPT/stage-2/G-stage enforce W^X **independently of guest page tables**:
       guest clears WP + writes `.text` → second-stage violation, not a patch.
       `tested-accel` (per vendor) → `tested-hw`
 
-## G2 — IOMMU / device-DMA confinement (per vendor)
+## G2 - IOMMU / device-DMA confinement (per vendor)
 
 Install DMA-remapping from the per-artifact `allowed DMA buffers` manifest field
 (Track 2); device DMA outside its grant faults. Genuinely impossible in software.

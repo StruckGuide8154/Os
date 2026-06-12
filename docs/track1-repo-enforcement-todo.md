@@ -1,11 +1,11 @@
-# Track 1 — Repository Enforcement (Beyond-Zero-Trust P0)
+# Track 1 - Repository Enforcement (Beyond-Zero-Trust P0)
 
-Goal: make "the trusted path is NHL/NexusHLK-only" a property the repository
+Goal: make "the trusted path is GHL/GritHLK-only" a property the repository
 *enforces*, not a property we hope holds. This is the cheap, load-bearing track:
 without it the no-asm posture rots silently as files are added.
 
-Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" and
-`docs/agent-nhl-no-asm-audit.md` → "Phase 1: freeze and inventory".
+Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" and
+`docs/agent-ghl-no-asm-audit.md` → "Phase 1: freeze and inventory".
 
 ## Status legend
 - [x] done and verified green
@@ -21,63 +21,63 @@ Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" an
 - [x] Monotonic-shrink guard: a listed file that no longer exists is reported as
       a stale entry so the inventory can only shrink as migration deletes legacy.
 - [x] Wire the inventory guard into the verification entry point
-      (`scripts/test/test_nhl_security_guards.ps1`).
+      (`scripts/test/test_ghl_security_guards.ps1`).
 - [x] Baseline is green (no new/stale entries against the current tree).
 
-## P0 — finish repository enforcement
+## P0 - finish repository enforcement
 
 - [x] Record per-entry metadata. The manifest is a structured pipe-delimited
       format (`path | subsystem | risk | status | replacement`); the guard parses
       the path column and rejects malformed lines (negative-tested). `replacement`
       is now filled and `status` flipped to `migrating` for every legacy file with
-      a started `.nxh` counterpart (kernel: syscall_security/validation/support/
+      a started `.ghl` counterpart (kernel: syscall_security/validation/support/
       data.inc, usermode_callbacks/integrity.inc, window.asm, usb_hid.asm; user:
       about/settings/shell.inc). Files with no genuinely-knowable target stay
-      `legacy`/TBD — not invented.
+      `legacy`/TBD - not invented.
 - [x] Add a guard rule that fails on `%include "*.asm"` / `%include "*.inc"`
       appearing in any **new-architecture** build script, allowing only the
       quarantined legacy build graph (`kernel_build.asm`, `apps.asm`,
-      `build_bios.ps1`, `build_uefi.ps1`, `build_nxh.ps1`, plus the legacy NASM
-      verification harnesses test_nxhc_security.ps1 / boot_parity.ps1). Also fails
+      `build_bios.ps1`, `build_uefi.ps1`, `build_ghl.ps1`, plus the legacy NASM
+      verification harnesses test_gritc_security.ps1 / boot_parity.ps1). Also fails
       on `nasm`/`-f bin` in a non-legacy build script.
       (`tools/security/check_build_integrity.ps1`, rule `new-arch-build-asm-include`.)
-- [x] Add a guard rule that fails when a generated `build/nxh/**/*.asm` or
-      `build/nxh/generated_apps.inc` is `%include`'d as a source of truth by any
+- [x] Add a guard rule that fails when a generated `build/ghl/**/*.asm` or
+      `build/ghl/generated_apps.inc` is `%include`'d as a source of truth by any
       file other than the two legacy aggregators.
       (`tools/security/check_build_integrity.ps1`, rule `generated-artifact-as-source`.)
 - [x] Add a raw instruction-emitter-string guard: fail on bare NASM mnemonic/reg
-      text in `.nxh` outside the compiler backend allowlist (`nxhc.py`).
-      (`tools/security/check_nhl_presubmit.ps1`, rule `nxh-raw-emitter-string`.)
+      text in `.ghl` outside the compiler backend allowlist (`gritc.py`).
+      (`tools/security/check_ghl_presubmit.ps1`, rule `ghl-raw-emitter-string`.)
 - [x] Add presubmit: reject new public APIs exposed through `.inc` include files
       (global/%define/%macro/EXPORT in a `.inc` not already frozen in the
-      inventory). (`check_nhl_presubmit.ps1`, rule `inc-public-api`.)
-- [x] Add presubmit: reject undocumented compiler intrinsics — every intrinsic
-      nxhc.py registers in `_NULLARY_INTRINSICS` must be in the guard's frozen
+      inventory). (`check_ghl_presubmit.ps1`, rule `inc-public-api`.)
+- [x] Add presubmit: reject undocumented compiler intrinsics - every intrinsic
+      gritc.py registers in `_NULLARY_INTRINSICS` must be in the guard's frozen
       documented-intrinsic allowlist (freeze pattern, like the legacy inventory).
-      (`check_nhl_presubmit.ps1`, rule `undocumented-intrinsic`.)
+      (`check_ghl_presubmit.ps1`, rule `undocumented-intrinsic`.)
 - [x] Add presubmit: reject security modules without a threat note header
       (no security-reasoning comment in a policy module's first 14 lines).
-      (`check_nhl_presubmit.ps1`, rule `missing-threat-note`.)
+      (`check_ghl_presubmit.ps1`, rule `missing-threat-note`.)
 - [x] Add presubmit: reject release logging calls in security/policy/crypto
-      modules — a serial/console sink at release scope (outside a
+      modules - a serial/console sink at release scope (outside a
       `cfg "ENABLE_*"` debug-gated block).
-      (`check_nhl_presubmit.ps1`, rule `release-logging-in-security`.)
+      (`check_ghl_presubmit.ps1`, rule `release-logging-in-security`.)
 - [x] Add presubmit: reject raw user data in log/trace format strings.
-      (`check_nhl_presubmit.ps1`, rule `raw-user-data-in-log`.)
+      (`check_ghl_presubmit.ps1`, rule `raw-user-data-in-log`.)
 
-## P0 — CI surfacing
+## P0 - CI surfacing
 
-- [x] Emit a single line `NHL-only trusted path: pass/fail`
+- [x] Emit a single line `GHL-only trusted path: pass/fail`
       (`scripts/test/ci_security_summary.ps1`, driven by the entry-point exit).
 - [x] Emit a single line `legacy assembly quarantine unchanged: pass/fail`
-      (diff inventory vs. tree; fail on additions, allow deletions —
+      (diff inventory vs. tree; fail on additions, allow deletions -
       `ci_security_summary.ps1` treats only new/missing/malformed findings as
       failure, allowing `stale-inventory-entry` deletions).
 - [x] Fail CI if new `.asm`/`.inc`/`.s` appear in `build/`, `dist/`, or active
       source after a new-architecture build runs (dirty-output guard:
       `scripts/test/ci_dirty_output_guard.ps1`, snapshot/compare).
 - [x] Run the inventory guard in CI on every PR, not just locally
-      (`.github/workflows/nhl-security.yml`, on `pull_request` + push).
+      (`.github/workflows/ghl-security.yml`, on `pull_request` + push).
 
 ## Enforcement-shape correctness (don't inherit the old architecture)
 
@@ -103,7 +103,7 @@ Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" an
       build-integrity guard.
       (`scripts/test/test_enforcement_meta.ps1`, test 3.)
 - [x] Property test: the guard's file enumeration reaches untracked working-tree
-      files — the planted `src/**/foo.asm` in test 1 is never committed, proving
+      files - the planted `src/**/foo.asm` in test 1 is never committed, proving
       an untracked `.asm` cannot sneak through.
       (`scripts/test/test_enforcement_meta.ps1`, tests 1+4.)
 
@@ -114,7 +114,7 @@ Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" an
 - [x] The inventory only shrinks; growth requires a documented justification.
       (monotonic-shrink guard + CI quarantine-unchanged line)
 - [x] CI reports trusted-path and quarantine status on every PR.
-      (`.github/workflows/nhl-security.yml` + `ci_security_summary.ps1`)
+      (`.github/workflows/ghl-security.yml` + `ci_security_summary.ps1`)
 - [x] Generated assembly can never be treated as source of truth.
       (`check_build_integrity.ps1` generated-artifact-as-source rule)
 - [x] All enforcement has its own negative tests.

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - PIT Timer Driver
+; GritOS v3.0 - PIT Timer Driver
 ; ============================================================================
 bits 64
 %include "constants.inc"
@@ -11,7 +11,7 @@ extern fb_addr, main_loop_stage, main_loop_stage_done, gui_initialized
 ; "CANARY 0 @<hash>" panic). Strictly delays when scanning starts.
 extern code_hash_armed
 extern scr_pitch_q, scr_width, scr_height
-; Per-slot syscall rate-limit token buckets, defined in syscall_data.nxh.
+; Per-slot syscall rate-limit token buckets, defined in syscall_data.ghl.
 ; Refilled once per timer tick (security_todo.md §2).
 extern slot_sc_budget
 extern slot_gui_budget
@@ -27,7 +27,7 @@ extern sc_anomaly_scan_all
 
 ; Re-verify cadence in PIT ticks. MUST be a power of two (masked, not divided).
 ; PIT_FREQUENCY ticks ≈ 1 s, so 64 ticks re-hashes every code range a few times
-; per second — frequent enough to catch a transient W^X breach quickly, coarse
+; per second - frequent enough to catch a transient W^X breach quickly, coarse
 ; enough that the per-tick branch is free on the 63/64 ticks it is skipped.
 %ifndef CODE_HASH_VERIFY_PERIOD
 CODE_HASH_VERIFY_PERIOD equ 64
@@ -254,7 +254,7 @@ pit_handler:
     ; --- Behavioral anomaly scan (security_todo.md §11) ----------------------
     ; Every ANOMALY_SCAN_PERIOD ticks, scan each live slot's syscall-mix
     ; histogram (built by the always-on trace ring) for a deviation from its
-    ; app profile — e.g. a Notepad slot hammering the W^X/JIT-alias surface — and
+    ; app profile - e.g. a Notepad slot hammering the W^X/JIT-alias surface - and
     ; drive an over-budget slot through the existing §12 strike/kill path. Coarser
     ; than the code-hash cadence and far coarser than the per-tick budget refill,
     ; so the per-tick branch is free on the ticks it is skipped and the detector

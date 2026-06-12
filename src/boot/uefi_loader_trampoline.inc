@@ -9,8 +9,8 @@
 ;      R11 = entry offset             (jump target = dest_base + R11)
 ;
 ; The UEFI-allocated buffer that holds the original wrapped kernel (R8's
-; backing) does NOT overlap [RDI, RDI+RCX) — UEFI's AllocateAnyPages places
-; it well above the kernel destination window — so fixup reads remain valid
+; backing) does NOT overlap [RDI, RDI+RCX) - UEFI's AllocateAnyPages places
+; it well above the kernel destination window - so fixup reads remain valid
 ; after the copy.
 ; ============================================================================
 align 16

@@ -48,7 +48,7 @@ admin_*.backup
 admin_*.rsc
 
 # Dropped source archives after extraction into source-owned folders
-NexusOS Design System.zip
+GritOS Design System.zip
 dist/
 
 # Quantum entropy seed -- PRIVATE BUILD SECRET. The raw bytes must never be
@@ -60,3 +60,5 @@ tools/quantum/seed.bin
 tools/quantum/seed.inc
 tools/quantum/qrng_manifest.txt
 src/include/qrng_seed.inc
+mitmdump-*.log
+station-zero/

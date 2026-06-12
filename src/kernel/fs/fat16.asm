@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - FAT16 Filesystem Driver
+; GritOS v3.0 - FAT16 Filesystem Driver
 ; Reads/writes files from a FAT16 partition starting at a fixed sector offset
 ; ============================================================================
 bits 64
@@ -54,7 +54,7 @@ DIR_ENTRY_SIZE      equ 32
 FAT16_SNAP_STRIDE   equ 17
 
 ; Per-slot cwd ownership sentinel for fat16_cache_owner (see the BSS block):
-; "no slot owns the live cache" — forces the next FS syscall to re-materialize.
+; "no slot owns the live cache" - forces the next FS syscall to re-materialize.
 FAT16_CACHE_OWNER_NONE equ 0xFFFFFFFF
 
 ; Attributes
@@ -68,7 +68,7 @@ ATTR_LFN            equ 0x0F
 
 ; Temp buffers. Cache32Max keeps these cold buffers outside the 4MB..16MB GUI
 ; LLC arena and outside the 16MB..24MB app arena.
-%ifdef NEXUS_CACHE32_MAX
+%ifdef GRIT_CACHE32_MAX
 FAT16_SECTOR_BUF    equ 0x1A00000   ; 512 byte sector buffer
 FAT16_FAT_CACHE     equ 0x1A01000   ; FAT table cache (up to 64KB)
 FAT16_ROOT_CACHE    equ 0x1A11000   ; Root directory cache (up to 32 sectors = 16KB)

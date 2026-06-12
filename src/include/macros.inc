@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Common Macros
+; GritOS v3.0 - Common Macros
 ; ============================================================================
 
 %ifndef MACROS_INC
@@ -30,7 +30,7 @@
 %endmacro
 
 %macro BOOTLOG2 2
-%ifdef NEXUS_BOOT_DIAG_LOG
+%ifdef GRIT_BOOT_DIAG_LOG
     SER '['
     SER %1
     SER %2

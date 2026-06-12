@@ -1,7 +1,7 @@
 ; ============================================================================
-; amd_smn.asm — NBIO SMN (System Management Network) indirect access
+; amd_smn.asm - NBIO SMN (System Management Network) indirect access
 ; ----------------------------------------------------------------------------
-; The SMU on AMD APUs (Phoenix, Strix, …) is a SoC-level microcontroller
+; The SMU on AMD APUs (Phoenix, Strix, ...) is a SoC-level microcontroller
 ; that is NOT mapped into the GPU's BAR0 the way it is on discrete cards.
 ; To reach its mailbox registers we use the NBIO indirect-access pair:
 ;
@@ -14,7 +14,7 @@
 ;     write32(BAR0+0x3C, val)              ; writes to that SMN address
 ;
 ; Both INDEX2 and DATA2 live inside BAR0, so gpu_mmio_r32/w32 work.
-; They are sticky across single accesses but not across context switches —
+; They are sticky across single accesses but not across context switches -
 ; we re-latch INDEX2 on every transaction. Bring-up is single-threaded so
 ; no locking is needed.
 ;
@@ -39,7 +39,7 @@ global smn_probe_last
 extern gpu_mmio_r32
 extern gpu_mmio_w32
 
-; PCIE_INDEX2 / DATA2 — absolute dword offsets within BAR0.
+; PCIE_INDEX2 / DATA2 - absolute dword offsets within BAR0.
 ; NBIO base for Strix (NBIO 7.7) is 0; the dword offsets are the canonical
 ; SOC15 values (regBIF_BX0_PCIE_INDEX2 = 0x0E, _DATA2 = 0x0F).
 %define SMN_DW_INDEX2    0x0E

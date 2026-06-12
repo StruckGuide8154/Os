@@ -178,10 +178,10 @@
     ; entry would otherwise stay visible to ring 3. Load the ring-3
     ; GDT64_USER_DATA selector into all four before returning. The macro
     ; clobbers ax, which here is the low half of the rax syscall-return value,
-    ; so bracket it with a save/restore — rax (return) and rdx (slot id, still
+    ; so bracket it with a save/restore - rax (return) and rdx (slot id, still
     ; needed for the runtime-ptr math below) are the only contract regs live,
     ; and rdx is untouched by the selector loads. (Under the optional MSR-scrub
-    ; the macro also clobbers rcx/rdx, so save rdx too — rdx is reloaded into
+    ; the macro also clobbers rcx/rdx, so save rdx too - rdx is reloaded into
     ; the runtime-ptr math right after.) Done before rcx/r11/rsp are loaded.
     push rax
     push rdx
@@ -194,8 +194,8 @@
 %ifdef ENABLE_DEBUG_SERIAL
     ; DEBUG (click-freeze diagnosis): if the user RIP we are about to SYSRET into
     ; is non-canonical, the iretq/sysret would deliver a corrupt ring-3 RIP and
-    ; #GP (exactly the observed 0x1F4E...13682C). Flag it HERE — before the bad
-    ; sysret — with the slot, the corrupt RIP, the user RSP, and the syscall's
+    ; #GP (exactly the observed 0x1F4E...13682C). Flag it HERE - before the bad
+    ; sysret - with the slot, the corrupt RIP, the user RSP, and the syscall's
     ; return value (rax) so we know which call's exit path stored garbage. This
     ; only fires on actual corruption (canonical RIPs are silent -> no flood).
     ; rsp is still the kernel syscall stack here, so pushes are safe.

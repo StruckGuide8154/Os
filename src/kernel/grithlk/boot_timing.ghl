@@ -1,0 +1,151 @@
+# ============================================================================
+# Boot timing instrumentation.  ZERO-ASM GritHLK.
+#
+# A lightweight, always-on per-stage boot profiler. Each call to boot_mark(c1,c2)
+#   * timestamps the current TSC into a fixed table, and
+#   * emits the live "[c1c2]" progress marker over COM1 immediately,
+# so we keep human-visible boot progress AND retain the cycle counts needed to
+# produce a timing report. boot_timing_report() is called once at the end of
+# kmain bring-up; it walks the table and prints, per stage, the elapsed time in
+# microseconds (TSC delta converted via the calibrated cpu_tsc_per_tick), plus a
+# cumulative wall-clock and a grand total. Output is framed [BOOTTIME] .. [/BOOTTIME]
+# so scripts/test/boot_markers.ps1 (and a future timing harness) can scrape it.
+#
+# Conversion: 1 PIT tick = 10 ms = 10000 us, and cpu_tsc_per_tick is the TSC
+# cycles calibrated per PIT tick, so:  us = tsc_delta * 10000 / cpu_tsc_per_tick.
+# If calibration has not run yet (cpu_tsc_per_tick == 0) we print the raw TSC
+# delta instead, tagged with 't'.
+# ============================================================================
+
+module "boot_timing";
+
+unsafe raw_mem;       # lq/sq/lw/sw against the mark table
+unsafe kernel_priv;   # rdtsc() is a privileged CPU intrinsic
+
+global boot_mark;
+global boot_timing_report;
+
+extern cpu_tsc_per_tick;   # qword: calibrated TSC cycles per PIT tick (10 ms)
+
+const MAX_MARKS   = 64;    # table capacity; excess marks are dropped (no overrun)
+const US_PER_TICK = 10000; # 1 PIT tick = 10 ms = 10000 us
+
+# ASCII glyphs used in the report framing.
+const CH_LBRACK = 91;   # '['
+const CH_RBRACK = 93;   # ']'
+const CH_SLASH  = 47;   # '/'
+const CH_SPACE  = 32;   # ' '
+const CH_CR     = 13;
+const CH_LF     = 10;
+const CH_COLON  = 58;   # ':'
+const CH_t      = 116;  # 't' (raw-TSC fallback flag)
+const CH_u      = 117;  # 'u'
+const CH_s      = 115;  # 's'
+const CH_B      = 66;
+const CH_O      = 79;
+const CH_T      = 84;
+const CH_I      = 73;
+const CH_M      = 77;
+const CH_E      = 69;
+
+# Parallel table: mark_tsc[i] = TSC snapshot, mark_tag[i] = (c1 | c2<<8).
+data mark_tsc:   64 x 8 = 0;
+data mark_tag:   64 x 4 = 0;
+data mark_count: 1 x 4  = 0;
+
+# Record a boot stage. c1/c2 are the two tag chars (e.g. 'K','0'). Emits the
+# live "[c1c2]\r\n" marker, then stores TSC + tag if there is table room.
+fn boot_mark(c1, c2) {
+    # Live progress marker (always on).
+    call svg_dump_putc(al: CH_LBRACK);
+    call svg_dump_putc(al: c1);
+    call svg_dump_putc(al: c2);
+    call svg_dump_putc(al: CH_RBRACK);
+    call svg_dump_putc(al: CH_CR);
+    call svg_dump_putc(al: CH_LF);
+
+    let n = lw(&mark_count);
+    if n >= MAX_MARKS { return; }
+    sq(&mark_tsc + n * 8, rdtsc());
+    sw(&mark_tag + n * 4, c1 | (c2 << 8));
+    sw(&mark_count, n + 1);
+}
+
+# Emit "us\r\n" after a decimal number (report helper).
+fn report_us_suffix() {
+    call svg_dump_putc(al: CH_SPACE);
+    call svg_dump_putc(al: CH_u);
+    call svg_dump_putc(al: CH_s);
+    call svg_dump_putc(al: CH_CR);
+    call svg_dump_putc(al: CH_LF);
+}
+
+# Convert a TSC delta to microseconds and print it. Falls back to the raw TSC
+# delta (prefixed 't') when calibration is unavailable.
+fn report_delta(delta) {
+    let tpt = lq(&cpu_tsc_per_tick);
+    if tpt == 0 {
+        call svg_dump_putc(al: CH_t);
+        call svg_dump_dec(eax: delta);
+        call svg_dump_putc(al: CH_CR);
+        call svg_dump_putc(al: CH_LF);
+        return;
+    }
+    let us = (delta * US_PER_TICK) / tpt;
+    call svg_dump_dec(eax: us);
+    report_us_suffix();
+}
+
+# Walk the table and print a per-stage + cumulative timing report.
+fn boot_timing_report() {
+    # Header: "[BOOTTIME]\r\n"
+    call svg_dump_putc(al: CH_LBRACK);
+    call svg_dump_putc(al: CH_B); call svg_dump_putc(al: CH_O); call svg_dump_putc(al: CH_O);
+    call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_I);
+    call svg_dump_putc(al: CH_M); call svg_dump_putc(al: CH_E);
+    call svg_dump_putc(al: CH_RBRACK);
+    call svg_dump_putc(al: CH_CR); call svg_dump_putc(al: CH_LF);
+
+    let n = lw(&mark_count);
+    if n < 2 {
+        # Footer even when empty so scrapers always see the close tag.
+        call svg_dump_putc(al: CH_LBRACK); call svg_dump_putc(al: CH_SLASH);
+        call svg_dump_putc(al: CH_B); call svg_dump_putc(al: CH_O); call svg_dump_putc(al: CH_O);
+        call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_I);
+        call svg_dump_putc(al: CH_M); call svg_dump_putc(al: CH_E);
+        call svg_dump_putc(al: CH_RBRACK);
+        call svg_dump_putc(al: CH_CR); call svg_dump_putc(al: CH_LF);
+        return;
+    }
+
+    let base = lq(&mark_tsc);
+    let i = 1;
+    while i < n {
+        let prev = lq(&mark_tsc + (i - 1) * 8);
+        let cur  = lq(&mark_tsc + i * 8);
+        let tag  = lw(&mark_tag + i * 4);
+
+        # "<tag>: <stage_us> us"  (delta from previous mark)
+        call svg_dump_putc(al: tag & 0xFF);
+        call svg_dump_putc(al: (tag >> 8) & 0xFF);
+        call svg_dump_putc(al: CH_COLON);
+        call svg_dump_putc(al: CH_SPACE);
+        report_delta(cur - prev);
+        i = i + 1;
+    }
+
+    # Grand total from first to last mark.
+    let total = lq(&mark_tsc + (n - 1) * 8) - base;
+    call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_O);
+    call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_COLON);
+    call svg_dump_putc(al: CH_SPACE);
+    report_delta(total);
+
+    # Footer: "[/BOOTTIME]\r\n"
+    call svg_dump_putc(al: CH_LBRACK); call svg_dump_putc(al: CH_SLASH);
+    call svg_dump_putc(al: CH_B); call svg_dump_putc(al: CH_O); call svg_dump_putc(al: CH_O);
+    call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_T); call svg_dump_putc(al: CH_I);
+    call svg_dump_putc(al: CH_M); call svg_dump_putc(al: CH_E);
+    call svg_dump_putc(al: CH_RBRACK);
+    call svg_dump_putc(al: CH_CR); call svg_dump_putc(al: CH_LF);
+}

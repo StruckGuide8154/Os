@@ -418,7 +418,7 @@ FN_BEGIN raster_self_test, 0, 0, FN_RET_SCALAR
     je .rst_line_ok
     mov ebx, 1
 .rst_line_ok:
-    ; Line: off-screen (negative coords) — clipping path
+    ; Line: off-screen (negative coords) - clipping path
     mov edi, -50
     mov esi, -50
     mov edx, 300

@@ -6,7 +6,7 @@
 ; Lines below remain in syscall_entry's local-label scope where applicable.
 ; ============================================================================
 ; ----------------------------------------------------------------------------
-; CPI-lite — sign/verify the callback pointers stored in window structs at
+; CPI-lite - sign/verify the callback pointers stored in window structs at
 ; WIN_OFF_CLICKFN / WIN_OFF_KEYFN / WIN_OFF_DRAGFN / WIN_OFF_RCLICKFN. Same
 ; trick already used for WIN_OFF_USER_ARG (see .sc_wm_set_user_arg above),
 ; generalised so a forged callback pointer is rejected at dispatch time.
@@ -17,7 +17,7 @@
 ; value forged for CLICKFN can't be relocated to KEYFN, and binding &window
 ; means a tag captured from window A is useless in window B. An attacker
 ; must leak both kernel_canary and the window VA before they can forge a
-; usable entry — significantly stronger than "raw write hits a code ptr".
+; usable entry - significantly stronger than "raw write hits a code ptr".
 ;
 ; A stored qword of exactly 0 is the explicit "no handler / detach"
 ; sentinel: stamping a tag onto 0 would either force detach to use a magic
@@ -25,9 +25,9 @@
 ; just yields 0. Real handlers should never be 0.
 ; ----------------------------------------------------------------------------
 
-; cpi_sign_callback / cpi_verify_callback — MIGRATED to zero-asm NexusHLK
-; (Stage 2b, docs/nhlk-syscall-rearchitecture.md). The structured fns now live
-; in src/kernel/nexushlk/syscall_secure.nxh (compiled to build/nxh/
+; cpi_sign_callback / cpi_verify_callback - MIGRATED to zero-asm GritHLK
+; (Stage 2b, docs/ghlk-syscall-rearchitecture.md). The structured fns now live
+; in src/kernel/grithlk/syscall_secure.ghl (compiled to build/ghl/
 ; syscall_secure.asm, %include'd by kernel_build.asm BEFORE this file). Same
 ; global names, same register ABI (rdi/rsi/rdx in, rax out, all else preserved),
 ; same KDOM_CPI=0 HMAC arithmetic; cpi_verify's violation path still tail-calls
@@ -35,7 +35,7 @@
 ; duplicate definition.
 
 ; ----------------------------------------------------------------------------
-; Cap-mask authenticator — the data-side counterpart to CPI-lite. The same
+; Cap-mask authenticator - the data-side counterpart to CPI-lite. The same
 ; kernel_canary key authenticates each slot's capability mask so a stray
 ; kernel write that widens slot_cap_mask[slot] is caught at the next dispatch
 ; instead of silently granting privileges. Tag = low8(kernel_canary ^ slot ^
@@ -45,14 +45,14 @@
 ; (hot path); these helpers are the single source of truth for the write side.
 ; ----------------------------------------------------------------------------
 
-; cap_mask_sign / cap_mask_store — MIGRATED to zero-asm NexusHLK (Stage 2b).
-; Now structured fns in src/kernel/nexushlk/syscall_secure.nxh. Same global
+; cap_mask_sign / cap_mask_store - MIGRATED to zero-asm GritHLK (Stage 2b).
+; Now structured fns in src/kernel/grithlk/syscall_secure.ghl. Same global
 ; names + register ABI (rdi=slot, rsi=mask; cap_mask_sign -> rax; cap_mask_store
 ; void). Same low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK=0x5C) tag, now
 ; with a bounds check on the slot index before the two byte writes (the gained
 ; safety property). cap_mask_store computes the authenticator inline (identical
-; arithmetic) rather than calling cap_mask_sign — a regabi callee's rax return
-; cannot be captured into a NHLK local. Removed here to avoid a duplicate def.
+; arithmetic) rather than calling cap_mask_sign - a regabi callee's rax return
+; cannot be captured into a GHLK local. Removed here to avoid a duplicate def.
 
 ; ----------------------------------------------------------------------------
 ; cap_audit_log(dil=slot, sil=old_mask, dl=new_mask, cl=reason, r8d=app_id)
@@ -60,13 +60,13 @@
 ; Append one capability-transition record to the kernel-only audit ring
 ; (security_todo.md §4, "Capability transitions logged + auditable"). Called
 ; from every legitimate cap-mask write site (declare_manifest narrowing,
-; kernel_apply_app_manifest, slot recycle) so a failure to narrow — or any
-; unexpected widening — leaves a forensic trail instead of being silent.
+; kernel_apply_app_manifest, slot recycle) so a failure to narrow - or any
+; unexpected widening - leaves a forensic trail instead of being silent.
 ;
 ; The ring is fixed-size (CAP_AUDIT_ENTRIES records of CAP_AUDIT_ENT_SIZE
 ; bytes); cap_audit_head is the running event count and (head & IDX_MASK) is
 ; the next write slot, so the ring overwrites oldest-first. Kernel-only: no
-; ring-3 reader yet. Self-contained — preserves every register a caller could
+; ring-3 reader yet. Self-contained - preserves every register a caller could
 ; rely on so it can be dropped into any write site without clobber surprises.
 FN_BEGIN cap_audit_log, 5, 0, FN_RET_VOID
     push rax
@@ -105,8 +105,8 @@ FN_BEGIN cap_audit_log, 5, 0, FN_RET_VOID
     FN_END cap_audit_log
     ret
 
-; slot_cap_hmac_init() — MIGRATED to zero-asm NexusHLK (Stage 2b). Now a
-; structured fn in src/kernel/nexushlk/syscall_secure.nxh: loops slot=0..
+; slot_cap_hmac_init() - MIGRATED to zero-asm GritHLK (Stage 2b). Now a
+; structured fn in src/kernel/grithlk/syscall_secure.ghl: loops slot=0..
 ; MAX_WINDOWS-1, reads slot_cap_mask[slot] (bounds-checked), computes the
 ; authenticator inline, writes slot_cap_hmac[slot]. Same global name + boot
 ; contract (called once from kernel_main after kernel_canary_init). Removed
@@ -125,7 +125,7 @@ FN_BEGIN cap_audit_log, 5, 0, FN_RET_VOID
 ; Out: nothing. The caller still sets rax=-1 and falls through to .done; if the
 ;      slot was killed, .done's W^X scrub + SYSRET land back in (now-recycled)
 ;      slot state, which is exactly the close-window outcome.
-; Clobbers rax, rcx, rdx, rsi, rdi, r8 (all dead at the reject labels — they
+; Clobbers rax, rcx, rdx, rsi, rdi, r8 (all dead at the reject labels - they
 ; reload from the saved frame or set constants afterward). r15 preserved.
 ; ----------------------------------------------------------------------------
 sc_record_strike:
@@ -166,7 +166,7 @@ sc_record_strike:
 ; integrity fault that is ATTRIBUTABLE TO THE CURRENT SLOT on the syscall
 ; dispatch path (e.g. .sc_cap_tamper: slot_cap_mask[r15] no longer matches its
 ; HMAC). The old behaviour jmp'd kernel_panic_canary, which HALTS THE WHOLE
-; MACHINE — letting one malicious tenant take down every other tenant. Instead
+; MACHINE - letting one malicious tenant take down every other tenant. Instead
 ; we kill ONLY the offending slot via the same teardown sc_record_strike uses
 ; at its strike limit (cap_audit_log + wm_close_window), then return so the
 ; caller can set rax=-1 and take the normal .done exit. Fail-closed: the slot's
@@ -175,14 +175,14 @@ sc_record_strike:
 ;
 ; In:  r15 = current slot id (set by syscall_entry).
 ;      edx = 4-char serial reason code (e.g. 'CAPT' = 0x43415054), big-endian
-;            so the bytes print in order — same codes the old panic banner used.
+;            so the bytes print in order - same codes the old panic banner used.
 ; Out: nothing. Caller sets rax=-1 and jmp .done.
 ; Clobbers rax, rcx, rdx, rsi, rdi, r8 (dead at the integrity sinks). r15 kept.
 ; ----------------------------------------------------------------------------
 sc_slot_integrity_kill:
     push rbx
     mov ebx, edx                            ; save reason code across serial/log
-    ; Serial banner: "SKILL <code> s<slot>" — forensic trail before teardown so
+    ; Serial banner: "SKILL <code> s<slot>" - forensic trail before teardown so
     ; the kill is never silent (mirrors the panic banner's intent, no halt).
     SER 'S'
     SER 'K'
@@ -216,7 +216,7 @@ sc_slot_integrity_kill:
     call sc_trace_dump
     ; Audit the kill so the cap-transition ring records it: old_mask = current
     ; mask, new_mask = 0, reason = CAP_AUDIT_STRIKE (same code as the strike
-    ; auto-kill — this is a security teardown of the same class), app_id = 0.
+    ; auto-kill - this is a security teardown of the same class), app_id = 0.
     movzx eax, r15b
     cmp eax, MAX_WINDOWS
     jae .ski_kill                           ; defensive: skip audit on bad slot
@@ -245,7 +245,7 @@ sc_slot_integrity_kill:
 ; in the cheap inline SC_TRACE_APPEND only.
 ;
 ; It consumes the per-slot syscall histogram (sc_trace_hist[], the data source
-; built by the trace ring) — NOT the ring records — so the scan is just a few
+; built by the trace ring) - NOT the ring records - so the scan is just a few
 ; counter reads per slot. For every LIVE slot it sums that slot's accumulated
 ; count over the high-risk syscall set (the CAP_WX W^X/JIT trio + SYS_FS_DELETE)
 ; and compares it against a per-slot budget chosen by whether the slot's manifest
@@ -253,13 +253,13 @@ sc_slot_integrity_kill:
 ;   * slot lacks the cap  -> expected rate is ZERO, so budget = ANOMALY_HIRISK_
 ;     DENY_BUDGET (tiny). Because SC_TRACE_APPEND bumps the histogram at dispatch
 ;     entry *before* the cap gate, a sandboxed Notepad slot probing SYS_WX_JIT_
-;     ALIAS is counted even though every call is cap-rejected — this is the
+;     ALIAS is counted even though every call is cap-rejected - this is the
 ;     "Notepad slot suddenly hammering SYS_WX_JIT_ALIAS" signal from the doc.
 ;   * slot holds the cap  -> budget = ANOMALY_HIRISK_HOLD_BUDGET (a real JIT app
 ;     may legitimately use the surface, but a flood far above sane warm-up is
 ;     still throttled).
 ; A slot over budget is driven through the EXISTING §12 strike path
-; (sc_record_strike) — so excessive high-risk behaviour throttles toward the
+; (sc_record_strike) - so excessive high-risk behaviour throttles toward the
 ; same SC_STRIKE_LIMIT slot-kill, with no new teardown path invented. A
 ; CAP_AUDIT_ANOMALY record is appended at the flagging moment so the forensic
 ; trail shows what tripped it, then the slot's high-risk histogram buckets are
@@ -269,9 +269,9 @@ sc_slot_integrity_kill:
 ; In:  none.  Out: none.  r15 must equal the scanned slot id for the duration of
 ; each sc_record_strike call (it keys off r15); we set it per slot and restore
 ; the caller's r15 at the end. Preserves all caller regs (called from the ISR
-; landing pad). Internal helper — plain label, no FN_BEGIN (matches
+; landing pad). Internal helper - plain label, no FN_BEGIN (matches
 ; sc_build_allow_bitmap). Exported so pit.asm can drive it (FN_BEGIN, which
-; emits the global, matching cap_audit_log — the coverage tool requires every
+; emits the global, matching cap_audit_log - the coverage tool requires every
 ; global to carry a signature).
 ; ----------------------------------------------------------------------------
 FN_BEGIN sc_anomaly_scan_all, 0, 0, FN_RET_VOID
@@ -290,7 +290,7 @@ FN_BEGIN sc_anomaly_scan_all, 0, 0, FN_RET_VOID
 .asa_slot:
     cmp r10d, MAX_WINDOWS
     jae .asa_done
-    ; Only scan live slots — a recycled/empty slot has no tenant to judge and
+    ; Only scan live slots - a recycled/empty slot has no tenant to judge and
     ; its histogram is stale until the next tenant repopulates it.
     lea rax, [rel l3_slot_live]
     cmp qword [rax + r10*8], 0
@@ -317,7 +317,7 @@ FN_BEGIN sc_anomaly_scan_all, 0, 0, FN_RET_VOID
     ; CAP_WX. Reading slot_cap_mask raw is fine here: a tampered mask is caught
     ; by the dispatcher's HMAC gate on the next syscall; the worst this scan can
     ; do with a forged-wide mask is apply the more generous HOLD budget, which
-    ; only delays — never suppresses — a strike, and the dispatcher would panic
+    ; only delays - never suppresses - a strike, and the dispatcher would panic
     ; on that mask anyway.
     lea rax, [rel slot_cap_mask]
     movzx eax, byte [rax + r10]
@@ -329,7 +329,7 @@ FN_BEGIN sc_anomaly_scan_all, 0, 0, FN_RET_VOID
     mov edx, ANOMALY_HIRISK_HOLD_BUDGET
 .asa_have_budget:
     cmp r9d, edx
-    jbe .asa_reset_window                ; within profile — just roll the window
+    jbe .asa_reset_window                ; within profile - just roll the window
     ; --- Anomaly: this slot's high-risk mix is over budget for its class. -----
     ; Audit the flag (old_mask = current cap mask, new_mask = the over-budget
     ; count truncated to a byte for the record, reason = CAP_AUDIT_ANOMALY).
@@ -397,7 +397,7 @@ sc_trace_dump:
     push r9
     movzx ecx, dil
     cmp ecx, MAX_WINDOWS
-    jae .std_done                        ; bad slot id — nothing to dump
+    jae .std_done                        ; bad slot id - nothing to dump
     SER 'T'
     SER 'R'
     SER 'C'
@@ -445,7 +445,7 @@ sc_trace_dump:
     mov al, ' '
     out dx, al
     pop r8
-    mov rdi, [r8 + 8]                    ; user_rip — the most useful field
+    mov rdi, [r8 + 8]                    ; user_rip - the most useful field
     call ser_print_hex64
     pop rcx
     pop r8
@@ -490,7 +490,7 @@ extern dbg_event_dump_serial
 ; Track 4 Part A: wipe-on-panic / wipe-on-tamper. nk-monitor #PF, a cap-mask
 ; HMAC mismatch and a code-range mismatch all fail closed into this routine, so
 ; scrubbing the per-boot secrets here before the final HLT covers panic AND
-; detected tamper (ram_volatile.nxh). Called after the forensic serial dump has
+; detected tamper (ram_volatile.ghl). Called after the forensic serial dump has
 ; consumed rdi/rsi, so it does not disturb the banner.
 extern nx_volatile_panic_scrub
 kernel_panic_canary:
@@ -498,7 +498,7 @@ kernel_panic_canary:
     DBG_EVT_IMPORTANT EVT_PANIC, r15, rdi, rsi, rdx, r10, 0, 0
     ; §11: a kernel-integrity panic on the syscall path means *this* slot's last
     ; few syscalls are the prime forensic evidence. Ship them on serial before
-    ; halting (r15 still holds the faulting slot id here). Save rdi/rsi — the
+    ; halting (r15 still holds the faulting slot id here). Save rdi/rsi - the
     ; dumper preserves them but the explicit push documents the contract that
     ; the panic banner below still reads the original args.
     push rdi

@@ -1,0 +1,761 @@
+# ============================================================================
+# wm_helpers.ghl  -  GritHLK (zero-asm) window-manager LEAF helpers.
+#
+# Continues the GHLK migration pattern of docs/ghlk-syscall-rearchitecture.md
+# (see src/kernel/grithlk/syscall_validate.ghl / syscall_secure.ghl). Ports the
+# SAFE LEAF / pure-computation helpers out of src/kernel/gui/window.asm into
+# STRUCTURED GritHLK fns, keeping the EXACT same global symbol names and the
+# EXACT same register ABI each caller binds to. There is ZERO assembly in this
+# module - every helper is a structured `fn` over pixel/geometry arithmetic,
+# typed memory accessors (lb/lw/lq/sb/sw/sq) and direct kernel-label `call`s.
+#
+# Compile (kernel emit mode) with:
+#   python src/user/grithl/compiler/gritc.py \
+#       src/kernel/grithlk/wm_helpers.ghl -o build/ghl/wm_helpers.asm \
+#       -L src/user/grithl/lib --embed --target kernel
+# and %include the generated build/ghl/wm_helpers.asm into kernel_build.asm
+# (section .text) BEFORE the window.asm include. Because the kernel is one NASM
+# translation unit, the data/BSS symbols this module reads/writes
+# (wm_focused_window, wm_cb_table) and the external render helpers (render_rect,
+# render_mark_dirty) and the framebuffer globals (bb_addr, scr_width/height,
+# scr_pitch_q) resolve as forward references with no extern wiring.
+#
+# WHAT IS PORTED HERE (verified genuinely leaf / pure-computation):
+#   wm_get_window_at          - pure geometry hit-test over the window array
+#   wm_handle_mouse_event     - mouse routing, title/app drag, CPI callback dispatch
+#   wm_cb_intern              - bounded callback-table fill (#UD-on-OOB target)
+#   wm_cb_resolve             - bounded callback-table lookup
+#   wm_bg_fill_solid          - solid framebuffer fill (per-pixel dword store)
+#   wm_bg_save_cache          - backbuffer -> cache copy (per-pixel dword)
+#   wm_bg_restore_cache       - cache -> backbuffer copy (per-pixel dword)
+#   wm_bg_diamond             - diamond scanline geometry (calls render_rect)
+#   wm_mark_outline_dirty     - 4-edge dirty marking (calls render_mark_dirty)
+#
+# WHAT STAYS IN window.asm (left with a comment pointer, NOT ported): boot /
+# render / lifecycle fns (wm_draw_*, wm_create_window*, wm_init,
+# wm_close_window, wm_poll_wallpaper_render, wallpaper_render_job),
+# wm_cb_trampoline, and the wm_wallpaper_cache_addr / wm_focus_top_active
+# internal helpers.
+# NOTE on the bg fill/copy loops: the asm used `rep stosd` / `rep movsd`. The
+# zero-asm re-expression is a per-pixel dword loop (sw/lw are 32-bit accessors).
+# The pixel stream produced is byte-identical (same DESKTOP_SOLID_COLOR, same
+# row count, same pitch-gap advance), so the rendered output is unchanged.
+# ============================================================================
+
+module "wm_helpers";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over window-pool / hit-test state
+unsafe implicit_extern;  # &fn / &data resolved as same-unit kernel labels (-f bin)
+
+global wm_get_window_at;
+global wm_handle_mouse_event;
+global wm_cb_intern;
+global wm_cb_resolve;
+global wm_bg_fill_solid;
+global wm_bg_save_cache;
+global wm_bg_restore_cache;
+global wm_bg_diamond;
+global wm_mark_outline_dirty;
+
+# --- Mirrors of the NASM equ constants this module depends on. Values must
+# stay in lockstep with their definitions (the kernel is one translation unit;
+# these are literals here exactly as in syscall_validate.ghl / syscall_secure.ghl):
+#   WINDOW_POOL_ADDR     src/include/boot_memory.inc    (0x2410000)
+#   WINDOW_STRUCT_SIZE   src/include/constants.inc      (256)
+#   MAX_WINDOWS          == APP_SLOT_COUNT               (12)
+#   WIN_OFF_*            src/include/window_layout.inc
+#   WF_VISIBLE / WF_ACTIVE  src/include/constants.inc
+#   DESKTOP_SOLID_COLOR  window.asm                      (0x00202632)
+#   WM_CB_FIELDS         window.asm §6                   (4)
+const WINDOW_POOL_ADDR    = 0x2410000;
+const WINDOW_STRUCT_SIZE  = 256;
+const MAX_WINDOWS         = 12;
+const WIN_OFF_ID          = 0;
+const WIN_OFF_X           = 8;
+const WIN_OFF_Y           = 16;
+const WIN_OFF_W           = 24;
+const WIN_OFF_H           = 32;
+const WIN_OFF_FLAGS       = 40;
+const WIN_OFF_CLICKFN     = 128;
+const WIN_OFF_DRAGFN      = 144;
+const WIN_OFF_RCLICKFN    = 152;
+const WF_VISIBLE          = 0x01;
+const WF_ACTIVE           = 0x10;
+const WF_FOCUSED          = 0x04;
+const BORDER_WIDTH        = 2;
+const TITLEBAR_HEIGHT     = 28;
+const CLOSE_BTN_SIZE      = 20;
+const MIN_BTN_SIZE        = 20;
+const BTN_LEFT            = 1;
+const BTN_RIGHT           = 2;
+const NO_WINDOW           = -1;
+const DESKTOP_SOLID_COLOR = 0x00202632;
+const WM_CB_FIELD_CLICK   = 0;
+const WM_CB_FIELD_DRAG    = 2;
+const WM_CB_FIELD_RCLICK  = 3;
+const WM_CB_FIELDS        = 4;
+
+# Debug-build click trace state. The syscall dispatcher reads this while a
+# click callback is active, so a canary/freeze during a user click has the WM
+# context and per-syscall arguments in the serial log without tracing canaries.
+data click_debug_active: 1 x 1 = 0;
+data click_debug_seq: 1 x 8 = 0;
+data click_debug_slot: 1 x 8 = 0;
+data click_debug_field: 1 x 8 = 0;
+data click_debug_win: 1 x 8 = 0;
+data click_debug_mouse_x: 1 x 8 = 0;
+data click_debug_mouse_y: 1 x 8 = 0;
+data click_debug_client_x: 1 x 8 = 0;
+data click_debug_client_y: 1 x 8 = 0;
+data click_debug_stored: 1 x 8 = 0;
+data click_debug_target: 1 x 8 = 0;
+data click_debug_focus_before: 1 x 8 = 0;
+data click_debug_focus_after: 1 x 8 = 0;
+data click_debug_buttons: 1 x 8 = 0;
+data click_debug_wflags: 1 x 8 = 0;
+
+extern wm_window_count;
+extern wm_drag_window_id;
+extern wm_drag_off_x;
+extern wm_drag_off_y;
+extern wm_drag_preview_x;
+extern wm_drag_preview_y;
+extern wm_drag_preview_w;
+extern wm_drag_preview_h;
+extern wm_last_buttons;
+extern wm_app_drag_window_id;
+extern wm_app_drag_last_x;
+extern wm_app_drag_last_y;
+extern cursor_mode;
+extern scr_width;
+extern scr_height;
+extern dbg_event_emit6;
+
+const EVT_FOCUS_CHANGE = 0x464F4353; # FOCS
+const EVT_INPUT_ROUTE  = 0x494E5054; # INPT
+
+fn wm_ptr(id) { return WINDOW_POOL_ADDR + id * WINDOW_STRUCT_SIZE; }
+
+fn click_dbg_putc(ch) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        call serial_putc(rdi: ch);
+    }
+}
+
+fn click_dbg_hex(value) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        call ser_print_hex64(rdi: value);
+    }
+}
+
+fn click_dbg_crlf() {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        click_dbg_putc(13);
+        click_dbg_putc(10);
+    }
+}
+
+fn click_dbg_tag(a, b, c, d) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        click_dbg_putc(a);
+        click_dbg_putc(b);
+        click_dbg_putc(c);
+        click_dbg_putc(d);
+        click_dbg_putc(32);
+    }
+}
+
+fn click_dbg_mouse(tag_d, mouse_x, mouse_y, buttons, prev_focus, hit, flags) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        click_dbg_tag(67, 76, 75, tag_d);       # "CLK?"
+        click_dbg_putc(120); click_dbg_hex(mouse_x);
+        click_dbg_putc(32); click_dbg_putc(121); click_dbg_hex(mouse_y);
+        click_dbg_putc(32); click_dbg_putc(98); click_dbg_hex(buttons);
+        click_dbg_putc(32); click_dbg_putc(102); click_dbg_hex(prev_focus);
+        click_dbg_putc(32); click_dbg_putc(104); click_dbg_hex(hit);
+        click_dbg_putc(32); click_dbg_putc(103); click_dbg_hex(flags);
+        click_dbg_crlf();
+    }
+}
+
+fn click_dbg_focus(id, old_focus, new_focus, flags) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        click_dbg_tag(67, 76, 75, 70);          # "CLKF"
+        click_dbg_putc(105); click_dbg_hex(id);
+        click_dbg_putc(32); click_dbg_putc(111); click_dbg_hex(old_focus);
+        click_dbg_putc(32); click_dbg_putc(110); click_dbg_hex(new_focus);
+        click_dbg_putc(32); click_dbg_putc(103); click_dbg_hex(flags);
+        click_dbg_crlf();
+    }
+}
+
+fn click_dbg_cpi_req(kind, slot, field, win, stored, arg1, arg2) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        click_dbg_tag(67, 80, 73, kind);        # "CPI?"
+        click_dbg_putc(115); click_dbg_hex(slot);
+        click_dbg_putc(32); click_dbg_putc(102); click_dbg_hex(field);
+        click_dbg_putc(32); click_dbg_putc(119); click_dbg_hex(win);
+        click_dbg_putc(32); click_dbg_putc(112); click_dbg_hex(stored);
+        click_dbg_putc(32); click_dbg_putc(97); click_dbg_hex(arg1);
+        click_dbg_putc(47); click_dbg_hex(arg2);
+        click_dbg_crlf();
+    }
+}
+
+fn click_dbg_callback_start(slot, field, win, mouse_x, mouse_y, arg1, arg2, stored, target, focus_before, buttons, flags) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        sq(&click_debug_seq, lq(&click_debug_seq) + 1);
+        sq(&click_debug_slot, slot);
+        sq(&click_debug_field, field);
+        sq(&click_debug_win, win);
+        sq(&click_debug_mouse_x, mouse_x);
+        sq(&click_debug_mouse_y, mouse_y);
+        sq(&click_debug_client_x, arg1);
+        sq(&click_debug_client_y, arg2);
+        sq(&click_debug_stored, stored);
+        sq(&click_debug_target, target);
+        sq(&click_debug_focus_before, focus_before);
+        sq(&click_debug_focus_after, focus_before);
+        sq(&click_debug_buttons, buttons);
+        sq(&click_debug_wflags, flags);
+        sb(&click_debug_active, 1);
+
+        click_dbg_tag(67, 76, 75, 67);          # "CLKC"
+        click_dbg_putc(113); click_dbg_hex(lq(&click_debug_seq));
+        click_dbg_putc(32); click_dbg_putc(115); click_dbg_hex(slot);
+        click_dbg_putc(32); click_dbg_putc(119); click_dbg_hex(win);
+        click_dbg_putc(32); click_dbg_putc(120); click_dbg_hex(mouse_x);
+        click_dbg_putc(32); click_dbg_putc(121); click_dbg_hex(mouse_y);
+        click_dbg_putc(32); click_dbg_putc(99); click_dbg_hex(arg1);
+        click_dbg_putc(47); click_dbg_hex(arg2);
+        click_dbg_putc(32); click_dbg_putc(102); click_dbg_hex(focus_before);
+        click_dbg_putc(32); click_dbg_putc(112); click_dbg_hex(stored);
+        click_dbg_putc(32); click_dbg_putc(116); click_dbg_hex(target);
+        click_dbg_crlf();
+    }
+}
+
+fn click_dbg_callback_end(focus_after) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        sq(&click_debug_focus_after, focus_after);
+        click_dbg_tag(67, 76, 75, 69);          # "CLKE"
+        click_dbg_putc(113); click_dbg_hex(lq(&click_debug_seq));
+        click_dbg_putc(32); click_dbg_putc(115); click_dbg_hex(lq(&click_debug_slot));
+        click_dbg_putc(32); click_dbg_putc(102); click_dbg_hex(lq(&click_debug_focus_before));
+        click_dbg_putc(45); click_dbg_hex(focus_after);
+        click_dbg_crlf();
+        sb(&click_debug_active, 0);
+    }
+}
+
+fn wm_client_x(win, mouse_x) { return mouse_x - lq(win + WIN_OFF_X) - BORDER_WIDTH; }
+fn wm_client_y(win, mouse_y) { return mouse_y - lq(win + WIN_OFF_Y) - TITLEBAR_HEIGHT; }
+
+fn wm_hit_window_at(x, y) {
+    let f = lq(&wm_focused_window);
+    if f != NO_WINDOW {
+        if f >= 0 && f < MAX_WINDOWS {
+            let p = wm_ptr(f);
+            let fl = lq(p + WIN_OFF_FLAGS);
+            if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 {
+                let wx = lq(p + WIN_OFF_X);
+                let wy = lq(p + WIN_OFF_Y);
+                if x >= wx && x < wx + lq(p + WIN_OFF_W) {
+                    if y >= wy && y < wy + lq(p + WIN_OFF_H) { return f; }
+                }
+            }
+        }
+    }
+    let i = MAX_WINDOWS - 1;
+    while i >= 0 {
+        let p = wm_ptr(i);
+        let fl = lq(p + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 {
+            let wx = lq(p + WIN_OFF_X);
+            let wy = lq(p + WIN_OFF_Y);
+            if x >= wx && x < wx + lq(p + WIN_OFF_W) {
+                if y >= wy && y < wy + lq(p + WIN_OFF_H) { return i; }
+            }
+        }
+        i = i - 1;
+    }
+    return NO_WINDOW;
+}
+
+fn wm_clear_focus_flags() {
+    let i = 0;
+    while i < MAX_WINDOWS {
+        let win = wm_ptr(i);
+        sq(win + WIN_OFF_FLAGS, lq(win + WIN_OFF_FLAGS) & 0xFFFFFFFFFFFFFFFB);
+        i = i + 1;
+    }
+}
+
+fn wm_focus_window(id) {
+    let old_focus = lq(&wm_focused_window);
+    wm_clear_focus_flags();
+    let win = wm_ptr(id);
+    sq(win + WIN_OFF_FLAGS, lq(win + WIN_OFF_FLAGS) | WF_FOCUSED);
+    sq(&wm_focused_window, id);
+    cfg "ENABLE_DEBUG_SERIAL" {
+        call dbg_event_emit6(rdi: EVT_FOCUS_CHANGE, rsi: id, rdx: old_focus, rcx: id, r8: win, r9: lq(win + WIN_OFF_FLAGS));
+    }
+    click_dbg_focus(id, old_focus, id, lq(win + WIN_OFF_FLAGS));
+}
+
+fn wm_dispatch_verified_callback(slot, field, stored, win, arg1, arg2) {
+    if stored == 0 { return 0; }
+    let cpi_off = WIN_OFF_DRAGFN;
+    if field == WM_CB_FIELD_RCLICK { cpi_off = WIN_OFF_RCLICKFN; }
+    click_dbg_cpi_req(68, slot, cpi_off, win, stored, arg1, arg2); # "CPID"
+    let target = cpi_verify_callback(stored, win, cpi_off);
+    if target == 0 { return 0; }
+    return dispatch_app_callback(target, win, arg1, arg2);
+}
+
+fn wm_dirty_outline(x, y, w, h) {
+    call render_mark_dirty(rdi: x, rsi: y, rdx: w, rcx: 2);
+    call render_mark_dirty(rdi: x, rsi: y + h - 2, rdx: w, rcx: 2);
+    call render_mark_dirty(rdi: x, rsi: y, rdx: 2, rcx: h);
+    call render_mark_dirty(rdi: x + w - 2, rsi: y, rdx: 2, rcx: h);
+}
+
+fn wm_handle_title_drag(mouse_x, mouse_y, buttons) {
+    let id = lq(&wm_drag_window_id);
+    if id == NO_WINDOW { return 0; }
+    if (buttons & BTN_LEFT) == 0 {
+        sq(&wm_drag_window_id, NO_WINDOW);
+        sb(&cursor_mode, 0);
+        return 1;
+    }
+
+    let win = wm_ptr(id);
+    let x = mouse_x - lq(&wm_drag_off_x);
+    let y = mouse_y - lq(&wm_drag_off_y);
+    let max_x = lw(&scr_width) - lq(win + WIN_OFF_W);
+    if max_x < 0 { max_x = 0; }
+    if x > max_x { x = max_x; }
+    if x < 0 { x = 0; }
+
+    let max_y = lw(&scr_height) - lq(win + WIN_OFF_H);
+    if max_y < 0 { max_y = 0; }
+    if y > max_y { y = max_y; }
+    if y < 0 { y = 0; }
+
+    wm_dirty_outline(lq(&wm_drag_preview_x), lq(&wm_drag_preview_y),
+                     lq(&wm_drag_preview_w), lq(&wm_drag_preview_h));
+    sq(&wm_drag_preview_x, x);
+    sq(&wm_drag_preview_y, y);
+    wm_dirty_outline(x, y, lq(&wm_drag_preview_w), lq(&wm_drag_preview_h));
+    sq(win + WIN_OFF_X, x);
+    sq(win + WIN_OFF_Y, y);
+    return 0;
+}
+
+fn wm_handle_app_drag(mouse_x, mouse_y, buttons) {
+    if (buttons & BTN_LEFT) == 0 {
+        sq(&wm_app_drag_window_id, NO_WINDOW);
+        return 0;
+    }
+    let id = lq(&wm_app_drag_window_id);
+    if id == NO_WINDOW { return 0; }
+    if id < 0 || id >= MAX_WINDOWS {
+        sq(&wm_app_drag_window_id, NO_WINDOW);
+        return 0;
+    }
+
+    let win = wm_ptr(id);
+    if (lq(win + WIN_OFF_FLAGS) & WF_ACTIVE) == 0 {
+        sq(&wm_app_drag_window_id, NO_WINDOW);
+        return 0;
+    }
+    let cx = wm_client_x(win, mouse_x);
+    let cy = wm_client_y(win, mouse_y);
+    if cx == lq(&wm_app_drag_last_x) {
+        if cy == lq(&wm_app_drag_last_y) { return 1; }
+    }
+    sq(&wm_app_drag_last_x, cx);
+    sq(&wm_app_drag_last_y, cy);
+    wm_dispatch_verified_callback(id, WM_CB_FIELD_DRAG, lq(win + WIN_OFF_DRAGFN), win, cx, cy);
+    return 1;
+}
+
+fn wm_handle_right_click(mouse_x, mouse_y) {
+    let id = wm_hit_window_at(mouse_x, mouse_y);
+    if id == NO_WINDOW { return 0; }
+    let win = wm_ptr(id);
+    if mouse_y - lq(win + WIN_OFF_Y) <= TITLEBAR_HEIGHT { return 0; }
+    let cx = wm_client_x(win, mouse_x);
+    let cy = wm_client_y(win, mouse_y);
+    wm_dispatch_verified_callback(id, WM_CB_FIELD_RCLICK, lq(win + WIN_OFF_RCLICKFN), win, cx, cy);
+    return 1;
+}
+
+fn wm_start_title_drag(id, win, mouse_x, rel_y) {
+    sq(&wm_drag_window_id, id);
+    sq(&wm_drag_off_x, mouse_x - lq(win + WIN_OFF_X));
+    sq(&wm_drag_off_y, rel_y);
+    sq(&wm_drag_preview_x, lq(win + WIN_OFF_X));
+    sq(&wm_drag_preview_y, lq(win + WIN_OFF_Y));
+    sq(&wm_drag_preview_w, lq(win + WIN_OFF_W));
+    sq(&wm_drag_preview_h, lq(win + WIN_OFF_H));
+    sb(&cursor_mode, 1);
+    render_save_backbuffer();
+    wm_focus_window(id);
+}
+
+fn wm_handle_client_click(id, win, mouse_x, mouse_y) {
+    let stored = lq(win + WIN_OFF_CLICKFN);
+    cfg "ENABLE_DEBUG_SERIAL" {
+        call dbg_event_emit6(rdi: EVT_INPUT_ROUTE, rsi: id, rdx: WIN_OFF_CLICKFN, rcx: win, r8: mouse_x, r9: mouse_y);
+    }
+    if stored == 0 {
+        wm_focus_window(id);
+        return 0;
+    }
+    if (lq(&wm_last_buttons) & BTN_LEFT) != 0 {
+        return 1;
+    }
+
+    let drag = lq(win + WIN_OFF_DRAGFN);
+    if drag != 0 {
+        sq(&wm_app_drag_window_id, id);
+        sq(&wm_app_drag_last_x, wm_client_x(win, mouse_x));
+        sq(&wm_app_drag_last_y, wm_client_y(win, mouse_y));
+    }
+
+    let focus_before = lq(&wm_focused_window);
+    let cx = wm_client_x(win, mouse_x);
+    let cy = wm_client_y(win, mouse_y);
+    click_dbg_cpi_req(67, id, WIN_OFF_CLICKFN, win, stored, cx, cy); # "CPIC"
+    let target = cpi_verify_callback(stored, win, WIN_OFF_CLICKFN);
+    click_dbg_callback_start(id, WIN_OFF_CLICKFN, win, mouse_x, mouse_y,
+                             cx, cy, stored, target, focus_before, BTN_LEFT,
+                             lq(win + WIN_OFF_FLAGS));
+    if target != 0 {
+        dispatch_app_callback(target, win, cx, cy);
+    }
+    click_dbg_callback_end(lq(&wm_focused_window));
+    if lq(&wm_focused_window) == focus_before {
+        wm_focus_window(id);
+    }
+    return 1;
+}
+
+# Handle mouse input: RDI=mouseX, RSI=mouseY, RDX=buttons. Returns 1 when the
+# WM consumed the event or a title/app drag is active; 0 otherwise.
+fn wm_handle_mouse_event(rdi mouse_x, rsi mouse_y, rdx buttons)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let handled = 0;
+
+    if lq(&wm_drag_window_id) != NO_WINDOW {
+        handled = wm_handle_title_drag(mouse_x, mouse_y, buttons);
+        sq(&wm_last_buttons, buttons);
+        if handled != 0 { return 1; }
+        if lq(&wm_drag_window_id) != NO_WINDOW { return 1; }
+        return 0;
+    }
+
+    if lq(&wm_app_drag_window_id) != NO_WINDOW {
+        handled = wm_handle_app_drag(mouse_x, mouse_y, buttons);
+        sq(&wm_last_buttons, buttons);
+        return handled;
+    }
+
+    if (buttons & BTN_RIGHT) != 0 {
+        if (lq(&wm_last_buttons) & BTN_RIGHT) == 0 {
+            handled = wm_handle_right_click(mouse_x, mouse_y);
+            sq(&wm_last_buttons, buttons);
+            return handled;
+        }
+        sq(&wm_last_buttons, buttons);
+        return 0;
+    }
+
+    if (buttons & BTN_LEFT) == 0 {
+        sq(&wm_last_buttons, buttons);
+        return 0;
+    }
+
+    let focus_at_entry = lq(&wm_focused_window);
+    let id = wm_hit_window_at(mouse_x, mouse_y);
+    if id == NO_WINDOW {
+        click_dbg_mouse(78, mouse_x, mouse_y, buttons, focus_at_entry, id, 0); # "CLKN"
+        wm_clear_focus_flags();
+        sq(&wm_focused_window, NO_WINDOW);
+        sq(&wm_last_buttons, buttons);
+        return 0;
+    }
+    let win = wm_ptr(id);
+    click_dbg_mouse(77, mouse_x, mouse_y, buttons, focus_at_entry, id,
+                    lq(win + WIN_OFF_FLAGS));                                 # "CLKM"
+
+    let close_x = lq(win + WIN_OFF_X) + lq(win + WIN_OFF_W) - CLOSE_BTN_SIZE - 4;
+    let chrome_y = lq(win + WIN_OFF_Y) + 4;
+    if mouse_x >= close_x && mouse_x <= close_x + CLOSE_BTN_SIZE {
+        if mouse_y >= chrome_y && mouse_y <= chrome_y + CLOSE_BTN_SIZE {
+            wm_close_window(id);
+            sq(&wm_last_buttons, buttons);
+            return 0;
+        }
+    }
+
+    let min_x = lq(win + WIN_OFF_X) + lq(win + WIN_OFF_W) - CLOSE_BTN_SIZE * 2 - 8;
+    if mouse_x >= min_x && mouse_x <= min_x + MIN_BTN_SIZE {
+        if mouse_y >= chrome_y && mouse_y <= chrome_y + MIN_BTN_SIZE {
+            sq(win + WIN_OFF_FLAGS, (lq(win + WIN_OFF_FLAGS) | 0x08) & 0xFFFFFFFFFFFFFFFE);
+            sq(&wm_last_buttons, buttons);
+            return 0;
+        }
+    }
+
+    let rel_y = mouse_y - lq(win + WIN_OFF_Y);
+    if rel_y <= TITLEBAR_HEIGHT {
+        wm_start_title_drag(id, win, mouse_x, rel_y);
+        sq(&wm_last_buttons, buttons);
+        return 1;
+    }
+
+    handled = wm_handle_client_click(id, win, mouse_x, mouse_y);
+    sq(&wm_last_buttons, buttons);
+    return handled;
+}
+
+# ---------------------------------------------------------------------------
+# wm_get_window_at - find topmost window at (X, Y).
+#   In:  RDI = x, RSI = y
+#   Out: RAX = window ID, or -1 if none.
+# The focused window (drawn on top) is checked first; on any miss the scan
+# falls back to a top-down (MAX_WINDOWS-1 .. 0) pass and returns the first
+# active+visible window whose bounds contain the point. Both passes test
+# [WIN_X, WIN_X+WIN_W) x [WIN_Y, WIN_Y+WIN_H) with the SAME signed compares
+# (jl/jge) the asm used. Preserves RDI/RSI (inputs) + RBX/RCX/RDX/R8..R15;
+# RAX is the verdict (left out of preserves).
+# ---------------------------------------------------------------------------
+fn wm_get_window_at(rdi x, rsi y)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    # --- focused-window fast path ---
+    let f = lq(&wm_focused_window);
+    if f != -1 {
+        if f < MAX_WINDOWS {
+            let p = WINDOW_POOL_ADDR + f * WINDOW_STRUCT_SIZE;
+            let fl = lq(p + WIN_OFF_FLAGS);
+            if (fl & WF_ACTIVE) != 0 {
+                if (fl & WF_VISIBLE) != 0 {
+                    let wx = lq(p + WIN_OFF_X);
+                    if x >= wx {
+                        if x < wx + lq(p + WIN_OFF_W) {
+                            let wy = lq(p + WIN_OFF_Y);
+                            if y >= wy {
+                                if y < wy + lq(p + WIN_OFF_H) {
+                                    return f;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    # --- top-down scan of all slots ---
+    let i = MAX_WINDOWS - 1;
+    while i >= 0 {
+        let p = WINDOW_POOL_ADDR + i * WINDOW_STRUCT_SIZE;
+        let fl = lq(p + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 {
+            if (fl & WF_VISIBLE) != 0 {
+                let wx = lq(p + WIN_OFF_X);
+                if x >= wx {
+                    if x < wx + lq(p + WIN_OFF_W) {
+                        let wy = lq(p + WIN_OFF_Y);
+                        if y >= wy {
+                            if y < wy + lq(p + WIN_OFF_H) {
+                                return i;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+# ---------------------------------------------------------------------------
+# wm_cb_intern - record a callback target for (slot, field) in the kernel-owned
+# table and return its slot-local id.
+#   In:  EDI = slot index (0..MAX_WINDOWS-1), ESI = field id (WM_CB_FIELD_*),
+#        RDX = target (0 allowed -> "no callback").
+#   Out: EAX = (slot * WM_CB_FIELDS + field) + 1, or 0 if (slot,field) is out of
+#        range OR target is 0. The +1 bias keeps a valid id non-zero so 0 stays a
+#        clean "none" sentinel.
+# Preserves RDI/RSI/RDX/R8 (and the rest); EAX is the returned id. Inputs are
+# zero-extended dwords, so the signed `>=` guards behave identically to the
+# asm's unsigned `cmp/jae` range rejects. The table write goes through the
+# kernel-BSS wm_cb_table (defined in window.asm) at the bounds-proven flat row.
+# ---------------------------------------------------------------------------
+fn wm_cb_intern(rax id, edi slot, esi field, rdx target)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    id = 0;
+    if slot < MAX_WINDOWS {
+        if field < WM_CB_FIELDS {
+            if target != 0 {
+                let row = slot * WM_CB_FIELDS + field;
+                sq(&wm_cb_table + row * 8, target);
+                id = row + 1;
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_cb_resolve - look up a slot-local callback id in the kernel-owned table and
+# return the stored TRUSTED target. The single read point the dispatch sites
+# take their call target from; the window struct is never the source here.
+#   In:  EDI = slot-local callback id (as returned by wm_cb_intern; 0 = none)
+#   Out: RAX = trusted target, or 0 if id is 0 / out of range / slot empty.
+# Preserves RSI/RDX/R8 (and the rest) so callers keep their args live across the
+# call. id is a zero-extended dword, so signed `>=` matches the asm's unsigned
+# `cmp/jae` bound. The flat row index is (id - 1), bound to MAX_WINDOWS*FIELDS.
+# ---------------------------------------------------------------------------
+fn wm_cb_resolve(rax target, edi id)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    target = 0;
+    if id != 0 {
+        let row = id - 1;
+        if row < MAX_WINDOWS * WM_CB_FIELDS {
+            target = lq(&wm_cb_table + row * 8);
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_bg_fill_solid - paint the backbuffer with the plain desktop colour. Used
+# whenever no wallpaper is selected (notably the whole boot path) so the SVG
+# rasterizer never runs unprompted. Reads bb_addr / scr_height / scr_width /
+# scr_pitch_q. Preserves ALL registers (it is a pure side-effect-on-FB void).
+# Per-row: write scr_width dwords of DESKTOP_SOLID_COLOR, then advance the
+# write cursor by the full pitch (so the end-of-row gap is skipped) - identical
+# pixel stream to the asm's `rep stosd ; add rdi, pitch-width*4` per row.
+# ---------------------------------------------------------------------------
+fn wm_bg_fill_solid() preserves(all) {
+    let dst = lq(&bb_addr);
+    let h = lw(&scr_height);
+    let w = lw(&scr_width);
+    let pitch = lq(&scr_pitch_q);
+    let row = 0;
+    while row < h {
+        let cursor = dst;
+        let col = 0;
+        while col < w {
+            sw(cursor, DESKTOP_SOLID_COLOR);
+            cursor = cursor + 4;
+            col = col + 1;
+        }
+        dst = dst + pitch;
+        row = row + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_bg_save_cache - copy the live backbuffer into a wallpaper cache.
+#   In:  (none extra) - source is bb_addr, dest is the cache the asm received in
+#        RDI? No: the asm read SRC from bb_addr and wrote contiguously from RDI.
+#   The asm: rsi=bb_addr (source, pitch-strided), rdi=cache (dest, contiguous,
+#   advanced by rep movsd only). Mirror exactly: read scr_width dwords per row
+#   from the pitch-strided source, write them contiguously to the dest cursor.
+#   In:  RDI = dest cache base.  Preserves ALL registers.
+# ---------------------------------------------------------------------------
+fn wm_bg_save_cache(rdi dest) preserves(all) {
+    let src = lq(&bb_addr);
+    let h = lw(&scr_height);
+    let w = lw(&scr_width);
+    let pitch = lq(&scr_pitch_q);
+    let dcur = dest;
+    let row = 0;
+    while row < h {
+        let scur = src;
+        let col = 0;
+        while col < w {
+            sw(dcur, lw(scur));
+            scur = scur + 4;
+            dcur = dcur + 4;
+            col = col + 1;
+        }
+        src = src + pitch;
+        row = row + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_bg_restore_cache - blit a wallpaper cache back into the live backbuffer.
+#   In:  RDI = source cache base.
+#   The asm: rsi=cache (source, contiguous), rdi=bb_addr (dest, pitch-strided,
+#   advanced by rep movsd then +pitch-width*4). Mirror: read scr_width dwords
+#   contiguously from the source, write them to the pitch-strided dest, advance
+#   dest by the full pitch each row. Preserves ALL registers.
+# ---------------------------------------------------------------------------
+fn wm_bg_restore_cache(rdi source) preserves(all) {
+    let dst = lq(&bb_addr);
+    let h = lw(&scr_height);
+    let w = lw(&scr_width);
+    let pitch = lq(&scr_pitch_q);
+    let scur = source;
+    let row = 0;
+    while row < h {
+        let dcur = dst;
+        let col = 0;
+        while col < w {
+            sw(dcur, lw(scur));
+            scur = scur + 4;
+            dcur = dcur + 4;
+            col = col + 1;
+        }
+        dst = dst + pitch;
+        row = row + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_bg_diamond - draw a soft diamond from one-pixel-tall scanlines.
+#   In: EDI = cx, ESI = cy, EDX = radius, R8D = color.
+# For dy in [-radius, radius]: half = radius - abs(dy); if half > 0 draw a
+# 1px-tall rect at (cx-half, cy+dy) of width 2*half. Calls render_rect with the
+# System-V ABI (rdi=x, rsi=y, rdx=w, rcx=h, r8=color). Geometry is exactly the
+# asm's (signed abs, `jle` skip on half<=0). Preserves all callee-saved regs the
+# asm push/pop'd (rbx/r12..r15); render_rect owns its own clobbers.
+# ---------------------------------------------------------------------------
+fn wm_bg_diamond(edi cx, esi cy, edx radius, r8d color)
+        preserves(rbx, rcx, rsi, rdi, r9, r10, r11, r12, r13, r14, r15) {
+    let dy = 0 - radius;
+    while dy <= radius {
+        let a = dy;
+        if a < 0 {
+            a = 0 - a;
+        }
+        let half = radius - a;
+        if half > 0 {
+            call render_rect(rdi: cx - half, rsi: cy + dy, rdx: half * 2, rcx: 1, r8: color);
+        }
+        dy = dy + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# wm_mark_outline_dirty - mark the four edges of an outline rect as dirty so the
+# compositor restores them.
+#   In: R8 = x, R9 = y, R10 = w, R11 = h.
+# Calls render_mark_dirty(rdi=x, rsi=y, rdx=w, rcx=h) for the top edge (2px),
+# bottom edge (y+h-2, 2px), left edge (2px wide, h tall) and right edge
+# (x+w-2, 2px wide, h tall) - byte-identical to the asm's four calls. Preserves
+# R8..R11 (inputs) + the other callee-saved regs; render_mark_dirty owns its
+# clobbers. Coordinates are taken at 32-bit width (the asm used r8d/r9d/...).
+# ---------------------------------------------------------------------------
+fn wm_mark_outline_dirty(r8 x, r9 y, r10 w, r11 h)
+        preserves(rbx, rcx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    call render_mark_dirty(rdi: x, rsi: y, rdx: w, rcx: 2);
+    call render_mark_dirty(rdi: x, rsi: y + h - 2, rdx: w, rcx: 2);
+    call render_mark_dirty(rdi: x, rsi: y, rdx: 2, rcx: h);
+    call render_mark_dirty(rdi: x + w - 2, rsi: y, rdx: 2, rcx: h);
+}

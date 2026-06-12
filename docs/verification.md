@@ -1,4 +1,4 @@
-# NexusOS Verification
+# GritOS Verification
 
 This page is normative for structural edits.
 

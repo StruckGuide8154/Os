@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - PS/2 Mouse Driver
+; GritOS v3.0 - PS/2 Mouse Driver
 ; Full 8042 controller init, IRQ12 handler, 3-byte packet protocol
 ; ============================================================================
 bits 64

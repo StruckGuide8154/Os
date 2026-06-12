@@ -77,7 +77,7 @@ fbperf_init:
     mov  rax, cr4
     mov  [fbperf_cr4], rax
 
-    ; --- IA32_PAT (MSR 0x277) — only if CPUID says PAT supported ---
+    ; --- IA32_PAT (MSR 0x277) - only if CPUID says PAT supported ---
     cmp  dword [fbperf_cpuid_pat_supported], 0
     je   .skip_pat_read
     mov  ecx, 0x277
@@ -86,7 +86,7 @@ fbperf_init:
     mov  [fbperf_pat_msr + 4], edx
 .skip_pat_read:
 
-    ; --- IA32_MTRRCAP (0xFE) — only if CPUID says MTRR supported ---
+    ; --- IA32_MTRRCAP (0xFE) - only if CPUID says MTRR supported ---
     cmp  dword [fbperf_cpuid_mtrr_supported], 0
     je   .skip_mtrr_read
     mov  ecx, 0xFE

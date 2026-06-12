@@ -35,7 +35,7 @@ CONTROL_ALLOW = {
     # safely run FN_BEGIN trace push/call sequence on a corrupted stack frame.
     "kernel_panic_canary",
     # Shadow-stack panic landing pad: reached only on a shadow/return-address
-    # mismatch (KEPILOGUE), halts the CPU. Same constraint as the canary pad —
+    # mismatch (KEPILOGUE), halts the CPU. Same constraint as the canary pad -
     # the stack frame it lands on is, by definition, suspect.
     "kernel_panic_shadow",
     # Build-gated (-dENABLE_SHADOW_STACK_POC) shadow-stack proof harness. It

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Page Table Setup (BIOS path)
+; GritOS v3.0 - Page Table Setup (BIOS path)
 ; Identity-maps first 4GB. PD0..PD2 use 2MB pages; the app arena PDEs in PD0
 ; instead point at 4KB page tables so the kernel can toggle USER per slot
 ; (and W^X per page) at ring-3 entry. PD3 is relocated to 0x81000 because
@@ -125,7 +125,7 @@ setup_paging:
     ; corresponding 4KB physical page with PRESENT|WRITABLE|USER. The kernel's
     ; l3_apply_slot_isolation (src/kernel/proc/usermode.asm) clamps the USER
     ; bit to the running slot's pages on every ring-3 entry, so the initial
-    ; USER mapping is safe — nothing executes in ring 3 before that clamp.
+    ; USER mapping is safe - nothing executes in ring 3 before that clamp.
     mov edi, APP_ARENA_PT_BASE
     mov eax, APP_DATA_ADDR | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER
     mov ecx, APP_USER_PDE_COUNT * 512

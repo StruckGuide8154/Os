@@ -59,7 +59,7 @@ FN_BEGIN wm_draw_desktop, 0, 0, FN_RET_VOID
     pop rbx
     ret
 
-; Desktop background renderer. Drives the NexusHL wallpaper app
+; Desktop background renderer. Drives the GritHL wallpaper app
 ; (app_hl_wallpaper_draw -> svg_render on the inline SVG strings) through the
 ; standard l3 ABI. Each theme has its own raster cache so changing backgrounds
 ; is a cache blit, not a full SVG render in the interactive frame loop.
@@ -117,7 +117,7 @@ FN_BEGIN wm_draw_desktop_background, 0, 0, FN_RET_VOID
     cmp byte [wallpaper_render_state], 1
     je .poll_render
     ; Refresh slot 0's shadow window to the current resolution before invoking
-    ; the renderer -- wallpaper.nxh reads display_current_width/height through
+    ; the renderer -- wallpaper.ghl reads display_current_width/height through
     ; syscalls so this is only defense in depth.
     mov rbx, WINDOW_POOL_ADDR
     mov eax, [scr_width]
@@ -256,7 +256,7 @@ wm_wallpaper_cache_addr:
     ret
 
 ; wm_bg_fill_solid, wm_bg_save_cache, wm_bg_restore_cache, wm_bg_diamond migrated
-; to src/kernel/nexushlk/wm_helpers.nxh (zero-asm; per-pixel dword loops replace
+; to src/kernel/grithlk/wm_helpers.ghl (zero-asm; per-pixel dword loops replace
 ; the rep stosd/movsd with a byte-identical pixel stream). DESKTOP_SOLID_COLOR is
 ; mirrored as a const there.
 

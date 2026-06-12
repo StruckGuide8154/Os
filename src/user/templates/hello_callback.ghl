@@ -1,0 +1,26 @@
+# Hello GritHL callback template.
+#
+# Use this as the starting point for new ring-3 callbacks. It keeps all app
+# behavior in GritHL and routes host interaction through the syscall ABI.
+
+use core
+
+app "HelloCallback" { stack = 4096; }
+
+str s_title   = "Hello from a GritOS ring-3 callback";
+str s_clicked = "hello_callback: click";
+str s_bye     = "hello_callback: escape pressed";
+
+fn hello_draw(win) {
+    syscall(SYS_GUI_TEXT, 24, 24, &s_title, COL_WHITE, 0);
+}
+
+fn hello_click(win, x, y) {
+    syscall(SYS_PRINT, &s_clicked);
+}
+
+fn hello_key(win, k) {
+    if k == KEY_ESC {
+        syscall(SYS_PRINT, &s_bye);
+    }
+}

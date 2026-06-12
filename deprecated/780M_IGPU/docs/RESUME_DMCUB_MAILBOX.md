@@ -92,7 +92,7 @@ Boot USB / ESP target: `E:\`
 
 ## Goal
 
-Get AMD open-source Linux DCN 3.1.4 / DMCUB mailbox bring-up working on real hardware for the Ryzen/Radeon 780M-style iGPU path in NexusOS.
+Get AMD open-source Linux DCN 3.1.4 / DMCUB mailbox bring-up working on real hardware for the Ryzen/Radeon 780M-style iGPU path in GritOS.
 
 ## Current Build Copied To E:
 

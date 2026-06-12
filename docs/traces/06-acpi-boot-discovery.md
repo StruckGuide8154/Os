@@ -1,4 +1,4 @@
-# Trace 06 — ACPI Boot Discovery: RSDP → XSDT → MADT → IOAPIC
+# Trace 06 - ACPI Boot Discovery: RSDP → XSDT → MADT → IOAPIC
 
 ## Entry
 
@@ -14,7 +14,7 @@
 | 4 | rsdp.asm:39-48 | scan 1KB at EBDA |
 | 5 | returns rax = RSDP pointer or 0 |
 
-**Round 8 fix**: `mov rcx, 0x1FFFF / 16` was 8191 paragraphs — last paragraph at 0xFFFF0 missed. Now `0x20000/16` = 8192.
+**Round 8 fix**: `mov rcx, 0x1FFFF / 16` was 8191 paragraphs - last paragraph at 0xFFFF0 missed. Now `0x20000/16` = 8192.
 
 ## Step 2: ACPI table walk (`kernel/arch/acpi.asm`)
 
@@ -46,7 +46,7 @@
 
 `acpi.asm:109-167` `.handle_facp`:
 - DSDT pointer at FADT+40; `aml_init` sets scan bounds
-- `aml_find_object('ELAN' / 'SYNA' / 'FTE')` — Round 10 fix: SYNA found-result was being overwritten by next FTE search (wrong jz/jnz polarity)
+- `aml_find_object('ELAN' / 'SYNA' / 'FTE')` - Round 10 fix: SYNA found-result was being overwritten by next FTE search (wrong jz/jnz polarity)
 - On match: scan 1024 bytes for ResourceDescriptor 0x86 (Memory32Fixed → spi_base) and 0x89 (Extended IRQ → touchpad_irq)
 
 ## Step 5: APIC + IOAPIC init

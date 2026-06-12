@@ -1,0 +1,141 @@
+# GritHL XML 1.0 parser bindings.
+#
+# One-shot DOM model: the kernel holds at most one parsed document. Call
+# xml_parse() to (re)build it; subsequent xml_root() / xml_first_child()
+# / xml_next_sibling() / xml_parent() return integer node indices. Use
+# xml_tag_name() / xml_attr() / xml_text() to copy strings into caller
+# buffers. Returns from navigation functions are -1 on miss.
+#
+# Each wrapper emits exactly one syscall - no hidden allocation, matching
+# the core.ghl convention.
+
+use core
+
+const XML_NIL          = -1
+const XML_ERR_OK       = 0
+const XML_ERR_EOF      = 1
+const XML_ERR_BAD_TAG  = 2
+const XML_ERR_UNCLOSED = 3
+const XML_ERR_MISMATCH = 4
+const XML_ERR_ARENA    = 5
+const XML_ERR_BAD_ATTR = 6
+const XML_ERR_COMMENT  = 7
+const XML_ERR_ENTITY   = 8
+const XML_ERR_MULTI    = 9
+
+const XML_MAX_NODES    = 8192
+const XML_MAX_ATTRS    = 8192
+const XML_STR_SIZE     = 262144
+const XML_NAMES_SIZE   = 16384
+const XML_MAX_NAMES    = 1024
+const XML_MAX_DEPTH    = 64
+
+fn xml_parse(buf, len) {
+    return syscall(30, buf, len);
+}
+
+fn xml_root() {
+    return syscall(31);
+}
+
+fn xml_tag(node) {
+    return syscall(32, node);
+}
+
+fn xml_tag_name(node, out, max) {
+    return syscall(33, node, out, max);
+}
+
+fn xml_first_child(node) {
+    return syscall(34, node);
+}
+
+fn xml_next_sibling(node) {
+    return syscall(35, node);
+}
+
+fn xml_parent(node) {
+    return syscall(36, node);
+}
+
+fn xml_attr(node, name, nlen, out, omax) {
+    return syscall(37, node, name, nlen, out, omax);
+}
+
+fn xml_text(node, out, max) {
+    return syscall(38, node, out, max);
+}
+
+fn xml_free() {
+    return syscall(39);
+}
+
+# Packed diagnostic from the last parse: low 32 bits are XML_ERR_*,
+# high 32 bits are the byte offset where parsing failed.
+fn xml_last_error() {
+    return syscall(43);
+}
+
+fn xml_last_error_code() {
+    return xml_last_error() & 0xFFFFFFFF;
+}
+
+fn xml_last_error_offset() {
+    return (xml_last_error() >> 32) & 0xFFFFFFFF;
+}
+
+fn xml_node_count() {
+    return syscall(44);
+}
+
+fn xml_text_runs(node) {
+    return syscall(47, node);
+}
+
+fn xml_text_run(node, index, out, max) {
+    return syscall(48, node, index, out, max);
+}
+
+fn xml_namespace(node, prefix, prefix_len, out, max) {
+    return syscall(49, node, prefix, prefix_len, out, max);
+}
+
+fn xml_node_namespace(node, out, max) {
+    return syscall(50, node, out, max);
+}
+
+fn xml_entity_value(name, name_len, out, max) {
+    return syscall(51, name, name_len, out, max);
+}
+
+fn xml_tag_is(node, tag_id) {
+    if node < 0 { return 0; }
+    if xml_tag(node) == tag_id { return 1; }
+    return 0;
+}
+
+fn xml_same_tag(a, b) {
+    if a < 0 { return 0; }
+    if b < 0 { return 0; }
+    if xml_tag(a) == xml_tag(b) { return 1; }
+    return 0;
+}
+
+fn xml_first_child_safe(node) {
+    if node < 0 { return XML_NIL; }
+    return xml_first_child(node);
+}
+
+fn xml_next_sibling_safe(node) {
+    if node < 0 { return XML_NIL; }
+    return xml_next_sibling(node);
+}
+
+fn xml_next_child(parent, child) {
+    if parent < 0 { return XML_NIL; }
+    if child < 0 { return XML_NIL; }
+    let next = xml_next_sibling(child);
+    if next < 0 { return XML_NIL; }
+    if xml_parent(next) != parent { return XML_NIL; }
+    return next;
+}

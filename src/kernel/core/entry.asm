@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Kernel Entry Point (64-bit Long Mode)
+; GritOS v3.0 - Kernel Entry Point (64-bit Long Mode)
 ; Loaded at 0x100000 by Stage 2
 ; ============================================================================
 bits 64

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Append-only trace ring with parent-hash causal chain
+; GritOS v3.0 - Append-only trace ring with parent-hash causal chain
 ; ============================================================================
 bits 64
 
@@ -19,7 +19,7 @@ extern ser_print_hex64
 extern debug_print
 
 ; ----------------------------------------------------------------------------
-; trace_fn_enter — called from FN_BEGIN
+; trace_fn_enter - called from FN_BEGIN
 ;   EDI = fn_id (32-bit), ESI = slot
 ; Pushes parent on per-slot stack, sets current_fn[slot] = fn_id, emits ENTER.
 ; ----------------------------------------------------------------------------
@@ -67,7 +67,7 @@ trace_fn_enter:
 %endif
 
 ; ----------------------------------------------------------------------------
-; trace_fn_exit — called from FN_END
+; trace_fn_exit - called from FN_END
 ;   EDI = fn_id, ESI = slot, RDX = retval
 ; Pops parent stack into current_fn[slot]; emits EXIT with retval.
 ; ----------------------------------------------------------------------------
@@ -119,7 +119,7 @@ trace_fn_exit:
 %endif
 
 ; ----------------------------------------------------------------------------
-; trace_syscall — emit a syscall enter/exit record explicitly.
+; trace_syscall - emit a syscall enter/exit record explicitly.
 ;   EDI = syscall number, ESI = slot, EDX = flags, RCX = arg0/return
 ; ----------------------------------------------------------------------------
 global trace_syscall
@@ -175,7 +175,7 @@ trace_emit:
 %endif
 
 ; ----------------------------------------------------------------------------
-; trace_dump_serial — dump last TRACE_DUMP_RECORDS records to COM1.
+; trace_dump_serial - dump last TRACE_DUMP_RECORDS records to COM1.
 ; Format per line: "#<seq> F<fn_id>:<flags>:<arg>:<parent>"
 ; ----------------------------------------------------------------------------
 global trace_dump_serial
@@ -253,7 +253,7 @@ trace_dump_screen:
 %endif
 
 ; ----------------------------------------------------------------------------
-; trace_set_slot — set the global active slot used by FN_BEGIN/FN_END.
+; trace_set_slot - set the global active slot used by FN_BEGIN/FN_END.
 ; Called by syscall entry / scheduler when switching contexts.
 ;   EDI = slot
 ; ----------------------------------------------------------------------------

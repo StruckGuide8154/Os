@@ -1,4 +1,4 @@
-# Trace 04 — Frame Render → Back-Buffer Composition → Display Flip
+# Trace 04 - Frame Render → Back-Buffer Composition → Display Flip
 
 ## Entry
 
@@ -10,14 +10,14 @@
 |---|---|---|
 | 1 | main.asm | poll inputs (`process_mouse`, `keyboard_repeat_tick`, drain `kb_buffer`, USB/I2C/SPI HID polls) |
 | 2 | main.asm | branches to `.do_render` if `scene_dirty != 0` or first frame |
-| 3 | main.asm `.rf_render` | `call render_begin` — clears dirty rect list |
-| 4 | render | `call wm_draw_all_windows` — iterates `window_pool[0..MAX_WINDOWS]` with `WF_ACTIVE`; for each: |
+| 3 | main.asm `.rf_render` | `call render_begin` - clears dirty rect list |
+| 4 | render | `call wm_draw_all_windows` - iterates `window_pool[0..MAX_WINDOWS]` with `WF_ACTIVE`; for each: |
 |   |   | • `wm_draw_window`: titlebar fill_rect, border draw_rect_outline, draw_string title, content callback `WIN_OFF_DRAWFN` |
 | 5 | render | `call desktop_draw_icons` (if no fullscreen window) |
-| 6 | render | `call tb_draw` — taskbar buttons + clock + battery |
+| 6 | render | `call tb_draw` - taskbar buttons + clock + battery |
 | 7 | render | `call cursor_hide` (restore old bg from cursor_bg_save) |
-| 8 | render | `call cursor_draw(mouse_x, mouse_y)` — saves new bg, XORs cursor |
-| 9 | render | `call render_flush` — `display_flip` or `display_flip_rect(s)` per dirty rect |
+| 8 | render | `call cursor_draw(mouse_x, mouse_y)` - saves new bg, XORs cursor |
+| 9 | render | `call render_flush` - `display_flip` or `display_flip_rect(s)` per dirty rect |
 | 10 | display.asm `display_flip` | row-by-row `rep movsd` from `bb_addr` to `[fb_addr]` |
 
 ## Back buffer layout

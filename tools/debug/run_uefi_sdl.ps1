@@ -15,7 +15,7 @@ $qemuArgs = @(
     '-device', 'usb-kbd,bus=xhci0.0,port=2',
     '-serial', 'tcp:127.0.0.1:5555,server=on,wait=off',
     '-no-reboot',
-    '-name', 'NexusOS_UEFI_SDL'
+    '-name', 'GritOS_UEFI_SDL'
 )
 Start-Process -FilePath $QEMU -ArgumentList $qemuArgs
 Write-Host "SDL window launching..." -ForegroundColor Green

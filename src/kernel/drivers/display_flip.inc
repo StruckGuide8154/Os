@@ -117,8 +117,8 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     ; scr_width/scr_height, but if THOSE globals are themselves garbage (corrupt
     ; VBE/GOP state) the clip is a no-op and a bad width/row-count would drive the
     ; movntdq loop below off the end of RAM in a multi-GB copy that never returns
-    ; (boot hang). Cap the post-clip extents to 8192 px — far above any real
-    ; panel — so no caller can ever turn this into an unbounded copy.
+    ; (boot hang). Cap the post-clip extents to 8192 px - far above any real
+    ; panel - so no caller can ever turn this into an unbounded copy.
     cmp edx, 8192
     jle .fr_w_cap_ok
     mov edx, 8192
@@ -370,7 +370,7 @@ last_vsync_tick: dq 0      ; PIT tick count at last vsync
 ;              the pacer. 0 is treated as "uncapped" (pace to PIT only).
 ; vsync_hz   : target refresh used when vsync_enabled != 0. Default 60; the
 ;              user's real panel is 180. Clamped 5..1000 by the pacer.
-; The pacer (frame_pacing.nxh) reads these every frame, so a live write from the
+; The pacer (frame_pacing.ghl) reads these every frame, so a live write from the
 ; settings UI takes effect on the next frame with no extra wiring.
 target_fps:    dd 60    ; frame-rate cap when vsync is OFF (clamped 5..1000)
 vsync_hz:      dd 60     ; target refresh when vsync is ON (clamped 5..1000)
@@ -505,7 +505,7 @@ FN_BEGIN display_set_mode, 0, 0, FN_RET_SCALAR
 
     ; Real AMD display hardware is driven by the AMD provider. It accepts the
     ; firmware/native GOP mode and rejects unsafe non-native switches for now,
-    ; so NexusOS never pokes Bochs VBE ports on AMD laptops.
+    ; so GritOS never pokes Bochs VBE ports on AMD laptops.
     cmp byte [amd_display_active], 1
     jne .try_bochs_vbe
     call amd_display_set_mode

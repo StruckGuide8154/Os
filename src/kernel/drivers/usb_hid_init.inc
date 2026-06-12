@@ -149,7 +149,7 @@ usb_hid_init_body:
     ; On the FIRST attempt only, reuse an already-active controller (e.g. one
     ; brought up by rtl8156 before us) instead of resetting it. On subsequent
     ; attempts we have already exhausted that controller's ports without
-    ; finding a HID device, so force a fresh xhci_init — this advances the
+    ; finding a HID device, so force a fresh xhci_init - this advances the
     ; PCI scan (xhci_pci_search_start) to the NEXT controller. AMD Strix
     ; Point and similar platforms expose multiple xHCI PCI functions; the
     ; mouse may live on the second or third one.

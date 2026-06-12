@@ -10,7 +10,7 @@ FN_BEGIN wm_init, 0, 0, FN_RET_VOID
     mov qword [wm_app_drag_window_id], -1
     mov qword [wm_focused_window], -1
 
-    ; Slot 0 = native NexusHL wallpaper renderer. Set it up like a regular
+    ; Slot 0 = native GritHL wallpaper renderer. Set it up like a regular
     ; window so wm_draw_desktop_background can call into app_hl_wallpaper_draw
     ; through call_app_l3 / the normal l3 ABI.
     mov rbx, WINDOW_POOL_ADDR
@@ -90,7 +90,7 @@ wm_do_create:
     ja .fail
 
     ; Slot 0 is reserved for the native desktop wallpaper renderer's
-    ; NexusHL state. Normal windows use slots 1..MAX_WINDOWS-1.
+    ; GritHL state. Normal windows use slots 1..MAX_WINDOWS-1.
     cmp qword [wm_window_count], MAX_WINDOWS - 1
     jge .fail
 

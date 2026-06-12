@@ -1,4 +1,4 @@
-# NexusOS Cache32Max Performance Profile
+# GritOS Cache32Max Performance Profile
 
 `Cache32Max` is an experimental profile for cache-first development on an
 8-core Ryzen-class system. It keeps the normal boot profile unchanged while
@@ -12,7 +12,7 @@ frequency, memory layout, and SMP status.
 .\scripts\run\run_uefi.ps1 -PerfProfile Cache32Max
 ```
 
-The profile passes `NEXUS_CACHE32_MAX` to NASM and runs QEMU with:
+The profile passes `GRIT_CACHE32_MAX` to NASM and runs QEMU with:
 
 - `32M` guest memory on BIOS
 - `36M` guest memory on UEFI because this OVMF build exits below that floor
@@ -36,7 +36,7 @@ working set.
 
 ## Fixed Layout
 
-For `NEXUS_CACHE32_MAX`:
+For `GRIT_CACHE32_MAX`:
 
 - Hot kernel state remains below 4 MB.
 - GUI LLC arena is `0x1000000..0x1700000`.
@@ -74,7 +74,7 @@ and the native firmware/GOP mode it will accept for mode setting.
 
 The current milestone has cacheline-aligned per-core state records, a real-mode
 AP trampoline, and Local APIC INIT-SIPI-SIPI startup. Cache32Max builds enable
-`NEXUS_CACHE32_AP_STARTUP` and `NEXUS_ENABLE_RING3_AP`; APs enter long mode,
+`GRIT_CACHE32_AP_STARTUP` and `GRIT_ENABLE_RING3_AP`; APs enter long mode,
 update their heartbeat/state records, initialize their ring-3 syscall/TSS
 state, and run `smp_worker_loop`. IRQ and device ownership remain on the BSP,
 but app callbacks are submitted to each process `home_core`.

@@ -11,11 +11,11 @@
 
 bits 64
 
-%include "nexus_app.inc"
+%include "grit_app.inc"
 
 ; Synthetic 32-bit return value baked into the JIT-written `mov eax, imm32; ret`
 ; stub and re-checked after executing it through the X alias. Arbitrary sentinel
-; ("JIT" leetspeak-ish) — its only job is to prove the bytes written through the
+; ("JIT" leetspeak-ish) - its only job is to prove the bytes written through the
 ; W alias are the bytes executed through the X alias.
 WX_JIT_ALIAS_SENTINEL equ 0x4A1751CC
 
@@ -39,7 +39,7 @@ wx_jit_alias_pos_code_start:
     cmp rax, 0
     jne .fail
 
-    ; mov eax, WX_JIT_ALIAS_SENTINEL ; ret — written via W+NX alias, exec via X+!W.
+    ; mov eax, WX_JIT_ALIAS_SENTINEL ; ret - written via W+NX alias, exec via X+!W.
     lea rbx, [rel wx_jit_alias_pos_w_page]
     mov byte  [rbx + 0], 0xB8
     mov dword [rbx + 1], WX_JIT_ALIAS_SENTINEL

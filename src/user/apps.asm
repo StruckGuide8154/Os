@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Application Framework + Built-in Apps
+; GritOS v3.0 - Application Framework + Built-in Apps
 ; Split into per-app/source includes to keep userland code maintainable while
 ; preserving the monolithic kernel build.
 ; ============================================================================
@@ -47,7 +47,7 @@ global app_blob_start
 app_blob_start:
 ; 16-byte sentinel so a post-build extraction can locate this blob inside
 ; kernel.bin without needing NASM symbol maps.
-db 0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "NXAPPBLO"
+db 0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "GRAPPBLO"
 db 0x42, 0x53, 0x54, 0x52, 0x54, 0xDE, 0xAD, 0xBE    ; "BSTRT" + 0xDEADBE
 ; --- Segment 0: common glue (boot trampoline + common/state/launch) -------
 app_seg_common_start:
@@ -58,29 +58,29 @@ app_l3_done_trampoline:
     ud2
 %include "src/user/apps/common.inc"
 ; state.inc must come BEFORE any large code blob: every symbol it defines
-; (notepad_buf, np_line_len, …) is accessed slot-relative as
+; (notepad_buf, np_line_len, ...) is accessed slot-relative as
 ; `slot_base + (sym - app_blob_start)`, so the offset MUST fit within
 ; APP_SLOT_SIZE (1 MB) AND L3_APP_BLOB_COPY_CAP. Pushed below the >1 MB of
-; generated NexusHL code it overflows the slot and every notepad ends up
+; generated GritHL code it overflows the slot and every notepad ends up
 ; aliasing into the next slot's memory.
 %include "src/user/apps/state.inc"
 %include "src/user/apps/launch.inc"
 app_seg_common_end:
-; explorer.inc deleted — Explorer is now a pure-NexusHL app built by
-; build_nxh.ps1 and included via build/nxh/generated_apps.inc below.
-; terminal.inc deleted — Terminal is now a pure-NexusHL app
-; (src/user/nexushl/apps/terminal.nxh) built by build_nxh.ps1 and included via
-; build/nxh/generated_apps.inc below.
+; explorer.inc deleted - Explorer is now a pure-GritHL app built by
+; build_ghl.ps1 and included via build/ghl/generated_apps.inc below.
+; terminal.inc deleted - Terminal is now a pure-GritHL app
+; (src/user/grithl/apps/terminal.ghl) built by build_ghl.ps1 and included via
+; build/ghl/generated_apps.inc below.
 %define DISABLE_FN_RUNTIME_TRACE
-%include "build/nxh/generated_apps.inc"
+%include "build/ghl/generated_apps.inc"
 %undef DISABLE_FN_RUNTIME_TRACE
-; about.inc deleted — About is now a pure-NexusHL app built by build_nxh.ps1
-; and included via build/nxh/generated_apps.inc above.
+; about.inc deleted - About is now a pure-GritHL app built by build_ghl.ps1
+; and included via build/ghl/generated_apps.inc above.
 app_seg_shell_start:
 %include "src/user/apps/shell.inc"
 app_seg_shell_end:
-; paint.inc deleted — Paint is now a pure-NexusHL app built by build_nxh.ps1
-; and included via build/nxh/generated_apps.inc above.
+; paint.inc deleted - Paint is now a pure-GritHL app built by build_ghl.ps1
+; and included via build/ghl/generated_apps.inc above.
 %ifndef RELEASE_BUILD
 app_seg_security_probe_start:
 %include "src/user/apps/security_probe.inc"
@@ -90,7 +90,7 @@ app_seg_media_viewer_start:
 %include "src/user/apps/media_viewer.inc"
 app_seg_media_viewer_end:
 ; End sentinel (16 bytes, distinct from start marker).
-db 0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "NXAPPBLO"
+db 0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "GRAPPBLO"
 db 0x42, 0x45, 0x4E, 0x44, 0x21, 0xCA, 0xFE, 0xBE    ; "BEND!" + 0xCAFEBE
 global app_blob_end
 app_blob_end:
@@ -113,11 +113,11 @@ __SECT__
 ; app_id <-> segment mapping (see app_manifest.inc for id constants):
 ;   0   common glue (trampoline + common/state/launch)
 ;   2   explorer    3 terminal   4 notepad    5 settings   6 paint
-;   7   about       9 taskmgr   10 ping      11 media (NexusHL media app)
+;   7   about       9 taskmgr   10 ping      11 media (GritHL media app)
 ;   8   security_probe (debug only)
 ;   100 hello (debug only)  101 wallpaper  102 shell   103 media_viewer (asm app)
-; The NexusHL apps (2..11,100,101) are wrapped by app_seg_<name>_start/_end in
-; build/nxh/generated_apps.inc (emitted by build_nxh.ps1).
+; The GritHL apps (2..11,100,101) are wrapped by app_seg_<name>_start/_end in
+; build/ghl/generated_apps.inc (emitted by build_ghl.ps1).
 ; ============================================================================
 section .data
 global app_integrity_table

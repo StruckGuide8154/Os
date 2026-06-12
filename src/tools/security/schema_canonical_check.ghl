@@ -1,0 +1,105 @@
+# THREAT: a non-canonical/ambiguous encoding parsing differently than it was signed, enabling a signature-bypass.
+# GHL-native canonical schema checker kernel.
+#
+# The caller owns byte traversal. This module owns the policy decisions for
+# supported schema versions, known fields, canonical scalar lengths, and bounded
+# nesting so signed security data fails closed.
+
+module "security_schema_canonical_check";
+
+global security_schema_is_supported_version;
+global security_schema_is_known_field;
+global security_schema_accept_field;
+global security_schema_is_canonical_u32;
+global security_schema_is_safe_depth;
+
+const SCHEMA_SIGNED_ARTIFACT = 1;
+const SCHEMA_CAPABILITY_POLICY = 2;
+const SCHEMA_APP_MANIFEST = 3;
+const SCHEMA_UPDATE_MANIFEST = 4;
+
+const FIELD_TYPE = 1;
+const FIELD_DOMAIN = 2;
+const FIELD_HASH = 3;
+const FIELD_SCHEMA_VERSION = 4;
+const FIELD_SIGNER_ROLE = 5;
+const FIELD_VALIDITY = 6;
+const FIELD_POLICY_EPOCH = 7;
+const FIELD_CAPABILITY_SET = 8;
+const FIELD_SERVICE_ABI = 9;
+const FIELD_COMPATIBILITY = 10;
+
+const MAX_SCHEMA_VERSION = 1;
+const MAX_NESTING_DEPTH = 4;
+
+fn security_schema_is_supported_version(version) {
+    if version == MAX_SCHEMA_VERSION {
+        return 1;
+    }
+    return 0;
+}
+
+fn security_schema_is_known_field(schema_id, field_id) {
+    if schema_id == SCHEMA_SIGNED_ARTIFACT {
+        if field_id >= FIELD_TYPE {
+            if field_id <= FIELD_POLICY_EPOCH {
+                return 1;
+            }
+        }
+    }
+    if schema_id == SCHEMA_CAPABILITY_POLICY {
+        if field_id == FIELD_SCHEMA_VERSION { return 1; }
+        if field_id == FIELD_DOMAIN { return 1; }
+        if field_id == FIELD_POLICY_EPOCH { return 1; }
+        if field_id == FIELD_CAPABILITY_SET { return 1; }
+    }
+    if schema_id == SCHEMA_APP_MANIFEST {
+        if field_id == FIELD_SCHEMA_VERSION { return 1; }
+        if field_id == FIELD_TYPE { return 1; }
+        if field_id == FIELD_CAPABILITY_SET { return 1; }
+        if field_id == FIELD_SERVICE_ABI { return 1; }
+    }
+    if schema_id == SCHEMA_UPDATE_MANIFEST {
+        if field_id == FIELD_SCHEMA_VERSION { return 1; }
+        if field_id == FIELD_HASH { return 1; }
+        if field_id == FIELD_VALIDITY { return 1; }
+        if field_id == FIELD_COMPATIBILITY { return 1; }
+    }
+    return 0;
+}
+
+fn security_schema_accept_field(schema_id, version, field_id, critical, duplicate) {
+    if security_schema_is_supported_version(version) == 0 { return 0; }
+    if duplicate != 0 { return 0; }
+    if security_schema_is_known_field(schema_id, field_id) != 0 {
+        return 1;
+    }
+    if critical != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+fn security_schema_is_canonical_u32(encoded_width, value) {
+    if encoded_width == 1 {
+        if value <= 255 { return 1; }
+        return 0;
+    }
+    if encoded_width == 2 {
+        if value <= 255 { return 0; }
+        if value <= 65535 { return 1; }
+        return 0;
+    }
+    if encoded_width == 4 {
+        if value <= 65535 { return 0; }
+        return 1;
+    }
+    return 0;
+}
+
+fn security_schema_is_safe_depth(depth) {
+    if depth <= MAX_NESTING_DEPTH {
+        return 1;
+    }
+    return 0;
+}

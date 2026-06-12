@@ -1,7 +1,7 @@
 %ifndef SHADOW_STACK_INC
 %define SHADOW_STACK_INC
 ; ============================================================================
-; Kernel shadow stack — parallel return-address store for the syscall path.
+; Kernel shadow stack - parallel return-address store for the syscall path.
 ;
 ; THREAT MODEL
 ;   A stack overflow (or any stray write) inside a kernel helper that runs on
@@ -10,7 +10,7 @@
 ;   stack guard at slot+0x1FA000 catches user-side overflows; this is the
 ;   kernel-side analogue for the syscall dispatch path.
 ;
-; DESIGN — positional mirror, no global state
+; DESIGN - positional mirror, no global state
 ;   Commit 1 widened each per-slot syscall-stack stride to 16 KiB:
 ;     +0x0000 guard | +0x1000 shadow (4 KiB) | +0x2000 guard | +0x3000 stack
 ;   Because the stride is 16 KiB-aligned, the shadow address of any live
@@ -27,7 +27,7 @@
 ;
 ; PROPERTIES
 ;   * Self-contained per function. You only edit the protected function, never
-;     its callers — KPROLOGUE writes the mirror, KEPILOGUE reads it. A
+;     its callers - KPROLOGUE writes the mirror, KEPILOGUE reads it. A
 ;     protected function called from uninstrumented code still works.
 ;   * Stateless. No init at syscall_entry, no empty-check at .done.
 ;   * Frame layouts unchanged. The macros push/pop a balanced 16 bytes and
@@ -37,15 +37,15 @@
 ;     macros are deleted and the CPU performs the same check in microcode; the
 ;     +0x1000 shadow page is exactly the SSP region CET would use.
 ;
-; CONSTRAINTS — read before instrumenting a function
+; CONSTRAINTS - read before instrumenting a function
 ;   * ONLY apply to functions that always run on the syscall stack (rsp inside
 ;     a 16 KiB slot stride). On any other stack, (rsp ^ 0x2000) is NOT the
 ;     shadow page, so KPROLOGUE would scribble 8 bytes into unrelated memory.
 ;     In particular cpi_sign_callback / cpi_verify_callback are called from the
-;     render loop (main.asm) and window.asm on the KERNEL stack — they must
+;     render loop (main.asm) and window.asm on the KERNEL stack - they must
 ;     keep plain ret.
 ;   * The protected function must be stack-balanced at every KEPILOGUE (rsp
-;     equal to entry rsp), which a normal "push regs … pop regs … ret"
+;     equal to entry rsp), which a normal "push regs ... pop regs ... ret"
 ;     prologue/epilogue already guarantees.
 ;
 ; CLOBBERS
@@ -55,7 +55,7 @@
 ;   KEPILOGUE on the good path is reading it.
 ; ============================================================================
 
-; KPROLOGUE — first instruction of a shadow-protected function.
+; KPROLOGUE - first instruction of a shadow-protected function.
 ;   Mirrors the freshly-pushed return address into the parallel shadow page.
 %macro KPROLOGUE 0
     push rax
@@ -68,7 +68,7 @@
     pop  rax
 %endmacro
 
-; KEPILOGUE — replaces every RET in a shadow-protected function.
+; KEPILOGUE - replaces every RET in a shadow-protected function.
 ;   Re-derives the same shadow slot and verifies the return address is intact.
 %macro KEPILOGUE 0
     push rax

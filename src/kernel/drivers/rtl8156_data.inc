@@ -122,7 +122,7 @@ global rtl8156_ping_start_tick, rtl8156_ping_start_tsc
 rtl8156_ping_start_tick: resq 1
 rtl8156_ping_start_tsc:  resq 1
 ; TSC captured at the instant the ICMP echo reply is parsed (set in
-; rtl8156_dhcp_parse.nxh). Read by the ping RTT math so the round-trip is measured
+; rtl8156_dhcp_parse.ghl). Read by the ping RTT math so the round-trip is measured
 ; against reply arrival, not the userspace poll that notices it.
 global rtl8156_ping_reply_tsc
 rtl8156_ping_reply_tsc:  resq 1

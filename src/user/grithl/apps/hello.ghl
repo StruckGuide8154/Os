@@ -1,0 +1,31 @@
+# Hello GritHL - minimal app to prove the toolchain end-to-end.
+# Prints a marker to serial on every callback so the VM smoke test can grep it.
+
+use core
+
+app "HelloHL" { stack = 4096; }
+
+str s_boot    = "[ghll] hello boot";
+str s_draw    = "[ghll] hello draw";
+str s_click   = "[ghll] hello click";
+str s_key_esc = "[ghll] hello esc";
+str s_title   = "GritHL Hello";
+
+fn hello_draw(win) {
+    syscall(SYS_PRINT, &s_draw);
+    syscall(SYS_GUI_TEXT, 24, 24, &s_title, COL_WHITE, 0);
+}
+
+fn hello_click(win, x, y) {
+    syscall(SYS_PRINT, &s_click);
+}
+
+fn hello_key(win, k) {
+    if k == KEY_ESC {
+        syscall(SYS_PRINT, &s_key_esc);
+    }
+}
+
+fn hello_boot() {
+    syscall(SYS_PRINT, &s_boot);
+}

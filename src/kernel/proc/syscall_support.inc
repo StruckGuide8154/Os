@@ -5,8 +5,8 @@
 ; Extracted verbatim from syscall.asm (textual %include split, no logic change).
 ; Lines below remain in syscall_entry's local-label scope where applicable.
 ; ============================================================================
-; dbg_wmcreate_log / dbg_wc_hex64 — MIGRATED to NexusHLK (Stage 2a). Now emitted
-; from src/kernel/nexushlk/syscall_validate.nxh as structured zero-asm fns with
+; dbg_wmcreate_log / dbg_wc_hex64 - MIGRATED to GritHLK (Stage 2a). Now emitted
+; from src/kernel/grithlk/syscall_validate.ghl as structured zero-asm fns with
 ; the same global names and ABI (dbg_wmcreate_log: R15=slot, R9=drawfn;
 ; dbg_wc_hex64: RSI=value -> 16 hex digits; both preserve all registers). The
 ; dbg_wc_s1/dbg_wc_s2 strings below stay here and are referenced extern by the
@@ -56,7 +56,7 @@ sc_validate_from_table:
     pop rdi
     ; Default length probe is 1 byte. If the descriptor names a sibling
     ; SCALAR arg as the length source, load that scalar and use it as the
-    ; full byte length instead — this is the single place where PTR args
+    ; full byte length instead - this is the single place where PTR args
     ; get range-validated, so a handler that forgets the explicit check is
     ; still safe.
     mov rsi, 1
@@ -74,7 +74,7 @@ sc_validate_from_table:
     ; Nibble 0 = this PTR arg was never migrated to a sibling-length
     ; descriptor. STRICT rows (security_todo.md §2, "Mandatory non-zero
     ; arg_desc for every PTR arg") deny-on-unmigrated instead of falling back
-    ; to the 1-byte probe — eliminates the "handler forgot the range check"
+    ; to the 1-byte probe - eliminates the "handler forgot the range check"
     ; class for opted-in rows. Non-STRICT rows keep the legacy 1-byte probe.
     test byte [r12 + SYSCALL_FLAGS_OFF], SC_FLAG_STRICT
     jnz .validate_fail
@@ -172,7 +172,7 @@ align 4
 sc_arg_off_table:
     dd ALL_RDI, ALL_RSI, ALL_RDX, ALL_R10, ALL_R8, ALL_R9
 
-; sc_resolve_dir_entry_arg — translate an untrusted user-supplied dir-entry
+; sc_resolve_dir_entry_arg - translate an untrusted user-supplied dir-entry
 ; handle into the matching real FAT16 root-cache entry pointer.
 ;
 ;   In:  RDI = user handle (as forwarded into the syscall handler)
@@ -181,8 +181,8 @@ sc_arg_off_table:
 ;        EAX = 0,                                on any failure
 ;
 ; The handle is verified through the per-slot handle table (magic, kind tag,
-; index range, stored kind, generation). The payload — the valid-entry index
-; — is then fed back through fat16_get_entry so the returned pointer reflects
+; index range, stored kind, generation). The payload - the valid-entry index
+; - is then fed back through fat16_get_entry so the returned pointer reflects
 ; current FAT16 cache state (a directory change after SYS_FS_ENTRY does NOT
 ; produce a dangling kernel VA; the handle simply resolves to whatever is at
 ; that index now). Volume-label / LFN / deleted entries are skipped by
@@ -242,16 +242,16 @@ sc_resolve_dir_entry_arg:
 ; SYSCALL_ENTRY handler, argc, kind [, caps [, arg_desc]]
 ;
 ; The optional 4th argument is the capability mask required to invoke this
-; syscall — see syscall_caps.inc. Defaulting to CAP_ALL preserves legacy
+; syscall - see syscall_caps.inc. Defaulting to CAP_ALL preserves legacy
 ; behaviour for any row that hasn't been annotated yet (sandboxing only
 ; bites once an app calls SYS_APP_DECLARE_MANIFEST and its mask narrows).
 ;
-; The optional 5th argument is the per-arg sanitization descriptor — see
+; The optional 5th argument is the per-arg sanitization descriptor - see
 ; SYSCALL_ARG_DESC_OFF above and the SC_DESC_LEN macros below. Default 0
 ; keeps the legacy 1-byte probe for PTR args; non-zero opts a row into
 ; sibling-driven range validation done in one place at the dispatcher.
 ;
-; The optional 6th argument is the per-entry flags byte (offset 15) — see
+; The optional 6th argument is the per-entry flags byte (offset 15) - see
 ; SYSCALL_FLAGS_OFF above. SC_FLAG_STRICT makes the validator deny any PTR
 ; arg whose arg_desc nibble is still 0/unmigrated rather than 1-byte-probing.
 %macro SYSCALL_ENTRY 3-6 CAP_ALL, 0, 0
@@ -339,26 +339,26 @@ syscall_table:
     SYSCALL_ENTRY syscall_entry.sc_desktop_bg_busy,   0, 0,                         CAP_GUI_DISPLAY
     SYSCALL_ENTRY syscall_entry.sc_open_file_media,   1, SC_KIND1(FN_KIND_HANDLE),  CAP_APP_CTRL
     SYSCALL_ENTRY syscall_entry.sc_wm_set_user_arg,   2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
-    ; sc_media_blit_scaled — secure aspect-preserving BGRA blit; src is
+    ; sc_media_blit_scaled - secure aspect-preserving BGRA blit; src is
     ; PTR-validated to live inside the calling slot before the scaler runs.
     SYSCALL_ENTRY syscall_entry.sc_media_blit_scaled, 5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW | CAP_MEDIA
     SYSCALL_ENTRY syscall_entry.sc_wx_install_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
     SYSCALL_ENTRY syscall_entry.sc_mprotect_wx,      2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
     SYSCALL_ENTRY syscall_entry.sc_wx_jit_alias,     3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
-    ; SYS_HANDLE_CLOSE — handle is a scalar from the validator's POV
+    ; SYS_HANDLE_CLOSE - handle is a scalar from the validator's POV
     ; (handle_close does the magic/kind/gen verification internally).
     SYSCALL_ENTRY syscall_entry.sc_handle_close,     1, SC_KIND1(FN_KIND_SCALAR),   CAP_CORE
-    ; SYS_FS_ENTRY_INFO — (handle, out_buf, out_buf_len). The handle is
+    ; SYS_FS_ENTRY_INFO - (handle, out_buf, out_buf_len). The handle is
     ; FN_KIND_HANDLE so a bad handle is rejected before sc_fs_entry_info
     ; runs; out_buf is FN_KIND_PTR with a 1-byte probe (the handler does
     ; the full 20-byte range check against the user mapping).
     SYSCALL_ENTRY syscall_entry.sc_fs_entry_info,    3, SC_KIND3(FN_KIND_HANDLE, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS_READ
-    ; SYS_APP_DECLARE_MANIFEST(app_id) — narrow the calling slot's cap mask
+    ; SYS_APP_DECLARE_MANIFEST(app_id) - narrow the calling slot's cap mask
     ; to the manifest declared for app_id in syscall_caps.inc. One-way: a
     ; sandboxed app can never widen its mask. Tagged CAP_CORE so even a
     ; deeply-sandboxed app can still call it (a no-op the second time).
     SYSCALL_ENTRY syscall_entry.sc_app_declare_manifest, 1, SC_KIND1(FN_KIND_SCALAR), CAP_CORE
-    ; SYS_WM_GET_USER_ARG — tag-verified read of WIN_OFF_USER_ARG. Reader
+    ; SYS_WM_GET_USER_ARG - tag-verified read of WIN_OFF_USER_ARG. Reader
     ; companion to SYS_WM_SET_USER_ARG; required so user-mode draw fns no
     ; longer dereference window-pool memory directly to fetch their arg.
     SYSCALL_ENTRY syscall_entry.sc_wm_get_user_arg,  1, SC_KIND1(FN_KIND_SCALAR), CAP_GUI_DRAW

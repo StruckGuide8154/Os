@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_cp_ring.asm — CP ring buffer + doorbell programming (Task J)
+; amd_cp_ring.asm - CP ring buffer + doorbell programming (Task J)
 ; ----------------------------------------------------------------------------
 ; Allocate the GFX CP ring (ring 0) in the GMC-mapped work region, capture
 ; the doorbell aperture base, and program CP_RB0_BASE / CP_RB0_CNTL and the
@@ -66,7 +66,7 @@ extern tick_count
                               | (1 << 27) )
 
 ; ---------------------------------------------------------------------------
-; uint8 cp_ring_alloc(void)   — Task J entry, register-bank portion
+; uint8 cp_ring_alloc(void)   - Task J entry, register-bank portion
 ;   Zero the ring, program base/cntl/rptr regs, leave WPTR=0 and CP in
 ;   whatever reset state caller left it in.
 ;
@@ -98,7 +98,7 @@ cp_ring_alloc:
     mov  byte [cp_ring_substep], 1
 
     ; (2) Program CP_RB0_BASE/HI. The CP wants the ring base in dwords,
-    ;     not bytes — base_dw = phys >> 2.
+    ;     not bytes - base_dw = phys >> 2.
     mov  rax, GPU_CP_RING_BASE
     shr  rax, 2
     mov  edi, CP_RB0_BASE_DW
@@ -295,7 +295,7 @@ cp_gfx_start_nop:
     mov  byte [cp_nop_substep], 4
 
     ; (5) Poll CP_RB0_RPTR until it reaches 2 (or timeout). Read the live
-    ;     register, not the writeback dword — writeback can lag and we want
+    ;     register, not the writeback dword - writeback can lag and we want
     ;     proof the CP is alive.
     mov  ebx, [tick_count]
     add  ebx, CP_NOP_TIMEOUT_TICKS
@@ -308,7 +308,7 @@ cp_gfx_start_nop:
     mov  ecx, [tick_count]
     cmp  ecx, ebx
     jb   .wait
-    ; Timeout — leave state at CP_LOADED so a retry walks here again.
+    ; Timeout - leave state at CP_LOADED so a retry walks here again.
     xor  al, al
     pop  rsi
     pop  rdi

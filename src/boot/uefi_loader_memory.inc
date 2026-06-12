@@ -26,7 +26,7 @@ claim_pages:
                                     ; + syscall-stack PT at 0x82000
                                     ; + FB-guard PD/PT at 0x83000..0x84000 = 21 pages total
     DO_CLAIM SMP_TRAMPOLINE_ADDR, 1 ; Trampoline
-    ; NOTE: Do NOT claim KERN_DEST (0x100000) here — UEFI loaded our own
+    ; NOTE: Do NOT claim KERN_DEST (0x100000) here - UEFI loaded our own
     ; PE image at ImageBase=0x100000.  Claiming it could corrupt memory
     ; protections on our code/data/stack while we're still executing.
     ; The trampoline copies the kernel there AFTER ExitBootServices.

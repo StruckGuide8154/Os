@@ -1,6 +1,6 @@
-# NexusOS Multi-Core (SMP Work Queue)
+# GritOS Multi-Core (SMP Work Queue)
 
-This document describes how NexusOS uses more than one CPU core, and how to
+This document describes how GritOS uses more than one CPU core, and how to
 offload expensive work so the GUI stays responsive.
 
 ## Goal
@@ -12,11 +12,11 @@ the boot CPU keeps drawing frames at full speed.
 
 ## Model: worker-core offload
 
-NexusOS does **not** schedule whole apps preemptively across cores. It uses a
+GritOS does **not** schedule whole apps preemptively across cores. It uses a
 simpler, lower-risk model:
 
 - **BSP (boot processor, CPU 0)** runs the kernel, the GUI render loop, drivers,
-  and all ring-3 app code — exactly as before.
+  and all ring-3 app code - exactly as before.
 - **APs (application processors, the other cores)** do nothing but pull
   *compute jobs* from a shared queue and run them.
 
@@ -40,9 +40,9 @@ sends INIT/SIPI IPIs. Each AP walks 16-bit → 32-bit → 64-bit mode, enables S
 job is claimable it enables interrupts, executes `hlt`, and wakes on the
 workqueue IPI sent after the BSP publishes a job.
 
-Build profiles that define `NEXUS_CACHE32_AP_STARTUP` start AP workers. UEFI
+Build profiles that define `GRIT_CACHE32_AP_STARTUP` start AP workers. UEFI
 enables that path in both `Default` and `Cache32Max`; BIOS enables it only in
-`Cache32Max`. Those AP-startup profiles also define `NEXUS_ENABLE_RING3_AP`,
+`Cache32Max`. Those AP-startup profiles also define `GRIT_ENABLE_RING3_AP`,
 so app callbacks are routed to each process `home_core` instead of running
 inline on the BSP.
 
@@ -59,7 +59,7 @@ self-test coverage.
 - A job slot is claimed with a single `lock cmpxchg` on its status word, so
   there is **no global lock**. A slow or dead AP can never stall the BSP, and
   two APs can never run the same job.
-- Each slot is its own 64-byte cache line — cores working different slots never
+- Each slot is its own 64-byte cache line - cores working different slots never
   ping-pong a shared line (no false sharing).
 - Status store ordering (x86 TSO) guarantees a worker that observes `PENDING`
   also observes the function pointer and argument written just before it.
@@ -70,21 +70,21 @@ Status lifecycle: `FREE → BUILDING → PENDING → RUNNING → DONE → FREE`.
 
 | Function | In | Out | Notes |
 |----------|----|----|-------|
-| `workqueue_init` | – | – | Reset the queue; must run before `smp_ap_startup`. |
+| `workqueue_init` | - | - | Reset the queue; must run before `smp_ap_startup`. |
 | `workqueue_submit` | RDI=func, RSI=arg, RDX=priority | RAX=handle or `-1` | Queues a job; runs it inline if no AP is alive. |
 | `workqueue_done` | RDI=handle | RAX=1 if finished | Non-blocking poll. |
 | `workqueue_reap` | RDI=handle | RAX=result | Reads result and frees the slot. |
 | `workqueue_wait` | RDI=handle | RAX=result | Blocks until done, then reaps. |
-| `wq_lock` | RDI=lock ptr | – | Acquire a shared-state spinlock. |
-| `wq_unlock` | RDI=lock ptr | – | Release a shared-state spinlock. |
+| `wq_lock` | RDI=lock ptr | - | Acquire a shared-state spinlock. |
+| `wq_unlock` | RDI=lock ptr | - | Release a shared-state spinlock. |
 
-## Job priority — keeping the system responsive
+## Job priority - keeping the system responsive
 
 `workqueue_submit` takes a priority in RDX:
 
 | Constant | Value | Use for |
 |----------|-------|---------|
-| `WQ_PRIO_LOW` | 0 | Background app work — may be starved while higher work exists. |
+| `WQ_PRIO_LOW` | 0 | Background app work - may be starved while higher work exists. |
 | `WQ_PRIO_NORMAL` | 1 | The default for ordinary offloaded work. |
 | `WQ_PRIO_HIGH` | 2 | System-critical jobs that must not wait behind app work. |
 
@@ -92,7 +92,7 @@ Each sweep, a worker scans all slots and claims the **highest-priority**
 `PENDING` job, not the first one it sees. This is what stops a misbehaving or
 busy app from degrading the system: a flood of `WQ_PRIO_LOW` jobs from a frozen
 or runaway app can never delay a `WQ_PRIO_HIGH` system job, and it can never
-affect the BSP at all — the BSP never runs jobs, so the GUI render loop is
+affect the BSP at all - the BSP never runs jobs, so the GUI render loop is
 isolated from app work by construction.
 
 A job still runs to completion once claimed (APs take no timer IRQs). A job
@@ -102,8 +102,8 @@ cores spend their time on the work that matters.
 
 ## Sharing state safely
 
-A job **may** touch state shared with the BSP — the framebuffer, the page
-allocator, driver state — as long as **every** accessor, on the BSP side too,
+A job **may** touch state shared with the BSP - the framebuffer, the page
+allocator, driver state - as long as **every** accessor, on the BSP side too,
 holds the matching lock. `workqueue.asm` provides a spinlock primitive and
 three named locks:
 
@@ -124,24 +124,24 @@ three named locks:
 `page_alloc` / `page_free` already take `wq_alloc_lock` internally, so a job can
 allocate pages with no extra ceremony. For the framebuffer and driver state the
 BSP-side code must be taught to take the lock before that resource is genuinely
-job-safe — until then, treat it as BSP-only.
+job-safe - until then, treat it as BSP-only.
 
 A lock only protects if **both** sides take it. The simplest job is still a
 self-contained one that reads only read-only data and writes only its own
-output buffer — that needs no lock at all.
+output buffer - that needs no lock at all.
 
-## Job contract — REQUIRED
+## Job contract - REQUIRED
 
 A function submitted as a job **must**:
 
 1. Be trusted kernel code. Jobs are never submitted from ring 3, so the function
    pointer is always a kernel address. **Never expose submit as a syscall.**
 2. Take one argument in RDI and return a scalar in RAX.
-3. Follow the SysV ABI (preserve RBX, RBP, R12–R15).
+3. Follow the SysV ABI (preserve RBX, RBP, R12-R15).
 4. Touch shared mutable state **only** under the matching lock (see "Sharing
    state safely"). Unlocked access to a resource another core may touch is the
-   classic SMP bug — it corrupts memory intermittently and is hard to debug.
-5. Do bounded work — APs receive no timer IRQs, so a job runs to completion.
+   classic SMP bug - it corrupts memory intermittently and is hard to debug.
+5. Do bounded work - APs receive no timer IRQs, so a job runs to completion.
 
 ## Recommended usage (keeps the render loop alive)
 
@@ -162,7 +162,7 @@ Submit the heavy job, keep rendering frames, and poll once per frame:
     call workqueue_reap              ; result in RAX; slot freed
 ```
 
-Use `workqueue_wait` only when there is genuinely nothing else to do — it blocks
+Use `workqueue_wait` only when there is genuinely nothing else to do - it blocks
 the BSP and defeats the purpose.
 
 ## Verification
@@ -201,20 +201,20 @@ spends time in a half-broken state.
   utilization (read from `smp_core_states[i] + 24`); ties go to the lowest
   core index. Re-balancing happens at process_set_affinity time today.
 
-### Stage 1 — Foundation *(landed)*
+### Stage 1 - Foundation *(landed)*
 
 Adds data and bookkeeping without changing scheduling. Apps still execute on
 the BSP via `call_app_l3`; this stage just records where they would run.
 
 - `process_t` gained `affinity_mask`, `home_core`, `cpu_time_ticks`.
 - `SMP_SYSTEM_CORE_MASK` / `SMP_APP_CORE_MASK` defined in `constants.inc`.
-- `process_auto_pick_core(mask)` — least-loaded core in a mask, with system
+- `process_auto_pick_core(mask)` - least-loaded core in a mask, with system
   cores stripped. Used at `process_create` time.
-- `process_set_affinity(pid, mask)` / `process_get_affinity(pid)` — kernel
+- `process_set_affinity(pid, mask)` / `process_get_affinity(pid)` - kernel
   callable API; syscall wrapper deferred to Stage 2.
 - Kernel process (PID 0) carries mask `0xFFFFFFFF` and `home_core = 0`.
 
-### Stage 2a — Dispatch primitives + per-proc billing *(landed)*
+### Stage 2a - Dispatch primitives + per-proc billing *(landed)*
 
 The infrastructure to *send* work to a specific AP and *bill* it to a
 process. App callbacks still execute on the BSP today; once Stage 2b lights
@@ -223,7 +223,7 @@ those cores.
 
 - `WQ_OFF_TARGET` / `WQ_OFF_PROC` added to the work-queue slot (still 64
   bytes per slot; uses previously-padded space).
-- `workqueue_submit_to(func, arg, prio, target_core, proc_id)` — submit a
+- `workqueue_submit_to(func, arg, prio, target_core, proc_id)` - submit a
   job that only the named AP may claim, and bill its TSC cycles to the
   named PCB. Plain `workqueue_submit` is now a wrapper that passes
   `target_core = -1` and `proc_id = 0`, so every existing caller is
@@ -231,7 +231,7 @@ those cores.
 - The AP worker honors `target_core` during slot scanning, and `lock add`s
   its busy-cycle delta into `PROCESS_POOL[proc_id].cpu_time_cycles` after
   each job completes.
-- `process_submit_job(pid, func, arg, prio)` — kernel API that submits a
+- `process_submit_job(pid, func, arg, prio)` - kernel API that submits a
   job pinned to a process's `home_core` and billed to its PCB. This is the
   exact entry point Stage 2c will call to dispatch app callbacks.
 
@@ -241,11 +241,11 @@ those cores.
 equals that app's `home_core` should be the one that ran it (visible as a
 spike on that core in task manager during the burn).
 
-### Stage 2b — Ring-3 on AP *(landed)*
+### Stage 2b - Ring-3 on AP *(landed)*
 
 Every AP now boots into a state where it could safely execute ring-3 code
 and service its own syscalls. The trampoline still ends at `smp_worker_loop`,
-so APs continue to run kernel jobs from the work queue — but the moment
+so APs continue to run kernel jobs from the work queue - but the moment
 Stage 2c routes a `call_app_l3`-equivalent job to an AP, the AP has all the
 plumbing it needs to take that callback into ring 3 and back.
 
@@ -267,7 +267,7 @@ What landed:
 - **`ap_long_mode_init`** ([src/kernel/arch/apic.asm](../src/kernel/arch/apic.asm)): one-shot per-AP
   function invoked from the trampoline once paging is up. Loads the kernel
   GDT, reloads segments (including a `retfq` to refresh CS), loads the
-  kernel IDT (shared with the BSP — APs don't service hardware IRQs but
+  kernel IDT (shared with the BSP - APs don't service hardware IRQs but
   must not triple-fault on CPU exceptions), runs `tss_init_for_core` for
   its core index, then `syscall_init_this_cpu`. Returns to the trampoline,
   which then drops into `smp_worker_loop` exactly as before.
@@ -277,27 +277,27 @@ up alive in the perfdiag log (no regressions). The visible payoff lands in
 Stage 2c, when actual ring-3 callbacks start dispatching to APs and the
 machinery exercised here gets used in anger.
 
-### Stage 2c — Dispatch chokepoint + packed thunk *(landed)*
+### Stage 2c - Dispatch chokepoint + packed thunk *(landed)*
 
 The plumbing to route ring-3 callbacks across cores. Call sites use
-`dispatch_app_callback`, and builds with `NEXUS_ENABLE_RING3_AP` use the
+`dispatch_app_callback`, and builds with `GRIT_ENABLE_RING3_AP` use the
 active Stage 2d body. Builds without that define keep the compile-time
 fallback that tail-calls `call_app_l3` on the BSP.
 
 What landed:
 
-- **`dispatch_app_callback`** ([src/kernel/proc/process.asm](../src/kernel/proc/process.asm)) — the
-  chokepoint, same signature as `call_app_l3`. With `NEXUS_ENABLE_RING3_AP`
+- **`dispatch_app_callback`** ([src/kernel/proc/process.asm](../src/kernel/proc/process.asm)) - the
+  chokepoint, same signature as `call_app_l3`. With `GRIT_ENABLE_RING3_AP`
   it uses the Stage 2d lock + submit + wait flow; otherwise it tail-calls
   `call_app_l3` for single-core/non-AP builds.
-- **`call_app_l3_packed`** ([src/kernel/proc/usermode.asm](../src/kernel/proc/usermode.asm)) — thunk that
+- **`call_app_l3_packed`** ([src/kernel/proc/usermode.asm](../src/kernel/proc/usermode.asm)) - thunk that
   unpacks a 32-byte `{target, win, arg1, arg2}` block from RDI into the
   registers `call_app_l3` expects and tail-calls it. This is what Stage
   2d hands to `process_submit_job` as the kernel-job function pointer.
-- **`process_find_by_window(win_id)`** — actual body for the previously
+- **`process_find_by_window(win_id)`** - actual body for the previously
   stub-only global. Returns the PID of the PCB associated with a window,
   or 0 if none. Used by the routing path to look up `home_core`.
-- **`app_callback_lock`** — global spinlock data on its own cache line.
+- **`app_callback_lock`** - global spinlock data on its own cache line.
   Stage 2d holds this across the submit+wait pair so only one core is in
   ring 3 on behalf of an app at a time (see Stage 2d for why).
 
@@ -306,7 +306,7 @@ call and does `mov cr3,cr3`. Stage 2d prevents cross-core races by holding
 `app_callback_lock` across the submit+wait pair, so only one core is in ring 3
 on behalf of an app at a time.
 
-### Stage 2d — Active routing under the global lock *(landed)*
+### Stage 2d - Active routing under the global lock *(landed)*
 
 The chokepoint is now wired. App callbacks for any PCB with a non-zero
 `home_core` and at least one AP alive dispatch through the AP. Stage 2a
@@ -355,7 +355,7 @@ Also still planned at this stage:
   request a specific mask. Kernel still AND-strips `SMP_SYSTEM_CORE_MASK`.
 - Task manager UI showing per-process CPU time (reads `cpu_time_cycles`).
 
-### Stage 3 — Preemption *(planned)*
+### Stage 3 - Preemption *(planned)*
 
 - Per-core PIT/APIC-timer tick that triggers a context save through the
   existing `process_save_context` / `process_restore_context` plumbing.

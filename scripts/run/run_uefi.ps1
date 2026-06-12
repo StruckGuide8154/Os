@@ -87,7 +87,7 @@ if (-not $GuestMemory) {
     $GuestMemory = if ($PerfProfile -eq 'Cache32Max') { '256M' } else { '512M' }
 }
 
-Write-Host "Launching NexusOS UEFI with XHCI+HID ($PerfProfile, $GuestMemory RAM, net=$NetworkMode)..." -ForegroundColor Cyan
+Write-Host "Launching GritOS UEFI with XHCI+HID ($PerfProfile, $GuestMemory RAM, net=$NetworkMode)..." -ForegroundColor Cyan
 
 $qemuArgs = @(
     '-bios', "$BUILD\OVMF.fd",
@@ -124,7 +124,7 @@ $qemuArgs += @(
 # The emulated rtl8139 rides QEMU's slirp ('user') netdev, which has its OWN
 # built-in DHCP server handing out 10.0.2.15 / gw 10.0.2.2 / dns 10.0.2.3. When
 # the real RTL8156 is passed through and you want a lease from your PHYSICAL
-# router, this emulated NIC shadows the real LAN — the guest binds the slirp
+# router, this emulated NIC shadows the real LAN - the guest binds the slirp
 # 10.0.2.x lease instead of the router's. -NoEmulatedNic drops it so the only
 # NIC the guest sees is the real passthrough device.
 if ($NoEmulatedNic) {
@@ -141,8 +141,8 @@ if ($NoEmulatedNic) {
     )
 }
 # USB device layout. Ports 1..8 are USB2; ports 9..16 are USB3 (with p2=8,p3=8
-# above). RTL8156 is a SuperSpeed device — pass it through on a USB3 port.
-# Mouse is usually USB2/LowSpeed — keep it on a USB2 port. Order on the bus
+# above). RTL8156 is a SuperSpeed device - pass it through on a USB3 port.
+# Mouse is usually USB2/LowSpeed - keep it on a USB2 port. Order on the bus
 # determines enumeration order the guest sees.
 if ($UsbPassthrough) {
     if (-not $UsbVendorId -or -not $UsbProductId) {
@@ -151,7 +151,7 @@ if ($UsbPassthrough) {
     }
     Write-Host "USB passthrough (NIC): vendor=$UsbVendorId product=$UsbProductId (auto port)." -ForegroundColor Yellow
     Write-Host "  Host device must be bound to WinUSB via Zadig (admin)." -ForegroundColor DarkYellow
-    # No explicit bus=/port= — explicit port=9 errors "not found (in use?)".
+    # No explicit bus=/port= - explicit port=9 errors "not found (in use?)".
     # QEMU picks the correct USB3 port for the SuperSpeed device automatically.
     $qemuArgs += @(
         '-device', "usb-host,vendorid=$UsbVendorId,productid=$UsbProductId"
@@ -177,7 +177,7 @@ if ($UsbMousePassthrough) {
     # reported "mouse aint here"). The passthrough NIC is added earlier and
     # auto-grabs the LOWEST free port (observed: USB2 port 1), so an explicit
     # port=4 stays clear. Only a USB2 usb-host *mouse* passthrough would
-    # contend for low ports — and that path adds no emulated mouse at all.
+    # contend for low ports - and that path adds no emulated mouse at all.
     $qemuArgs += @('-device', 'usb-mouse,bus=xhci0.0,port=4')
 }
 # Always provide a working keyboard. Pin it to an explicit USB2 port too, unless
@@ -192,7 +192,7 @@ if ($UsbMousePassthrough) {
 if ($MscTest) {
     # USB Mass Storage backing for ramdisk write-back development. The drive
     # is the same data.img the kernel currently treats as a RAM-resident
-    # FAT16 image — once the MSC stack lands, ramdisk_flush will write
+    # FAT16 image - once the MSC stack lands, ramdisk_flush will write
     # dirty pages back through this device instead of dropping them.
     $qemuArgs += @(
         '-drive', "if=none,id=msc0,format=raw,file=$BUILD\data.img",
@@ -203,13 +203,13 @@ $qemuArgs += @(
     '-serial', $SERIAL,
     '-no-reboot',
     '-monitor', 'telnet:127.0.0.1:4444,server,nowait',
-    '-name', 'NexusOS_UEFI'
+    '-name', 'GritOS_UEFI'
 )
 if ($IntLog) {
     Write-Host "Interrupt/reset logging -> $BUILD\qemu_int.log" -ForegroundColor Yellow
     $qemuArgs += @('-d', 'int,cpu_reset,guest_errors', '-D', "$BUILD\qemu_int.log")
 }
-# Diagnostics for USB passthrough — logs every libusb open/claim attempt.
+# Diagnostics for USB passthrough - logs every libusb open/claim attempt.
 if ($UsbPassthrough -or $UsbMousePassthrough) {
     $qemuArgs += @(
         '-trace', 'usb_host_open_started',

@@ -53,7 +53,7 @@ app_open_file:
 
 ; ============================================================================
 ; app_open_file_in_media - thin user-mode wrapper. Routes to a kernel helper
-; via SYS_OPEN_FILE_NP semantics — see kernel_open_file_in_media below for
+; via SYS_OPEN_FILE_NP semantics - see kernel_open_file_in_media below for
 ; why the heavy lifting must run in kernel context (real fat16 globals).
 ; RDI = dir entry pointer
 ; ============================================================================
@@ -575,6 +575,6 @@ app_find_entry_83:
 
 global kernel_open_file_in_notepad
 ; Open a FAT16 file (RDI = dir-entry ptr) in a fresh Notepad window. All per-
-; instance state is written directly into the new window's L3 slot — never
+; instance state is written directly into the new window's L3 slot - never
 ; into the kernel image's np_* master copies. The kernel-side notepad_buf is
 ; used as a transient raw-bytes scratch, scoped strictly to this call.

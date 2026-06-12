@@ -1,4 +1,4 @@
-; §5  Video codecs — NBA + timeline
+; §5  Video codecs - NBA + timeline
 ; ---------------------------------------------------------------------------
 
 ; nx_media_advance_frame

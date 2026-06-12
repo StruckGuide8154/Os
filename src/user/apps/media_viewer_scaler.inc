@@ -11,7 +11,7 @@ nx_media_fill_rect:
     push r14
     push r15
 
-    movsxd r12, edi                          ; x (SIGNED — a negative x must not
+    movsxd r12, edi                          ; x (SIGNED - a negative x must not
                                              ; zero-extend into a wild row ptr)
     mov r13d, esi                            ; y
     mov r14d, edx                            ; w
@@ -208,7 +208,7 @@ nx_media_compute_fit:
 ;     inner loop.
 ;   - One add per pixel for the U/V accumulators. No multiplies in the
 ;     inner loop.
-;   - Pure scalar — no SSE — for portability across every CPU we boot
+;   - Pure scalar - no SSE - for portability across every CPU we boot
 ;     on. The framebuffer is WC-mapped (see fbperf_wc_landed memory) so
 ;     a single 32-bit `mov [r10], eax` is already a fast write. A SIMD
 ;     gather/store rewrite is sketched in §8.
@@ -345,7 +345,7 @@ nx_media_blit_scaled:
     mov r8d, MEDIA_COL_LETTERBOX
     call nx_media_fill_rect
 
-    ; Inner loop — one pass over the fit rectangle.
+    ; Inner loop - one pass over the fit rectangle.
     ;   edi = dy
     ;   r10d = v (16.16 src y)
     xor edi, edi
@@ -418,7 +418,7 @@ nx_media_blit_scaled:
     jae .sc_px_skip
     mov eax, [r8 + rax * 4]
     cmp dword [rsp + 32], 0
-    je .sc_px_write                          ; opaque source — always write
+    je .sc_px_write                          ; opaque source - always write
     test eax, MEDIA_ALPHA_MASK
     jz .sc_px_skip                           ; alpha-keyed and A==0 → skip
 .sc_px_write:

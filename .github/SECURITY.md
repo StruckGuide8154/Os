@@ -1,25 +1,25 @@
 # Security Policy
 
-NexusOS is a hobbyist x86-64 operating system written in assembly. Although it
+GritOS is a hobbyist x86-64 operating system written in assembly. Although it
 is not production software, the project takes security research seriously and
 welcomes good-faith reports of vulnerabilities in the OS, its build tooling, and
 its supporting scripts.
 
 ## Supported Versions
 
-NexusOS is pre-1.0 and ships from a single mainline. Security fixes are applied
+GritOS is pre-1.0 and ships from a single mainline. Security fixes are applied
 to the default branch (`master`); tagged prereleases are snapshots and are not
 individually patched.
 
 | Version            | Supported          |
 | ------------------ | ------------------ |
 | `master` (latest)  | :white_check_mark: |
-| `v0.1.0-qrng` (pre-release) | :x: (snapshot — upgrade to `master`) |
+| `v0.1.0-qrng` (pre-release) | :x: (snapshot - upgrade to `master`) |
 | Older / forks      | :x:                |
 
 ## Reporting a Vulnerability
 
-**Please report security vulnerabilities privately — do not open a public
+**Please report security vulnerabilities privately - do not open a public
 issue, pull request, or discussion for a suspected vulnerability.**
 
 Use this repository's **Private Vulnerability Reporting**:
@@ -60,7 +60,7 @@ We will credit reporters in the advisory unless you ask to remain anonymous.
 
 ### In scope
 
-- The NexusOS kernel, boot path, drivers, and userspace under `src/`.
+- The GritOS kernel, boot path, drivers, and userspace under `src/`.
 - Build and analysis tooling under `tools/` and `scripts/` (including the
   Python tooling and the QRNG seed tooling under `tools/quantum/`).
 - Memory-safety, privilege-escalation, sandbox-escape (syscall capability /
@@ -74,7 +74,7 @@ We will credit reporters in the advisory unless you ask to remain anonymous.
 - Bugs that require physical access or an already-compromised host toolchain.
 - Denial of service that only affects the reporter's own VM/hardware and has no
   privilege or isolation impact.
-- Vulnerabilities in third-party dependencies that are already publicly known —
+- Vulnerabilities in third-party dependencies that are already publicly known -
   report those upstream (Dependabot tracks our dependency updates).
 - Findings from automated scanners with no demonstrated impact.
 - Anything requiring social engineering of maintainers or users.
@@ -97,7 +97,7 @@ To qualify for safe harbor you must:
 
 - Make a good-faith effort to avoid privacy violations, data destruction, and
   service interruption to others.
-- Only test against your own instances/builds of NexusOS — do **not** target
+- Only test against your own instances/builds of GritOS - do **not** target
   other people's systems, infrastructure, or accounts.
 - Report any vulnerability you discover promptly and give us reasonable time to
   remediate before public disclosure (we ask for coordinated disclosure).
@@ -106,7 +106,7 @@ To qualify for safe harbor you must:
 
 If in doubt about whether a specific action is authorized, ask us first via the
 Private Vulnerability Reporting channel above and we will clarify. This safe
-harbor applies only to legal claims under the control of the NexusOS
+harbor applies only to legal claims under the control of the GritOS
 maintainers; it does not bind third parties.
 
 ## Coordinated Disclosure

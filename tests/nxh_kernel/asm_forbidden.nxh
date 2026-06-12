@@ -1,8 +1,0 @@
-module "asm_forbidden";
-
-global nxh_test_asm_forbidden;
-
-fn nxh_test_asm_forbidden() {
-    asm "    nop";
-    return 0;
-}

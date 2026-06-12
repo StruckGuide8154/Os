@@ -124,10 +124,10 @@ process_set_affinity:
 ; cycles it spends will be billed to PROCESS_POOL[PID].cpu_time_cycles. This
 ; is the path Stage 2c will use to route app-callback execution onto a
 ; specific AP without anything in this kernel having to know which core is
-; "the app core" — that decision was already made when the process was
+; "the app core" - that decision was already made when the process was
 ; created (or last did process_set_affinity).
 ;
-; A PID of 0 (the kernel process) submits with WQ_TARGET_ANY and no billing —
+; A PID of 0 (the kernel process) submits with WQ_TARGET_ANY and no billing -
 ; same semantics as the legacy workqueue_submit.
 global process_submit_job
 extern workqueue_submit_to
@@ -223,14 +223,14 @@ process_find_by_window:
 
 ; --- dispatch_app_callback ---------------------------------------------------
 ;
-; Stage 2d is active whenever the build defines `NEXUS_ENABLE_RING3_AP`.
+; Stage 2d is active whenever the build defines `GRIT_ENABLE_RING3_AP`.
 ; Profiles that start AP workers define it so app callbacks run on each
 ; process home_core instead of tail-calling call_app_l3 on the BSP.
 ;
 ; The active path below looks up the PCB, takes the global
 ; app_callback_lock, submit the packed thunk to the PCB's home_core, wait
 ; with a 200 ms budget. On timeout the ring3_ap_enabled flag is cleared and
-; every subsequent callback this boot goes straight to inline — at most one
+; every subsequent callback this boot goes straight to inline - at most one
 ; callback ever suffers the timeout penalty.
 ;
 ; The compile-time fallback remains for single-core/non-AP profiles.

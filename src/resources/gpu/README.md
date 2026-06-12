@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File tools\gpu\build_shaders.ps1
 ```
 
 `tools/gpu/build_shaders.ps1` also writes a human-readable disassembly
-to `build/gpu/*.dis` — use that to verify the binary against the AMD
+to `build/gpu/*.dis` - use that to verify the binary against the AMD
 GFX11 ISA spec before committing.
 
 | File                     | Source                                       |
@@ -22,4 +22,4 @@ GFX11 ISA spec before committing.
 | `textured_quad_ps.bin`   | `tools/gpu/shaders/textured_quad_ps.s`       |
 
 The `.bin` files are populated by the build script and are not yet
-committed — first run requires LLVM ≥ 17 with the AMDGPU target.
+committed - first run requires LLVM ≥ 17 with the AMDGPU target.

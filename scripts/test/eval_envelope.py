@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Track-2 (signed everything) reject-matrix evaluator.
 #
-# This does NOT re-implement the verifier. It parses the REAL NHL sources —
-# the in-kernel reader `src/kernel/nexushlk/envelope_reader.nxh` plus the two
-# policy kernels it calls (`signed_envelope.nxh`, `signed_artifact_check.nxh`)
-# — with the production compiler's own lexer/parser (nxhc.lex / nxhc.parse),
+# This does NOT re-implement the verifier. It parses the REAL GHL sources -
+# the in-kernel reader `src/kernel/grithlk/envelope_reader.ghl` plus the two
+# policy kernels it calls (`signed_envelope.ghl`, `signed_artifact_check.ghl`)
+# - with the production compiler's own lexer/parser (gritc.lex / gritc.parse),
 # then interprets `envelope_verify` against REAL envelope byte blobs, with the
 # lb/lw/lq raw-memory builtins mapped onto the blob. So every reject-matrix
 # case below executes the exact decode+decide logic that ships in the kernel.
@@ -24,17 +24,17 @@ import struct
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'nexushl', 'compiler')
+COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'grithl', 'compiler')
 MODULES = [
-    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_envelope.nxh'),
-    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_artifact_check.nxh'),
-    os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.nxh'),
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'envelope_reader.nxh'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_envelope.ghl'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_artifact_check.ghl'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.ghl'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'envelope_reader.ghl'),
 ]
 MAX_LOOP_ITERS = 1 << 20
 
 sys.path.insert(0, COMPILER_DIR)
-import nxhc  # noqa: E402  (the production NHL compiler — source of truth)
+import gritc  # noqa: E402  (the production GHL compiler - source of truth)
 
 
 class EvalError(Exception):
@@ -52,7 +52,7 @@ class Unit:
         for path in paths:
             with open(path, 'r', encoding='utf-8') as fh:
                 src = fh.read()
-            decls = nxhc.parse(nxhc.lex(src, path), path)
+            decls = gritc.parse(gritc.lex(src, path), path)
             for d in decls:
                 k = d.get('k')
                 if k == 'const':
@@ -75,7 +75,7 @@ class Unit:
 
     def _load(self, addr, size, signed):
         if addr < 0 or addr + size > len(self.mem):
-            raise EvalError("out-of-blob load at 0x%x size %d (blob %d bytes) — "
+            raise EvalError("out-of-blob load at 0x%x size %d (blob %d bytes) - "
                             "the reader walked outside its bounds"
                             % (addr, size, len(self.mem)))
         fmt = {1: 'B', 4: ('i' if signed else 'I'), 8: 'Q'}[size]
@@ -207,7 +207,7 @@ def enc_tlv(field_id, value, id_width=None, len_width=None):
 CTX = dict(now=1000, device_id=0x11, device_class=0x22,
            required_version=5, required_counter=3, required_epoch=2)
 
-PAYLOAD = b'NexusOS test artifact payload bytes'
+PAYLOAD = b'GritOS test artifact payload bytes'
 
 
 def base_fields(unit, payload):
@@ -230,7 +230,7 @@ def base_fields(unit, payload):
     ]
 
 
-def build(unit, payload=PAYLOAD, fields=None, magic=b'NXSE', schema=1, kind=5,
+def build(unit, payload=PAYLOAD, fields=None, magic=b'GRSE', schema=1, kind=5,
           domain=5, field_count=None, header_len=None, payload_len=None,
           sig_len=64, tlv_raw=None, total_pad=0):
     """Assemble a v1 envelope; every knob overridable for negative tests."""
@@ -355,7 +355,7 @@ def matrix_cases(unit):
         'quorum_missing_required_role': ('ENVR_ERR_QUORUM',
                                          lambda: mut(c['FIELD_ID_COSIGNER_ROLES'],
                                                      struct.pack('<HHH', 2, 0x3F, 0x03))),
-        # allowed_mask=0x01 (only BOOT) — popcount(1) < min_count(2), rule invalid.
+        # allowed_mask=0x01 (only BOOT) - popcount(1) < min_count(2), rule invalid.
         'quorum_allowed_mask_too_narrow': ('ENVR_ERR_QUORUM',
                                            lambda: mut(c['FIELD_ID_COSIGNER_ROLES'],
                                                        struct.pack('<HHH', 2, 0x01, 0x01))),
@@ -369,7 +369,7 @@ FIXTURE_DIR = os.path.join(ROOT, 'tests', 'security', 'fixtures', 'signed_envelo
 
 def fixture_case_names():
     """Every signed_envelope fixture that names a matrix_case must map to a
-    real executable case here — keeps the .fixture files and this evaluator
+    real executable case here - keeps the .fixture files and this evaluator
     from drifting apart."""
     names = []
     if not os.path.isdir(FIXTURE_DIR):
@@ -411,10 +411,10 @@ def main():
 
     accepts = sum(1 for n in cases if cases[n][0] == 'ENVR_OK')
     rejects = len(cases) - accepts
-    print("[envelope] executed envelope_verify (real kernel NHL source) on "
+    print("[envelope] executed envelope_verify (real kernel GHL source) on "
           "%d case(s): %d accept, %d reject" % (len(cases), accepts, rejects))
     if failures:
-        sys.stderr.write("[envelope] FAIL — %d problem(s):\n" % len(failures))
+        sys.stderr.write("[envelope] FAIL - %d problem(s):\n" % len(failures))
         for f in failures:
             sys.stderr.write("  - %s\n" % f)
         return 1

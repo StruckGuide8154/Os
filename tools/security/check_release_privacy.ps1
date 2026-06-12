@@ -41,7 +41,7 @@ function Is-CommentOnlyLine {
 
     $trimmed = $Line.TrimStart()
     if ($trimmed.Length -eq 0) { return $true }
-    if ($Extension -in @('.nxh', '.py', '.ps1')) {
+    if ($Extension -in @('.ghl', '.py', '.ps1')) {
         return $trimmed.StartsWith('#')
     }
     return $false
@@ -76,14 +76,14 @@ if ([string]::IsNullOrWhiteSpace($Root)) {
 }
 
 $expectedSecurityModules = @(
-    'compatibility_check.nxh',
-    'no_asm_guard.nxh',
-    'policy_graph_check.nxh',
-    'release_privacy_guard.nxh',
-    'revocation_check.nxh',
-    'schema_canonical_check.nxh',
-    'signed_artifact_check.nxh',
-    'threshold_check.nxh'
+    'compatibility_check.ghl',
+    'no_asm_guard.ghl',
+    'policy_graph_check.ghl',
+    'release_privacy_guard.ghl',
+    'revocation_check.ghl',
+    'schema_canonical_check.ghl',
+    'signed_artifact_check.ghl',
+    'threshold_check.ghl'
 )
 
 $scanFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
@@ -95,7 +95,7 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
         Rule = 'missing-security-module-dir'
         Path = 'src/tools/security'
         Line = 0
-        Message = 'Expected NHL security policy module directory is missing.'
+        Message = 'Expected GHL security policy module directory is missing.'
         Text = 'src/tools/security'
     })
 } else {
@@ -106,7 +106,7 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
                 Rule = 'missing-security-module'
                 Path = "src/tools/security/$moduleName"
                 Line = 0
-                Message = 'Expected NHL security policy module is missing.'
+                Message = 'Expected GHL security policy module is missing.'
                 Text = $moduleName
             })
         }
@@ -114,15 +114,15 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
 }
 
 $sourceRoots = @(
-    'src\kernel\nexushlk',
+    'src\kernel\grithlk',
     'src\tools\security',
-    'src\user\nexushl'
+    'src\user\grithl'
 )
 
 foreach ($sourceRoot in $sourceRoots) {
     $full = Join-Path $RepoRoot $sourceRoot
     if (Test-Path -LiteralPath $full -PathType Container) {
-        Get-ChildItem -LiteralPath $full -Recurse -File -Include '*.nxh', '*.py', '*.json', '*.toml', '*.yaml', '*.yml', '*.manifest', '*.txt' |
+        Get-ChildItem -LiteralPath $full -Recurse -File -Include '*.ghl', '*.py', '*.json', '*.toml', '*.yaml', '*.yml', '*.manifest', '*.txt' |
             ForEach-Object { [void]$scanFiles.Add($_) }
     }
 }
@@ -136,9 +136,9 @@ foreach ($scriptRoot in @('scripts\build', 'scripts\test')) {
 }
 
 foreach ($manifestPath in @(
-    'src\user\nexushl\manifest.json',
-    'src\kernel\nexushlk\manifest.json',
-    'src\user\nexushl\compiler\manifest.json'
+    'src\user\grithl\manifest.json',
+    'src\kernel\grithlk\manifest.json',
+    'src\user\grithl\compiler\manifest.json'
 )) {
     Add-ScanFile -Files $scanFiles -Path (Join-Path $RepoRoot $manifestPath)
 }
@@ -146,7 +146,7 @@ foreach ($manifestPath in @(
 if ($IncludeDocs) {
     $docs = Join-Path $RepoRoot 'docs'
     if (Test-Path -LiteralPath $docs -PathType Container) {
-        Get-ChildItem -LiteralPath $docs -File -Include '*nhl*.md', '*nexushl*.md', '*security*.md', '*zero-trust*.md' |
+        Get-ChildItem -LiteralPath $docs -File -Include '*ghl*.md', '*grithl*.md', '*security*.md', '*zero-trust*.md' |
             ForEach-Object { [void]$scanFiles.Add($_) }
     }
 }
@@ -205,7 +205,7 @@ $releaseDefinePatterns = @(
     'ENABLE_TRACE',
     'ENABLE_USER_DEBUG_SYSCALL',
     'ENABLE_L3_CALL_TRACE',
-    'NEXUS_BOOT_DIAG_LOG'
+    'GRIT_BOOT_DIAG_LOG'
 )
 
 foreach ($file in $scanFiles) {

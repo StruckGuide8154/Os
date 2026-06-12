@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Interrupt Descriptor Table (64-bit Long Mode)
+; GritOS v3.0 - Interrupt Descriptor Table (64-bit Long Mode)
 ; 256 entries, each 16 bytes
 ; ============================================================================
 bits 64

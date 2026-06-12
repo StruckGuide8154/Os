@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Taskbar + Start Menu
+; GritOS v3.0 - Taskbar + Start Menu
 ; Now shows open windows with names and close (X) buttons
 ; ============================================================================
 bits 64
@@ -15,7 +15,7 @@ extern scr_tb_btn_y, scr_bat_ind_x, scr_bat_ind_y
 
 ; Start menu geometry. Item count, height, and per-item layout are all
 ; derived from the single `menu_entries` table at the bottom of this file
-; — to add a row, append one MENU_ENTRY there; nothing else needs touching.
+; - to add a row, append one MENU_ENTRY there; nothing else needs touching.
 START_MENU_W      equ 200
 START_MENU_X      equ 4
 MENU_ITEM_H       equ 28
@@ -34,7 +34,7 @@ MENU_OFF_FLAGS    equ 17
 MENU_FLAG_SEP_ABOVE equ 1     ; draw a thin separator line above this row
 MENU_FLAG_DIM       equ 2     ; render label in gray instead of black
 
-; Count + height come from the table — see menu_entries / menu_entries_end.
+; Count + height come from the table - see menu_entries / menu_entries_end.
 MENU_ITEM_COUNT equ (menu_entries_end - menu_entries) / MENU_ENTRY_SIZE
 START_MENU_H    equ (MENU_PAD_TOP + MENU_ITEM_H * MENU_ITEM_COUNT + MENU_PAD_BOTTOM)
 

@@ -1,20 +1,20 @@
 ; ============================================================================
 ; syscall_data.inc
-; syscall .data/.bss: the RESIDUAL symbols that could not migrate to NexusHLK.
+; syscall .data/.bss: the RESIDUAL symbols that could not migrate to GritHLK.
 ;
-; Stage 1 of docs/nhlk-syscall-rearchitecture.md migrated the UNCONDITIONAL,
+; Stage 1 of docs/ghlk-syscall-rearchitecture.md migrated the UNCONDITIONAL,
 ; const-sized data symbols (syscall_count, kernel_canary, sc_net_*_busy,
 ; szHelloUser, slot_cap_mask, slot_cap_hmac, cap_audit_head/ring, slot_sc_budget,
 ; slot_gui_budget, slot_sc_strikes, sc_trace_ring/head/hist) to
-;   src/kernel/nexushlk/syscall_data.nxh
-; -> build/nxh/syscall_data.asm (zero-asm `data`/`global` decls), %include'd by
+;   src/kernel/grithlk/syscall_data.ghl
+; -> build/ghl/syscall_data.asm (zero-asm `data`/`global` decls), %include'd by
 ; kernel_build.asm under `section .data`.
 ;
-; WHAT REMAINS HERE (the NexusHLK `data` decl cannot express either property):
-;   * %ifdef-gated blocks — NHLK has no conditional-compilation construct, so
+; WHAT REMAINS HERE (the GritHLK `data` decl cannot express either property):
+;   * %ifdef-gated blocks - GHLK has no conditional-compilation construct, so
 ;     every ENABLE_DEBUG_SERIAL / ENABLE_SHADOW_STACK_POC / ENABLE_SYSCALL_PERM
 ;     symbol stays in asm.
-;   * slot_syscall_allow + the SC_ALLOW_BYTES equ — sized by syscall_table_count,
+;   * slot_syscall_allow + the SC_ALLOW_BYTES equ - sized by syscall_table_count,
 ;     a NASM assembly-time equ; the compiler resolves a `data` count to a literal
 ;     at compile time and cannot track the live table size.
 ; ============================================================================
@@ -37,7 +37,7 @@ shadow_poc_saved_rsp: dq 0
 ; syscall set, not just cap bits"). One bit per syscall number, SC_ALLOW_BYTES
 ; bytes per slot; bit i set == slot may invoke syscall i. The dispatcher tests
 ; this bit right after the coarse cap gate, so an app is confined to the exact
-; syscall set its manifest implies — finer than the CAP_* mask alone (Notepad
+; syscall set its manifest implies - finer than the CAP_* mask alone (Notepad
 ; keeps CAP_FS but is denied SYS_FS_DELETE).
 ;
 ; Default is every bit set (0xFF fill): legacy/undeclared slots are
@@ -60,7 +60,7 @@ slot_syscall_allow: times (MAX_WINDOWS * SC_ALLOW_BYTES) db 0xFF
 ; The dispatcher applies this on entry to recover the real row from the number
 ; the app issued. The matching FORWARD permutation (real_row -> app_visible) is
 ; what a future loader-side rewrite stamps into the app's SYS_* constants; it is
-; built transiently in sc_slot_perm_generate and discarded — only the inverse
+; built transiently in sc_slot_perm_generate and discarded - only the inverse
 ; the kernel needs is persisted.
 ;
 ; sc_slot_perm_ready[slot] is the generation sentinel: BSS-zero (0) = "not
@@ -94,7 +94,7 @@ sc_slot_perm_committed: times MAX_WINDOWS db 0
 ; Validator post-condition snapshot storage (security_todo.md §2, debug build
 ; only). For each slot, sc_postcond_args holds the 6 saved arg qwords captured
 ; right after sc_validate_from_table passes; sc_postcond_valid[slot] is set then
-; and cleared/consumed at the return-path recheck. Debug-only — release builds
+; and cleared/consumed at the return-path recheck. Debug-only - release builds
 ; allocate none of this and pay nothing (see the ENABLE_DEBUG_SERIAL gates on
 ; the dispatch/snapshot/recheck sites).
 align 8
