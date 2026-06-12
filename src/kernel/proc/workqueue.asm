@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - SMP Work Queue (worker-core offload)
+; GritOS v3.0 - SMP Work Queue (worker-core offload)
 ; ----------------------------------------------------------------------------
 ; PURPOSE
 ;   Keeps the GUI responsive when an app does something expensive (SVG

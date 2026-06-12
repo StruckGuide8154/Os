@@ -1,0 +1,66 @@
+# GritHL network library.
+# Thin wrappers over the system-wide kernel network syscalls.
+
+use core
+
+fn net_ipv4(a, b, c, d) {
+    return ((a & 255) << 24) | ((b & 255) << 16) | ((c & 255) << 8) | (d & 255);
+}
+
+# Ping a numeric IPv4 address.
+# Returns approximate RTT in milliseconds, or -1 after the kernel's 2s timeout.
+fn net_ping4(ip) {
+    return syscall(SYS_NET_PING4, ip);
+}
+
+# Query a single field of the current network state.
+fn net_info(selector) {
+    return syscall(SYS_NET_INFO, selector);
+}
+
+# Legacy synchronous DHCP. BLOCKS the caller (and the main loop) for up to a
+# few seconds. Prefer net_dhcp_start + poll net_dhcp_state().
+fn net_dhcp_renew() {
+    return syscall(SYS_NET_DHCP_RENEW);
+}
+
+# Kick off an async DHCP DISCOVER. Returns immediately (sub-millisecond);
+# the kernel finishes the handshake on the main loop. Poll net_dhcp_state()
+# for progress - it returns one of DHCP_IDLE/DISCOVER/REQUEST/BOUND/FAILED.
+fn net_dhcp_start() {
+    return syscall(SYS_NET_DHCP_START);
+}
+
+fn net_dhcp_state() {
+    return net_info(NI_DHCP_STATE);
+}
+
+# Send the opening TCP SYN to a numeric IPv4 address.
+# Returns 1 if the SYN was queued/sent, 0 on network failure, -2 if busy.
+fn net_tcp_connect4(ip, dst_port, src_port) {
+    return syscall(SYS_NET_TCP_CONNECT4, ip, dst_port, src_port);
+}
+
+# Resolve one DNS A record through the kernel resolver. NON-BLOCKING: call once
+# per frame with the SAME hostname pointer until the return value is non-zero -
+# the kernel advances the query one step per call (and marks the scene dirty
+# while pending so draw() keeps re-polling), so the GUI never freezes.
+#   > 0  -> resolved IPv4 A.B.C.D packed order
+#   0    -> still in flight, call again next frame
+#   -1   -> permanent failure (invalid name, policy reject, or both resolvers
+#           timed out)
+#   -2   -> a lookup for a DIFFERENT hostname is already in flight
+fn net_dns_a(hostname) {
+    return syscall(SYS_NET_DNS_A, hostname);
+}
+
+# Non-blocking ICMP echo. Call once per frame until the return value is
+# non-zero. The kernel advances ARP/ICMP one short step per call, so the GUI
+# keeps drawing in between.
+#   > 0  -> RTT in microseconds (one echo completed)
+#   0    -> still in flight, call again next frame
+#   -1   -> timeout / no link / send failed
+#   -2   -> a ping with a different target is in flight
+fn net_ping4_tick(ip) {
+    return syscall(SYS_NET_PING4_TICK, ip);
+}

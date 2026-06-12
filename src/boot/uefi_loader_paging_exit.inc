@@ -118,7 +118,7 @@ setup_paging:
 .pd0_nx:
     ; Keep the loaded kernel image executable after the first 2 MiB. The
     ; trampoline jumps into KERNEL_LOAD_ADDR and the monolithic kernel's text
-    ; spans multiple MiB once generated NexusHL apps are included.
+    ; spans multiple MiB once generated GritHL apps are included.
     cmp ebx, 1
     jb .pd0_set_nx
     cmp ebx, 8

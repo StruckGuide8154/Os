@@ -1,4 +1,4 @@
-# UEFI USB Mouse Input — Working Method (Acer Nitro V16 AI / Strix Point)
+# UEFI USB Mouse Input - Working Method (Acer Nitro V16 AI / Strix Point)
 
 This is the **exact, verified-working** sequence to get USB mouse movement on
 real hardware while inside UEFI Boot Services. Implement it 1:1 and the mouse
@@ -9,7 +9,7 @@ Point), Radeon 890M, Insyde UEFI firmware.
 
 ---
 
-## TL;DR — why earlier attempts failed
+## TL;DR - why earlier attempts failed
 
 | Attempt | Result | Reason |
 |---|---|---|
@@ -71,7 +71,7 @@ BS->LocateHandleBuffer(ByProtocol, &EFI_USB_IO_PROTOCOL_GUID, NULL,
                        &count, &handle_array);
 ```
 
-### 2. For each handle — find a HID pointer interface
+### 2. For each handle - find a HID pointer interface
 
 ```
 BS->OpenProtocol(handle, &USB_IO_GUID, &usbio, ImageHandle, NULL,
@@ -91,7 +91,7 @@ for ep in 0 .. ifd.bNumEndpoints-1:
     if (!(epd.bEndpointAddress & 0x80)) continue;       // 0x80 = IN
     -> found. Save:
        ep_addr  = epd.bEndpointAddress      (e.g. 0x81)
-       maxpkt   = epd.wMaxPacketSize        (e.g. 5  — NOT always 4/8!)
+       maxpkt   = epd.wMaxPacketSize        (e.g. 5  - NOT always 4/8!)
        interval = epd.bInterval
        iface    = ifd.bInterfaceNumber
 ```
@@ -106,7 +106,7 @@ BS->DisconnectController(handle, NULL, NULL);
 // rc = 0 on success. On this firmware it does NOT hang the xHCI host.
 ```
 
-After this, the firmware's HID driver no longer owns the interrupt endpoint —
+After this, the firmware's HID driver no longer owns the interrupt endpoint -
 `EFI_USB_IO_PROTOCOL` itself stays valid (it is produced by the USB bus
 driver, which is not disconnected).
 
@@ -123,7 +123,7 @@ usbio->UsbControlTransfer(usbio, &request,
                           NULL, 0, &status);          // vtbl +0
 ```
 
-Both must be sent. SET_IDLE matters — some mice will not report without it.
+Both must be sent. SET_IDLE matters - some mice will not report without it.
 
 ### 6. Arm the async interrupt transfer
 
@@ -143,7 +143,7 @@ usbio->UsbAsyncInterruptTransfer(
 
 ```
 EFI_STATUS EFIAPI mouse_callback(
-    VOID  *Data,        // rcx — the HID report
+    VOID  *Data,        // rcx - the HID report
     UINTN  DataLength,  // rdx
     VOID  *Context,     // r8
     UINT32 Status);     // r9
@@ -168,24 +168,24 @@ Apply `mouse_x += (s8)byte1;  mouse_y += (s8)byte2;` then clamp.
 
 The callback is driven by the firmware's xHCI timer event. It dispatches
 whenever your code is at TPL_APPLICATION and you yield. A plain main loop that
-calls `BS->Stall(10000)` (~10 ms) per iteration is enough — the callback fires
+calls `BS->Stall(10000)` (~10 ms) per iteration is enough - the callback fires
 between iterations. Do **not** raise TPL.
 
 ---
 
-## Robustness notes (do these — they prevented real freezes)
+## Robustness notes (do these - they prevented real freezes)
 
 1. **Never call SPP / AbsolutePointer `GetState`** on this firmware. They block
    forever. If you must probe them, gate every call behind
    `BS->CheckEvent(protocol->WaitForInput)` and skip `GetState` unless the
-   event is signalled — but on this hardware even that hung, so just don't.
+   event is signalled - but on this hardware even that hung, so just don't.
 2. **Arm every HID pointer interface**, not just the first match. There were 8
    USB interfaces; the real mouse was not guaranteed to be first. Run steps
-   3–6 for *every* class-3, protocol≠1 interface. One shared callback is fine.
+   3-6 for *every* class-3, protocol≠1 interface. One shared callback is fine.
 3. `UsbSyncInterruptTransfer` also works as a fallback once the driver is
-   detached — but `DataLength` MUST equal `wMaxPacketSize`, and it should have
+   detached - but `DataLength` MUST equal `wMaxPacketSize`, and it should have
    a real timeout (e.g. 20 ms) so it cannot block.
-4. Touchpad is **I²C-HID, not USB** on this laptop — it will never appear on
+4. Touchpad is **I²C-HID, not USB** on this laptop - it will never appear on
    the `EFI_USB_IO_PROTOCOL` path. Handle it separately.
 
 ---

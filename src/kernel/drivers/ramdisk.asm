@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - In-memory block device (RAM disk)
+; GritOS v3.0 - In-memory block device (RAM disk)
 ; ----------------------------------------------------------------------------
 ; Provides an LBA-addressed read/write window over a contiguous region of
 ; physical RAM. The UEFI loader fills `\EFI\BOOT\DATA.IMG` into firmware-
@@ -173,11 +173,11 @@ ramdisk_intercept_read:
     push r9
     push r11
 
-    ; Save dst in r11 (NOT r10) — ramdisk_classify's header documents that
+    ; Save dst in r11 (NOT r10) - ramdisk_classify's header documents that
     ; it clobbers r10 (uses it to hold lba_base). Pre-2026-05-26 this used
     ; r10 and the dst pointer was silently overwritten with FAT16_PART_LBA,
     ; making the memcpy write into low memory and leaving FAT16_SECTOR_BUF
-    ; untouched — the BPB read appeared to succeed but the buffer never
+    ; untouched - the BPB read appeared to succeed but the buffer never
     ; got the data, so fat16_init bailed at the signature check.
     mov r11, rsi
     call ramdisk_classify
@@ -215,7 +215,7 @@ ramdisk_intercept_write:
     push r9
     push r11
 
-    ; Save src in r11 (not r10 — see intercept_read for the bug history).
+    ; Save src in r11 (not r10 - see intercept_read for the bug history).
     mov r11, rsi
     call ramdisk_classify
     cmp eax, 1
@@ -318,7 +318,7 @@ ramdisk_storage_class:
 ;
 ; Phase 1 status: write-back is not implemented yet. The dispatch table to
 ; nvme_write_sectors / usb_msc_write_sectors lands in Phase 4 (blkdev.asm),
-; which is blocked on the kernel block-device backing driver — tracked as
+; which is blocked on the kernel block-device backing driver - tracked as
 ; issue #21 (same blocker as the loader's partition-relative LBA item). Today
 ; this returns 1 ("no backing configured") so behavior is unchanged.
 ; ----------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# NexusOS Reference Index
+# GritOS Reference Index
 
 This is the maintainer-facing map of the codebase. The goal is to let you find
 the owning file and exported entrypoints for a bug or feature without tracing
@@ -36,8 +36,8 @@ through the whole tree first.
   Generated large-file, export, fixed-address, and TODO/STUB/FIXME counts.
 - `app-authoring.md`
   User-app development surface today.
-- `nexushl-gui.md`
-  NexusHL immediate-mode GUI library and widget ownership rules.
+- `grithl-gui.md`
+  GritHL immediate-mode GUI library and widget ownership rules.
 - `app-loader-format.md`
   Proposed future external app binary and loader contract.
 - `multicore.md`
@@ -126,7 +126,7 @@ through the whole tree first.
 - `src/kernel/arch/apic.asm` (AP bring-up)
 - See `multicore.md`
 
-## Quick “Where Do I Fix This?” Map
+## Quick "Where Do I Fix This?" Map
 
 - Boot crash before kernel: `boot-reference.md`
 - IRQ crash or exception vector issue: `kernel-function-reference.md` under
@@ -137,7 +137,7 @@ through the whole tree first.
   `drivers`, then `state-machine-reference.md`
 - Files not reading/writing: `kernel-function-reference.md` under `fs`
 - File create/rename/delete/mkdir ABI: `syscalls.md` and
-  `src/user/lib/nexus_fs.inc`
+  `src/user/lib/grit_fs.inc`
 - Window/callback bug: `kernel-function-reference.md` under `gui` plus
   `usermode-reference.md` and `data-layout-reference.md`
 - Syscall reject or privilege bug: `syscalls.md` plus `src/kernel/proc/syscall.asm`

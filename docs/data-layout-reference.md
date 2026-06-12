@@ -1,4 +1,4 @@
-# NexusOS Data Layout Reference
+# GritOS Data Layout Reference
 
 This document covers the important live structures and in-memory layouts that
 maintainers frequently need when debugging bugs across subsystem boundaries.
@@ -207,7 +207,7 @@ direct writable kernel pointer. Mutating syscalls such as `SYS_FS_DELETE` and
 ### Usermode filesystem kit
 
 Owner:
-- `src/user/lib/nexus_fs.inc`
+- `src/user/lib/grit_fs.inc`
 
 The user library defines:
 

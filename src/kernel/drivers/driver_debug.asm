@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS driver diagnostics manager
+; GritOS driver diagnostics manager
 ; ----------------------------------------------------------------------------
 ; Central debug surface for hardware bring-up. The klog overlay calls
 ; driver_debug_render, and this file gathers concise state from whatever

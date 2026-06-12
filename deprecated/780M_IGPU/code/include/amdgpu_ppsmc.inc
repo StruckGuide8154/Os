@@ -1,5 +1,5 @@
 ; ============================================================================
-; amdgpu_ppsmc.inc — PPSMC message IDs for AMD SMU mailbox
+; amdgpu_ppsmc.inc - PPSMC message IDs for AMD SMU mailbox
 ; ----------------------------------------------------------------------------
 ; Pure data. The PPSMC ("PowerPlay SMC") namespace is the message protocol
 ; between the host driver and the SMU microcontroller. Each SoC family ships
@@ -31,16 +31,16 @@ PPSMC_Result_UnknownCmd         equ 0xFE
 PPSMC_Result_CmdRejectedPrereq  equ 0xFD
 PPSMC_Result_CmdRejectedBusy    equ 0xFC
 
-; --- Message IDs (smu_v13_0_4 — Strix Point / Phoenix APUs) ---------------
+; --- Message IDs (smu_v13_0_4 - Strix Point / Phoenix APUs) ---------------
 ;
 ; Source: drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu_v13_0_4_ppsmc.h
 ;
 ; IMPORTANT: APUs have NO PowerUpGfx message. GFX is powered by ABL/PSP
 ; at boot and stays on; the driver only controls clock-gating via
 ; AllowGfxOff / DisallowGfxOff. Task H on this family is therefore:
-;     1. TestMessage  — proves mailbox alive (echoes arg+1)
-;     2. DisallowGfxOff — keep GFX from auto-gating during bring-up
-;     3. GFX scratch round-trip — confirms MMIO is live
+;     1. TestMessage  - proves mailbox alive (echoes arg+1)
+;     2. DisallowGfxOff - keep GFX from auto-gating during bring-up
+;     3. GFX scratch round-trip - confirms MMIO is live
 PPSMC_MSG_TestMessage              equ 0x01
 PPSMC_MSG_GetSmuVersion            equ 0x02
 PPSMC_MSG_GetDriverIfVersion       equ 0x03

@@ -6,7 +6,7 @@
 ; THREAT MODEL
 ;   Kernel drivers (xHCI, the rtl8156 USB NIC that rides on it, the LAPIC)
 ;   run with implicit full ring-0 power: a mistyped pointer or an off-by-N in
-;   a descriptor walk can scribble anywhere in the kernel's address space —
+;   a descriptor walk can scribble anywhere in the kernel's address space -
 ;   over another driver's BAR, over kernel .data, over a page table. There is
 ;   no hardware between a kernel-mode store and physical memory.
 ;
@@ -20,7 +20,7 @@
 ;
 ; ONE REGISTRY, TWO FEATURES
 ;   * Driver capability gates (§8 ★): `mmio_drv_caps_init` declares, at boot,
-;     the per-driver region descriptors — the set of {base,len} a given
+;     the per-driver region descriptors - the set of {base,len} a given
 ;     MMIO_DRV_* is permitted to reach. That set IS the driver's capability.
 ;   * MMIO bounds policy (§8): `mmio_bounds_assert(addr,len,drv)` is the
 ;     runtime check; it consults the exact same registry the gates were
@@ -29,7 +29,7 @@
 ;
 ; REGISTRY SHAPE
 ;   Fixed-capacity parallel arrays (MMIO_REG_MAX entries) in kernel .data,
-;   OUTSIDE any ring-3-writable slot — an app cannot widen a driver's reach by
+;   OUTSIDE any ring-3-writable slot - an app cannot widen a driver's reach by
 ;   writing the table. Each slot holds {base, end (=base+len), owner drv id,
 ;   flags}. Append-only via `mmio_region_register`; never freed (BARs live for
 ;   the lifetime of the boot). end is stored pre-computed so the hot-path
@@ -40,17 +40,17 @@
 ;   ANY of: zero length, address+len overflow, owner drv id not matching a
 ;   registered region, or the [addr,addr+len) range straddling/exceeding the
 ;   region it started in. A driver that has registered no region cannot pass
-;   the assert at all — registration is mandatory, absence denies.
+;   the assert at all - registration is mandatory, absence denies.
 ;
 ; SCOPE (what is wired vs. enumerated for follow-up)
 ;   The registry, the per-driver descriptors, and the assert helper land here
 ;   fully. The assert is wired into the most-obvious / hottest kernel-driver
 ;   MMIO sites:
-;     * apic.asm  — every `[lapic_base + off]` register store in apic_eoi and
+;     * apic.asm  - every `[lapic_base + off]` register store in apic_eoi and
 ;       apic_init's SIVR/TPR programming (the LAPIC page is the one MMIO
 ;       window the kernel pokes on the steady-state IRQ path).
 ;   The remaining per-register pokes inside the cold xHCI bring-up path
-;   (xhci.asm, owned by another agent) are NOT instrumented here — they run
+;   (xhci.asm, owned by another agent) are NOT instrumented here - they run
 ;   once at init, off the hot path, and xhci.asm is off-limits for this change.
 ;   Their BAR is still REGISTERED (so any future instrumentation there, or any
 ;   stray store that lands in the registered range, is covered) and the xHCI
@@ -61,10 +61,10 @@
 ; --- Driver identity tags ---------------------------------------------------
 ; Small dense ids; index space is private to the registry.
 MMIO_DRV_NONE   equ 0
-MMIO_DRV_LAPIC  equ 1            ; kernel/arch/apic.asm  — local APIC MMIO page
-MMIO_DRV_XHCI   equ 2            ; kernel/drivers/xhci.asm — host controller BAR
-MMIO_DRV_RTL8156 equ 3           ; kernel/drivers/rtl8156.asm — rides xHCI BAR
-MMIO_DRV_I2C    equ 4            ; kernel/drivers/i2c_hid.asm — DesignWare I2C MMIO block
+MMIO_DRV_LAPIC  equ 1            ; kernel/arch/apic.asm  - local APIC MMIO page
+MMIO_DRV_XHCI   equ 2            ; kernel/drivers/xhci.asm - host controller BAR
+MMIO_DRV_RTL8156 equ 3           ; kernel/drivers/rtl8156.asm - rides xHCI BAR
+MMIO_DRV_I2C    equ 4            ; kernel/drivers/i2c_hid.asm - DesignWare I2C MMIO block
 
 ; --- Region flags -----------------------------------------------------------
 MMIO_RGN_NONE   equ 0
@@ -78,18 +78,18 @@ MMIO_REG_MAX    equ 8
 ; The LAPIC register block is one 4 KiB page at the MSR-reported base. An xHCI
 ; BAR is implementation-defined but the cap/op/runtime/doorbell register set
 ; for the controllers we support fits well inside 64 KiB; declare that as the
-; reachable window (conservative upper bound, not the exact decoded size — the
+; reachable window (conservative upper bound, not the exact decoded size - the
 ; goal is "a stray pointer can't leave the controller's BAR", not exact decode).
 MMIO_LAPIC_WINDOW equ 0x1000
 MMIO_XHCI_WINDOW  equ 0x10000
 ; A DesignWare I2C register block (DW_IC_*) tops out at offset 0xF4. One 4 KiB
-; page is a conservative window — far more than the decoded register set, but it
+; page is a conservative window - far more than the decoded register set, but it
 ; keeps a stray [i2c_base_addr + off] from leaving the controller's MMIO page.
 MMIO_I2C_WINDOW   equ 0x1000
 
 section .data
 align 8
-; Parallel arrays — entry i is {base[i], end[i], owner[i], flags[i]}.
+; Parallel arrays - entry i is {base[i], end[i], owner[i], flags[i]}.
 mmio_reg_base   times MMIO_REG_MAX dq 0
 mmio_reg_end    times MMIO_REG_MAX dq 0
 mmio_reg_owner  times MMIO_REG_MAX dd 0
@@ -99,7 +99,7 @@ mmio_reg_count  dd 0
 section .text
 
 ; ----------------------------------------------------------------------------
-; mmio_region_register — append one {base,len} region owned by a driver.
+; mmio_region_register - append one {base,len} region owned by a driver.
 ;   RDI = region base (physical == identity-mapped VA in this kernel)
 ;   RSI = region length in bytes (must be non-zero)
 ;   EDX = owner MMIO_DRV_* id
@@ -138,7 +138,7 @@ mmio_region_register:
     ret
 
 ; ----------------------------------------------------------------------------
-; mmio_bounds_assert — fail-closed check that a kernel-driver MMIO access lies
+; mmio_bounds_assert - fail-closed check that a kernel-driver MMIO access lies
 ; entirely within a region that driver registered.
 ;   RDI = access address
 ;   RSI = access length in bytes (e.g. 4 for a dword MMIO write)
@@ -179,7 +179,7 @@ mmio_bounds_assert:
     mov rax, [mmio_reg_end + r10*8]
     cmp r9, rax
     ja .next                            ; access end past region end
-    ; contained — accept
+    ; contained - accept
     pop r10
     pop r9
     pop r8
@@ -197,7 +197,7 @@ mmio_bounds_assert:
     jmp mmio_bounds_panic
 
 ; ----------------------------------------------------------------------------
-; mmio_bounds_panic — out-of-bounds kernel-driver MMIO. Serial-log and halt.
+; mmio_bounds_panic - out-of-bounds kernel-driver MMIO. Serial-log and halt.
 ;   RDI = access start, RSI = access end (exclusive), EDX = driver id.
 ; Never returns. Mirrors kernel_panic_canary's fail-closed shape.
 ; ----------------------------------------------------------------------------
@@ -224,7 +224,7 @@ mmio_bounds_panic:
     jmp .mbp_halt
 
 ; ----------------------------------------------------------------------------
-; mmio_drv_caps_init — declare the xHCI-family drivers' reachable-region
+; mmio_drv_caps_init - declare the xHCI-family drivers' reachable-region
 ; capability set. Called once from kmain after the controllers have been probed
 ; (so xhci_mmio_base is resolved) and before the steady-state poll paths that
 ; call mmio_bounds_assert. This is the §8 "capability descriptor" for the USB
@@ -235,10 +235,10 @@ mmio_bounds_panic:
 ; descriptor is declared earlier, inside apic_init, via mmio_register_lapic.
 ;   no args. Clobbers rax/rcx/rdx/rsi/rdi (caller-saved at the init site).
 ; ----------------------------------------------------------------------------
-extern lapic_base               ; arch/apic.asm — MSR-resolved LAPIC MMIO base
-extern xhci_mmio_base           ; drivers/xhci.asm — BAR0 base, set by xhci probe
+extern lapic_base               ; arch/apic.asm - MSR-resolved LAPIC MMIO base
+extern xhci_mmio_base           ; drivers/xhci.asm - BAR0 base, set by xhci probe
 
-; mmio_register_lapic — declare the LAPIC's single 4 KiB register page as the
+; mmio_register_lapic - declare the LAPIC's single 4 KiB register page as the
 ; MMIO_DRV_LAPIC capability. Called from apic_init the moment lapic_base is
 ; resolved, so it is in the registry before the first EOI assert. Idempotent in
 ; practice (apic_init runs once). Clobbers rax/rcx/rdx/rsi/rdi.
@@ -272,7 +272,7 @@ mmio_register_lapic:
 .skip:
     ret
 
-; mmio_register_i2c — declare a DesignWare I2C controller's register page as the
+; mmio_register_i2c - declare a DesignWare I2C controller's register page as the
 ; MMIO_DRV_I2C capability. i2c_hid's probe walks several candidate bases (the
 ; four AMD FCH FEDCx000 blocks, or a PCI BAR0) and commits one to
 ; i2c_base_addr; this is called with that committed base in RDI right after the

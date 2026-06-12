@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to NexusOS! -->
+<!-- Thanks for contributing to GritOS! -->
 
 ## Summary
 

@@ -81,7 +81,7 @@ raster_select_default_target:
 ;
 ; Acquires raster_target_lock before mutating the shared raster_target_*
 ; globals. Without this, the wallpaper rasterizer (running on an AP) and the
-; BSP could both call this routine in parallel — the BSP's call would overwrite
+; BSP could both call this routine in parallel - the BSP's call would overwrite
 ; the AP's target mid-raster-op, sending the AP's pixel writes into bb_addr at
 ; framebuffer-pitch offsets computed for a packed-pitch cache. That produced
 ; the skewed-stripes wallpaper bug on real hardware (true SMP); QEMU TCG
@@ -151,7 +151,7 @@ raster_sc_release_target:
 ; SCREEN_WIDTH/SCREEN_HEIGHT. We now recompute them whenever the screen
 ; size changes so the taskbar follows the active mode.
 ;
-; Layout constants (must match taskbar.asm — single source of truth would
+; Layout constants (must match taskbar.asm - single source of truth would
 ; be nicer, but they're stable and only used here for the recompute):
 ;   TASKBAR_HEIGHT  = 36
 ;   CLOCK_WIDTH     = 64

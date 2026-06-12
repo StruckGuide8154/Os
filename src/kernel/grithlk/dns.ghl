@@ -1,0 +1,371 @@
+# ============================================================================
+# dns.ghl  -  GritHLK (zero-asm) DNS A-record resolver, ASYNC.
+#
+# Ports src/kernel/net/dns.asm to GritHL and, in the process, removes the
+# kernel-halting busy-wait. The old net_dns_query_a sent a query and then SPUN
+# (call net_nic_poll_rx; pause) for up to 300ms on the DHCP resolver plus 1s on
+# the 8.8.8.8 fallback - 1.3s during which the syscall never returned, so the
+# whole main loop (render_frame, mouse, DHCP pump) froze. The GUI only "caught
+# up" once the lookup finished.
+#
+# This module replaces that with a tick state machine, mirroring the async ICMP
+# ping (net_ping4_tick) and DHCP (rtl8156_dhcp_start/pump) paths: each call
+# advances ONE step and returns immediately. Replies are landed by the main
+# loop's net_nic_poll_rx() -> udp -> net_dns_rx_udp(), which stashes the result;
+# the next tick observes it. The caller polls once per frame (the syscall marks
+# scene_dirty while pending so the app's draw() re-polls) until it resolves.
+#
+# net_dns_tick(host) return contract (host = NUL-terminated C-string):
+#    > 0  resolved IPv4 in A.B.C.D packed order
+#      0  still in flight - call again next frame
+#     -1  permanent failure (invalid/over-long/non-LDH name, policy reject, or
+#         both the DHCP resolver and the 8.8.8.8 fallback timed out)
+#     -2  a lookup for a DIFFERENT hostname is already in flight
+#
+# FSM (net_dns_fsm): 0 IDLE, 1 WAIT_PRIMARY (DHCP resolver), 2 WAIT_FALLBACK
+# (8.8.8.8). Single-flight is enforced by net_dns_name_ptr: only the hostname
+# that started the lookup may poll it; a different pointer gets -2.
+#
+# Calls into code that stays put: net_info (NIC info selector), net_udp_send_ipv4
+# (UDP/ARP/IPv4 framing - note: its internal ARP resolve can still briefly block
+# on a cold next-hop MAC, but the gateway MAC is warm after DHCP/ping), and
+# sec_net_check_suffix (per-slot DNS-suffix allowlist, net_slot_policy.inc, kept
+# alive by tcp.asm's include). No assembly in this module.
+# ============================================================================
+
+module "dns";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over the query buffer + FSM state
+unsafe implicit_extern;  # &<symbol> + call net_info / net_udp_send_ipv4 / ...
+
+global net_dns_tick;
+global net_dns_rx_udp;
+
+const DNS_QUERY_CAP       = 512;
+const DNS_MAX_NAME        = 253;     # presentation-name cap (wire max 255 incl. len bytes)
+const NET_DNS_FALLBACK_IP = 0x08080808;   # 8.8.8.8 public resolver
+const NI_DNS_SERVER       = 9;       # net_info selector for the DHCP-offered resolver
+const DNS_DST_PORT        = 53;
+const DNS_SRC_PORT        = 49153;
+const DNS_DST_PORT_NET    = 0x3500;  # 53 on the wire, little-endian into a reg
+const DNS_SRC_PORT_NET    = 0x01C0;  # 49153 on the wire, little-endian into a reg
+const DNS_WAIT_PRIMARY    = 30;      # ~300ms at 100 Hz
+const DNS_WAIT_FALLBACK   = 100;     # ~1s
+
+# ---------------------------------------------------------------------------
+# Little 16-bit big-endian helpers. The GHLK load/store intrinsics are 8/32/64
+# only (lb / lw / lq), so DNS's many 16-bit wire fields are composed by byte.
+# ---------------------------------------------------------------------------
+fn dns_get16be(a) { return (lb(a) << 8) | lb(a + 1); }
+
+# TEMP DNS trace: emit "~<c>" on COM1 (unconditional, like the L3 trace).
+fn dnsdbg(c) {
+    call svg_dump_putc(al: 126);     # '~'
+    call svg_dump_putc(al: c);
+}
+
+# LDH label charset (letters/digits/hyphen) - used while encoding a label; the
+# label separator '.' is handled by the caller.
+fn dns_label_char_ok(c) {
+    if c == 45 { return 1; }                 # '-'
+    if c >= 48 { if c <= 57 { return 1; } }   # 0-9
+    if c >= 65 { if c <= 90 { return 1; } }   # A-Z
+    if c >= 97 { if c <= 122 { return 1; } }  # a-z
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_validate_name - up-front kill switch. Rejects (returns 0) a NULL/empty
+# name, one over DNS_MAX_NAME bytes, or one containing any non-LDH byte (here the
+# dot separator is also accepted). Pure scan, no wire I/O. Fails closed.
+# ---------------------------------------------------------------------------
+fn net_dns_validate_name(host) {
+    if host == 0 { return 0; }
+    let p = host;
+    let n = 0;
+    let c = lb(p);
+    while c != 0 {
+        if n >= DNS_MAX_NAME { return 0; }     # would exceed 253 bytes
+        if c == 46 {                           # '.'
+            n = n + 1; p = p + 1; c = lb(p);
+        } else {
+            if dns_label_char_ok(c) == 0 { return 0; }
+            n = n + 1; p = p + 1; c = lb(p);
+        }
+    }
+    if n == 0 { return 0; }                     # empty name
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_build_query - encode hostname -> net_dns_query_buf. Returns the query
+# length, or 0 on an invalid name (empty/over-long label, non-LDH byte). The
+# txid (bytes 0..1) is left zero here and patched per-attempt by net_dns_send.
+# ---------------------------------------------------------------------------
+fn net_dns_build_query(host) {
+    let B = &net_dns_query_buf;
+    let z = 0;
+    while z < DNS_QUERY_CAP { sb(B + z, 0); z = z + 1; }
+
+    sb(B + 2, 0x01);          # flags 0x0100 (RD) - high byte = 0x01
+    sb(B + 5, 0x01);          # QDCOUNT = 1 (big-endian low byte)
+
+    let src = host;
+    let lenpos = 12;          # offset of the current label's length byte
+    let w = 13;               # write cursor (first label char)
+    let clen = 0;             # current label length
+    let consumed = 0;
+    let c = lb(src);
+    while c != 0 {
+        if consumed >= DNS_MAX_NAME { return 0; }
+        if c == 46 {                           # '.': close the current label
+            if clen == 0 { return 0; }
+            sb(B + lenpos, clen);
+            lenpos = w;
+            w = w + 1;
+            clen = 0;
+        } else {
+            if dns_label_char_ok(c) == 0 { return 0; }
+            if clen >= 63 { return 0; }
+            sb(B + w, c);
+            w = w + 1;
+            clen = clen + 1;
+        }
+        consumed = consumed + 1;
+        src = src + 1;
+        c = lb(src);
+    }
+    if clen == 0 { return 0; }                  # trailing dot / empty label
+    sb(B + lenpos, clen);
+    sb(B + w, 0);                               # root label
+    w = w + 1;
+    sb(B + w, 0x00);     sb(B + w + 1, 0x01);   # QTYPE  = A
+    sb(B + w + 2, 0x00); sb(B + w + 3, 0x01);   # QCLASS = IN
+    w = w + 4;
+    return w;
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_send - bump the txid, patch it into the prebuilt query, clear the
+# result slot, arm the waiting flag, and fire one UDP datagram at the current
+# net_dns_server_ip. Returns 1 if the datagram was queued, 0 on send failure.
+# ---------------------------------------------------------------------------
+fn net_dns_send() {
+    let t = (lw(&net_dns_txid) + 1) & 0xFFFF;
+    if t == 0 { t = 1; }                        # never reuse txid 0
+    sw(&net_dns_txid, t);
+    sb(&net_dns_query_buf + 0, (t >> 8) & 0xFF);
+    sb(&net_dns_query_buf + 1, t & 0xFF);
+
+    sw(&net_dns_result_ip, 0);
+    sb(&net_dns_waiting, 1);
+
+    return net_udp_send_ipv4(lw(&net_dns_server_ip) & 0xFFFFFFFF,
+                             DNS_DST_PORT, DNS_SRC_PORT,
+                             lw(&net_dns_query_len) & 0xFFFFFFFF,
+                             &net_dns_query_buf);
+}
+
+# Arm a fresh attempt window against the current net_dns_server_ip in the given
+# FSM phase: clear the result + "sent" latch, mark waiting, set the deadline.
+# The actual transmit is deferred to net_dns_pump so a cold next-hop ARP cannot
+# block here - pump retries the send each tick until the cache warms.
+fn net_dns_arm(phase, window) {
+    sw(&net_dns_result_ip, 0);
+    sb(&net_dns_sent, 0);
+    sb(&net_dns_waiting, 1);
+    sb(&net_dns_fsm, phase);
+    sq(&net_dns_deadline, lq(&tick_count) + window);
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_pump - advance an in-flight lookup by ONE non-blocking step:
+#   1. a landed reply (net_dns_result_ip != 0) resolves immediately;
+#   2. otherwise, if the query hasn't gone out yet, try ONE send. net_dns_send
+#      -> net_udp_send_ipv4 now uses the non-blocking ARP resolver, so a cold
+#      next-hop MAC just fires an ARP request and returns 0 (not sent); we leave
+#      net_dns_sent=0 and retry next tick once poll_rx warms the cache. No spin.
+#   3. on deadline, the primary phase rolls over to the 8.8.8.8 fallback and the
+#      fallback phase gives up (-1).
+# Returns the same contract as net_dns_tick (>0 ip / 0 pending / -1 fail).
+# ---------------------------------------------------------------------------
+fn net_dns_pump() {
+    let ip = lw(&net_dns_result_ip) & 0xFFFFFFFF;
+    if ip != 0 {
+        sb(&net_dns_fsm, 0);
+        sb(&net_dns_waiting, 0);
+        sb(&net_dns_sent, 0);
+        dnsdbg(82);                                        # 'R' (resolved)
+        return ip;
+    }
+
+    # Transmit once; retry on later ticks while the next-hop ARP is still cold.
+    if lb(&net_dns_sent) == 0 {
+        if net_dns_send() != 0 { sb(&net_dns_sent, 1); dnsdbg(49); }    # '1' (query on the wire)
+    }
+
+    if lq(&tick_count) >= lq(&net_dns_deadline) {
+        if lb(&net_dns_fsm) == 1 {
+            dnsdbg(50);                                    # '2' primary -> fallback
+            sw(&net_dns_server_ip, NET_DNS_FALLBACK_IP);
+            net_dns_arm(2, DNS_WAIT_FALLBACK);
+            return 0;
+        }
+        sb(&net_dns_fsm, 0);                               # fallback -> give up
+        sb(&net_dns_waiting, 0);
+        sb(&net_dns_sent, 0);
+        dnsdbg(84);                                        # 'T' (timeout fail)
+        return -1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_tick - the async entry. See the contract in the module header.
+# ---------------------------------------------------------------------------
+fn net_dns_tick(host) {
+    let fsm = lb(&net_dns_fsm);
+
+    if fsm == 0 {
+        # IDLE -> start a fresh lookup.
+        if net_dns_validate_name(host) == 0 { dnsdbg(86); return -1; }   # 'V'
+        if sec_net_check_suffix(host) == 0 { dnsdbg(83); return -1; }    # 'S'
+        let qlen = net_dns_build_query(host);
+        if qlen == 0 { dnsdbg(66); return -1; }                         # 'B'
+        sw(&net_dns_query_len, qlen);
+        sq(&net_dns_name_ptr, host);
+        dnsdbg(81);                                                     # 'Q' (start)
+
+        # Phase 1: the DHCP-offered resolver, short window. No offer -> go
+        # straight to the public fallback. The transmit happens in net_dns_pump
+        # (called below), never here, so a cold ARP can't freeze the click frame.
+        let srv = net_info(NI_DNS_SERVER);
+        if srv == 0 {
+            dnsdbg(48);                                                 # '0' (no DHCP DNS)
+            sw(&net_dns_server_ip, NET_DNS_FALLBACK_IP);
+            net_dns_arm(2, DNS_WAIT_FALLBACK);
+        } else {
+            sw(&net_dns_server_ip, srv);
+            net_dns_arm(1, DNS_WAIT_PRIMARY);
+        }
+        return net_dns_pump();
+    }
+
+    # In flight for a DIFFERENT hostname: normally single-flight -> -2. But if
+    # that lookup is already past its deadline, its owner has stopped polling
+    # (e.g. the app closed mid-resolve), so don't keep new callers blocked for
+    # the rest of the timeout chain - reclaim the FSM and start fresh now.
+    if lq(&net_dns_name_ptr) != host {
+        if lq(&tick_count) < lq(&net_dns_deadline) { return -2; }
+        sb(&net_dns_fsm, 0);
+        sb(&net_dns_waiting, 0);
+        sb(&net_dns_sent, 0);
+        return net_dns_tick(host);
+    }
+
+    return net_dns_pump();
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_rx_udp - UDP demux target (called from udp.asm). Validates the reply
+# against the in-flight transaction and, on the first A record, stashes the IPv4
+# address into net_dns_result_ip for the next tick to pick up. Returns 1 when a
+# datagram was consumed as our answer, 0 otherwise.
+#   payload = UDP payload pointer, srcport/dstport = on-wire (little-endian into
+#   a reg) port bytes, len = payload length.
+# ---------------------------------------------------------------------------
+fn net_dns_rx_udp(payload, srcport, dstport, len) {
+    if lb(&net_dns_waiting) != 1 { return 0; }
+    dnsdbg(114);                                              # 'r' (a UDP frame while waiting)
+    if (srcport & 0xFFFF) != DNS_DST_PORT_NET { dnsdbg(112); return 0; }   # 'p' src port
+    if (dstport & 0xFFFF) != DNS_SRC_PORT_NET { dnsdbg(113); return 0; }   # 'q' dst port
+    let plen = len & 0xFFFFFFFF;
+    if plen < 12 { dnsdbg(108); return 0; }                  # 'l' too short
+
+    if dns_get16be(payload + 0) != (lw(&net_dns_txid) & 0xFFFF) { dnsdbg(120); return 0; }  # 'x' txid
+    if (lb(payload + 2) & 0x80) == 0 { dnsdbg(99); return 0; }   # 'c' not a response
+    if (lb(payload + 3) & 0x0F) != 0 { dnsdbg(101); return 0; }  # 'e' rcode!=0
+
+    let qd = dns_get16be(payload + 4);
+    let an = dns_get16be(payload + 6);
+    if an == 0 { dnsdbg(110); return 0; }                    # 'n' no answers
+
+    let pend = payload + plen;
+    let cur = payload + 12;
+
+    # Skip the echoed question section.
+    while qd != 0 {
+        let nx = net_dns_skip_name(cur, pend);
+        if nx == 0 { return 0; }
+        cur = nx + 4;                                        # QTYPE + QCLASS
+        if cur > pend { return 0; }
+        qd = qd - 1;
+    }
+
+    # Walk answers, take the first A/IN record with RDLENGTH 4.
+    while an != 0 {
+        let rr = net_dns_skip_name(cur, pend);
+        if rr == 0 { return 0; }
+        if rr + 10 > pend { return 0; }                      # fixed RR header
+        if dns_get16be(rr + 0) == 1 {                        # TYPE  A
+            if dns_get16be(rr + 2) == 1 {                    # CLASS IN
+                if dns_get16be(rr + 8) == 4 {                # RDLENGTH 4
+                    if rr + 14 > pend { return 0; }
+                    let a = (lb(rr + 10) << 24) | (lb(rr + 11) << 16)
+                          | (lb(rr + 12) << 8)  |  lb(rr + 13);
+                    sw(&net_dns_result_ip, a);
+                    dnsdbg(97);                              # 'a' (A record stashed)
+                    return 1;
+                }
+            }
+        }
+        let rdlen = dns_get16be(rr + 8);
+        cur = rr + 10 + rdlen;
+        if cur > pend { return 0; }
+        an = an - 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# net_dns_skip_name - step a cursor past one encoded domain name (handling a
+# single compression pointer, which terminates the name). Returns the first byte
+# after the name, or 0 for malformed length/compression / overrun. The 128-step
+# cap bounds a pathological chain of label lengths.
+# ---------------------------------------------------------------------------
+fn net_dns_skip_name(cur, pend) {
+    let guard = 128;
+    while guard > 0 {
+        if cur >= pend { return 0; }
+        let d = lb(cur);
+        if d == 0 { return cur + 1; }                        # root -> done
+        let hi = d & 0xC0;
+        if hi == 0xC0 {                                      # compression pointer
+            if cur + 2 > pend { return 0; }
+            return cur + 2;
+        }
+        if hi != 0 { return 0; }                             # 0x40/0x80 reserved
+        cur = cur + 1 + d;
+        if cur > pend { return 0; }
+        guard = guard - 1;
+    }
+    return 0;
+}
+
+# ============================================================================
+# Resolver state - kernel .data (RW). The 512-byte query buffer is the only
+# scratch; the rest are small FSM scalars.
+# ============================================================================
+align 16;
+data net_dns_query_buf: DNS_QUERY_CAP x 1 = 0;
+align 4;
+data net_dns_txid:       1 x 4 = 0;     # 16-bit value held in a 32-bit slot
+data net_dns_query_len:  1 x 4 = 0;
+data net_dns_result_ip:  1 x 4 = 0;     # A.B.C.D packed, 0 = none yet
+data net_dns_server_ip:  1 x 4 = 0;
+data net_dns_waiting:    1 x 1 = 0;
+data net_dns_sent:       1 x 1 = 0;     # 1 once the query datagram is actually on the wire
+data net_dns_fsm:        1 x 1 = 0;     # 0 IDLE, 1 WAIT_PRIMARY, 2 WAIT_FALLBACK
+align 8;
+data net_dns_deadline:   1 x 8 = 0;
+data net_dns_name_ptr:   1 x 8 = 0;     # in-flight hostname pointer (single-flight key)

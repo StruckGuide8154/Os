@@ -1,6 +1,6 @@
 ; NOTE: app_show_context_menu and app_properties_draw were removed during the
-; NexusHL app migration — Explorer's context menu and Properties window are now
-; handled in src/user/nexushl/apps/explorer.nxh. The helpers below
+; GritHL app migration - Explorer's context menu and Properties window are now
+; handled in src/user/grithl/apps/explorer.ghl. The helpers below
 ; (fat16_format_name, filename_to_83, app_open_file_in_bmpview/app_bmp_draw)
 ; remain because they are still called by the raw-asm launcher (launch.inc) and
 ; the kernel's SYS_FS_FORMAT_NAME (syscall.asm).
@@ -338,9 +338,9 @@ filename_to_83:
     pop rax
     ret
 
-; NOTE: app_format_bytes_size was removed during the NexusHL app migration —
-; its only caller was the deleted app_properties_draw. NexusHL apps now use
-; format_bytes_size from src/user/nexushl/lib/fs.nxh.
+; NOTE: app_format_bytes_size was removed during the GritHL app migration -
+; its only caller was the deleted app_properties_draw. GritHL apps now use
+; format_bytes_size from src/user/grithl/lib/fs.ghl.
 
 ; ============================================================================
 ; PAINTER APP

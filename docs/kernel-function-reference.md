@@ -1,4 +1,4 @@
-# NexusOS Kernel Function Reference
+# GritOS Kernel Function Reference
 
 This is the exported kernel surface grouped by subsystem. It is intentionally
 organized by owning file first so bug-fixing starts at the right module.

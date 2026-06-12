@@ -66,7 +66,7 @@ num_buf:            times 64 dw 0             ; UCS-2 output
 
 ; ConOut strings (UCS-2)
 align 2
-s_banner:       ustr "NexusOS UEFI Mouse Probe ZULU -- stays in UEFI, no kernel"
+s_banner:       ustr "GritOS UEFI Mouse Probe ZULU -- stays in UEFI, no kernel"
 s_crlf:         ustr ""        ; OutputString interprets \r\n via CR/LF chars: use explicit
 s_gop_res:      ustr "GOP: "
 s_x:            ustr " x "

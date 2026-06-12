@@ -9,7 +9,7 @@
 
 bits 64
 
-%include "nexus_app.inc"
+%include "grit_app.inc"
 
 align 4096
 global wx_poc_write_x_click

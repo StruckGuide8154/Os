@@ -1,9 +1,9 @@
 ; ---------------------------------------------------------------------------
-; §6  Vector codecs — SVG (subset) and XML text view
+; §6  Vector codecs - SVG (subset) and XML text view
 ;
 ; Scope (mirrored in docs/media-formats.md):
 ;   * XML: rendered as plain text with keyboard-controlled line scrolling.
-;   * SVG: static preview. The real NexusHL SVG2 renderer supports the
+;   * SVG: static preview. The real GritHL SVG2 renderer supports the
 ;     wallpaper sources; this asm draw path paints a recognisable dark
 ;     ribbon preview instead of opening SVGs as blank/white text.
 ;
@@ -124,8 +124,8 @@ nx_media_blit_xml:
 ; nx_media_blit_svg
 ;   Static SVG preview for Media Player's kernel-side draw fn.
 ;
-;   A full SVG2 renderer already exists in nxh land:
-;   `src/user/nexushl/lib/svg2.nxh → svg_render(buf, len, x, y, w, h)`.
+;   A full SVG2 renderer already exists in ghl land:
+;   `src/user/grithl/lib/svg2.ghl → svg_render(buf, len, x, y, w, h)`.
 ;   Wiring it directly to this codec still requires moving this draw fn to
 ;   user-mode. Until then, this path draws a deterministic thumbnail-like
 ;   preview so SVG-backed wallpapers are visibly viewable from Explorer.

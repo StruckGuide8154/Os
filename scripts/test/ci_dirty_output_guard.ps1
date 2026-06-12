@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Part of the Track 1 "P0 - CI surfacing" enforcement
-    (docs/track1-repo-enforcement-todo.md). The new (NHL/NexusHLK) trusted path
+    (docs/track1-repo-enforcement-todo.md). The new (GHL/GritHLK) trusted path
     must not regenerate raw assembly into watched, tracked locations. This guard
     detects such leakage in one of two modes:
 

@@ -1,5 +1,5 @@
 <theme>
-  <meta name="dark" display="Dark" author="NexusOS" />
+  <meta name="dark" display="Dark" author="GritOS" />
   <palette>
     <color name="bg_base"     value="0x121419" />
     <color name="surface"     value="0x1B1E25" />

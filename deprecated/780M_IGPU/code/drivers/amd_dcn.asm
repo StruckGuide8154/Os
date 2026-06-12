@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - AMD DCN (Display Core Next) read-only probe
+; GritOS v3.0 - AMD DCN (Display Core Next) read-only probe
 ;
 ; Phase 1 (this file): safely probe the AMD display BAR0, walk page tables for
 ; its cache type, read a small set of registers, and expose the results for
@@ -310,7 +310,7 @@ amd_dcn_probe:
     call amd_dcn_dmub_classify
     mov byte [amd_dcn_dmub_diag_ok], 1
 
-    ; Step 7b: Task-B prep — enumerate IP-block headers. Sample dword at
+    ; Step 7b: Task-B prep - enumerate IP-block headers. Sample dword at
     ; every 0x1000 offset across the mapped 1MB. Each non-zero entry
     ; corresponds to an AMD SOC15 IP block header (pattern 0x4000_X001).
     ; Cross-referenced offline against soc15_ip_offset.h to identify DCN.
@@ -325,7 +325,7 @@ amd_dcn_probe:
     cmp r8, AMD_DCN_IP_COUNT
     jb  .ip_loop
 
-    ; Step 7c: Task-C prep — brightness-PWM register hunt. Sample every
+    ; Step 7c: Task-C prep - brightness-PWM register hunt. Sample every
     ; dword at 4-byte stride across BAR0+AMD_DCN_BL_BASE .. +size, into
     ; amd_dcn_bl_table. After Task B identifies the DCN aperture base we
     ; can pick the PWM register from this snapshot without needing another
@@ -566,7 +566,7 @@ amd_dcn_decode_cache:
     jae .high
     mov ecx, ebx
     shl ecx, 3
-    mov eax, eax           ; (lo half — no-op)
+    mov eax, eax           ; (lo half - no-op)
     shr eax, cl
     and eax, 0x7
     jmp .store
@@ -623,7 +623,7 @@ amd_dcn_dmub_prepare_mailbox:
     ; CW4 splits the 64-bit ring sys-phys into OFFSET (low) + OFFSET_HIGH
     ; registers, and INBOX1_BASE/OUTBOX1_BASE are DMCUB-space constants
     ; (CW4_BASE/CW4_BASE+RING_BYTES). The system address is allowed to be
-    ; above 4GB — ring backing sits just past the GOP framebuffer at
+    ; above 4GB - ring backing sits just past the GOP framebuffer at
     ; ~0xF8_00xxxxxx on this hardware.
     mov dword [amd_dcn_dmub_ring_inbox_fb], AMD_DMUB_CW4_BASE
     mov eax, AMD_DMUB_CW4_BASE
@@ -1217,7 +1217,7 @@ AMD_DMUB_STATE_NO_FAULTS       equ 0x00000080
 ; Boot 1 (2026-05-25) found DCN block header at BAR0+0x4000 (40003071 =
 ; DCN 3.0.71 / Strix). DCN 3.x BL_PWM_CNTL/USER_LEVEL/PERIOD live inside
 ; the DCN block, typically within the first 64KB of it. The previous
-; 0x40000 window hit an SDMA index table — useless.
+; 0x40000 window hit an SDMA index table - useless.
 AMD_DCN_BL_BASE      equ 0x0
 AMD_DCN_BL_COUNT     equ 16384        ; with 0x40 stride: 16384 * 0x40 = 1MB
 AMD_DCN_BL_STRIDE    equ 0x40         ; 64-byte stride sweep across full BAR0
@@ -1249,9 +1249,9 @@ align 4096
 amd_dcn_dmub_ring_uc_pt: times 4096 db 0
 align 4096
 
-; IP table — one dword per 4KB BAR0 page (256 entries = 1KB).
+; IP table - one dword per 4KB BAR0 page (256 entries = 1KB).
 align 64
 amd_dcn_ip_table:    times (AMD_DCN_IP_COUNT * 4) db 0
-; Brightness PWM hunt — 4096 dwords (16KB).
+; Brightness PWM hunt - 4096 dwords (16KB).
 align 64
 amd_dcn_bl_table:    times (AMD_DCN_BL_COUNT * 4) db 0

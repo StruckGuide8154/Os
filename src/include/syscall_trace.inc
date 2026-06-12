@@ -15,14 +15,14 @@
 ;   and the §11 anomaly detector has a per-slot syscall-mix to scan.
 ;
 ; DATA LAYOUT (all in syscall.asm kernel BSS, OUTSIDE the ring-3 slot arena)
-;   sc_trace_ring[]   — per slot, SC_TRACE_RING_ENTRIES records of
+;   sc_trace_ring[]   - per slot, SC_TRACE_RING_ENTRIES records of
 ;                       SC_TRACE_ENT_SIZE bytes, written oldest-first. One slot's
 ;                       ring never aliases another's (slot-isolated): the byte
 ;                       base for slot s is s * SC_TRACE_SLOT_BYTES.
-;   sc_trace_head[]   — per slot, a running u16 event counter; (head &
+;   sc_trace_head[]   - per slot, a running u16 event counter; (head &
 ;                       SC_TRACE_IDX_MASK) is the next record index, so the ring
 ;                       overwrites oldest-first once it fills.
-;   sc_trace_hist[]   — per slot, SC_TRACE_HIST_SLOTS u16 counters indexed by
+;   sc_trace_hist[]   - per slot, SC_TRACE_HIST_SLOTS u16 counters indexed by
 ;                       syscall number. THIS is the data source the anomaly
 ;                       detector (sc_anomaly_scan_all) consumes: it never walks
 ;                       the ring records, only these cheap counters. Saturating
@@ -30,14 +30,14 @@
 ;
 ; HOT PATH BUDGET
 ;   The append (SC_TRACE_APPEND macro, inlined at dispatch entry) is a handful
-;   of instructions — index math, one 16-byte record store, one saturating
-;   histogram bump — with no CALL and no serial I/O. The §11 doc stresses the
+;   of instructions - index math, one 16-byte record store, one saturating
+;   histogram bump - with no CALL and no serial I/O. The §11 doc stresses the
 ;   hot path stays cheap; the detector itself runs on a coarse pit cadence.
 ;
 ; Each record (SC_TRACE_ENT_SIZE = 16 bytes):
 ;   +0  u16 seq      (low 16 bits of this slot's head at write time)
 ;   +2  u16 sysno    (syscall number; 0xFFFF == out-of-range/invalid)
-;   +4  u32 arg0_lo  (low 32 bits of the first user arg — cheap forensic hint)
+;   +4  u32 arg0_lo  (low 32 bits of the first user arg - cheap forensic hint)
 ;   +8  u64 user_rip (faulting/return RIP for this call, for crash triage)
 ; ============================================================================
 
@@ -56,7 +56,7 @@ SC_TRACE_HIST_SLOTS   equ 128
 SC_TRACE_HIST_MAX     equ 0xFFFF        ; saturation ceiling (u16)
 
 ; ----------------------------------------------------------------------------
-; SC_TRACE_APPEND — inline, always-on. Record one syscall into the active
+; SC_TRACE_APPEND - inline, always-on. Record one syscall into the active
 ; slot's ring and bump its histogram. Called at the top of dispatch, after r15
 ; (slot id) and the PUSH_ALL frame are established.
 ;
@@ -92,7 +92,7 @@ SC_TRACE_HIST_MAX     equ 0xFFFF        ; saturation ceiling (u16)
     add rbx, r8
     movzx r8d, word [rbx + rdx*2]
     cmp r8d, SC_TRACE_HIST_MAX
-    jae %%hist_done                     ; saturate — never wrap under threshold
+    jae %%hist_done                     ; saturate - never wrap under threshold
     inc r8d
     mov [rbx + rdx*2], r8w
 %%hist_done:

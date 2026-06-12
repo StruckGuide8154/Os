@@ -4,7 +4,7 @@
 %include "app_sysno.inc"
 
 ; ============================================================================
-; NexusOS v3.0 - Usermode Syscall Wrappers
+; GritOS v3.0 - Usermode Syscall Wrappers
 ; ============================================================================
 
 %macro SYS_PRINT 1
@@ -48,19 +48,19 @@
 ;   label / LFN / deleted slots), as enumerated by SYS_FS_COUNT.
 ;
 ;   On success rax is a packed 32-bit handle (magic|kind|gen|index) that:
-;     * is opaque to ring 3 — DO NOT dereference it. The kernel no longer
+;     * is opaque to ring 3 - DO NOT dereference it. The kernel no longer
 ;       returns a pointer; the snapshot cache that used to back this call
 ;       has been removed.
 ;     * is owned by the calling slot. Closing the slot drops every handle;
 ;       another slot can never resolve it.
 ;     * must be paired with SYS_HANDLE_CLOSE when no longer needed (the
-;       per-slot table is 64 entries — leaking handles eventually wedges
+;       per-slot table is 64 entries - leaking handles eventually wedges
 ;       SYS_FS_ENTRY at the alloc step).
 ;
 ;   To read fields out of the entry (name, size, attr, first cluster) call
 ;   SYS_FS_ENTRY_INFO with the handle and a 20-byte user buffer. To act on
 ;   the entry (read/format/delete/rename/open) pass the handle directly to
-;   the matching FS syscall — those resolve through the handle table.
+;   the matching FS syscall - those resolve through the handle table.
 ;
 ;   rax = 0 on any failure (out-of-range index, table full, kernel skip).
 %macro SYS_FS_ENTRY 1
@@ -176,7 +176,7 @@
     syscall
 %endmacro
 
-; SYS_OPEN_FILE_NP(dir_entry_handle) — kernel-side: launch notepad and load file
+; SYS_OPEN_FILE_NP(dir_entry_handle) - kernel-side: launch notepad and load file
 ;   rdi = slot-cached dir entry pointer (from SYS_FS_ENTRY)
 ;   returns rax = notepad window id, or -1
 %macro SYS_OPEN_FILE_NP 1
@@ -247,7 +247,7 @@
 ; SYS_DISPLAY_NATIVE()
 ;   returns the monitor's native (boot-time) framebuffer dimensions packed
 ;   as: width in bits[31:0], height in bits[63:32]. This is the size the
-;   UEFI loader picked from GOP — display_set_mode can change scr_width /
+;   UEFI loader picked from GOP - display_set_mode can change scr_width /
 ;   scr_height after boot, but the value returned here never moves, so it
 ;   is the right thing to offer as "Use native resolution".
 %macro SYS_DISPLAY_NATIVE 0
@@ -352,7 +352,7 @@
     syscall
 %endmacro
 
-; SYS_FILL_TRIANGLE(coords_ptr, color) — coords_ptr -> 6 int32 [x0,y0,x1,y1,x2,y2]
+; SYS_FILL_TRIANGLE(coords_ptr, color) - coords_ptr -> 6 int32 [x0,y0,x1,y1,x2,y2]
 %macro SYS_FILL_TRIANGLE 2
     APP_SYSNO 42
     mov rdi, %1
@@ -529,7 +529,7 @@
     syscall
 %endmacro
 
-; SYS_OPEN_FILE_MEDIA(dir_entry_handle) — kernel-side: launch Media Player
+; SYS_OPEN_FILE_MEDIA(dir_entry_handle) - kernel-side: launch Media Player
 ;   and load the file's bytes into the new window's slot at
 ;   APP_SLOT_BMP_FILE_OFF. The Media Player draw fn (app_media_draw) probes
 ;   the file's magic on every frame and dispatches to the matching codec.
@@ -551,7 +551,7 @@
 ;   buffer into the client area of the named window.
 ;
 ;   packed_dims = (src_w << 16) | src_h, each half ∈ [1, 4096]. Packed so
-;   the syscall fits NexusHL's 6-argument syscall() arity.
+;   the syscall fits GritHL's 6-argument syscall() arity.
 ;
 ;   The kernel-side stub validates that:
 ;     * src_w, src_h ∈ [1, 4096]
@@ -562,7 +562,7 @@
 ;     * alpha_key reduced to {0,1}
 ;   Returns 0 on success, -1 on any rejection.
 ;   Designed for the Media Player codecs (NIC/NBA/BMP-via-scratch/SVG-via-
-;   svg2) so the per-codec draw fn can stay in user-mode NexusHL.
+;   svg2) so the per-codec draw fn can stay in user-mode GritHL.
 %macro SYS_MEDIA_BLIT_SCALED 5
     APP_SYSNO 66
     mov rdi, %1
@@ -588,7 +588,7 @@
 ;     * pages inside [code_start_off, code_end_off) become X+!W
 ;     * every other slot page becomes W+NX
 ;   Returns 0 on success, -1 on validation failure.
-;   Idempotent — callable any time the app wants to widen/replace its code
+;   Idempotent - callable any time the app wants to widen/replace its code
 ;   range. RWX is never produced at any intermediate step.
 %macro SYS_WX_INSTALL_MANIFEST 2
     APP_SYSNO 67
@@ -641,7 +641,7 @@
 ; SYS_HANDLE_CLOSE(handle) -> rax = 0 on success, -1 on bad handle
 ;   Releases an opaque handle previously returned by SYS_FS_ENTRY (or any
 ;   future handle-returning syscall). The handle is verified against the
-;   per-slot table first — a stale or forged handle returns -1 without
+;   per-slot table first - a stale or forged handle returns -1 without
 ;   touching kernel state. After close the entry's generation is bumped
 ;   on the next reuse, so the closed handle resolves as invalid forever.
 ;
@@ -671,7 +671,7 @@
 ;      16  u32    size_bytes
 ;
 ;   This replaces the previous "SYS_FS_ENTRY returns a snapshot pointer you
-;   dereference directly" contract — kernel VAs no longer leak to ring 3.
+;   dereference directly" contract - kernel VAs no longer leak to ring 3.
 %macro SYS_FS_ENTRY_INFO 3
     APP_SYSNO 71
     mov rdi, %1
@@ -690,7 +690,7 @@ MPROT_WX_MODE_WNX equ 0
 MPROT_WX_MODE_XRO equ 1
 %endif
 
-; SYS_APP_DECLARE_MANIFEST(app_id) — opt the calling slot into sandboxing.
+; SYS_APP_DECLARE_MANIFEST(app_id) - opt the calling slot into sandboxing.
 ;   AND-narrows this slot's capability mask to the static manifest declared
 ;   for app_id in src/include/syscall_caps.inc. After this call, any syscall
 ;   outside the manifest returns -1 without invoking its handler.
@@ -712,7 +712,7 @@ MPROT_WX_MODE_XRO equ 1
 ;   16-bit tag (derived from kernel_canary) into the high bits on the
 ;   matching SET; this getter strips and verifies it. A stored zero is
 ;   returned as 0 (the "never set" sentinel). Apps that previously read the
-;   field by dereferencing &window+160 must migrate to this syscall — direct
+;   field by dereferencing &window+160 must migrate to this syscall - direct
 ;   reads now see the tag bytes and won't decode the original value.
 %macro SYS_WM_GET_USER_ARG 1
     APP_SYSNO 73

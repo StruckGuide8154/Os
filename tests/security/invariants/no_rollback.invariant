@@ -1,5 +1,5 @@
 # Track 2 anti-rollback: a signed artifact is admissible only if its version is
-# at least the persisted per-class floor (floor_store.nxh, FLOOR_LBA=2). A
+# at least the persisted per-class floor (floor_store.ghl, FLOOR_LBA=2). A
 # validly-signed but superseded version a later build ratcheted past must be
 # rejected — signature validity alone is not sufficient.
 invariant=INV-NO-ROLLBACK

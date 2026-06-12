@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Window Manager
+; GritOS v3.0 - Window Manager
 ; ============================================================================
 bits 64
 
@@ -16,7 +16,7 @@ global wm_create_window_ex
 global wm_draw_window
 global wm_draw_desktop
 global wm_handle_mouse_event
-; wm_get_window_at migrated to src/kernel/nexushlk/wm_helpers.nxh (its `global`
+; wm_get_window_at migrated to src/kernel/grithlk/wm_helpers.ghl (its `global`
 ; is emitted by that module's FN_BEGIN).
 global wm_close_window
 global wm_window_count

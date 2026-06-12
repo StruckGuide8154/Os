@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS — architectural register / MSR / MMIO-base constants (src/kernel/arch)
+; GritOS - architectural register / MSR / MMIO-base constants (src/kernel/arch)
 ; ----------------------------------------------------------------------------
 ; Named values for the magic literals previously baked into the APIC, I/O APIC
 ; and ACPI-RSDP drivers. Each constant cites the spec section it comes from so
@@ -37,13 +37,13 @@ IA32_PAT_CANONICAL_LO   equ 0x00070106
 IA32_PAT_CANONICAL_HI   equ 0x00070106
 
 ; --- CR0 control bit --------------------------------------------------------
-; CR0.PG (bit 31) — enable paging. Intel SDM Vol.3 §2.5 "Control Registers".
+; CR0.PG (bit 31) - enable paging. Intel SDM Vol.3 §2.5 "Control Registers".
 CR0_PG                  equ 0x80000000
 
 ; --- Local APIC ICR command words (written to LAPIC + 0x300 / ICR low) ------
 ; Intel SDM Vol.3 §10.6.1 "Interrupt Command Register (ICR)".
 ; All-excluding-self shorthand (bits 19:18=11b), Fixed delivery, level=assert,
-; vector 0x31 (49) — used to wake idle AP workqueue workers.
+; vector 0x31 (49) - used to wake idle AP workqueue workers.
 LAPIC_ICR_WAKE_WORKERS  equ 0x000C4031
 ; AP startup IPI sequence (SDM Vol.3 §10.6.1 / §8.4.4 INIT-SIPI-SIPI):
 ;   INIT assert (delivery mode 101b, level=assert, trigger=level)

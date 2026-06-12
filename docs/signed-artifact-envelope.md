@@ -1,4 +1,4 @@
-# Signed Artifact Envelope — Canonical Specification (v1)
+# Signed Artifact Envelope - Canonical Specification (v1)
 
 This is the keystone of the beyond-zero-trust architecture: a single signed
 container shared by **boot, kernel, hypervisor, drivers, apps, policies, configs,
@@ -7,10 +7,10 @@ anti-rollback, and policy binding all hang off this one envelope. Everything tha
 the system trusts must arrive inside it.
 
 Policy kernels:
-- `src/tools/security/signed_envelope.nxh` — structural contract (this doc).
-- `src/tools/security/signed_artifact_check.nxh` — semantic field validity
+- `src/tools/security/signed_envelope.ghl` - structural contract (this doc).
+- `src/tools/security/signed_artifact_check.ghl` - semantic field validity
   (role-for-type, signature window, anti-rollback).
-- `src/tools/security/schema_canonical_check.nxh` — canonical scalar encoding and
+- `src/tools/security/schema_canonical_check.ghl` - canonical scalar encoding and
   bounded nesting.
 
 The envelope is **detached-signature** style: a header + canonical TLV field
@@ -44,22 +44,22 @@ MONOTONIC_VERSION u32; ROLLBACK_COUNTER u32; COSIGNER_ROLES u16 min_count +
 u16 allowed_mask + u16 required_mask; REVOCATION_EPOCH u32; BUILD_PROVENANCE
 32 bytes; POLICY_DEPENDENCY 32 bytes.
 
-The in-kernel reader is `src/kernel/nexushlk/envelope_reader.nxh`
+The in-kernel reader is `src/kernel/grithlk/envelope_reader.ghl`
 (`envelope_verify`): it walks this encoding with bounds-checked byte loads,
 calls the policy-kernel predicates, and returns a distinct `ENVR_ERR_*` reason
 code per reject-matrix row (0 = accept). The reader binds the signed HASH
 field to a caller-computed payload SHA-256 with a constant-control-flow
 compare.
 
-Signature *crypto* is `src/kernel/nexushlk/ed25519_check.nxh`
-(`envelope_verify_signed` — the entry point real call sites bind to): after
+Signature *crypto* is `src/kernel/grithlk/ed25519_check.ghl`
+(`envelope_verify_signed` - the entry point real call sites bind to): after
 `envelope_verify` accepts, every 64-byte Ed25519 signature in the detached
 block is verified (RFC 8032) over the canonical bytes
 `[0, header_len + payload_len)` against the threshold-role public-key table
 (`ed_role_pubs`, roles 1..6 = BOOT/KERNEL/POLICY/UPDATE/RECOVERY/AUDIT).
 A signature may satisfy at most one role and a role counts at most once;
 accept iff at least `min_count` distinct roles from `allowed_mask` verified
-AND every `required_mask` role verified — otherwise `ENVR_ERR_SIGCRYPTO`
+AND every `required_mask` role verified - otherwise `ENVR_ERR_SIGCRYPTO`
 (22). The signature block carries no key ids (keeping the multiple-of-64
 tiling); role attribution is by trial verification against the <=6 role keys.
 Host signing: `scripts/build/write_envelope.py` (`--sign-roles`, DEV keys
@@ -73,7 +73,7 @@ closed.
 ## Mandatory signed fields
 
 Every field below is a TLV record inside the canonical region and is covered by
-the signature. The presence bitmask (`FIELDBIT_*` in `signed_envelope.nxh`)
+the signature. The presence bitmask (`FIELDBIT_*` in `signed_envelope.ghl`)
 reports which were seen.
 
 Bit | Field              | Why it must be signed
@@ -98,14 +98,14 @@ Bit | Field              | Why it must be signed
 
 ## Verification order (fail closed at each step)
 
-1. `security_envelope_magic_ok` — magic matches.
+1. `security_envelope_magic_ok` - magic matches.
 2. schema_version == 1, artifact_type in range, target_domain in range.
 3. `field_count` within `[12,64]`.
 4. For each TLV: `security_envelope_field_order_ok` (strictly ascending id ⇒
    canonical + no duplicates) and `security_envelope_offset_ok` (in-bounds, no
    overflow).
-5. `security_envelope_required_present` — all required bits for the class present.
-6. `security_envelope_accept` — composes 1–5 into one decision.
+5. `security_envelope_required_present` - all required bits for the class present.
+6. `security_envelope_accept` - composes 1-5 into one decision.
 7. Hand decoded fields to `signed_artifact_check` for semantic validity
    (role-for-type, signature window, anti-rollback).
 8. Verify threshold signatures over the canonical bytes (see threshold_check).
@@ -123,5 +123,5 @@ the current device id or device class.
 
 - Field encryption (the envelope is integrity/authenticity, not confidentiality).
 - In-place mutation. Envelopes are immutable; updates ship new envelopes.
-- Backward-compatible parsing of unknown critical fields — unknown critical
+- Backward-compatible parsing of unknown critical fields - unknown critical
   fields fail closed by design (`schema_canonical_check`).

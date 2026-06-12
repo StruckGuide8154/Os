@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Task State Segment (64-bit)
+; GritOS v3.0 - Task State Segment (64-bit)
 ; ============================================================================
 bits 64
 
@@ -97,7 +97,7 @@ tss_rsp0_stack_end:
 
 alignb 16
 ; Per-AP TSS structures. Each is 104 bytes per the SDM; we round to 112 for
-; alignment. Slot N is used by AP with core index (N + 1) — slot 0 here is
+; alignment. Slot N is used by AP with core index (N + 1) - slot 0 here is
 ; the AP whose core index is 1 (the first AP after the BSP).
 ap_tss_pool:
     resb 112 * (SMP_MAX_CORES - 1 + 1)   ; +1 keeps NASM happy when MAX=1

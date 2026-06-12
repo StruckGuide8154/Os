@@ -1,36 +1,36 @@
 ; ============================================================================
-; NexusOS — Nested-Kernel Memory Monitor (portable, MMU + CR0.WP based)
+; GritOS - Nested-Kernel Memory Monitor (portable, MMU + CR0.WP based)
 ; ----------------------------------------------------------------------------
-; security_todo.md — "intra-kernel privilege separation without CPU lock-in."
+; security_todo.md - "intra-kernel privilege separation without CPU lock-in."
 ;
 ; GOAL
 ;   Make the page tables tamper-resistant *from the kernel itself*, using only
-;   mechanisms every 64-bit x86 has (paging + CR0.WP) — no CET, no VT-x, and
+;   mechanisms every 64-bit x86 has (paging + CR0.WP) - no CET, no VT-x, and
 ;   fully emulated by QEMU TCG. This is the Nested-Kernel design
 ;   (Dautenhahn et al., ASPLOS'15): a tiny audited "monitor" is the ONLY code
 ;   permitted to mutate page tables. The page-table pages are mapped read-only
-;   (nk_protect_page_tables, Phase 2), so any *other* write to a PTE/PDE — a
+;   (nk_protect_page_tables, Phase 2), so any *other* write to a PTE/PDE - a
 ;   stray overflow, a type confusion, a ROP chain trying to clear W^X or remap
-;   .text — faults instead of succeeding. Enforcement is the MMU (per-access,
+;   .text - faults instead of succeeding. Enforcement is the MMU (per-access,
 ;   in hardware, zero hot-path cost); the monitor only runs on the rare
 ;   mapping-change path.
 ;
 ; THE WINDOW
 ;   Every legitimate page-table writer brackets its edits:
-;       call nk_pt_window_begin     ; WP off — page tables writable
+;       call nk_pt_window_begin     ; WP off - page tables writable
 ;       ... edit PTEs/PDEs ...
 ;       call nk_pt_window_end        ; WP on, TLB flushed, IF restored
 ;   With CR0.WP cleared inside the window, supervisor writes ignore the RW=0
 ;   bit and so can edit the (otherwise read-only) page tables. Outside the
 ;   window WP is set, so the same store faults. The ONLY `mov cr0` that toggles
-;   WP in the post-init kernel lives in this file — that is the auditable TCB
+;   WP in the post-init kernel lives in this file - that is the auditable TCB
 ;   boundary (see Phase 3 audit).
 ;
 ; PRESERVE, DON'T ASSUME
 ;   The window is opened both BEFORE the one-time WP engage (l3_install_syscall
 ;   _stack_pt runs during early init while CR0.WP is still 0) and AFTER it
 ;   (app-switch, SYS_MPROTECT_WX). So the window SAVES and RESTORES the prior
-;   CR0.WP state rather than unconditionally setting it — early writers stay at
+;   CR0.WP state rather than unconditionally setting it - early writers stay at
 ;   WP=0, post-engage writers return to WP=1, and neither path changes WP
 ;   timing. The deliberate one-time off->on transition is a separate primitive,
 ;   nk_engage_wp, called once by kernel_lockdown_ro. Both still live here, so
@@ -41,7 +41,7 @@
 ;   It is opened from two kinds of context: with IF set (kmain init,
 ;   app-switch) and with IF clear (SYS_MPROTECT_WX runs in syscall context with
 ;   IF masked by FMASK). So `begin` SAVES the caller's IF and `end` restores it
-;   conditionally — an unconditional sti would wrongly enable interrupts inside
+;   conditionally - an unconditional sti would wrongly enable interrupts inside
 ;   a syscall.
 ;
 ; ASSUMPTIONS / SCOPE (v1)
@@ -59,7 +59,7 @@ bits 64
 %include "macros.inc"           ; FN_BEGIN / FN_END (via trace.inc) + SER
 %include "boot_memory.inc"      ; PAGE_TABLE_ADDR, SYSCALL_STACK_PT_BASE
 
-CR0_WP_BIT          equ 16      ; CR0.WP — when set, supervisor honors RW=0
+CR0_WP_BIT          equ 16      ; CR0.WP - when set, supervisor honors RW=0
 NK_PAGE_WRITABLE    equ (1 << 1); RW bit in a PTE/PDE
 
 ; Physical extent of the page-table region to self-protect (Phase 2). The
@@ -73,7 +73,7 @@ NK_PT_REGION_HI     equ (SYSCALL_STACK_PT_BASE + 0x3000)  ; 0x85000
 section .text
 
 ; ----------------------------------------------------------------------------
-; nk_pt_window_begin — open a page-table edit window.
+; nk_pt_window_begin - open a page-table edit window.
 ;   Saves the caller's IF and the current CR0.WP, masks interrupts, and clears
 ;   CR0.WP so the (read-only-mapped, post-Phase-2) page tables become writable
 ;   for the duration of the window. Preserves all registers and arithmetic
@@ -104,7 +104,7 @@ FN_BEGIN nk_pt_window_begin, 0, 0, FN_RET_VOID
     ret
 
 ; ----------------------------------------------------------------------------
-; nk_pt_window_end — close the window.
+; nk_pt_window_end - close the window.
 ;   Restores CR0.WP to its pre-window state, flushes the TLB (so freshly-edited
 ;   PTEs are live), and restores the caller's interrupt flag. Preserves all
 ;   registers.
@@ -132,7 +132,7 @@ FN_BEGIN nk_pt_window_end, 0, 0, FN_RET_VOID
     ret
 
 ; ----------------------------------------------------------------------------
-; nk_engage_wp — the deliberate one-time CR0.WP off->on transition.
+; nk_engage_wp - the deliberate one-time CR0.WP off->on transition.
 ;   Called once by kernel_lockdown_ro after it has marked .text read-only, to
 ;   make supervisor writes start honoring RW=0 for the rest of the kernel's
 ;   life. Flushes the TLB. Preserves all registers. Kept here so EVERY CR0.WP
@@ -150,19 +150,19 @@ FN_BEGIN nk_engage_wp, 0, 0, FN_RET_VOID
     ret
 
 ; ----------------------------------------------------------------------------
-; nk_protect_page_tables — Phase 2: map the page-table region itself read-only.
+; nk_protect_page_tables - Phase 2: map the page-table region itself read-only.
 ;   Walks CR3 -> PML4[0] -> PDPT0[0] -> PD0[0] -> PT0 (the 4 KiB table the
 ;   loader installs over physical 0..2 MiB) and clears RW on every PT0 entry
-;   that maps a page in [NK_PT_REGION_LO, NK_PT_REGION_HI) — that range is
+;   that maps a page in [NK_PT_REGION_LO, NK_PT_REGION_HI) - that range is
 ;   exactly the PML4/PDPTs/PD0/PT0/app-PTs/syscall-PT pages. After this, with
 ;   CR0.WP set, ANY page-table write from outside an nk_pt_window faults, so the
 ;   only code that can mutate a mapping is the audited monitor. Idempotent.
 ;
-;   Runs inside its own window so it can edit PT0 — including PT0's own entry,
+;   Runs inside its own window so it can edit PT0 - including PT0's own entry,
 ;   which it makes read-only (self-protecting). Called once from kmain right
 ;   after kernel_lockdown_ro has engaged CR0.WP. Bails (leaving tables
 ;   unprotected) if PD0[0] is a 2 MiB large page, i.e. there is no 4 KiB PT0 to
-;   walk — that only happens if the boot paging layout changed out from under us.
+;   walk - that only happens if the boot paging layout changed out from under us.
 ;   Clobbers nothing (saves/restores rax-rdx).
 ; ----------------------------------------------------------------------------
 FN_BEGIN nk_protect_page_tables, 0, 0, FN_RET_VOID
@@ -172,7 +172,7 @@ FN_BEGIN nk_protect_page_tables, 0, 0, FN_RET_VOID
     push rbx
     push rcx
     push rdx
-    ; Walk to PT0's physical base (reads — no window needed yet).
+    ; Walk to PT0's physical base (reads - no window needed yet).
     mov rax, PAGE_TABLE_ADDR         ; PML4 phys (== CR3 base)
     mov rax, [rax]                   ; PML4[0]
     and rax, ~0xFFF                  ; -> next-level phys base (no NX set on these branch entries)
@@ -184,7 +184,7 @@ FN_BEGIN nk_protect_page_tables, 0, 0, FN_RET_VOID
     and rax, ~0xFFF                  ; -> next-level phys base (no NX set on these branch entries)            ; rax = PT0 physical base
     mov rbx, rax
 
-    call nk_pt_window_begin          ; WP off — PT0 (and itself) become editable
+    call nk_pt_window_begin          ; WP off - PT0 (and itself) become editable
     mov rcx, NK_PT_REGION_LO >> 12   ; first PT0 index that maps the PT region
     mov rdx, NK_PT_REGION_HI >> 12   ; one past the last (exclusive)
 .npt_loop:
@@ -207,7 +207,7 @@ FN_BEGIN nk_protect_page_tables, 0, 0, FN_RET_VOID
     SER '+'
     jmp .npt_pop
 .npt_bail:
-    ; No 4 KiB PT0 — cannot protect at page granularity. Leave WP/tables as-is
+    ; No 4 KiB PT0 - cannot protect at page granularity. Leave WP/tables as-is
     ; and flag it on the debug serial so the regression is visible.
     SER 'N'
     SER 'K'

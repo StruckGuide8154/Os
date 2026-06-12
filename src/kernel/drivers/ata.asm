@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - ATA PIO Disk Driver
+; GritOS v3.0 - ATA PIO Disk Driver
 ; Provides sector read/write using ATA PIO mode (ports 0x1F0-0x1F7)
 ; ============================================================================
 bits 64
@@ -177,7 +177,7 @@ ata_write_sectors:
     ret
 
 .ata_pio_write:
-    ; Float-bus probe — see ata_read_sectors / .ata_pio_read.
+    ; Float-bus probe - see ata_read_sectors / .ata_pio_read.
     call ata_bus_present
     test eax, eax
     jnz .write_bus_ok
@@ -333,7 +333,7 @@ ata_wait_drq:
     push rcx
     mov rbx, [tick_count]
     add rbx, 100
-    ; Tick-free spin fallback — see ata_wait_ready (sti is deferred past the
+    ; Tick-free spin fallback - see ata_wait_ready (sti is deferred past the
     ; FAT cache fill, so tick_count is frozen during fat16_init).
     mov rcx, 0x10000000
 .wdrq_loop:

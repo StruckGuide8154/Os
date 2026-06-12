@@ -9,12 +9,12 @@ firmware blobs beyond the AMD-signed microcontroller binaries.
 
 Subsystems attempted:
 
-- **DCN 3.5 display controller** — MMIO probe, BAR0 UC alias, PTE walk,
+- **DCN 3.5 display controller** - MMIO probe, BAR0 UC alias, PTE walk,
   DMUB (display microcontroller) mailbox bring-up to read-only diag.
-- **GFX11 graphics pipeline** — SMU/MP1 handshake, GMC (memory controller),
+- **GFX11 graphics pipeline** - SMU/MP1 handshake, GMC (memory controller),
   CP (command processor) ring scaffolding, PSP (platform security processor)
   firmware-load path, IMU (integrated microcontroller unit) autoload kick.
-- **IP discovery** — parse the AMD IP-discovery binary out of VRAM to find
+- **IP discovery** - parse the AMD IP-discovery binary out of VRAM to find
   MP0/MP1/GC/DCN/MMHUB base addresses without hardcoding.
 
 ## Status when retired
@@ -25,11 +25,11 @@ Subsystems attempted:
     Phoenix HW. DMUB diag mailbox readable (cntl/scratch/inbox/outbox).
   - GFX11: scaffolding compiled and a Wave-3 path (PSP+RLC, CP PFP/ME/MEC
     load, IMU kick) was wired but never produced a successful CP ring NOP
-    retire. PSP path on Phoenix was unresolved — MP0 SMN segment from Linux
+    retire. PSP path on Phoenix was unresolved - MP0 SMN segment from Linux
     headers didn't match observed behaviour.
   - IP discovery: ramdisk fetch + dmub_fw_meta parse worked; live VRAM scan
     landed but never validated end-to-end.
-- Ever shipped in a working build? **No** — only ran behind opt-in build
+- Ever shipped in a working build? **No** - only ran behind opt-in build
   flags (`-Gfx`, `-GfxWave3`, `-GfxWave3L`, `-GfxImuKick`, `-DiagLegacy`).
   Default builds never executed any of this code.
 
@@ -41,7 +41,7 @@ Two reasons:
    family. Other AMD generations need different register layouts, firmware
    blobs, and SMU message sets. Other vendors (Intel, Nvidia, ARM Mali)
    share nothing.
-2. **Pivot to widely-compatible interfaces only.** NexusOS will rely on
+2. **Pivot to widely-compatible interfaces only.** GritOS will rely on
    UEFI GOP for the framebuffer (already working via `fbperf.asm` with WC
    mapping). Future acceleration, if any, will target portable abstractions
    (Vulkan-via-loader or compute-via-host) rather than per-vendor MMIO
@@ -49,7 +49,7 @@ Two reasons:
 
 ## What replaced it
 
-Nothing — the feature is dropped. The UEFI GOP framebuffer + the WC-mapped
+Nothing - the feature is dropped. The UEFI GOP framebuffer + the WC-mapped
 software compositor (`src/kernel/drivers/fbperf.asm`) cover everything the
 active OS needs from the display side. Backlight control via DMUB inbox is
 no longer pursued; if backlight is needed on Phoenix specifically, route
@@ -114,7 +114,7 @@ Memory files (auto-memory entries):
 
 If anyone resurrects this for Phoenix specifically:
 
-- **MP1 SMN base on Strix is `0x03B10000`** — do NOT take this from Linux
+- **MP1 SMN base on Strix is `0x03B10000`** - do NOT take this from Linux
   header tables, they're wrong for Strix/Phoenix. Confirmed by live probe.
 - **The Phoenix MP0 path was the wall.** PSP bootloader handshake never
   resolved. NBIO SMN proxy was tried, retired as the wrong path. The
@@ -127,17 +127,17 @@ If anyone resurrects this for Phoenix specifically:
   BL_PWM register. Brightness must go through a DMUB packet (cmd.panel_cntl)
   or via ACPI EC scratch.
 - **xHCI bulk IN short-packet completion code 13 is success.** Not related
-  to GFX but burned half a session here — preserving it anyway.
+  to GFX but burned half a session here - preserving it anyway.
 - **WARNING: `gfx_bringup()` with `-GfxImuKick` can wedge the SoC.** It
   writes guessed IMU regs. Always cold-boot first if you re-enable this.
 
 ## main.asm residue
 
 `src/kernel/core/main.asm` still contains the original DCN/DMUB diag-dump
-block (~lines 2245–2872) and GFX11 bring-up diag block (~lines 2874+) as
-inert source, wrapped in `%ifdef NEXUS_DIAG_LEGACY` and
-`%ifdef NEXUS_GFX_BRINGUP`. Neither symbol is defined by any active build
+block (~lines 2245-2872) and GFX11 bring-up diag block (~lines 2874+) as
+inert source, wrapped in `%ifdef GRIT_DIAG_LEGACY` and
+`%ifdef GRIT_GFX_BRINGUP`. Neither symbol is defined by any active build
 configuration. Excising the source from main.asm is a follow-up cleanup
-task — until then, do **not** add `-dNEXUS_DIAG_LEGACY` or
-`-dNEXUS_GFX_BRINGUP` to any build command, or the dead code will try to
+task - until then, do **not** add `-dGRIT_DIAG_LEGACY` or
+`-dGRIT_GFX_BRINGUP` to any build command, or the dead code will try to
 link against externs that no longer exist in the active tree.

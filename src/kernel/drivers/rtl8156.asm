@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Realtek RTL8152/RTL8156 USB Ethernet backend
+; GritOS v3.0 - Realtek RTL8152/RTL8156 USB Ethernet backend
 ; ----------------------------------------------------------------------------
 ; Raw USB path for Realtek r8152-family NICs passed through to QEMU with WinUSB
 ; / Zadig. This is intentionally small, but it includes the pieces the RTL8139
@@ -103,7 +103,7 @@ RTL8156_BMSR_ANEGCOMP  equ 0x0020        ; auto-neg complete
 ; Power-up registers (Linux r8152 r8153_first_init).
 RTL8156_PLA_OOB_CTRL   equ 0xE84C
 RTL8156_NOW_IS_OOB     equ 0x80
-RTL8156_PLA_SFF_STS_7  equ 0xE78A        ; r8152.c PLA_SFF_STS_7 (was wrongly 0xE648 — LINK_LIST_READY lives here)
+RTL8156_PLA_SFF_STS_7  equ 0xE78A        ; r8152.c PLA_SFF_STS_7 (was wrongly 0xE648 - LINK_LIST_READY lives here)
 RTL8156_PLA_BOOT_CTRL  equ 0xE004        ; r8152.c PLA_BOOT_CTRL
 RTL8156_AUTOLOAD_DONE  equ 0x0002        ; r8152.c AUTOLOAD_DONE (bit 1)
 RTL8156_MCU_BORW_EN    equ 0x4000

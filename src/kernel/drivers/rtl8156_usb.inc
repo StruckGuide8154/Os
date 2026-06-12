@@ -1,6 +1,6 @@
 ; RDI = Ethernet frame, ECX = len.
-; rtl8156_handle_frame / rtl8156_handle_udp moved to zero-asm NexusHLK:
-;   src/kernel/nexushlk/rtl8156_dhcp_parse.nxh (RX dispatch + bounds-checked
+; rtl8156_handle_frame / rtl8156_handle_udp moved to zero-asm GritHLK:
+;   src/kernel/grithlk/rtl8156_dhcp_parse.ghl (RX dispatch + bounds-checked
 ;   DHCP option parser). %included via kernel_build.asm before this file.
 ; RDI=OCP value/register, ESI=wIndex/type, EDX=len, RCX=buffer.
 rtl8156_ocp_read:
@@ -104,7 +104,7 @@ rtl8156_bulk_in:
     lea rsi, [rel rtl8156_bulk_in_enqueue]
     lea rdx, [rel rtl8156_bulk_in_cycle]
     call rtl8156_queue_bulk_trb
-    ; Doorbell the NIC's own slot, NOT the shared xhci_slot_id — that global
+    ; Doorbell the NIC's own slot, NOT the shared xhci_slot_id - that global
     ; gets clobbered by usb_hid / re-enumeration after rtl8156 init returns.
     movzx edi, byte [rtl8156_slot_id]
     movzx esi, byte [rtl8156_bulk_in_dci]
@@ -115,7 +115,7 @@ rtl8156_bulk_in:
     ret
 
 ; ----------------------------------------------------------------------------
-; rtl8156_consume_event — driven from the SINGLE shared USB event-ring poller
+; rtl8156_consume_event - driven from the SINGLE shared USB event-ring poller
 ; (currently usb_poll_mouse) once it has decided that the popped transfer
 ; event belongs to our NIC slot. Caller passes the completion code in EAX and
 ; the DW0/DW1 fields in EBX/ECX (matching xhci_poll_event's return ABI). We
@@ -123,7 +123,7 @@ rtl8156_bulk_in:
 ; if the event was Success/Short, then queue a fresh bulk-IN so a continuous
 ; RX stream is maintained without any per-syscall polling.
 ;
-; This is the layering pivot point — DHCP / ICMP / ARP all consume RX data
+; This is the layering pivot point - DHCP / ICMP / ARP all consume RX data
 ; through handle_frame, which is fed exclusively from here. No syscall path
 ; ever touches xhci_poll_event directly anymore.
 ; ----------------------------------------------------------------------------
@@ -149,11 +149,11 @@ rtl8156_consume_event:
     movzx ecx, byte [rtl8156_bulk_out_dci]
     cmp edx, ecx
     je .tx_completion
-    ; Unknown endpoint — drop.
+    ; Unknown endpoint - drop.
     jmp .out
 
 .tx_completion:
-    ; TX event — record completion code so a parallel rtl8156_wait_completion
+    ; TX event - record completion code so a parallel rtl8156_wait_completion
     ; (called from bulk_out) can pick it up via the mailbox.
     mov [rel rtl8156_tx_done_code], eax
     mov byte [rel rtl8156_tx_done_set], 1
@@ -204,7 +204,7 @@ rtl8156_consume_event:
     ret
 
 ; ----------------------------------------------------------------------------
-; rtl8156_arm_rx — queue an initial bulk-IN TRB so the next NIC frame will
+; rtl8156_arm_rx - queue an initial bulk-IN TRB so the next NIC frame will
 ; surface on the xHCI event ring. Call once after rtl8156_init succeeds so
 ; the consume_event loop has something to be waiting for. Idempotent.
 ; ----------------------------------------------------------------------------
@@ -304,7 +304,7 @@ rtl8156_bulk_in_nonblocking:
     mov eax, 1
     jmp .out
 .other_slot:
-    ; HID Transfer Event — re-prime its ring and report "no data" to caller.
+    ; HID Transfer Event - re-prime its ring and report "no data" to caller.
     extern usb_hid_requeue_slot1_one
     call usb_hid_requeue_slot1_one
     xor eax, eax
@@ -385,7 +385,7 @@ rtl8156_wait_completion:
     mov rsi, [tick_count]
     add rsi, 200
 .poll:
-    ; TX-completion mailbox first — if usb_poll_mouse already popped our
+    ; TX-completion mailbox first - if usb_poll_mouse already popped our
     ; bulk-OUT transfer event from the shared ring, it's been stashed here.
     cmp byte [rel rtl8156_tx_done_set], 1
     jne .ring_poll
@@ -409,7 +409,7 @@ rtl8156_wait_completion:
     je .event
     jmp .poll
 .ours_check:
-    ; Transfer Event — first check the slot ID.
+    ; Transfer Event - first check the slot ID.
     mov edx, ebx
     shr edx, 24
     and edx, 0xFF
@@ -439,7 +439,7 @@ rtl8156_wait_completion:
     jmp .poll
 
 .nic_ep_check:
-    ; NIC slot — bulk-IN events should NOT terminate this wait (we are
+    ; NIC slot - bulk-IN events should NOT terminate this wait (we are
     ; waiting on a TX completion). Hand bulk-IN events to consume_event so
     ; the RX path still progresses, then keep polling. Bulk-OUT events ARE
     ; the TX completion we are after.
@@ -461,7 +461,7 @@ rtl8156_wait_completion:
     pop rbx
     pop rax
     je .event
-    ; Not bulk-OUT — it's bulk-IN (or interrupt). Route via consume_event.
+    ; Not bulk-OUT - it's bulk-IN (or interrupt). Route via consume_event.
     call rtl8156_consume_event
     jmp .poll
 .nic_ep_is_completion:
@@ -473,7 +473,7 @@ rtl8156_wait_completion:
 
 .event:
     ; Accept: 1 = Success, 13 = Short Packet (valid data, device sent less
-    ; than the TRB length — normal for bulk IN of variable-size frames).
+    ; than the TRB length - normal for bulk IN of variable-size frames).
     ; THIS WAS THE RX BUG: only accepting 1 made every IN look like a fail.
     cmp eax, 1
     je .ok

@@ -7,7 +7,7 @@
 ; ============================================================================
 .sc_wx_install_manifest:
     ; rdi = code_start_off, rsi = code_end_off. Offsets are EXPRESSED RELATIVE
-    ; TO THE BLOB START (i.e. (sym - app_blob_start)), not the slot base — the
+    ; TO THE BLOB START (i.e. (sym - app_blob_start)), not the slot base - the
     ; ring-3 app doesn't know its own per-slot code slide. We add the slide
     ; here so the stored bounds are absolute in-slot offsets, matching what
     ; l3_apply_wx_policy and sc_mprotect_wx / sc_wx_jit_alias compare against.
@@ -112,7 +112,7 @@
     test al, 1
     jz .sc_mprotect_fail_pop
 
-    ; All validation passed — open the monitor window for the two PTE writes
+    ; All validation passed - open the monitor window for the two PTE writes
     ; below. No bail path exists between here and nk_pt_window_end, so the
     ; window can never leak open.
     call nk_pt_window_begin
@@ -226,7 +226,7 @@
     ; W alias must NOT overlap the code range. If alias was inside the code
     ; range, l3_apply_wx_policy would strip its W bit on the next activation.
     mov r14, [l3_wx_code_start + r13*8]  ; cs
-    mov r13, [l3_wx_code_end   + r13*8]  ; ce  (clobbers r13d — slot reloaded below if needed)
+    mov r13, [l3_wx_code_end   + r13*8]  ; ce  (clobbers r13d - slot reloaded below if needed)
     ; Overlap iff (w_off < ce) && (w_off_end > cs).
     cmp rbx, r13
     jae .sc_jit_alias_no_overlap
@@ -260,12 +260,12 @@
     mov rdx, [rax]                       ; x PTE
     test dl, 1                           ; PRESENT?
     jz .sc_jit_alias_fail_inwin
-    mov rsi, [rcx]                       ; existing w PTE — must be present
+    mov rsi, [rcx]                       ; existing w PTE - must be present
     test sil, 1
     jz .sc_jit_alias_fail_inwin
 
     ; Build the alias PTE: x's physical frame + flags PRESENT|RW|USER|NX,
-    ; preserving the rest of x's low flags is unnecessary — we want a fresh
+    ; preserving the rest of x's low flags is unnecessary - we want a fresh
     ; W+NX user mapping of the same frame.
     mov rbx, rdx
     mov rdi, 0x000FFFFFFFFFF000          ; 4KB-aligned phys-frame mask
@@ -293,7 +293,7 @@
     mov qword [rsp + ALL_RAX], 0
     jmp .done
 .sc_jit_alias_fail_inwin:
-    ; A per-page validation check failed mid-loop while the window was open —
+    ; A per-page validation check failed mid-loop while the window was open -
     ; close it (restore WP) before taking the shared failure path.
     call nk_pt_window_end
 .sc_jit_alias_fail_pop:
@@ -309,7 +309,7 @@
     jmp .done
 
 .sc_net_ping4:
-    ; Reject re-entrant calls — the kernel rtl8156 ping path is not safe
+    ; Reject re-entrant calls - the kernel rtl8156 ping path is not safe
     ; to call concurrently. App that double-clicks while a previous ping is
     ; in flight gets -2 back, not a fresh syscall that races shared state.
     cmp byte [sc_net_ping_busy], 0
@@ -397,7 +397,7 @@
 .sc_net_dhcp_renew:
     ; Force a fresh DHCP transaction WITHOUT blocking. Previously this called the
     ; synchronous net_dhcp_configure inside the syscall (busy-waiting on rx for up
-    ; to ~1.2s) which froze the whole UI — render/mouse/dhcp-pump couldn't run
+    ; to ~1.2s) which froze the whole UI - render/mouse/dhcp-pump couldn't run
     ; until it returned. Now it routes through the async net_dhcp_start kick (which
     ; clears any existing lease, forces a fresh DISCOVER, and arms the deadline for
     ; the main-loop rtl8156_dhcp_pump) and returns the CURRENT dhcp_state
@@ -416,14 +416,14 @@
     mov [rsp + ALL_RAX], rax
     jmp .done
 .dhcp_no_nic:
-    mov byte [rtl8156_dhcp_state], 4   ; FAILED — no NIC
+    mov byte [rtl8156_dhcp_state], 4   ; FAILED - no NIC
     mov qword [rsp + ALL_RAX], 0
     jmp .done
 
 .sc_net_dhcp_start:
     ; Kick off async DHCP. Returns 0 immediately. Caller polls NI_DHCP_STATE for
     ; progress. Backend selection + the (now non-blocking, fresh-DISCOVER-forcing)
-    ; kick live in the NHLK module net_dhcp_dispatch.nxh. net_dhcp_start never
+    ; kick live in the GHLK module net_dhcp_dispatch.ghl. net_dhcp_start never
     ; blocks on the rtl8156 path; the rtl8139 fallback does a bounded synchronous
     ; configure, so keep timer interrupts live around the call.
     sti
@@ -493,7 +493,7 @@
     ; Always keep the scene dirty after a tick. While in flight (0 = pending,
     ; -2 = busy) this re-pumps the FSM next frame. On the COMPLETION tick (the
     ; in-line busy-poll now resolves an RTT within a single call) it forces one
-    ; more redraw so the final result paints immediately — without it the app
+    ; more redraw so the final result paints immediately - without it the app
     ; kept showing "Pinging..." until the user clicked to trigger a redraw,
     ; especially on the DNS path where resolution + ping finish in one frame.
     mov byte [scene_dirty], 1
@@ -508,10 +508,10 @@
     ; Returns >0 resolved IPv4 A.B.C.D, 0 pending (poll again next frame), -1
     ; fail/invalid, -2 a different hostname's lookup is already in flight. While
     ; pending (0) or contended (-2) we keep the scene dirty so the app's draw()
-    ; re-polls each frame and the FSM advances — mirroring net_ping4_tick.
+    ; re-polls each frame and the FSM advances - mirroring net_ping4_tick.
     ; rsi = max scan length for the C-string validator. The dispatcher only
     ; 1-byte-probes a no-sibling-descriptor PTR arg and restores the user's
-    ; (garbage) rsi, so the handler MUST set it here — same as .sc_print et al.
+    ; (garbage) rsi, so the handler MUST set it here - same as .sc_print et al.
     ; Without this, sc_validate_user_cstring reads a random max_len and DNS
     ; rejects (-1) before net_dns_tick ever runs. THIS was the DNS-fail bug.
     mov rsi, SYSCALL_MAX_STR_LEN

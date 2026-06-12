@@ -1,4 +1,4 @@
-# NexusOS Usermode Reference
+# GritOS Usermode Reference
 
 This document covers the ring-3 callback path, the user app layout, and the
 main exported usermode-facing entrypoints.
@@ -25,13 +25,13 @@ main exported usermode-facing entrypoints.
   `app_blob_start` / `app_blob_end`.
 - `src/user/apps/*.inc`
   Split built-in app source.
-- `src/user/nexushl/apps/*.nxh`
-  NexusHL SDK app sources. `scripts/build/build_nxh.ps1` compiles these to `build/nxh/*.asm`
-  and emits `build/nxh/generated_apps.inc`, which `src/user/apps.asm` includes
+- `src/user/grithl/apps/*.ghl`
+  GritHL SDK app sources. `scripts/build/build_ghl.ps1` compiles these to `build/ghl/*.asm`
+  and emits `build/ghl/generated_apps.inc`, which `src/user/apps.asm` includes
   inside the app blob.
-- `src/user/lib/nexus_app.inc`
+- `src/user/lib/grit_app.inc`
   Stable syscall wrapper include.
-- `src/user/lib/nexus_window.inc`
+- `src/user/lib/grit_window.inc`
   Shared user-visible window/app constants.
 
 ## Runtime Model
@@ -219,7 +219,7 @@ Shared built-in user helpers and test callbacks:
 `app_terminal_blob_end`
 - End of the terminal blob.
 
-### `src/user/nexushl/apps/notepad.nxh`
+### `src/user/grithl/apps/notepad.ghl`
 
 Compiled active Notepad callbacks:
 
@@ -229,7 +229,7 @@ Compiled active Notepad callbacks:
 
 These are installed by `src/user/apps/launch.inc`.
 
-### `src/user/nexushl/apps/settings.nxh`
+### `src/user/grithl/apps/settings.ghl`
 
 Compiled active Settings callbacks:
 
@@ -267,14 +267,14 @@ no active callbacks.
 
 ## User Includes
 
-### `src/user/lib/nexus_app.inc`
+### `src/user/lib/grit_app.inc`
 
 Owns:
 - syscall wrapper includes
 - callback ABI notes
 - filesystem helper include wiring
 
-### `src/user/lib/nexus_fs.inc`
+### `src/user/lib/grit_fs.inc`
 
 Owns:
 - FAT16 entry offset constants for user apps
@@ -282,7 +282,7 @@ Owns:
   UI filenames into the 11-byte FAT 8.3 names used by `SYS_FS_WRITE`,
   `SYS_FS_RENAME`, and `SYS_FS_MKDIR`
 
-### `src/user/lib/nexus_window.inc`
+### `src/user/lib/grit_window.inc`
 
 Owns:
 - user-visible window offsets

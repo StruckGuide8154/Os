@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - UEFI Bootloader (BOOTX64.EFI)
+; GritOS v3.0 - UEFI Bootloader (BOOTX64.EFI)
 ; Loads KERNEL.BIN from EFI partition, sets up GOP/paging, jumps to kernel.
 ; ============================================================================
 bits 64
@@ -7,7 +7,7 @@ default rel
 
 %include "src/include/boot_memory.inc"
 ; UEFI / PE-COFF / FAT32 ABI constants (offsets, PE header magics, GOP/SFS/file
-; member offsets, FAT32 layout, KASLR PRNG) — named + spec-cited in the header,
+; member offsets, FAT32 layout, KASLR PRNG) - named + spec-cited in the header,
 ; referenced throughout the loader (maintainability-todo.md §4.2).
 %include "src/include/uefi_abi.inc"
 

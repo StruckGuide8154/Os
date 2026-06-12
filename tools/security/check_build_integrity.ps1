@@ -1,34 +1,34 @@
 # =============================================================================
-# check_build_integrity.ps1 — build-graph quarantine enforcement.
+# check_build_integrity.ps1 - build-graph quarantine enforcement.
 #
-# Beyond-zero-trust Track 1 (docs/track1-repo-enforcement-todo.md, "P0 — finish
+# Beyond-zero-trust Track 1 (docs/track1-repo-enforcement-todo.md, "P0 - finish
 # repository enforcement" + "Enforcement-shape correctness").
 #
 # This guard splits the repo's build surface into two modes and forbids the NEW
 # architecture from inheriting the LEGACY architecture's NASM/%include
 # assumptions:
 #
-#   legacy-maintenance mode  — an EXPLICIT allowlist of quarantined build
+#   legacy-maintenance mode  - an EXPLICIT allowlist of quarantined build
 #       artifacts (the legacy build scripts + the kernel/app aggregators) that
 #       are PERMITTED to invoke nasm, use `-f bin`, and `%include "*.asm/*.inc"`.
 #       This is the quarantine, not new work.
 #
-#   new-architecture mode    — every other tracked build/orchestration script.
+#   new-architecture mode    - every other tracked build/orchestration script.
 #       These MUST NOT introduce nasm, `-f bin`, or `%include "*.asm/*.inc"`:
-#       new trusted-path work is NHL/NexusHLK, compiled by nxhc.py.
+#       new trusted-path work is GHL/GritHLK, compiled by gritc.py.
 #
 # Rules:
 #   [new-arch-build-asm-include]  %include "*.asm"/"*.inc", a `nasm` invocation,
 #       or `-f bin` in a build/orchestration script OUTSIDE the legacy allowlist.
 #   [generated-artifact-as-source] a tracked SOURCE file references a generated
-#       artifact (build/nxh/**/*.asm or build/nxh/generated_apps.inc) via a real
-#       %include directive, outside the legacy aggregator allowlist — i.e. the
+#       artifact (build/ghl/**/*.asm or build/ghl/generated_apps.inc) via a real
+#       %include directive, outside the legacy aggregator allowlist - i.e. the
 #       generated output is being treated as a source of truth.
 #   [deprecated-import] anything under deprecated/ is imported/included/compiled/
 #       linked, or named as an allowlist source, by a tracked non-deprecated file.
 #
 # Findings model + PASS/FAIL summary + exit code mirror check_no_asm.ps1.
-# Runnable standalone; wired into scripts/test/test_nhl_security_guards.ps1.
+# Runnable standalone; wired into scripts/test/test_ghl_security_guards.ps1.
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -71,7 +71,7 @@ $root = Get-RepoRoot
 $findings = New-Object System.Collections.Generic.List[object]
 
 # Directories never scanned (VCS / tooling / generated / archival output).
-# NOTE: deprecated/ is NOT ignored here — we must scan non-deprecated files for
+# NOTE: deprecated/ is NOT ignored here - we must scan non-deprecated files for
 # references INTO deprecated/, and skip only files that live under deprecated/.
 $ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'build', 'dist', '__pycache__', 'worktrees')
 
@@ -87,16 +87,16 @@ $ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'build', 'dist', '__py
 $legacyBuildScripts = @(
     'scripts/build/build_uefi.ps1',
     'scripts/build/build_bios.ps1',
-    'scripts/build/build_nxh.ps1',
+    'scripts/build/build_ghl.ps1',
     # Legacy diagnostic build: assembles the quarantined legacy
     # src/diag/uefi_mouse_probe.asm (inventory-listed) into a standalone probe
     # EFI. Builds existing legacy assembly, not new-architecture work.
     'scripts/build/build_probe.ps1',
-    # Compiler self-verification harness: compiles .nxh fixtures and asserts the
-    # nxhc-generated .asm assembles under NASM. NASM here verifies the legacy
-    # backend output, it is not new-architecture build work — legitimately
+    # Compiler self-verification harness: compiles .ghl fixtures and asserts the
+    # gritc-generated .asm assembles under NASM. NASM here verifies the legacy
+    # backend output, it is not new-architecture build work - legitimately
     # legacy-maintenance, so it is allowlisted with the legacy build graph.
-    'scripts/test/test_nxhc_security.ps1',
+    'scripts/test/test_gritc_security.ps1',
     # Legacy boot-artifact byte-parity harness: re-assembles the legacy boot
     # .asm (UEFI loader / mbr / stage2) under NASM and SHA256-compares against a
     # recorded baseline. Pure legacy-maintenance verification of quarantined
@@ -104,9 +104,9 @@ $legacyBuildScripts = @(
     'scripts/test/boot_parity.ps1'
 )
 
-# Legacy aggregators that are PERMITTED to %include the generated build/nxh
+# Legacy aggregators that are PERMITTED to %include the generated build/ghl
 # artifacts. They are the integration point of the generated-output -> NASM-image
-# build step; everything else must treat build/nxh as output, never source.
+# build step; everything else must treat build/ghl as output, never source.
 $legacyAggregators = @(
     'src/kernel/kernel_build.asm',
     'src/user/apps.asm'
@@ -136,8 +136,8 @@ $files = Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object
 # -----------------------------------------------------------------------------
 # %include of a legacy assembly/include artifact (any path).
 $asmIncludePattern   = [regex]'(?i)^\s*%include\s+"[^"]*\.(asm|inc)"'
-# %include specifically of a generated build/nxh artifact (source-of-truth abuse).
-$genIncludePattern   = [regex]'(?i)^\s*%include\s+"(build/nxh/[^"]*\.(asm|inc)|[^"]*generated_apps\.inc)"'
+# %include specifically of a generated build/ghl artifact (source-of-truth abuse).
+$genIncludePattern   = [regex]'(?i)^\s*%include\s+"(build/ghl/[^"]*\.(asm|inc)|[^"]*generated_apps\.inc)"'
 # nasm INVOCATION in a build/orchestration script (the legacy assembler).
 # Matches true call sites only, never the prose word "NASM" in a message string
 # or a comment:
@@ -149,7 +149,7 @@ $nasmInvokePattern   = [regex]'(?i:\$nasm\b|&\s*[''"]?[^''"\s]*nasm(\.exe)?\b)|^
 $fBinPattern         = [regex]'(?i)(^|\s)-f\s+bin(?=$|\s)'
 # A reference to anything under deprecated/ being consumed (not merely mentioned
 # in prose): include/import/compile/link/source-arg forms.
-$deprecatedRefPattern = [regex]'(?i)(%include\s+"[^"]*deprecated/|(?:^|[\s"''(/\\])deprecated/[^\s"'']*\.(asm|inc|nxh|py|ps1))'
+$deprecatedRefPattern = [regex]'(?i)(%include\s+"[^"]*deprecated/|(?:^|[\s"''(/\\])deprecated/[^\s"'']*\.(asm|inc|ghl|py|ps1))'
 
 # Build/orchestration script extensions for the new-arch include/nasm rule.
 $buildScriptExts = @('.ps1', '.py')
@@ -201,7 +201,7 @@ foreach ($file in $files) {
         }
 
         # -- Rule: generated artifact referenced as source of truth.
-        # A generated build/nxh artifact (.asm) or generated_apps.inc may only be
+        # A generated build/ghl artifact (.asm) or generated_apps.inc may only be
         # %include'd by the legacy aggregators. Any other source treating it as
         # input is treating build output as source of truth.
         if (-not $isLegacyAggregator -and -not $isComment) {
@@ -209,7 +209,7 @@ foreach ($file in $files) {
                 $findings.Add([pscustomobject]@{
                     Rule = 'generated-artifact-as-source'
                     Location = "$($file.RepoPath):$lineNo"
-                    Text = "Generated build/nxh artifact consumed as source of truth: $($line.Trim())"
+                    Text = "Generated build/ghl artifact consumed as source of truth: $($line.Trim())"
                 })
             }
         }

@@ -1,14 +1,14 @@
 ; ============================================================================
-; amd_psp_probe.asm — Read-only MP0 SMN segment probe
+; amd_psp_probe.asm - Read-only MP0 SMN segment probe
 ; ----------------------------------------------------------------------------
 ; The MP0 SMN segment for Strix Point (gfx1150) hasn't been confirmed yet.
 ; Earlier guesses:
-;   * 0x03800000 — reads returned 0x13 (stale SMU bus data, segment unmapped)
-;   * BAR0+0x58000 direct MMIO — wedged NBIO; do NOT repeat that experiment
+;   * 0x03800000 - reads returned 0x13 (stale SMU bus data, segment unmapped)
+;   * BAR0+0x58000 direct MMIO - wedged NBIO; do NOT repeat that experiment
 ;
 ; This probe reads C2PMSG_{33,58,64,81} from six candidate SMN segments via
 ; the NBIO indirect proxy (BAR0[0x38/0x3C]). The proxy is safe even against
-; unmapped segments — DATA2 just returns last-bus-data — so no faults can
+; unmapped segments - DATA2 just returns last-bus-data - so no faults can
 ; escape regardless of which segment turns out to be real.
 ;
 ; The "live" MP0 segment will distinguish itself by:
@@ -53,7 +53,7 @@ psp_probe_mp0:
     push r12
     push r13
 
-    ; No idempotency guard — re-probe every call so '=' presses give fresh
+    ; No idempotency guard - re-probe every call so '=' presses give fresh
     ; data. 24 SMN reads is cheap.
     xor  r12d, r12d                     ; segment index
 .seg_loop:
@@ -76,7 +76,7 @@ psp_probe_mp0:
     call smn_r32
     mov  [rcx + 0], eax
 
-    ; C2PMSG_58 (SOS version — the killer signal)
+    ; C2PMSG_58 (SOS version - the killer signal)
     mov  edi, r13d
     add  edi, mmMP0_SMN_C2PMSG_58 * 4
     call smn_r32
@@ -111,12 +111,12 @@ psp_probe_mp0:
 section .data
 align 4
 psp_probe_segments:
-    dd 0x00016000        ; Strix MPASP — mp_14_0_2 regMPASP_* BASE_IDX 0
-    dd 0x0243FC00        ; Phoenix MP0 — yellow_carp_offset.h BASE_IDX 1
-    dd 0x00DC0000        ; SEG2 — control
-    dd 0x00E00000        ; SEG3 — control
-    dd 0x00E40000        ; SEG4 — control
-    dd 0x03B10000        ; legacy guess — keep as known-bad sentinel
+    dd 0x00016000        ; Strix MPASP - mp_14_0_2 regMPASP_* BASE_IDX 0
+    dd 0x0243FC00        ; Phoenix MP0 - yellow_carp_offset.h BASE_IDX 1
+    dd 0x00DC0000        ; SEG2 - control
+    dd 0x00E00000        ; SEG3 - control
+    dd 0x00E40000        ; SEG4 - control
+    dd 0x03B10000        ; legacy guess - keep as known-bad sentinel
 psp_probe_count:    dd PSP_PROBE_COUNT
 align 16
 psp_probe_results:  times (PSP_PROBE_COUNT * PSP_PROBE_STRIDE) db 0

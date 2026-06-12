@@ -5,7 +5,7 @@
 ; boot device handle (which is the ESP partition), read its BPB, and capture
 ; the FAT32 parameters needed to walk DATA.IMG's cluster chain.
 ;
-; Status (all four sub-phases LANDED — see the routines below this comment):
+; Status (all four sub-phases LANDED - see the routines below this comment):
 ;   [x] HandleProtocol(devhandle, BlockIoGuid)
 ;   [x] Allocate sector scratch
 ;   [x] Read partition LBA 0 and parse FAT32 BPB into v_fat_* fields
@@ -19,7 +19,7 @@
 ;       driver exists: VBE_STORAGE_CLASS_OFF stays 0 so ramdisk_flush is a
 ;       no-op and the partition-relative extents captured here are correct for
 ;       the future absolute-LBA fixup. Tracked as see #21 (and as a roadmap
-;       item in docs/nexushl-boot-conversion.md Phase 1b.4), not stray debt.
+;       item in docs/grithl-boot-conversion.md Phase 1b.4), not stray debt.
 ;
 ; The BPB capture below is non-destructive and idempotent - safe to call every
 ; boot. Non-fatal on every UEFI error: failure leaves the contract zeroed and

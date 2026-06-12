@@ -1,4 +1,4 @@
-# Trace 10 — `app_launch(app_id)` → User-Mode `iretq` → First User Instruction
+# Trace 10 - `app_launch(app_id)` → User-Mode `iretq` → First User Instruction
 
 ## Entry
 
@@ -12,7 +12,7 @@ Kernel-mode caller (e.g. taskbar click handler) → `call app_launch(rdi=app_id)
 | 2 | allocate next process slot in `process_table[]`; assign PID |
 | 3 | copy app blob into L3 arena (or map already-loaded app); zero BSS |
 | 4 | initialize syscall stack `l3_syscall_stacks[pid]` (4 KB) |
-| 5 | set process `cr3` (currently identity-mapped — flat AS, all rings share) |
+| 5 | set process `cr3` (currently identity-mapped - flat AS, all rings share) |
 | 6 | mark process WF_RUNNING; enqueue in scheduler |
 | 7 | `call call_app_l3(rdi=entry_addr, rsi=app_arg)` |
 
@@ -30,7 +30,7 @@ Kernel-mode caller (e.g. taskbar click handler) → `call app_launch(rdi=app_id)
 |    | | `push entry_addr` (RIP) |
 | 11 | | `mov rdi, rsi` (pass arg) ; clear all caller-saved regs to avoid leaking kernel state |
 | 12 | | `swapgs` (if used; this kernel doesn't use GS-base swapping) |
-| 13 | | `iretq` — CPU pops RIP/CS/RFLAGS/RSP/SS, switches to ring 3 with new RFLAGS |
+| 13 | | `iretq` - CPU pops RIP/CS/RFLAGS/RSP/SS, switches to ring 3 with new RFLAGS |
 
 CPU is now executing the user app's first instruction at `entry_addr` with stack at `user_rsp`.
 
@@ -51,13 +51,13 @@ User app: `mov rax, syscall_num; mov rdi, ...; syscall`. CPU action:
 | 16 | dispatch on `eax` syscall number |
 | 17 | execute handler |
 | 18 | restore user GPRs |
-| 19 | `sysretq` — restore user RIP/CS/RFLAGS/RSP, return to ring 3 |
+| 19 | `sysretq` - restore user RIP/CS/RFLAGS/RSP, return to ring 3 |
 
 ## Step 5: app exits via SYS_APP_EXIT (rax=10)
 
 `syscall.asm`:
 - mark process WF_EXITED
-- `call call_app_l3_return` (usermode.asm) — restores kernel rsp from `[l3_kernel_rsp_save]`, pops r15/r14/r13/r12/rbx/rbp, returns from `call_app_l3` to original kernel caller.
+- `call call_app_l3_return` (usermode.asm) - restores kernel rsp from `[l3_kernel_rsp_save]`, pops r15/r14/r13/r12/rbx/rbp, returns from `call_app_l3` to original kernel caller.
 
 ## Audit-pass guarantees
 

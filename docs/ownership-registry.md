@@ -1,4 +1,4 @@
-# NexusOS Ownership Registry
+# GritOS Ownership Registry
 
 This page is normative for maintainer routing. Use it before editing a subsystem.
 

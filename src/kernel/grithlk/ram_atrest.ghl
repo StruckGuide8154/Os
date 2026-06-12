@@ -1,0 +1,329 @@
+# ============================================================================
+# ram_atrest.ghl - Track 4 Part B items 2 + 4: encrypt-at-rest-in-RAM and
+# whiten-kernel-secrets-at-rest. ZERO-ASM (gritc.py --target kernel --forbid-asm).
+#
+# Both features key off the per-boot ephemeral memory key nx_mem_key (owned by
+# ram_volatile.ghl, drawn once at boot, scrubbed FIRST on any teardown). This
+# module is %included AFTER ram_volatile.asm in kernel_build.asm so the same-unit
+# labels nx_mem_key / nx_splitmix64 resolve.
+#
+# --------------------------------------------------------------------------
+# Item 2 - encrypt-at-rest-in-RAM (decrypt-smallest-granule-into-a-window)
+# --------------------------------------------------------------------------
+# nx_atrest_xcrypt(dst, n, tweak) is an in-place keyed XOR stream cipher: a
+# splitmix64 keystream derived from (nx_mem_key qwords ^ tweak ^ block_counter)
+# is XORed over [dst, dst+n). It is symmetric (encrypt == decrypt), so an
+# at-rest region is stored ciphertext and recovered by re-running with the SAME
+# tweak. The tweak (e.g. a slot id, a FAT16 sector LBA, a blob offset) keeps
+# identical plaintext in different regions from producing identical keystream.
+#
+# The intended consumption pattern (decrypt the smallest necessary granule into
+# a small working window on demand, then re-encrypt / zeroize) is provided by
+# nx_atrest_open_window / nx_atrest_close_window over a single static page-sized
+# working window (nx_atrest_win). A caller decrypts one granule of an at-rest
+# region into the window, uses it, then closes the window which RE-ENCRYPTS the
+# at-rest source in place (so it returns to ciphertext) and ZEROIZES the window.
+#
+# This module supplies the primitive + the on-demand window mechanism + a boot
+# self-test that round-trips a static at-rest buffer under the live per-boot key
+# (proving the cipher works keyed by nx_mem_key, not a constant). Wiring the
+# at-rest cipher into the actual FAT16 cache / app-blob store / non-active slot
+# arenas is the remaining (invasive, raw-asm-loader) Part B follow-up and is
+# tracked honestly in docs/track4-ram-secure-erasure-todo.md - NOT claimed here.
+#
+# --------------------------------------------------------------------------
+# Item 4 - whiten kernel secrets at rest (XOR-mask; unmask only into a register)
+# --------------------------------------------------------------------------
+# nx_secret_mask is a per-boot 64-bit whitening mask derived from nx_mem_key (so
+# it is RDTSC^RDRAND-fresh per boot and scrubbed when nx_mem_key is scrubbed). A
+# secret stored masked is `plaintext ^ nx_secret_mask` in DRAM; a reader unmasks
+# only transiently into a register via nx_unmask_secret(masked). nx_mask_secret
+# is the inverse used at the (single) write site. Because XOR is its own inverse
+# the two helpers are identical, but both names exist for call-site clarity.
+#
+# HONEST SCOPE (item 4 is [~] PARTIAL): kernel_canary is read at ~90 raw-asm
+# sites (isr.asm, src/include/kdomain_hmac.inc, syscall_security.inc, fat16.asm,
+# the syscall_* dispatch path, ...) and l3_slot_key[] at the net-egress / slot
+# read path - converting every reader to route through nx_unmask_secret is too
+# invasive to do safely+fast without risking boot, so those secrets are NOT
+# whitened yet. The fully-converted secret is net_tcp_rng_key (TCP ISN key): one
+# writer + one reader in src/kernel/net/tcp.asm, both routed through the mask. The
+# infrastructure (mask + helpers) is in place for the remaining readers.
+# ============================================================================
+
+module "ram_atrest";
+
+unsafe raw_mem;          # lb/lq/sb/sq over the static at-rest buffers + window
+unsafe implicit_extern;  # &nx_mem_key / &nx_splitmix64 resolved as same-unit labels
+
+# Item 2 primitives.
+global nx_atrest_xcrypt;
+global nx_atrest_open_window;
+global nx_atrest_close_window;
+global nx_atrest_win;
+global nx_atrest_selftest;
+global nx_atrest_selftest_ok;
+
+# Items 5/6/8 primitives + their combined boot self-test (item 7 rolling re-key
+# lives in ram_volatile.ghl, the key owner).
+global nx_atrest_poison;          # item 6: overwrite freed memory with key-derived bytes
+global nx_atrest_scrub_scratch;   # item 5: zero a transient plaintext scratch buffer
+global nx_atrest_ext_selftest;
+global nx_atrest_ext_selftest_ok;
+
+# Item 4 whitening: per-boot mask + unmask/mask helpers + the seed entry called
+# from nx_mem_key_ensure once the key is final.
+global nx_secret_mask;
+global nx_secret_mask_seed;
+global nx_unmask_secret;
+global nx_mask_secret;
+
+# Owned by ram_volatile.ghl (same -f bin TU, %included just before this module).
+extern nx_mem_key;           # qword[4] per-boot ephemeral memory key
+extern nx_splitmix64;        # fn(x)->mixed: shared splitmix64 avalanche
+
+const NX_MEM_KEY_QWORDS = 4;
+const PAGE_SIZE         = 0x1000;
+const ATREST_SELFTEST_TWEAK = 0xA73E57B10C0FFEE1;  # arbitrary distinct tweak
+
+# A single page-sized working window: the "small working window on demand". A
+# decrypt-on-demand consumer copies one granule of an at-rest region in here,
+# uses it, then re-encrypts the source + zeroizes this window (close).
+align 8;
+data nx_atrest_win: PAGE_SIZE x 1 = 0;
+
+# Item 2 boot self-test fixture: a known-plaintext at-rest buffer + result flag.
+align 8;
+data nx_atrest_st_buf: 32 x 1 = 0;
+data nx_atrest_selftest_ok: 1 x 1 = 0;
+
+# Items 5/6/8 boot self-test fixtures (two distinct regions so the fingerprint
+# de-correlation check can compare them) + a combined result flag.
+align 8;
+data nx_atrest_ext_a: 32 x 1 = 0;
+data nx_atrest_ext_b: 32 x 1 = 0;
+data nx_atrest_ext_selftest_ok: 1 x 1 = 0;
+
+# Item 4: the per-boot whitening mask (kernel .data, scrubbed with nx_mem_key).
+align 8;
+data nx_secret_mask: 1 x 8 = 0;
+
+# ----------------------------------------------------------------------------
+# nx_atrest_xcrypt(dst, n, tweak) - in-place keyed XOR stream cipher over
+# [dst, dst+n). Symmetric: a second call with the same (dst,n,tweak) restores
+# the plaintext. Keystream qword k_j = splitmix64( nx_mem_key[j&3] ^ tweak ^ j ),
+# where j is the qword block index. A byte tail (n not a multiple of 8) is
+# covered by the low bytes of the final keystream qword.
+# ----------------------------------------------------------------------------
+fn nx_atrest_xcrypt(dst, n, tweak) {
+    let j = 0;
+    let off = 0;
+    while (off + 8) <= n {
+        let ks = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        sq(dst + off, lq(dst + off) ^ ks);
+        off = off + 8;
+        j = j + 1;
+    }
+    if off < n {
+        let kt = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        while off < n {
+            sb(dst + off, lb(dst + off) ^ (kt & 0xFF));
+            kt = kt >> 8;
+            off = off + 1;
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# nx_atrest_open_window(src, n, tweak) - decrypt the smallest necessary granule
+# (n bytes, capped to the window) of an at-rest region [src, src+n) into the
+# static working window nx_atrest_win, leaving the SOURCE still ciphertext.
+# Returns the byte count placed in the window. Copy then decrypt-in-window: the
+# at-rest source DRAM is never transiently plaintext.
+# ----------------------------------------------------------------------------
+fn nx_atrest_open_window(src, n, tweak) {
+    let cnt = n;
+    if cnt > PAGE_SIZE { cnt = PAGE_SIZE; }
+    let i = 0;
+    while i < cnt {
+        sb(&nx_atrest_win + i, lb(src + i));
+        i = i + 1;
+    }
+    nx_atrest_xcrypt(&nx_atrest_win, cnt, tweak);
+    return cnt;
+}
+
+# ----------------------------------------------------------------------------
+# nx_atrest_close_window(src, n, tweak) - finish a decrypt-on-demand cycle: the
+# at-rest source [src, src+n) is (re-)encrypted in place under the per-boot key
+# so it returns to ciphertext, and the working window is zeroized so no granule
+# of plaintext lingers. Call after consuming nx_atrest_win.
+# ----------------------------------------------------------------------------
+fn nx_atrest_close_window(src, n, tweak) {
+    nx_atrest_xcrypt(src, n, tweak);
+    let cnt = n;
+    if cnt > PAGE_SIZE { cnt = PAGE_SIZE; }
+    let i = 0;
+    while (i + 8) <= cnt {
+        sq(&nx_atrest_win + i, 0);
+        i = i + 8;
+    }
+    while i < cnt {
+        sb(&nx_atrest_win + i, 0);
+        i = i + 1;
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Item 4: derive the per-boot whitening mask from the (now-final) memory key.
+# Called from nx_mem_key_ensure after the key is drawn. Folds all four key
+# qwords through splitmix64 so the mask is independent of any single key word;
+# a final non-zero guard avoids a no-op (mask==0) whitening.
+# ----------------------------------------------------------------------------
+fn nx_secret_mask_seed() {
+    let m = 0;
+    let i = 0;
+    while i < NX_MEM_KEY_QWORDS {
+        m = nx_splitmix64(m ^ lq(&nx_mem_key + i * 8));
+        i = i + 1;
+    }
+    if m == 0 { m = 0x5748495445303031; }   # "WHITE001" non-zero guard
+    sq(&nx_secret_mask, m);
+}
+
+# nx_mask_secret / nx_unmask_secret - XOR a secret with the per-boot mask. XOR is
+# its own inverse, so both are the same op; distinct names mark intent at the
+# (single) store site vs each read site. Unmask result lives only in the caller's
+# register.
+fn nx_mask_secret(plain)  { return plain ^ lq(&nx_secret_mask); }
+fn nx_unmask_secret(mskd) { return mskd ^ lq(&nx_secret_mask); }
+
+# ----------------------------------------------------------------------------
+# nx_atrest_selftest() - item 2 boot proof: write a known pattern into the at-rest
+# fixture, encrypt it under the live per-boot key, assert it no longer equals the
+# plaintext (i.e. the key actually whitened it), decrypt, assert exact round-trip.
+# Sets nx_atrest_selftest_ok=1 on success. No effect on boot flow either way
+# (fail-soft: a 0 flag just means the self-test didn't pass; surfaced via diag).
+# ----------------------------------------------------------------------------
+fn nx_atrest_selftest() {
+    sb(&nx_atrest_selftest_ok, 0);
+    # Known plaintext: 0x00,0x01,...,0x1F.
+    let i = 0;
+    while i < 32 {
+        sb(&nx_atrest_st_buf + i, i & 0xFF);
+        i = i + 1;
+    }
+    let p0 = lq(&nx_atrest_st_buf);
+    nx_atrest_xcrypt(&nx_atrest_st_buf, 32, ATREST_SELFTEST_TWEAK);
+    # Encrypted: first qword must differ from plaintext (key is non-zero per boot).
+    if lq(&nx_atrest_st_buf) == p0 { return; }
+    nx_atrest_xcrypt(&nx_atrest_st_buf, 32, ATREST_SELFTEST_TWEAK);
+    # Decrypted: exact round-trip of all four qwords.
+    i = 0;
+    while i < 32 {
+        if lb(&nx_atrest_st_buf + i) != (i & 0xFF) { return; }
+        i = i + 1;
+    }
+    sb(&nx_atrest_selftest_ok, 1);
+}
+
+# ----------------------------------------------------------------------------
+# Item 6 - poison freed memory. nx_atrest_poison(dst, n, tweak) OVERWRITES
+# [dst, dst+n) with the per-boot keystream (same derivation as nx_atrest_xcrypt,
+# but a direct store rather than an XOR). Unlike a plain zero-fill it (a) destroys
+# any stale plaintext that lingered in a freed page, and (b) leaves key-derived
+# bytes that are indistinguishable from at-rest ciphertext in a dump - so a freed
+# region neither leaks its old contents nor advertises itself as "free space"
+# (item 8: defeat structure fingerprinting). When called on a teardown path AFTER
+# the key was scrubbed, nx_mem_key is zero and the fill degrades to a fixed
+# splitmix64(tweak ^ j) pattern - still non-zero and still overwrites the
+# plaintext, which is all the wipe path needs.
+# ----------------------------------------------------------------------------
+fn nx_atrest_poison(dst, n, tweak) {
+    let j = 0;
+    let off = 0;
+    while (off + 8) <= n {
+        let ks = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        sq(dst + off, ks);
+        off = off + 8;
+        j = j + 1;
+    }
+    if off < n {
+        let kt = nx_splitmix64(lq(&nx_mem_key + (j & 3) * 8) ^ tweak ^ j);
+        while off < n {
+            sb(dst + off, kt & 0xFF);
+            kt = kt >> 8;
+            off = off + 1;
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Item 5 - minimize plaintext residency. nx_atrest_scrub_scratch(dst, n) zeroes a
+# transient plaintext scratch buffer the instant a consumer is done with it, so a
+# decrypted granule is never left sitting in DRAM longer than its point-of-use.
+# (nx_atrest_close_window already does this for the at-rest window; this is the
+# general helper for any caller that materializes a secret into a scratch buffer.)
+# The policy half - "no secret left in the framebuffer / scrollback / serial log
+# longer than needed" - holds by construction today: no kernel secret is ever
+# written to those sinks (the forensic serial dump prints addresses/tags, not key
+# bytes), so there is nothing there to scrub; this helper is the enforcement hook
+# for any future code path that would.
+# ----------------------------------------------------------------------------
+fn nx_atrest_scrub_scratch(dst, n) {
+    let i = 0;
+    while (i + 8) <= n {
+        sq(dst + i, 0);
+        i = i + 8;
+    }
+    while i < n {
+        sb(dst + i, 0);
+        i = i + 1;
+    }
+}
+
+# ----------------------------------------------------------------------------
+# nx_atrest_ext_selftest() - boot proof for items 5/6/8 (fail-soft, no boot-flow
+# effect). Proves, under the LIVE per-boot key:
+#   * item 6 (poison): poisoning a known-plaintext region overwrites it with
+#     non-zero, non-plaintext bytes;
+#   * item 8 (fingerprint de-correlation): two regions poisoned with DIFFERENT
+#     tweaks do NOT collide - a dump cannot pattern-scan a known structure across
+#     regions (the tweak = region identity breaks the equality);
+#   * item 5 (residency): scrub_scratch returns a region to all-zero.
+# Sets nx_atrest_ext_selftest_ok=1 only if all three hold.
+# ----------------------------------------------------------------------------
+fn nx_atrest_ext_selftest() {
+    sb(&nx_atrest_ext_selftest_ok, 0);
+    # Seed both fixtures with the SAME known plaintext (0x00..0x1F).
+    let i = 0;
+    while i < 32 {
+        sb(&nx_atrest_ext_a + i, i & 0xFF);
+        sb(&nx_atrest_ext_b + i, i & 0xFF);
+        i = i + 1;
+    }
+    let p0 = lq(&nx_atrest_ext_a);
+    # Item 6: poison region A with tweak = its own address.
+    nx_atrest_poison(&nx_atrest_ext_a, 32, &nx_atrest_ext_a);
+    if lq(&nx_atrest_ext_a) == p0 { return; }   # must not equal plaintext
+    if lq(&nx_atrest_ext_a) == 0  { return; }   # must not be a bare zero-fill
+    # Item 8: poison region B with a DIFFERENT tweak; identical plaintext must
+    # NOT produce identical poisoned bytes (de-correlated by tweak).
+    nx_atrest_poison(&nx_atrest_ext_b, 32, &nx_atrest_ext_b);
+    i = 0;
+    let differ = 0;
+    while i < 32 {
+        if lb(&nx_atrest_ext_a + i) != lb(&nx_atrest_ext_b + i) { differ = 1; }
+        i = i + 1;
+    }
+    if differ == 0 { return; }
+    # Item 5: scrub returns the scratch region to all-zero.
+    nx_atrest_scrub_scratch(&nx_atrest_ext_a, 32);
+    i = 0;
+    while i < 32 {
+        if lb(&nx_atrest_ext_a + i) != 0 { return; }
+        i = i + 1;
+    }
+    nx_atrest_scrub_scratch(&nx_atrest_ext_b, 32);
+    sb(&nx_atrest_ext_selftest_ok, 1);
+}

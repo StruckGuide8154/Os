@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Monolithic Kernel Build Wrapper
+; GritOS v3.0 - Monolithic Kernel Build Wrapper
 ; Combines all kernel components into a single binary
 ; ============================================================================
 [bits 64]
@@ -30,54 +30,54 @@ section .text
 %include "src/kernel/core/entry.asm"
 %include "src/kernel/core/core_runtime_state.asm"
 section .text
-%include "build/nxh/kernel_console.asm"
+%include "build/ghl/kernel_console.asm"
 section .text
-%include "build/nxh/context_menu.asm"
+%include "build/ghl/context_menu.asm"
 section .text
-%include "build/nxh/kernel_lifecycle.asm"
+%include "build/ghl/kernel_lifecycle.asm"
 section .text
-%include "build/nxh/serial_poll.asm"
+%include "build/ghl/serial_poll.asm"
 section .text
-%include "build/nxh/input_dispatch.asm"
+%include "build/ghl/input_dispatch.asm"
 section .text
-%include "build/nxh/frame_present.asm"
+%include "build/ghl/frame_present.asm"
 section .text
-%include "build/nxh/frame_pacing.asm"
-; NexusHLK: former main-loop and diagnostic modules. Keep these directly after
-; core_runtime_state.asm and before crypto.nxh so the moved code stays in
+%include "build/ghl/frame_pacing.asm"
+; GritHLK: former main-loop and diagnostic modules. Keep these directly after
+; core_runtime_state.asm and before crypto.ghl so the moved code stays in
 ; the early kernel text span [_start, _kernel_text_end).
 section .text
-%include "build/nxh/serial_diag.asm"
+%include "build/ghl/serial_diag.asm"
 ; Boot/serial diagnostics, debug overlay, CPU accounting, serial console, and
-; real-mode boot diagnostics are split into NexusHLK owner modules and compiled
-; by nxhc.py --target kernel.
+; real-mode boot diagnostics are split into GritHLK owner modules and compiled
+; by gritc.py --target kernel.
 section .text
-%include "build/nxh/boot_diag.asm"
+%include "build/ghl/boot_diag.asm"
 section .text
-%include "build/nxh/boot_timing.asm"
+%include "build/ghl/boot_timing.asm"
 section .text
-%include "build/nxh/boot_features.asm"
+%include "build/ghl/boot_features.asm"
 %ifndef RELEASE_BUILD
 section .text
-%include "build/nxh/debug_overlay.asm"
+%include "build/ghl/debug_overlay.asm"
 %endif
 section .text
-%include "build/nxh/cpu_acct.asm"
+%include "build/ghl/cpu_acct.asm"
 section .text
-%include "build/nxh/serial_console.asm"
+%include "build/ghl/serial_console.asm"
 section .text
-%include "build/nxh/crypto.asm"
+%include "build/ghl/crypto.asm"
 section .text
 ; Track 4 Part A: RAM-only / volatile secret scrubbing (wipe-on-shutdown / panic
 ; / tamper). Provides nx_volatile_panic_scrub (called from kernel_panic_canary /
 ; kernel_panic_shadow) and nx_volatile_wipe_halt (serial 'w' clean-exit wipe).
-%include "build/nxh/ram_volatile.asm"
+%include "build/ghl/ram_volatile.asm"
 section .text
 ; Track 4 Part B items 2+4: encrypt-at-rest-in-RAM (nx_atrest_xcrypt + the
 ; decrypt-into-window helpers) and whiten-kernel-secrets-at-rest (nx_secret_mask
 ; + nx_mask_secret/nx_unmask_secret). %included after ram_volatile so its
 ; nx_mem_key / nx_splitmix64 labels resolve as same-unit symbols.
-%include "build/nxh/ram_atrest.asm"
+%include "build/ghl/ram_atrest.asm"
 section .text
 ; Track 2 signed-envelope enforcement: structural policy kernel
 ; (security_envelope_*), semantic policy kernel (security_artifact_*), and the
@@ -85,28 +85,28 @@ section .text
 ; policy kernels are the SAME sources the host fixture gate compiles
 ; (src/tools/security), so the in-OS verifier and the checked contract cannot
 ; drift apart.
-%include "build/nxh/signed_envelope.asm"
+%include "build/ghl/signed_envelope.asm"
 section .text
-%include "build/nxh/signed_artifact_check.asm"
+%include "build/ghl/signed_artifact_check.asm"
 section .text
-%include "build/nxh/threshold_check.asm"
+%include "build/ghl/threshold_check.asm"
 section .text
-%include "build/nxh/envelope_reader.asm"
+%include "build/ghl/envelope_reader.asm"
 section .text
-%include "build/nxh/ed25519_check.asm"
+%include "build/ghl/ed25519_check.asm"
 section .text
 ; CMOS RTC wallclock -> unix seconds (verifier-clock source for the gate).
-%include "build/nxh/rtc_time.asm"
+%include "build/ghl/rtc_time.asm"
 section .text
 ; Persistent anti-rollback floors: per-class monotonic minimums in a reserved
 ; data.img sector, loaded before any admission and ratcheted by accepted
 ; envelopes (fail-soft to the build-time floors without ATA media).
-%include "build/nxh/floor_store.asm"
+%include "build/ghl/floor_store.asm"
 section .text
 ; Track 2 admission gate: binds envelope_verify_signed into the boot-chain
 ; (SYSSIG.ENV, fail-closed) + update-path (KUPDATE.ENV) call sites, with the
 ; verified-artifact hash cache in front of the Ed25519 crypto.
-%include "build/nxh/envelope_gate.asm"
+%include "build/ghl/envelope_gate.asm"
 section .text
 %include "src/kernel/core/nk_monitor.asm"
 section .text
@@ -140,7 +140,7 @@ section .text
 section .text
 %include "src/kernel/proc/usermode.asm"
 section .text
-; NexusHLK (zero-asm) ring-3 callback / app-done trampoline path. Ported from
+; GritHLK (zero-asm) ring-3 callback / app-done trampoline path. Ported from
 ; src/kernel/proc/usermode_callbacks.inc + l3_install_app_done_trampoline (was in
 ; usermode_integrity.inc); those .inc definitions are now removed to avoid a
 ; duplicate-symbol clash. Defines call_app_l3, call_app_l3_packed,
@@ -148,35 +148,35 @@ section .text
 ; test_usermode_proc. Same single-TU: l3_runtime_ptr / l3_slot_base /
 ; l3_translate_target / l3_copy_app_blob_to_slot / l3_apply_slot_isolation /
 ; l3_apply_wx_policy / l3_user_stack_top resolve as forward refs.
-%include "build/nxh/usermode_callbacks.asm"
+%include "build/ghl/usermode_callbacks.asm"
 section .text
 %include "src/kernel/proc/process.asm"
 section .text
-; NexusHLK Stage 2a: syscall LEAF validators/support (zero-asm). Must precede
+; GritHLK Stage 2a: syscall LEAF validators/support (zero-asm). Must precede
 ; syscall.asm so its globals (sc_get_slot_bounds, sc_range_in_bounds,
 ; sc_validate_user_range/_io_range, sc_validate_callback_target, dbg_wc_hex64,
 ; dbg_wmcreate_log) are defined before the dispatcher/handler .inc files use them.
-%include "build/nxh/syscall_validate.asm"
+%include "build/ghl/syscall_validate.asm"
 section .text
-; NexusHLK Stage 2b: syscall HMAC / cap-mask security LEAF helpers (zero-asm).
+; GritHLK Stage 2b: syscall HMAC / cap-mask security LEAF helpers (zero-asm).
 ; Must precede syscall.asm so its globals (cpi_sign_callback, cpi_verify_callback,
 ; cap_mask_sign, cap_mask_store, slot_cap_hmac_init) are defined before the
 ; dispatcher/handler/security .inc files (and kernel_main) reference them.
-%include "build/nxh/syscall_secure.asm"
+%include "build/ghl/syscall_secure.asm"
 section .text
 %include "src/kernel/proc/syscall.asm"
-; NexusHLK syscall data section (Stage 1 of docs/nhlk-syscall-rearchitecture.md):
+; GritHLK syscall data section (Stage 1 of docs/ghlk-syscall-rearchitecture.md):
 ; the unconditional, const-sized syscall data symbols migrated out of
 ; syscall_data.inc. Pure `section .data` (no .text); NASM -f bin aggregates it
 ; into the writable .data region past _kernel_text_end regardless of position.
 section .data
-%include "build/nxh/syscall_data.asm"
+%include "build/ghl/syscall_data.asm"
 section .text
 %include "src/kernel/proc/workqueue.asm"
 
 ; --- Network stack ---
 section .text
-%include "build/nxh/eth.asm"
+%include "build/ghl/eth.asm"
 section .text
 %include "src/kernel/net/ip.asm"
 section .text
@@ -186,7 +186,7 @@ section .text
 section .text
 %include "src/kernel/net/udp.asm"
 section .text
-%include "build/nxh/dns.asm"
+%include "build/ghl/dns.asm"
 section .text
 %include "src/kernel/net/icmp.asm"
 section .text
@@ -230,38 +230,38 @@ section .text
 section .text
 ; AMD DCN/DMUB and GFX11 bring-up subsystems retired 2026-05-26.
 ; Source preserved under deprecated/780M_IGPU/. See deprecated/README.md
-; for the deprecation policy. Do NOT add -dNEXUS_DIAG_LEGACY or
-; -dNEXUS_GFX_BRINGUP to any build — the retired gated source
+; for the deprecation policy. Do NOT add -dGRIT_DIAG_LEGACY or
+; -dGRIT_GFX_BRINGUP to any build - the retired gated source
 ; references symbols that no longer link in the active tree.
 %include "src/kernel/drivers/rtl8139.asm"
 section .text
 %include "src/kernel/drivers/xhci.asm"
 section .text
-; NexusHLK: USB HID LEAF helpers (zero-asm). Must precede usb_hid.asm so its
+; GritHLK: USB HID LEAF helpers (zero-asm). Must precede usb_hid.asm so its
 ; globals (usb_log_ch, usb_log_str, usb_log_crlf, usb_log_hex_nib,
 ; usb_hid_flush_log, usb_find_endpoint, usb_try_known_mouse_endpoint) are
 ; defined before usb_hid.asm's remaining asm references them. The data symbols
 ; they touch are still defined in usb_hid.asm's section .data (one NASM unit).
-%include "build/nxh/usb_hid_helpers.asm"
+%include "build/ghl/usb_hid_helpers.asm"
 section .text
 %include "src/kernel/drivers/usb_hid.asm"
 section .text
-; NexusHLK (zero-asm) DHCP/ARP control path — must precede rtl8156.asm so the
+; GritHLK (zero-asm) DHCP/ARP control path - must precede rtl8156.asm so the
 ; single NASM TU resolves these globals as forward refs (see each module header).
-%include "build/nxh/rtl8156_dhcp_build.asm"
+%include "build/ghl/rtl8156_dhcp_build.asm"
 section .text
-%include "build/nxh/rtl8156_arp.asm"
+%include "build/ghl/rtl8156_arp.asm"
 section .text
-%include "build/nxh/rtl8156_dhcp_parse.asm"
+%include "build/ghl/rtl8156_dhcp_parse.asm"
 section .text
-%include "build/nxh/rtl8156_dhcp_sm.asm"
+%include "build/ghl/rtl8156_dhcp_sm.asm"
 section .text
 %include "src/kernel/drivers/rtl8156.asm"
 section .text
 %include "src/kernel/net/nic.asm"
 section .text
-; net_dhcp_configure / net_dhcp_start ported out of nic.asm to zero-asm NHLK.
-%include "build/nxh/net_dhcp_dispatch.asm"
+; net_dhcp_configure / net_dhcp_start ported out of nic.asm to zero-asm GHLK.
+%include "build/ghl/net_dhcp_dispatch.asm"
 section .text
 %include "src/kernel/drivers/driver_debug.asm"
 section .text
@@ -285,10 +285,10 @@ section .text
 section .text
 %include "src/kernel/gui/render.asm"
 section .text
-; NexusHLK (zero-asm) window-manager leaf helpers — included BEFORE window.asm
+; GritHLK (zero-asm) window-manager leaf helpers - included BEFORE window.asm
 ; so wm_get_window_at / wm_cb_intern / wm_cb_resolve / wm_bg_* /
 ; wm_mark_outline_dirty symbols resolve for window.asm's callers.
-%include "build/nxh/wm_helpers.asm"
+%include "build/ghl/wm_helpers.asm"
 section .text
 %include "src/kernel/gui/window.asm"
 section .text
@@ -296,11 +296,11 @@ section .text
 section .text
 %include "src/kernel/gui/desktop.asm"
 section .text
-; NexusHLK mouse cursor rendering (zero-asm; compiled with --forbid-asm).
-%include "build/nxh/cursor.asm"
+; GritHLK mouse cursor rendering (zero-asm; compiled with --forbid-asm).
+%include "build/ghl/cursor.asm"
 section .text
-; NexusHLK boot animation player (zero-asm; compiled with --forbid-asm).
-%include "build/nxh/boot_anim.asm"
+; GritHLK boot animation player (zero-asm; compiled with --forbid-asm).
+%include "build/ghl/boot_anim.asm"
 
 ; --- Built-in User Apps ---
 section .text
@@ -337,7 +337,7 @@ strlen equ fn_strlen
 ; therefore sits at the top of the kernel code+helper region: [_start ..
 ; _kernel_text_end) is exactly the executable kernel image (no writable .data).
 ; Consumers:
-;   - crypto.nxh hashes this range as the measured kernel-code stage.
+;   - crypto.ghl hashes this range as the measured kernel-code stage.
 ;   - kernel_lockdown.asm marks this range read-only at PT level after init
 ;     (security_todo.md §9 "read-only kernel after init"). Writable .data lives
 ;     past this label, so locking [_start, _kernel_text_end) cannot fault a

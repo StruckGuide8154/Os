@@ -1,7 +1,7 @@
 # DMCUB firmware blobs
 
 These are the AMD DMCUB (Display MicroController Unit B) firmware images
-from the upstream `linux-firmware` repository, mirrored verbatim. NexusOS
+from the upstream `linux-firmware` repository, mirrored verbatim. GritOS
 loads them at boot to drive AMD GPU display features (panel control,
 brightness, IPS power management, etc.).
 
@@ -12,12 +12,12 @@ upstream `WHENCE` file for the AMD ucode entry).
 
 | File on FAT (8.3) | Original name              | Target hardware                  |
 |-------------------|----------------------------|----------------------------------|
-| DCN35DMC.BIN      | `dcn_3_5_dmcub.bin`        | DCN 3.5 — Strix Point, Phoenix2  |
-| DCN314.BIN        | `dcn_3_1_4_dmcub.bin`      | DCN 3.1.4 — Phoenix1             |
-| GC115RLC.BIN      | `gc_11_5_0_rlc.bin`        | GFX11.5 RLC-G — Strix Point      |
-| GC115PFP.BIN      | `gc_11_5_0_pfp.bin`        | GFX11.5 CP PFP — Strix Point     |
-| GC115ME.BIN       | `gc_11_5_0_me.bin`         | GFX11.5 CP ME — Strix Point      |
-| GC115MEC.BIN      | `gc_11_5_0_mec.bin`        | GFX11.5 CP MEC — Strix Point     |
+| DCN35DMC.BIN      | `dcn_3_5_dmcub.bin`        | DCN 3.5 - Strix Point, Phoenix2  |
+| DCN314.BIN        | `dcn_3_1_4_dmcub.bin`      | DCN 3.1.4 - Phoenix1             |
+| GC115RLC.BIN      | `gc_11_5_0_rlc.bin`        | GFX11.5 RLC-G - Strix Point      |
+| GC115PFP.BIN      | `gc_11_5_0_pfp.bin`        | GFX11.5 CP PFP - Strix Point     |
+| GC115ME.BIN       | `gc_11_5_0_me.bin`         | GFX11.5 CP ME - Strix Point      |
+| GC115MEC.BIN      | `gc_11_5_0_mec.bin`        | GFX11.5 CP MEC - Strix Point     |
 
 Layout (per `dmcub_firmware_header_v1_0` in amdgpu_ucode.h):
 - 0x00..0x28: common firmware header (size, version, ucode offset, crc)
@@ -26,7 +26,7 @@ Layout (per `dmcub_firmware_header_v1_0` in amdgpu_ucode.h):
 - After PSP: instruction-const region (firmware code + read-only data)
 - Last 0x100 of inst_const: PSP footer (skip)
 - 64-byte `dmub_fw_meta_info` lives in the last 16 bytes of the
-  scannable region — search at `(size - 0x100 - i - 64)` for i in 0..16
+  scannable region - search at `(size - 0x100 - i - 64)` for i in 0..16
 - Magic = `0x444D5542` ("DMUB" little-endian)
 
 Update by re-downloading from upstream when new ucode versions are

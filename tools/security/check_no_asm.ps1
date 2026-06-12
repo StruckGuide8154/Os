@@ -93,23 +93,23 @@ $findings = New-Object System.Collections.Generic.List[object]
 
 $securityModuleDir = Join-Path $root 'src\tools\security'
 $expectedSecurityModules = @(
-    'compatibility_check.nxh',
-    'invariant_check.nxh',
-    'no_asm_guard.nxh',
-    'policy_graph_check.nxh',
-    'release_privacy_guard.nxh',
-    'revocation_check.nxh',
-    'schema_canonical_check.nxh',
-    'signed_artifact_check.nxh',
-    'signed_envelope.nxh',
-    'threshold_check.nxh'
+    'compatibility_check.ghl',
+    'invariant_check.ghl',
+    'no_asm_guard.ghl',
+    'policy_graph_check.ghl',
+    'release_privacy_guard.ghl',
+    'revocation_check.ghl',
+    'schema_canonical_check.ghl',
+    'signed_artifact_check.ghl',
+    'signed_envelope.ghl',
+    'threshold_check.ghl'
 )
 
 if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
     $findings.Add([pscustomobject]@{
         Rule = 'missing-security-module-dir'
         Location = 'src/tools/security'
-        Text = 'Expected NHL security policy module directory is missing.'
+        Text = 'Expected GHL security policy module directory is missing.'
     })
 } else {
     foreach ($moduleName in $expectedSecurityModules) {
@@ -118,7 +118,7 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
             $findings.Add([pscustomobject]@{
                 Rule = 'missing-security-module'
                 Location = "src/tools/security/$moduleName"
-                Text = 'Expected NHL security policy module is missing.'
+                Text = 'Expected GHL security policy module is missing.'
             })
         }
     }
@@ -127,13 +127,13 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
 $ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'worktrees')
 $quarantinePrefixes = @('build', 'dist', 'deprecated')
 $trustedNxhPrefixes = @(
-    'src/boot/nxh',
-    'src/kernel/nexushlk',
+    'src/boot/ghl',
+    'src/kernel/grithlk',
     'src/tools/security',
-    'src/user/nexushl',
+    'src/user/grithl',
     'src/user/templates'
 )
-$roadmapPath = Join-Path $root 'docs\nhl-beyond-zero-trust-todo.md'
+$roadmapPath = Join-Path $root 'docs\ghl-beyond-zero-trust-todo.md'
 
 # Exclude git-ignored paths (generated/secret files such as tools/quantum/seed.inc)
 # so the scan does not drift between a local working tree and a clean CI checkout.
@@ -206,7 +206,7 @@ if ($InventoryGuard) {
                 $findings.Add([pscustomobject]@{
                     Rule = 'new-legacy-extension'
                     Location = $file.RepoPath
-                    Text = 'New active .asm/.inc not in legacy inventory. New work must be NHL/NexusHLK.'
+                    Text = 'New active .asm/.inc not in legacy inventory. New work must be GHL/GritHLK.'
                 })
             }
         }
@@ -232,7 +232,7 @@ if ($InventoryGuard) {
 $inlineAsmPattern = [regex]'(?i)(^|[^A-Za-z0-9_])(__asm|inline\s+asm|asm\s*\{|asm)(?=$|[^A-Za-z0-9_])'
 
 foreach ($file in $files) {
-    if ($file.Extension -ne '.nxh') {
+    if ($file.Extension -ne '.ghl') {
         continue
     }
     if (-not (Test-UnderPrefix -Path $file.RepoPath -Prefixes $trustedNxhPrefixes)) {
@@ -248,7 +248,7 @@ foreach ($file in $files) {
         $code = Remove-NxhLineNoise -Line $line
         if ($inlineAsmPattern.IsMatch($code)) {
             $findings.Add([pscustomobject]@{
-                Rule = 'nxh-inline-asm'
+                Rule = 'ghl-inline-asm'
                 Location = "$($file.RepoPath):$lineNumber"
                 Text = $line.Trim()
             })
@@ -263,14 +263,14 @@ if (Test-Path -LiteralPath $roadmapPath) {
         if ($line -match '(?i)(tools/security/[^`\s]*\.py|Python)') {
             $findings.Add([pscustomobject]@{
                 Rule = 'roadmap-python-security-tooling'
-                Location = "docs/nhl-beyond-zero-trust-todo.md:$lineNumber"
+                Location = "docs/ghl-beyond-zero-trust-todo.md:$lineNumber"
                 Text = $line.Trim()
             })
         }
     }
 }
 
-Write-Host "[bootstrap-host-scan] NHL no-ASM guard"
+Write-Host "[bootstrap-host-scan] GHL no-ASM guard"
 Write-Host "Repo root: $root"
 $modeLabel = if ($StrictExtensions) { 'strict extensions' } else { 'quarantine legacy extensions' }
 if ($InventoryGuard) { $modeLabel += ' + inventory guard' }

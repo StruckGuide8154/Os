@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - MADT Parser
+; GritOS v3.0 - MADT Parser
 ; Used for parsing ACPI Multiple APIC Description Table
 ; ============================================================================
 bits 64
@@ -69,7 +69,7 @@ madt_init:
     test eax, 8             ; Online-capable
     jz .next
 .lapic_enabled:
-%ifdef NEXUS_SMP
+%ifdef GRIT_SMP
     ; rcx holds the table-end pointer; use rdi for the count to avoid clobber.
     mov edi, [madt_enabled_cpu_count]
     cmp edi, SMP_MAX_CORES
@@ -89,7 +89,7 @@ madt_init:
     test eax, 8
     jz .next
 .x2_enabled:
-%ifdef NEXUS_SMP
+%ifdef GRIT_SMP
     mov edi, [madt_enabled_cpu_count]
     cmp edi, SMP_MAX_CORES
     jae .skip_store_x2
@@ -145,7 +145,7 @@ section .data
 align 4
 madt_lapic_count: dd 0
 madt_enabled_cpu_count: dd 0
-%ifdef NEXUS_SMP
+%ifdef GRIT_SMP
 align 8
 madt_lapic_ids: times SMP_MAX_CORES db 0
 %endif

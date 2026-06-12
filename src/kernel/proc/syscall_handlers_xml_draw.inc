@@ -281,7 +281,7 @@
     mov edx, [rsp + ALL_RDX]          ; zero-extends into rdx
     test rdx, rdx
     jz .sc_blend_span_argb_done
-    cmp rdx, 0x100000                 ; cap at 1M pixels — far above any real scanline
+    cmp rdx, 0x100000                 ; cap at 1M pixels - far above any real scanline
     ja .sc_blend_span_argb_done
     mov rdi, [rsp + ALL_R10]          ; src buffer ptr
     mov rsi, rdx
@@ -356,9 +356,9 @@
     jmp .done
 
 ; ---------------------------------------------------------------------------
-; sc_media_blit_scaled — aspect-preserving BGRA blit into a window's client
+; sc_media_blit_scaled - aspect-preserving BGRA blit into a window's client
 ; area. Used by the Media Player (and any future timeline-bearing app) so
-; the codec dispatch and control-bar drawing can live in user-mode NexusHL
+; the codec dispatch and control-bar drawing can live in user-mode GritHL
 ; instead of being trapped in kernel asm.
 ;
 ; Args (already loaded from caller registers):
@@ -369,8 +369,8 @@
 ;   r8  = alpha_key (any nonzero treated as 1)
 ; Returns: 0 on success, -1 if any input is rejected.
 ;
-; Dims are packed so the syscall fits in NexusHL's 6-argument syscall()
-; arity. Both halves are validated as if they had been separate args —
+; Dims are packed so the syscall fits in GritHL's 6-argument syscall()
+; arity. Both halves are validated as if they had been separate args -
 ; bounding happens before any arithmetic on them.
 ;
 ; Security invariants
@@ -382,7 +382,7 @@
 ;    caller cannot induce arithmetic overflow that would wrap the range
 ;    check.
 ;  * src_ptr range must lie entirely within the caller's app slot or the
-;    built-in user blob (sc_validate_user_range — same predicate used by
+;    built-in user blob (sc_validate_user_range - same predicate used by
 ;    sc_blend_span_argb).
 ;  * window_id < MAX_WINDOWS. The window struct address is computed from
 ;    a bounded index so a forged id cannot redirect the scaler's writes
@@ -390,7 +390,7 @@
 ;  * reserve_bottom_px is clamped to scr_height, so an absurd value
 ;    cannot make the scaler's internal client_h go negative and walk
 ;    backwards through memory.
-;  * alpha_key is reduced to {0,1} by `cmp/setnz` — any caller-supplied
+;  * alpha_key is reduced to {0,1} by `cmp/setnz` - any caller-supplied
 ;    bit pattern lands on one of the two intended paths.
 ; ---------------------------------------------------------------------------
 .sc_media_blit_scaled:
@@ -419,7 +419,7 @@
     ja .sc_media_blit_reject
     mov r14, rax                             ; stash byte_len
 
-    ; Validate src range — sc_validate_user_range takes (rdi=ptr, rsi=len).
+    ; Validate src range - sc_validate_user_range takes (rdi=ptr, rsi=len).
     mov rdi, rsi
     mov rsi, r14
     call sc_validate_user_range

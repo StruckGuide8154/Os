@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS network driver ABI
+; GritOS network driver ABI
 ; ----------------------------------------------------------------------------
 ; A NIC driver should stay hardware-only:
 ;   - probe/init the device
@@ -65,14 +65,14 @@ NET_IP_PROTO_UDP            equ 17
 ; Used by net_tcp_rng_* (src/kernel/net/tcp.asm). SplitMix64 is the reference
 ; finaliser published with Java 8's SplittableRandom (Steele, Lea & Flood,
 ; OOPSLA 2014, "Fast Splittable Pseudorandom Number Generators", §4 / Fig.1).
-;   GOLDEN: 2^64/phi rounded to an odd integer — the per-draw state increment.
+;   GOLDEN: 2^64/phi rounded to an odd integer - the per-draw state increment.
 ;   MIX1/MIX2: the two odd multiplicative mixing constants in the finaliser.
 SPLITMIX64_GOLDEN           equ 0x9E3779B97F4A7C15
 SPLITMIX64_MIX1             equ 0xBF58476D1CE4E5B9
 SPLITMIX64_MIX2             equ 0x94D049BB133111EB
 
 ; --- DNS public fallback resolver -------------------------------------------
-; Google Public DNS primary anycast address 8.8.8.8, in NexusOS A.B.C.D-packed
+; Google Public DNS primary anycast address 8.8.8.8, in GritOS A.B.C.D-packed
 ; scalar form. Tried by net_dns_query_a (src/kernel/net/dns.asm) when the
 ; DHCP-provided resolver does not answer. RFC 8482-class always-on resolver.
 NET_DNS_FALLBACK_IP         equ 0x08080808

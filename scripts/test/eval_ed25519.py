@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# Track-2 Ed25519 verifier evaluation: executes the REAL in-kernel NHL
-# sources (ed25519_check.nxh + envelope_reader.nxh + policy kernels) against
+# Track-2 Ed25519 verifier evaluation: executes the REAL in-kernel GHL
+# sources (ed25519_check.ghl + envelope_reader.ghl + policy kernels) against
 # RFC 8032 test vectors and real signed envelopes.
 #
 # Like eval_envelope.py this goes through the production compiler's own
-# lexer/parser (nxhc.lex / nxhc.parse), so the logic under test is exactly
+# lexer/parser (gritc.lex / gritc.parse), so the logic under test is exactly
 # what ships. Unlike eval_envelope.py the AST is TRANSPILED to Python
-# functions instead of tree-walked — field arithmetic runs ~50x faster, which
+# functions instead of tree-walked - field arithmetic runs ~50x faster, which
 # is what makes whole Ed25519 verifications testable on the host. The
 # transpiler covers only the integer subset these modules use and hard-errors
 # on anything else, so it can never silently skip logic.
 #
 # Suite:
-#   1. pubkey-drift guard: the NHL ed_role_pubs table must equal the host
+#   1. pubkey-drift guard: the GHL ed_role_pubs table must equal the host
 #      derivation (scripts/build/ed25519_host.py dev seeds).
-#   2. SHA-512 differential: NHL ed_sha512_* vs hashlib on assorted lengths.
-#   3. RFC 8032 vectors (TEST 1/2/3) + tamper negatives through the NHL
+#   2. SHA-512 differential: GHL ed_sha512_* vs hashlib on assorted lengths.
+#   3. RFC 8032 vectors (TEST 1/2/3) + tamper negatives through the GHL
 #      ed25519_verify.
-#   4. Signed envelopes through the NHL envelope_verify_signed: quorum-signed
+#   4. Signed envelopes through the GHL envelope_verify_signed: quorum-signed
 #      accept, tampered signature, placeholder sigs, under-quorum signing,
 #      and a structural reject (bad magic) keeping its precise reason code.
 
@@ -27,24 +27,24 @@ import struct
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'nexushl', 'compiler')
+COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'grithl', 'compiler')
 BUILD_DIR = os.path.join(ROOT, 'scripts', 'build')
 MODULES = [
-    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_envelope.nxh'),
-    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_artifact_check.nxh'),
-    os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.nxh'),
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'envelope_reader.nxh'),
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'ed25519_check.nxh'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_envelope.ghl'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'signed_artifact_check.ghl'),
+    os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.ghl'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'envelope_reader.ghl'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'ed25519_check.ghl'),
     # Track 2 call-site binding: the admission gate + the SHA-256 it uses
     # + the persistent anti-rollback floors the gate's verifier context reads.
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'crypto.nxh'),
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'floor_store.nxh'),
-    os.path.join(ROOT, 'src', 'kernel', 'nexushlk', 'envelope_gate.nxh'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'crypto.ghl'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'floor_store.ghl'),
+    os.path.join(ROOT, 'src', 'kernel', 'grithlk', 'envelope_gate.ghl'),
 ]
 
 sys.path.insert(0, COMPILER_DIR)
 sys.path.insert(0, BUILD_DIR)
-import nxhc          # noqa: E402  production NHL compiler — source of truth
+import gritc          # noqa: E402  production GHL compiler - source of truth
 import ed25519_host  # noqa: E402  independent host reference + dev keys
 
 
@@ -54,7 +54,7 @@ class TranspileError(Exception):
 
 class PanicCalled(Exception):
     """Raised when transpiled code reaches kernel_panic_canary (fail-closed
-    path) — tests assert this fires for rejected boot artifacts."""
+    path) - tests assert this fires for rejected boot artifacts."""
     pass
 
 
@@ -86,7 +86,7 @@ class Unit:
         for path in paths:
             with open(path, 'r', encoding='utf-8') as fh:
                 src = fh.read()
-            decls_all.extend(nxhc.parse(nxhc.lex(src, path), path))
+            decls_all.extend(gritc.parse(gritc.lex(src, path), path))
         for d in decls_all:
             k = d.get('k')
             if k == 'const':
@@ -298,7 +298,7 @@ class Unit:
             lines.append('')
         src = '\n'.join(lines)
         self.ns = {'_U': self}
-        exec(compile(src, '<nhl-transpiled>', 'exec'), self.ns)
+        exec(compile(src, '<ghl-transpiled>', 'exec'), self.ns)
 
     def call(self, name, *args):
         return self.ns[name](*args)
@@ -337,7 +337,7 @@ def check(label, ok, detail=''):
         FAILURES.append(label + (': ' + detail if detail else ''))
 
 
-def nhl_verify(u, pub, msg, sig):
+def ghl_verify(u, pub, msg, sig):
     pp = u.place(pub)
     mp = u.place(msg) if msg else u.place(b'\x00')   # non-zero ptr for len 0
     sp = u.place(sig)
@@ -347,7 +347,7 @@ def nhl_verify(u, pub, msg, sig):
 def main():
     u = Unit(MODULES)
     print('[ed25519] transpiled %d fns, %d data symbols, %d consts '
-          '(production nxhc frontend)' % (len(u.fns), len(u.data), len(u.consts)))
+          '(production gritc frontend)' % (len(u.fns), len(u.data), len(u.consts)))
 
     # 1. pubkey-drift guard
     tbl = u.data_addr['ed_role_pubs']
@@ -379,24 +379,24 @@ def main():
         pub = ed25519_host.public_key(sk)
         sig = ed25519_host.sign(sk, msg)
         check('RFC 8032 TEST %d verifies' % (i + 1),
-              nhl_verify(u, pub, msg, sig) == 1)
+              ghl_verify(u, pub, msg, sig) == 1)
     # negatives: tampered sig / msg / pubkey, non-canonical S
     sk = bytes.fromhex(vec[2][0])
     pub, msg = ed25519_host.public_key(sk), vec[2][1]
     sig = ed25519_host.sign(sk, msg)
     bad = bytearray(sig); bad[5] ^= 1
-    check('tampered signature rejected', nhl_verify(u, pub, msg, bytes(bad)) == 0)
-    check('tampered message rejected', nhl_verify(u, pub, msg + b'!', sig) == 0)
+    check('tampered signature rejected', ghl_verify(u, pub, msg, bytes(bad)) == 0)
+    check('tampered message rejected', ghl_verify(u, pub, msg + b'!', sig) == 0)
     badp = bytearray(pub); badp[3] ^= 1
-    check('wrong public key rejected', nhl_verify(u, bytes(badp), msg, sig) == 0)
+    check('wrong public key rejected', ghl_verify(u, bytes(badp), msg, sig) == 0)
     bads = bytearray(sig)
     s = int.from_bytes(sig[32:], 'little') + ed25519_host.L
     bads[32:] = s.to_bytes(32, 'little')
-    check('non-canonical S (S+L) rejected', nhl_verify(u, pub, msg, bytes(bads)) == 0)
+    check('non-canonical S (S+L) rejected', ghl_verify(u, pub, msg, bytes(bads)) == 0)
 
     # 4. signed envelopes through envelope_verify_signed
     import write_envelope as we
-    payload = b'NexusOS signed-envelope crypto test payload'
+    payload = b'GritOS signed-envelope crypto test payload'
     kw = dict(payload=payload, kind=5, domain=5, role=4,
               device_id=0x11, device_class=0,
               not_before=500, not_after=2000,
@@ -435,10 +435,10 @@ def main():
     rc = run_signed(badmagic)
     check('structural reject keeps reason (ENVR_ERR_MAGIC)', rc == 2, 'rc=%d' % rc)
 
-    # 5. artifact admission gate (envelope_gate.nxh): the boot/update call-site
+    # 5. artifact admission gate (envelope_gate.ghl): the boot/update call-site
     # binding + the verified-artifact hash cache. The gate computes the payload
-    # SHA-256 itself (crypto.nxh, the real kernel implementation) and pins its
-    # own verifier context (device_id=1; floors from floor_store.nxh, build
+    # SHA-256 itself (crypto.ghl, the real kernel implementation) and pins its
+    # own verifier context (device_id=1; floors from floor_store.ghl, build
     # default 1), so envelopes here match the write_envelope.py defaults.
     gkw = dict(kind=5, domain=5, role=4, device_id=1, device_class=0,
                not_before=0, not_after=0xFFFFFFFF,
@@ -551,7 +551,7 @@ def main():
           u.lw(u.data_addr['kupdate_rc']) != 0,
           'rc=%d' % u.lw(u.data_addr['kupdate_rc']))
 
-    # 7. "No single stolen key authorizes any critical action" — the four
+    # 7. "No single stolen key authorizes any critical action" - the four
     # named Track-2 scenarios, as executable negatives against the REAL
     # verifier with the gate's verifier context. Each envelope is otherwise
     # fully valid; only the signature set is what a single compromised key
@@ -670,7 +670,7 @@ def main():
 
     # 9. RTC/now binding (gate_time_set / gate_time_now): envelope validity
     # windows are judged against a REAL, floor-clamped, forward-ratcheting
-    # verifier clock — including on hash-cache hits.
+    # verifier clock - including on hash-cache hits.
     FLOOR = 1767225600                       # 2026-01-01 UTC (GATE_TIME_FLOOR)
     ENVR_ERR_WINDOW = 14
     check('verifier clock defaults to the build floor',
@@ -706,7 +706,7 @@ def main():
     check('cached (already-verified) artifact still expires against the '
           'live clock', rc == ENVR_ERR_WINDOW, 'rc=%d' % rc)
 
-    # 10. Persistent anti-rollback floors (floor_store.nxh): the gate's
+    # 10. Persistent anti-rollback floors (floor_store.ghl): the gate's
     # required version/counter/epoch come from the floor table, ratchet
     # forward on every ACCEPTED envelope's signed monotonic fields, and
     # round-trip through the persisted sector record (host ATA stubs leave
@@ -767,11 +767,11 @@ def main():
           u.call('floor_required_version', ART_UPDATE) == 3)
 
     if FAILURES:
-        sys.stderr.write('[ed25519] FAIL — %d problem(s):\n' % len(FAILURES))
+        sys.stderr.write('[ed25519] FAIL - %d problem(s):\n' % len(FAILURES))
         for f in FAILURES:
             sys.stderr.write('  - %s\n' % f)
         return 1
-    print('[ed25519] real NHL Ed25519 verifier: RFC 8032 vectors + threshold '
+    print('[ed25519] real GHL Ed25519 verifier: RFC 8032 vectors + threshold '
           'envelope signatures all enforced')
     return 0
 

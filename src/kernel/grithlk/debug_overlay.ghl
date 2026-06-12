@@ -1,0 +1,391 @@
+# ============================================================================
+# GritHLK USB-mouse debug-overlay subsystem.  ZERO-ASM.
+#
+# Ported out of the former src/kernel/core/main.asm into this GritHL kernel module
+# (gritc.py --target kernel, %include'd from kernel_build.asm right after
+# boot_diag.asm, before crypto.ghl). Single NASM translation unit (-f bin), so
+# the still-in-main callers (render_frame via usb_debug_overlay; usb_hid.asm) and
+# the shared data this reads/writes (ovl_buf, the s_o_* label strings, usb_dbg_* /
+# xhci_dbg_* counters, render_text/display_flip_rect/uint32_to_str/
+# i2c_hid_debug_dump_line) stay defined elsewhere and bind with no extern wiring.
+#
+# History: every routine here was a register-exact `asm {}` shim. They are now
+# GENUINELY STRUCTURED GritHLK with ZERO inline asm:
+#   * the ovl_* string builders, which threaded the destination cursor in rdi and
+#     took the value in edx, are redesigned to a clean System-V form
+#     `fn ovl_x(p, val) -> advanced p` (return value in rax) and the overlay
+#     threads a local cursor `p`. They are module-internal (no external caller),
+#     so the ABI change is self-contained.
+#   * usb_dbg_pci_scan reimplements PCI config-space access INLINE via the
+#     ind()/outd() 32-bit port intrinsics (CF8/CFC), so no custom-ABI asm call
+#     (pci_read/write_conf_dword) is needed; `unsafe kernel_io;` makes the port
+#     authority explicit.
+# The rendered overlay is behavior-identical to the prior shims (emitted
+# instruction stream differs, as with the cpu_acct.ghl port).
+#
+# Per-routine ABI (current, System-V unless noted):
+#   ovl_puts(p, s)     copy NUL-term s into [p] -> advanced p
+#   ovl_putu(p, val)   append unsigned decimal -> advanced p
+#   ovl_puti(p, val)   append signed decimal -> advanced p
+#   ovl_puth32(p, val) append 8 hex chars -> advanced p
+#   usb_dbg_pci_scan() one-shot xHCI PCI scan -> usb_dbg_xhci_rec / _n
+#   usb_debug_overlay() draw the overlay into the backbuffer + flip rect
+# ============================================================================
+
+module "debug_overlay";
+
+unsafe raw_mem;          # lb/lw/lq/sb against kernel-resident debug state
+unsafe kernel_io;        # ind()/outd() to PCI CF8/CFC in usb_dbg_pci_scan
+unsafe implicit_extern;  # &<symbol> over the many s_o_*/usb_dbg_*/xhci_dbg_* deps
+
+global ovl_puts;
+global ovl_putu;
+global ovl_puti;
+global ovl_puth32;
+global usb_dbg_pci_scan;
+global usb_debug_overlay;
+
+# Overlay geometry (core_runtime_state.asm %defines).
+const OVL_X = 8;     const OVL_Y = 56;
+const OVL_W = 760;   const OVL_H = 320;
+
+# Text colours (0x00RRGGBB) used by render_text. Background is constant.
+const OVL_BG     = 0x00101010;
+const COL_GREEN  = 0x0000FF00;
+const COL_WHITE  = 0x00FFFFFF;
+const COL_CYAN   = 0x0000FFFF;
+const COL_ORANGE = 0x00FF8800;
+const COL_AMBER  = 0x00FFAA44;
+const COL_YELLOW = 0x00FFFF00;
+const COL_TEAL   = 0x0000FF88;
+const COL_RED    = 0x00FF4040;
+const COL_MAGEN  = 0x00FF00FF;
+
+const CH_DOT  = 46;    # '.'
+const CH_ZERO = 48;    # '0'
+const CH_MINUS = 45;   # '-'
+const HEXA_M10 = 55;   # 'A' - 10
+
+# PCI config mechanism #1 ports + enable bit.
+const PCI_CF8 = 0xCF8;
+const PCI_CFC = 0xCFC;
+const PCI_ENABLE = 0x80000000;
+const PCI_CLASS_XHCI = 0x0C0330;   # serial-bus / USB / xHCI programming interface
+
+# --- ovl_* string builders: cursor in p, return advanced cursor. ---
+
+# Copy NUL-terminated string s into [p]; return advanced p.
+fn ovl_puts(p, s) {
+    let c = lb(s);
+    while c != 0 {
+        sb(p, c);
+        p = p + 1;
+        s = s + 1;
+        c = lb(s);
+    }
+    return p;
+}
+
+# Append unsigned decimal of val (low 32 bits) at [p]; return advanced p.
+fn ovl_putu(p, val) {
+    call uint32_to_str(rdi: val, rsi: p);
+    while lb(p) != 0 { p = p + 1; }
+    return p;
+}
+
+# Append signed decimal of val at [p]; return advanced p.
+fn ovl_puti(p, val) {
+    if val < 0 {
+        sb(p, CH_MINUS);
+        p = p + 1;
+        val = 0 - val;
+    }
+    return ovl_putu(p, val);
+}
+
+# Append 8 uppercase hex chars of val (32-bit) at [p], MSB first; return p.
+fn ovl_puth32(p, val) {
+    val = val & 0xFFFFFFFF;
+    let n = 8;
+    while n > 0 {
+        let nib = (val >> 28) & 0x0F;
+        val = (val << 4) & 0xFFFFFFFF;
+        if nib < 10 { sb(p, nib + CH_ZERO); }
+        else { sb(p, nib + HEXA_M10); }
+        p = p + 1;
+        n = n - 1;
+    }
+    return p;
+}
+
+# --- one-shot xHCI PCI enumeration (inline CF8/CFC config access) ---
+
+# 32-bit PCI config read for the enable|addr value `a`.
+fn pci_cfg_rd(a) {
+    outd(PCI_CF8, a | PCI_ENABLE);
+    return ind(PCI_CFC);
+}
+
+# 32-bit PCI config write of value `v` to enable|addr value `a`.
+fn pci_cfg_wr(a, v) {
+    outd(PCI_CF8, a | PCI_ENABLE);
+    outd(PCI_CFC, v);
+}
+
+# Enumerate PCI config space ONCE for xHCI controllers (class 0x0C0330), recording
+# up to 4 into usb_dbg_xhci_rec (64 bytes each: bus,dev,fn,port_count, then per-port
+# speed bytes) and the count into usb_dbg_xhci_n. Idempotent via usb_dbg_pci_done.
+fn usb_dbg_pci_scan() {
+    if lb(&usb_dbg_pci_done) != 0 { return; }
+    sb(&usb_dbg_pci_done, 1);
+
+    let found = 0;
+    let bus = 0;
+    while bus < 256 {
+        let dev = 0;
+        while dev < 32 {
+            let func = 0;
+            while func < 8 {
+                let cfg = (bus << 16) | (dev << 11) | (func << 8);
+                let id = pci_cfg_rd(cfg);
+                # Skip absent functions and non-xHCI class codes.
+                if id != 0xFFFFFFFF {
+                    let cls = (pci_cfg_rd(cfg | 0x08) >> 8) & 0x00FFFFFF;
+                    if cls == PCI_CLASS_XHCI {
+                        if found < 4 {
+                            let rec = &usb_dbg_xhci_rec + found * 64;
+                            sb(rec + 0, bus);
+                            sb(rec + 1, dev);
+                            sb(rec + 2, func);
+                            sb(rec + 3, 0);
+                            # Enable MMIO + bus-master (command reg |= 0x06).
+                            let cmd = pci_cfg_rd(cfg | 0x04) | 0x06;
+                            pci_cfg_wr(cfg | 0x04, cmd);
+                            # Resolve BAR0 (handle 64-bit BARs).
+                            let bar_lo = pci_cfg_rd(cfg | 0x10);
+                            let bar = bar_lo & 0xFFFFFFF0;
+                            if (bar_lo & 0x04) != 0 {
+                                bar = bar | (pci_cfg_rd(cfg | 0x14) << 32);
+                            }
+                            if bar != 0 {
+                                # CAPLENGTH (byte0) and HCSPARAMS1 max-ports (byte7).
+                                let caplen = lb(bar) & 0xFF;
+                                if caplen != 0 {
+                                    if caplen <= 0x40 {
+                                        let ports = (lw(bar + 4) >> 24) & 0xFF;
+                                        if ports != 0 {
+                                            if ports <= 60 {
+                                                sb(rec + 3, ports);
+                                                # PORTSC base = bar + caplen + 0x400.
+                                                let psc = bar + caplen + 0x400;
+                                                let pi = 0;
+                                                while pi < ports {
+                                                    let portsc = lw(psc + pi * 16);
+                                                    let spd = 0;
+                                                    if (portsc & 1) != 0 {
+                                                        spd = (portsc >> 10) & 0x0F;
+                                                    }
+                                                    sb(rec + pi + 4, spd);
+                                                    pi = pi + 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            found = found + 1;
+                        }
+                    }
+                }
+                func = func + 1;
+            }
+            dev = dev + 1;
+        }
+        bus = bus + 1;
+    }
+    sb(&usb_dbg_xhci_n, found);
+}
+
+# Draw the USB/xHCI/HID debug overlay into the backbuffer and flip its rect.
+# No-op when there is no backbuffer. Preserves every register it touches.
+fn usb_debug_overlay() preserves(all) {
+    if lq(&bb_addr) == 0 { return; }
+
+    # Line 1: core USB/xHCI liveness counters.
+    let p = &ovl_buf;
+    p = ovl_puts(p, &s_o_l1);       p = ovl_putu(p, lb(&xhci_active));
+    p = ovl_puts(p, &s_o_noxhci);   p = ovl_putu(p, lb(&usb_no_xhci));
+    p = ovl_puts(p, &s_o_mact);     p = ovl_putu(p, lb(&usb_mouse_active));
+    p = ovl_puts(p, &s_o_retry);    p = ovl_putu(p, lw(&init_retry_counter));
+    p = ovl_puts(p, &s_o_stage);    p = ovl_putu(p, lb(&usb_dbg_stage));
+    p = ovl_puts(p, &s_o_stagemax); p = ovl_putu(p, lb(&usb_dbg_stage_max));
+    p = ovl_puts(p, &s_o_fpn);      p = ovl_putu(p, lb(&xhci_dbg_fp_n));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y, &ovl_buf, COL_GREEN, OVL_BG);
+
+    # Line 2: port + slot state.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_port);   p = ovl_putu(p, lb(&xhci_port_num));
+    p = ovl_puts(p, &s_o_spd);    p = ovl_putu(p, lb(&xhci_port_speed));
+    p = ovl_puts(p, &s_o_slot);   p = ovl_putu(p, lb(&usb_slot1_id));
+    p = ovl_puts(p, &s_o_s2);     p = ovl_putu(p, lb(&usb_slot2_active));
+    p = ovl_puts(p, &s_o_hwslot); p = ovl_putu(p, lb(&xhci_slot_id));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 16, &ovl_buf, COL_WHITE, OVL_BG);
+
+    # Line 3: endpoint.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_ep);    p = ovl_putu(p, lb(&usb_ep_addr));
+    p = ovl_puts(p, &s_o_mps);   p = ovl_putu(p, lw(&usb_ep_mps) & 0xFFFF);
+    p = ovl_puts(p, &s_o_proto); p = ovl_putu(p, lb(&usb_hid_protocol));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 32, &ovl_buf, COL_WHITE, OVL_BG);
+
+    # Line 4: event/report counters + addressing + scratchpad.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_evt);     p = ovl_putu(p, lw(&usb_dbg_evt));
+    p = ovl_puts(p, &s_o_rpt);     p = ovl_putu(p, lw(&usb_dbg_rpt));
+    p = ovl_puts(p, &s_o_err);     p = ovl_putu(p, lw(&usb_dbg_err));
+    p = ovl_puts(p, &s_o_ec);      p = ovl_putu(p, lb(&usb_dbg_errcode));
+    p = ovl_puts(p, &s_o_adn);     p = ovl_putu(p, lb(&xhci_dbg_addrn));
+    p = ovl_puts(p, &s_o_adcc);    p = ovl_putu(p, lb(&xhci_dbg_addrcc));
+    p = ovl_puts(p, &s_o_scr);     p = ovl_putu(p, lw(&xhci_scratchpad_count) & 0xFFFF);
+    p = ovl_puts(p, &s_o_scr_req); p = ovl_putu(p, lw(&xhci_scratchpad_req) & 0xFFFF);
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 48, &ovl_buf, COL_CYAN, OVL_BG);
+
+    # Line 5: address-device stage detail.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_adst_h); p = ovl_putu(p, lb(&xhci_dbg_adstage));
+    p = ovl_puts(p, &s_o_cc1);    p = ovl_putu(p, lb(&xhci_dbg_adcc1));
+    p = ovl_puts(p, &s_o_cc2);    p = ovl_putu(p, lb(&xhci_dbg_adcc2));
+    p = ovl_puts(p, &s_o_portsc); p = ovl_puth32(p, lw(&xhci_dbg_portsc));
+    p = ovl_puts(p, &s_o_slotst); p = ovl_putu(p, lb(&xhci_dbg_slotstate));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 64, &ovl_buf, COL_CYAN, OVL_BG);
+
+    # Line 6: reset-stage detail.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_rst_h);  p = ovl_putu(p, lb(&xhci_dbg_rststage));
+    p = ovl_puts(p, &s_o_ped);    p = ovl_putu(p, lb(&xhci_dbg_ped_ok));
+    p = ovl_puts(p, &s_o_ccs);    p = ovl_putu(p, lb(&xhci_dbg_ccs_ok));
+    p = ovl_puts(p, &s_o_sppre);  p = ovl_putu(p, lb(&xhci_dbg_speed_pre));
+    p = ovl_puts(p, &s_o_sppost); p = ovl_putu(p, lb(&xhci_dbg_speed_post));
+    p = ovl_puts(p, &s_o_pscpre); p = ovl_puth32(p, lw(&xhci_dbg_portsc_pre));
+    p = ovl_puts(p, &s_o_pscpost);p = ovl_puth32(p, lw(&xhci_dbg_portsc_post));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 80, &ovl_buf, COL_ORANGE, OVL_BG);
+
+    # Line 7: portsc write/poll detail.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_wrt);   p = ovl_puth32(p, lw(&xhci_dbg_portsc_written));
+    p = ovl_puts(p, &s_o_imm);   p = ovl_puth32(p, lw(&xhci_dbg_portsc_immed));
+    p = ovl_puts(p, &s_o_wait);  p = ovl_puth32(p, lw(&xhci_dbg_portsc_wait));
+    p = ovl_puts(p, &s_o_polls); p = ovl_putu(p, lw(&xhci_dbg_reset_polls));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 96, &ovl_buf, COL_AMBER, OVL_BG);
+
+    # Line 8: first 4 HID report bytes (bytes 1,2 are signed deltas).
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_r0); p = ovl_putu(p, lb(&usb_dbg_report));
+    let rb1 = lb(&usb_dbg_report + 1);
+    if rb1 >= 128 { rb1 = rb1 - 256; }
+    p = ovl_puts(p, &s_o_r1); p = ovl_puti(p, rb1);
+    let rb2 = lb(&usb_dbg_report + 2);
+    if rb2 >= 128 { rb2 = rb2 - 256; }
+    p = ovl_puts(p, &s_o_r2); p = ovl_puti(p, rb2);
+    p = ovl_puts(p, &s_o_r3); p = ovl_putu(p, lb(&usb_dbg_report + 3));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 112, &ovl_buf, COL_YELLOW, OVL_BG);
+
+    # Three i2c-HID debug lines.
+    call i2c_hid_debug_dump_line(rdi: &ovl_buf, eax: 0);
+    render_text(OVL_X, OVL_Y + 128, &ovl_buf, COL_TEAL, OVL_BG);
+    call i2c_hid_debug_dump_line(rdi: &ovl_buf, eax: 1);
+    render_text(OVL_X, OVL_Y + 144, &ovl_buf, COL_TEAL, OVL_BG);
+    call i2c_hid_debug_dump_line(rdi: &ovl_buf, eax: 2);
+    render_text(OVL_X, OVL_Y + 160, &ovl_buf, COL_TEAL, OVL_BG);
+
+    # Main-loop liveness line.
+    p = &ovl_buf;
+    p = ovl_puts(p, &s_o_ml_iters); p = ovl_putu(p, lw(&main_loop_iters));
+    p = ovl_puts(p, &s_o_ml_stage); p = ovl_putu(p, lb(&main_loop_stage));
+    p = ovl_puts(p, &s_o_ml_done);  p = ovl_putu(p, lb(&main_loop_stage_done));
+    p = ovl_puts(p, &s_o_ml_tick);  p = ovl_putu(p, lw(&tick_count));
+    sb(p, 0);
+    render_text(OVL_X, OVL_Y + 304, &ovl_buf, COL_RED, OVL_BG);
+
+    # Controller map: scan once, then either "no controllers" or per-controller.
+    usb_dbg_pci_scan();
+    if lb(&usb_dbg_xhci_n) == 0 {
+        p = &ovl_buf;
+        p = ovl_puts(p, &s_o_noctrl);
+        sb(p, 0);
+        render_text(OVL_X, OVL_Y + 176, &ovl_buf, COL_MAGEN, OVL_BG);
+    } else {
+        let ci = 0;
+        while ci < lb(&usb_dbg_xhci_n) && ci < 4 {
+            let rec = &usb_dbg_xhci_rec + ci * 64;
+            p = &ovl_buf;
+            p = ovl_puts(p, &s_o_ctrl);  p = ovl_putu(p, ci);
+            p = ovl_puts(p, &s_o_cbus);  p = ovl_putu(p, lb(rec + 0));
+            p = ovl_puts(p, &s_o_cdev);  p = ovl_putu(p, lb(rec + 1));
+            p = ovl_puts(p, &s_o_cfn);   p = ovl_putu(p, lb(rec + 2));
+            p = ovl_puts(p, &s_o_cports);p = ovl_putu(p, lb(rec + 3));
+            p = ovl_puts(p, &s_o_cmap);
+            # Per-port speed map (cap 24): 0 -> '.', else digit (speed+'0').
+            let ports = lb(rec + 3);
+            let j = 0;
+            while j < ports && j < 24 {
+                let v = lb(rec + j + 4);
+                if v == 0 { sb(p, CH_DOT); }
+                else { sb(p, v + CH_ZERO); }
+                p = p + 1;
+                j = j + 1;
+            }
+            sb(p, 0);
+            render_text(OVL_X, OVL_Y + 176 + ci * 16, &ovl_buf, COL_MAGEN, OVL_BG);
+            ci = ci + 1;
+        }
+    }
+
+    # Init-log lines (cap 8).
+    let li = 0;
+    while li < lb(&xhci_initlog_n) && li < 8 {
+        let rec = &xhci_initlog + li * 4;
+        p = &ovl_buf;
+        p = ovl_puts(p, &s_o_init);   p = ovl_putu(p, li);
+        p = ovl_puts(p, &s_o_cbus);   p = ovl_putu(p, lb(rec + 0));
+        p = ovl_puts(p, &s_o_cdev);   p = ovl_putu(p, lb(rec + 1));
+        p = ovl_puts(p, &s_o_cfn);    p = ovl_putu(p, lb(rec + 2));
+        p = ovl_puts(p, &s_o_istage); p = ovl_putu(p, lb(rec + 3));
+        sb(p, 0);
+        render_text(OVL_X, OVL_Y + 240 + li * 16, &ovl_buf, COL_CYAN, OVL_BG);
+        li = li + 1;
+    }
+
+    # FB-flip log lines (cap 4), placed below the init-log block.
+    let initn = lb(&xhci_initlog_n);
+    let fi = 0;
+    while fi < lb(&xhci_dbg_fp_n) && fi < 4 {
+        let rec = &xhci_dbg_fp + fi * 16;
+        p = &ovl_buf;
+        p = ovl_puts(p, &s_o_fp);   p = ovl_putu(p, fi);
+        p = ovl_puts(p, &s_o_fmp);  p = ovl_putu(p, lb(rec + 4));
+        p = ovl_puts(p, &s_o_fr);   p = ovl_putu(p, lb(rec + 5));
+        p = ovl_puts(p, &s_o_fmap);
+        let j = 0;
+        while j < 10 {
+            let v = lb(rec + j + 6);
+            if v == 0 { sb(p, CH_DOT); }
+            else { sb(p, v + CH_ZERO); }
+            p = p + 1;
+            j = j + 1;
+        }
+        sb(p, 0);
+        render_text(OVL_X, (initn + fi) * 16 + OVL_Y + 256, &ovl_buf, COL_GREEN, OVL_BG);
+        fi = fi + 1;
+    }
+
+    display_flip_rect(OVL_X, OVL_Y, OVL_W, OVL_H);
+}

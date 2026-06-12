@@ -297,7 +297,7 @@
     mov qword [rsp + ALL_RAX], -1
     jmp .done
 
-; SYS_HANDLE_CLOSE — release an opaque handle. rdi = handle.
+; SYS_HANDLE_CLOSE - release an opaque handle. rdi = handle.
 ;
 ; Generic close; today only HANDLE_KIND_DIR_ENTRY exists. handle_close
 ; verifies the handle (magic + kind + index + generation) before zeroing
@@ -321,12 +321,12 @@
     mov qword [rsp + ALL_RAX], -1
     jmp .done
 
-; SYS_FS_ENTRY_INFO — read a fixed-layout snapshot of a FAT16 entry into
+; SYS_FS_ENTRY_INFO - read a fixed-layout snapshot of a FAT16 entry into
 ; a user buffer. rdi = handle, rsi = user out buf, rdx = buf size.
 ;
 ; This is the replacement for the legacy "SYS_FS_ENTRY returned a
 ; dereferenceable snapshot pointer" contract. The kernel decides what
-; fields are exposed (name/ext/attr, first cluster, size — no internal
+; fields are exposed (name/ext/attr, first cluster, size - no internal
 ; FAT16 metadata) and copies them out by value, so ring 3 never observes
 ; a kernel address.
 .sc_fs_entry_info:
@@ -390,8 +390,8 @@
 ; SYS_APP_DECLARE_MANIFEST(app_id):
 ;   AND-narrows slot_cap_mask[r15] by app_manifest_table[app_id - APP_MIN_ID].
 ;   Returns the resulting effective mask (or -1 on bad app_id). AND-only
-;   ensures the manifest call can never *grant* a capability — it can only
-;   take them away — so an attacker who hijacks an already-narrowed slot
+;   ensures the manifest call can never *grant* a capability - it can only
+;   take them away - so an attacker who hijacks an already-narrowed slot
 ;   can't re-declare into a more powerful manifest.
 .sc_app_declare_manifest:
     cmp edi, APP_MIN_ID

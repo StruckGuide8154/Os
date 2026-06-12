@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# Track 4 Verification — QEMU pmemsave RAM-dump grep test
+# Track 4 Verification - QEMU pmemsave RAM-dump grep test
 #
 # WHAT THIS PROVES
 #   docs/track4-ram-secure-erasure-todo.md "Verification" items:
@@ -11,14 +11,14 @@
 #     image, and the sentinel is absent.
 #
 # PROTOCOL
-#   Phase 1 — Pre-wipe baseline dump:
+#   Phase 1 - Pre-wipe baseline dump:
 #     Boot headless, wait for [/BOOTTIME] (OS fully up, secrets drawn). Send
 #     QEMU monitor "pmemsave 0 0x20000000 <file>" (512 MiB). Grep the dump for
 #     the known test sentinels. Record which are found (expected: some will be
-#     present in the live image — these are the documented live-working-set
+#     present in the live image - these are the documented live-working-set
 #     residuals).
 #
-#   Phase 2 — Post-wipe dump:
+#   Phase 2 - Post-wipe dump:
 #     Send serial 'w' command to trigger nx_volatile_wipe_halt(). Wait for
 #     [WIPED] marker on serial (confirms scrub completed). Send pmemsave again.
 #     Grep for the SAME sentinels. Secrets that were scrubbed by
@@ -29,10 +29,10 @@
 #
 #   The test defines two classes of sentinel:
 #
-#   MUST-VANISH sentinels — values that nx_volatile_scrub_secrets zeroes:
+#   MUST-VANISH sentinels - values that nx_volatile_scrub_secrets zeroes:
 #     These are the per-boot secrets named in the scrub function. We cannot
 #     know their run-time values in advance (they are random), so instead we
-#     search for the ASCII debug tokens that the serial log records — if the
+#     search for the ASCII debug tokens that the serial log records - if the
 #     serial log contains a [CANARY:0x...] print, that hex value is our
 #     sentinel. If those tokens are not present (non-debug build), we use
 #     the static strings that nx_mem_key initialization fallback writes
@@ -40,15 +40,15 @@
 #
 #   STATIC-STRING sentinels that must NEVER appear in plaintext (data hygiene):
 #     These are cleartext secrets that should never be in plaintext in DRAM,
-#     e.g. well-known test passwords or private keys. For NexusOS the only
+#     e.g. well-known test passwords or private keys. For GritOS the only
 #     embedded literal that would be a real secret is the QRNG seed, which is
-#     compiled in — but its presence is the documented residual (it is in the
+#     compiled in - but its presence is the documented residual (it is in the
 #     read-only .text, always visible), so we do NOT check for its absence.
 #     Instead we check that after the wipe the per-boot secret region does not
 #     contain the fallback guard value "MEMKEY01" (which would mean the memory
-#     key draw produced the fallback constant — a weak-entropy signal).
+#     key draw produced the fallback constant - a weak-entropy signal).
 #
-#   DOCUMENTED RESIDUALS (found pre-wipe AND post-wipe — expected, not a fail):
+#   DOCUMENTED RESIDUALS (found pre-wipe AND post-wipe - expected, not a fail):
 #     - The kernel .text / UEFI firmware bytes (always present, irreducible)
 #     - The QEMU OVMF firmware strings (e.g. "BdsDxe")
 #     These are logged but not asserted absent.
@@ -58,7 +58,7 @@
 #   encryption. Under TCG, guest DRAM is plaintext on the host regardless of
 #   FME status. This test therefore validates ONLY the SOFTWARE scrub layer
 #   (nx_volatile_scrub_secrets / nx_volatile_wipe_arenas). Part C (TME/SME)
-#   verification requires real silicon or KVM+SEV — that is out of scope here
+#   verification requires real silicon or KVM+SEV - that is out of scope here
 #   and is documented as such in docs/track4-ram-secure-erasure-todo.md Part C.
 #
 # USAGE
@@ -96,13 +96,13 @@ $DumpSizeHex = '0x{0:X}' -f ($DumpSizeMB * 1024 * 1024)
 #   M=0x4D E=0x45 M=0x4D K=0x4B E=0x45 Y=0x59 0=0x30 1=0x31
 $SentinelMemkey01 = [byte[]]@(0x4D,0x45,0x4D,0x4B,0x45,0x59,0x30,0x31)
 
-# Sentinel: the ASCII string "NEXUS_TRACK4_SENTINEL" planted at a known
+# Sentinel: the ASCII string "GRIT_TRACK4_SENTINEL" planted at a known
 # kernel data offset. We write this via a build flag or detect if it exists
 # in the build; for the pmemsave test we look for it in the pre-wipe dump
 # (planted → should be found) and assert it is gone post-wipe (scrubbed).
 # NOTE: if this string is not in the binary (no debug sentinel compiled in),
 # we skip the planted-sentinel assertion and note it in the output.
-$SentinelString = 'NEXUS_TRACK4_SENTINEL'
+$SentinelString = 'GRIT_TRACK4_SENTINEL'
 $SentinelBytes  = [System.Text.Encoding]::ASCII.GetBytes($SentinelString)
 
 # ============================================================================
@@ -202,7 +202,7 @@ $fails   = [System.Collections.Generic.List[string]]::new()
 
 Write-Host ''
 Write-Host '============================================================' -ForegroundColor Cyan
-Write-Host ' Track 4 — QEMU pmemsave RAM-dump grep test' -ForegroundColor Cyan
+Write-Host ' Track 4 - QEMU pmemsave RAM-dump grep test' -ForegroundColor Cyan
 Write-Host ' Validating: software scrub removes secrets from DRAM' -ForegroundColor Cyan
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host ''
@@ -264,9 +264,9 @@ try {
     if (-not $bootLog.Contains('[/BOOTTIME]')) {
         throw "Boot did not reach [/BOOTTIME] within ${BootTimeoutSec}s. Serial captured:`n$bootLog"
     }
-    Write-Host '[track4-pmemsave] [/BOOTTIME] reached — OS up, secrets drawn.' -ForegroundColor Green
+    Write-Host '[track4-pmemsave] [/BOOTTIME] reached - OS up, secrets drawn.' -ForegroundColor Green
 
-    # Extract per-boot secret token (optional — present in debug builds)
+    # Extract per-boot secret token (optional - present in debug builds)
     $canaryToken = Extract-SerialToken $bootLog 'CANARY'
     $nonceToken  = Extract-SerialToken $bootLog 'NONCE'
     if ($canaryToken) { Write-Host "  CANARY token from serial: $canaryToken" -ForegroundColor Gray }
@@ -276,11 +276,11 @@ try {
     Start-Sleep -Seconds 3
 
     # ------------------------------------------------------------------
-    # Phase 1 — Pre-wipe RAM dump
+    # Phase 1 - Pre-wipe RAM dump
     # ------------------------------------------------------------------
     Write-Host ''
     Write-Host "--- Phase 1: Pre-wipe pmemsave (${DumpSizeMB} MiB -> $DumpPre) ---" -ForegroundColor Cyan
-    Write-Host '    (This is the live-running image — some secrets WILL be present)' -ForegroundColor DarkGray
+    Write-Host '    (This is the live-running image - some secrets WILL be present)' -ForegroundColor DarkGray
 
     if (Test-Path $DumpPre) { Remove-Item $DumpPre -Force }
     # pmemsave is slow for large images; give it extra time. The monitor
@@ -293,22 +293,22 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not (Test-Path $DumpPre)) {
-        Write-Host '[track4-pmemsave] WARN: pre-wipe dump file not created — monitor may have failed.' -ForegroundColor DarkYellow
+        Write-Host '[track4-pmemsave] WARN: pre-wipe dump file not created - monitor may have failed.' -ForegroundColor DarkYellow
         Write-Host '  Check QEMU monitor connectivity. Skipping Phase 1 assertions.' -ForegroundColor DarkYellow
     } else {
         $preBytes = [System.IO.File]::ReadAllBytes($DumpPre)
         Write-Host "  Pre-wipe dump: $([Math]::Round($preBytes.Length/1MB,1)) MiB" -ForegroundColor Gray
 
-        # Search for MEMKEY01 fallback constant — should be ABSENT in a healthy
+        # Search for MEMKEY01 fallback constant - should be ABSENT in a healthy
         # run (means RDRAND/RDTSC entropy succeeded; fallback never stored).
-        # If found, it just means entropy fell back — not a security failure, but noteworthy.
+        # If found, it just means entropy fell back - not a security failure, but noteworthy.
         $preMemkeyHits = Search-BytePattern $preBytes $SentinelMemkey01
         if ($preMemkeyHits.Count -gt 0) {
             Write-Host "  [INFO] MEMKEY01 fallback found at $($preMemkeyHits.Count) location(s) in pre-wipe dump." -ForegroundColor DarkYellow
             Write-Host '         This means nx_mem_key_ensure fell back to the weak-entropy guard.' -ForegroundColor DarkYellow
             Write-Host '         Expected on QEMU TCG (no RDRAND). Not a security failure on TCG.' -ForegroundColor DarkYellow
         } else {
-            Write-Host '  MEMKEY01 not found in pre-wipe dump (good — entropy succeeded).' -ForegroundColor Green
+            Write-Host '  MEMKEY01 not found in pre-wipe dump (good - entropy succeeded).' -ForegroundColor Green
         }
 
         # If binary has planted sentinel, verify it IS in the pre-wipe dump
@@ -317,7 +317,7 @@ try {
             if ($presentHits.Count -gt 0) {
                 Write-Host "  Planted sentinel '$SentinelString' FOUND in pre-wipe dump at $($presentHits.Count) offset(s). (Expected)" -ForegroundColor Green
             } else {
-                Write-Host "  [WARN] Planted sentinel '$SentinelString' NOT found in pre-wipe dump — may not be in a RAM region." -ForegroundColor DarkYellow
+                Write-Host "  [WARN] Planted sentinel '$SentinelString' NOT found in pre-wipe dump - may not be in a RAM region." -ForegroundColor DarkYellow
             }
         }
 
@@ -330,7 +330,7 @@ try {
             }
             $preCanaryHits = Search-BytePattern $preBytes $canaryBytes
             if ($preCanaryHits.Count -gt 0) {
-                Write-Host "  Canary token bytes FOUND in pre-wipe dump ($($preCanaryHits.Count) hits) — expected (live secret in DRAM)." -ForegroundColor Gray
+                Write-Host "  Canary token bytes FOUND in pre-wipe dump ($($preCanaryHits.Count) hits) - expected (live secret in DRAM)." -ForegroundColor Gray
             } else {
                 Write-Host "  [INFO] Canary token not found in pre-wipe dump (may be in RO pages or register only)." -ForegroundColor DarkGray
             }
@@ -339,7 +339,7 @@ try {
     }
 
     # ------------------------------------------------------------------
-    # Phase 2 — Trigger wipe and post-wipe dump
+    # Phase 2 - Trigger wipe and post-wipe dump
     # ------------------------------------------------------------------
     Write-Host ''
     Write-Host '--- Phase 2: Trigger nx_volatile_wipe_halt via serial w command ---' -ForegroundColor Cyan
@@ -357,12 +357,12 @@ try {
 
     if (-not $wipeLog.Contains('[WIPED]')) {
         $overall = $false
-        $fails.Add('Phase 2: [WIPED] marker not received — nx_volatile_wipe_halt may not have run (debug serial build required).')
+        $fails.Add('Phase 2: [WIPED] marker not received - nx_volatile_wipe_halt may not have run (debug serial build required).')
         Write-Host '[track4-pmemsave] WARN: [WIPED] marker not seen in serial output.' -ForegroundColor DarkYellow
         Write-Host '  If this is a non-debug build (ENABLE_DEBUG_SERIAL off), [WIPED] is not emitted.' -ForegroundColor DarkYellow
         Write-Host '  Proceeding with post-wipe dump anyway (scrub happens regardless).' -ForegroundColor DarkYellow
     } else {
-        Write-Host '[track4-pmemsave] [WIPED] received — scrub completed before post-wipe dump.' -ForegroundColor Green
+        Write-Host '[track4-pmemsave] [WIPED] received - scrub completed before post-wipe dump.' -ForegroundColor Green
     }
 
     # Give a moment for the HLT loop to settle, then dump
@@ -380,7 +380,7 @@ try {
 
     if (-not (Test-Path $DumpPost)) {
         $overall = $false
-        $fails.Add('Phase 2: post-wipe dump file not created — monitor pmemsave failed.')
+        $fails.Add('Phase 2: post-wipe dump file not created - monitor pmemsave failed.')
         Write-Host '[track4-pmemsave] FAIL: post-wipe dump not created.' -ForegroundColor Red
     } else {
         $postBytes = [System.IO.File]::ReadAllBytes($DumpPost)
@@ -392,10 +392,10 @@ try {
         $postMemkeyHits = Search-BytePattern $postBytes $SentinelMemkey01
         if ($postMemkeyHits.Count -gt 0) {
             $overall = $false
-            $fails.Add("Phase 2 Assertion A: MEMKEY01 fallback found at $($postMemkeyHits.Count) offset(s) in POST-WIPE dump — nx_mem_key region was NOT zeroed. Scrub regression!")
+            $fails.Add("Phase 2 Assertion A: MEMKEY01 fallback found at $($postMemkeyHits.Count) offset(s) in POST-WIPE dump - nx_mem_key region was NOT zeroed. Scrub regression!")
             Write-Host "[track4-pmemsave] FAIL: MEMKEY01 found in post-wipe dump at offsets: $($postMemkeyHits[0..([Math]::Min(4,$postMemkeyHits.Count)-1)] -join ', ')..." -ForegroundColor Red
         } else {
-            Write-Host '  [A] MEMKEY01 absent from post-wipe dump. (PASS — mem-key region zeroed)' -ForegroundColor Green
+            Write-Host '  [A] MEMKEY01 absent from post-wipe dump. (PASS - mem-key region zeroed)' -ForegroundColor Green
         }
 
         # --- Assertion B: Planted sentinel must NOT appear post-wipe ---
@@ -428,7 +428,7 @@ try {
                 Write-Host "[track4-pmemsave] FAIL: canary token found in post-wipe dump ($($postCanaryHits.Count) hits)!" -ForegroundColor Red
                 Write-Host '  This indicates nx_volatile_scrub_secrets did not reach the kernel_canary symbol.' -ForegroundColor Red
             } else {
-                Write-Host '  [C] Canary token bytes absent from post-wipe dump. (PASS — canary zeroed)' -ForegroundColor Green
+                Write-Host '  [C] Canary token bytes absent from post-wipe dump. (PASS - canary zeroed)' -ForegroundColor Green
             }
         } else {
             Write-Host '  [C] No canary token to check (non-debug build or token not emitted in serial).' -ForegroundColor DarkGray
@@ -442,13 +442,13 @@ try {
         $ovmfBytes  = [System.Text.Encoding]::ASCII.GetBytes('BdsDxe')
         $ovmfHits   = Search-BytePattern $postBytes $ovmfBytes
         if ($ovmfHits.Count -gt 0) {
-            Write-Host "    UEFI firmware ('BdsDxe') present: $($ovmfHits.Count) hits — OVMF text, irreducible." -ForegroundColor DarkGray
+            Write-Host "    UEFI firmware ('BdsDxe') present: $($ovmfHits.Count) hits - OVMF text, irreducible." -ForegroundColor DarkGray
         }
         # Check for kernel code identity string (always in .text, not scrubbed)
-        $nexusBytes = [System.Text.Encoding]::ASCII.GetBytes('NexusOS')
-        $nexusHits  = Search-BytePattern $postBytes $nexusBytes
-        if ($nexusHits.Count -gt 0) {
-            Write-Host "    Kernel string ('NexusOS') present: $($nexusHits.Count) hits — kernel .text, documented live residual." -ForegroundColor DarkGray
+        $gritBytes = [System.Text.Encoding]::ASCII.GetBytes('GritOS')
+        $gritHits  = Search-BytePattern $postBytes $gritBytes
+        if ($gritHits.Count -gt 0) {
+            Write-Host "    Kernel string ('GritOS') present: $($gritHits.Count) hits - kernel .text, documented live residual." -ForegroundColor DarkGray
         }
         Write-Host '    These residuals are named in docs/track4-ram-secure-erasure-todo.md §Part A "HARD LIMIT".' -ForegroundColor DarkGray
     }

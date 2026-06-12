@@ -5,7 +5,7 @@ $SRC = Join-Path $Root 'src\diag\uefi_mouse_probe.asm'
 $OUTDIR = Join-Path $Root 'build\probe-esp\EFI\BOOT'
 
 Write-Host ''
-Write-Host '  NexusOS Mouse Probe Build' -ForegroundColor Cyan
+Write-Host '  GritOS Mouse Probe Build' -ForegroundColor Cyan
 Write-Host '  ==========================' -ForegroundColor Cyan
 
 New-Item -Path $OUTDIR -ItemType Directory -Force | Out-Null

@@ -6,7 +6,7 @@
 %include "kpti.inc"
 
 extern ser_print_hex64
-; Terminal is now a pure-NexusHL app (src/user/nexushl/apps/terminal.nxh); its
+; Terminal is now a pure-GritHL app (src/user/grithl/apps/terminal.ghl); its
 ; former app_terminal_* / app_terminal_kernel_* / blob_end symbols no longer
 ; exist. Its draw/click/key are the generated app_hl_terminal_* symbols.
 ; NOTE: app_blob_start/app_blob_end symbols still exist in kernel.bin (labels

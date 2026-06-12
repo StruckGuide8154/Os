@@ -2,7 +2,7 @@
 #
 # This file FREEZES the set of legacy NASM `.asm`/`.inc` files the active tree is
 # permitted to contain. It is the migration manifest referenced by
-# docs/nhl-beyond-zero-trust-todo.md (P0: Repository Enforcement) and
+# docs/ghl-beyond-zero-trust-todo.md (P0: Repository Enforcement) and
 # docs/track1-repo-enforcement-todo.md.
 #
 # Format (pipe-delimited, one record per line):
@@ -11,11 +11,11 @@
 #     subsystem   - owning area
 #     risk        - high | medium | low  (security criticality of migrating it)
 #     status      - legacy (migration pending) | migrating | <unused>
-#     replacement - target NHL/NexusHLK module, or TBD
+#     replacement - target GHL/GritHLK module, or TBD
 #
 # Enforcement (tools/security/check_no_asm.ps1 -InventoryGuard):
 #   - Any active .asm/.inc NOT listed here (matched on the path column) is a hard
-#     failure: new first-class work must be NHL/NexusHLK.
+#     failure: new first-class work must be GHL/GritHLK.
 #   - A listed file that no longer exists is a stale entry: prune the line. The
 #     inventory only shrinks as migration deletes legacy modules.
 #   - A non-comment line without the pipe-delimited columns is malformed.
@@ -159,11 +159,11 @@ src/kernel/drivers/rtl8156_usb.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/spi.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/spi_hid.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/usb.asm | kernel-drivers | medium | legacy | TBD
-src/kernel/drivers/usb_hid.asm | kernel-drivers | medium | migrating | src/kernel/nexushlk/usb_hid_helpers.nxh
-src/kernel/drivers/usb_hid_slot2.inc | kernel-drivers | medium | migrating | src/kernel/nexushlk/usb_hid_helpers.nxh
-src/kernel/drivers/usb_hid_poll.inc | kernel-drivers | medium | migrating | src/kernel/nexushlk/usb_hid_helpers.nxh
-src/kernel/drivers/usb_hid_init.inc | kernel-drivers | medium | migrating | src/kernel/nexushlk/usb_hid_helpers.nxh
-src/kernel/drivers/usb_hid_data.inc | kernel-drivers | medium | migrating | src/kernel/nexushlk/usb_hid_helpers.nxh
+src/kernel/drivers/usb_hid.asm | kernel-drivers | medium | migrating | src/kernel/grithlk/usb_hid_helpers.ghl
+src/kernel/drivers/usb_hid_slot2.inc | kernel-drivers | medium | migrating | src/kernel/grithlk/usb_hid_helpers.ghl
+src/kernel/drivers/usb_hid_poll.inc | kernel-drivers | medium | migrating | src/kernel/grithlk/usb_hid_helpers.ghl
+src/kernel/drivers/usb_hid_init.inc | kernel-drivers | medium | migrating | src/kernel/grithlk/usb_hid_helpers.ghl
+src/kernel/drivers/usb_hid_data.inc | kernel-drivers | medium | migrating | src/kernel/grithlk/usb_hid_helpers.ghl
 src/kernel/drivers/xhci.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/xhci_data.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/xhci_dbglog.inc | kernel-drivers | medium | legacy | TBD
@@ -185,11 +185,11 @@ src/kernel/gui/taskbar.asm | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar_draw.inc | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar_data.inc | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar_click.inc | kernel-gui | medium | legacy | TBD
-src/kernel/gui/window.asm | kernel-gui | medium | migrating | src/kernel/nexushlk/wm_helpers.nxh
-src/kernel/gui/window_lifecycle.inc | kernel-gui | medium | migrating | src/kernel/nexushlk/wm_helpers.nxh
-src/kernel/gui/window_draw.inc | kernel-gui | medium | migrating | src/kernel/nexushlk/wm_helpers.nxh
-src/kernel/gui/window_desktop.inc | kernel-gui | medium | migrating | src/kernel/nexushlk/wm_helpers.nxh
-src/kernel/gui/window_data.inc | kernel-gui | medium | migrating | src/kernel/nexushlk/wm_helpers.nxh
+src/kernel/gui/window.asm | kernel-gui | medium | migrating | src/kernel/grithlk/wm_helpers.ghl
+src/kernel/gui/window_lifecycle.inc | kernel-gui | medium | migrating | src/kernel/grithlk/wm_helpers.ghl
+src/kernel/gui/window_draw.inc | kernel-gui | medium | migrating | src/kernel/grithlk/wm_helpers.ghl
+src/kernel/gui/window_desktop.inc | kernel-gui | medium | migrating | src/kernel/grithlk/wm_helpers.ghl
+src/kernel/gui/window_data.inc | kernel-gui | medium | migrating | src/kernel/grithlk/wm_helpers.ghl
 src/kernel/kernel_build.asm | kernel-build | high | legacy | TBD
 src/kernel/lib/font.asm | kernel-lib | medium | legacy | TBD
 src/kernel/lib/math.asm | kernel-lib | medium | legacy | TBD
@@ -213,7 +213,7 @@ src/kernel/proc/process_data.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/process_core.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/process_callbacks.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall.asm | kernel-proc | high | legacy | TBD
-src/kernel/proc/syscall_data.inc | kernel-proc | high | migrating | src/kernel/nexushlk/syscall_data.nxh
+src/kernel/proc/syscall_data.inc | kernel-proc | high | migrating | src/kernel/grithlk/syscall_data.ghl
 src/kernel/proc/syscall_dispatch_core.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall_epilogue.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall_handlers_gui_wm.inc | kernel-proc | high | legacy | TBD
@@ -221,14 +221,14 @@ src/kernel/proc/syscall_handlers_sys_fs.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall_handlers_wx_net.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall_handlers_xml_draw.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/syscall_perm.inc | kernel-proc | high | legacy | TBD
-src/kernel/proc/syscall_security.inc | kernel-proc | high | migrating | src/kernel/nexushlk/syscall_secure.nxh
-src/kernel/proc/syscall_support.inc | kernel-proc | high | migrating | src/kernel/nexushlk/syscall_validate.nxh
-src/kernel/proc/syscall_validation.inc | kernel-proc | high | migrating | src/kernel/nexushlk/syscall_validate.nxh
+src/kernel/proc/syscall_security.inc | kernel-proc | high | migrating | src/kernel/grithlk/syscall_secure.ghl
+src/kernel/proc/syscall_support.inc | kernel-proc | high | migrating | src/kernel/grithlk/syscall_validate.ghl
+src/kernel/proc/syscall_validation.inc | kernel-proc | high | migrating | src/kernel/grithlk/syscall_validate.ghl
 src/kernel/proc/usermode.asm | kernel-proc | high | legacy | TBD
-src/kernel/proc/usermode_callbacks.inc | kernel-proc | high | migrating | src/kernel/nexushlk/usermode_callbacks.nxh
+src/kernel/proc/usermode_callbacks.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_decls.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_entry.inc | kernel-proc | high | legacy | TBD
-src/kernel/proc/usermode_integrity.inc | kernel-proc | high | migrating | src/kernel/nexushlk/usermode_callbacks.nxh
+src/kernel/proc/usermode_integrity.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_paging.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_slot_install.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_slot_state.inc | kernel-proc | high | legacy | TBD
@@ -244,7 +244,7 @@ src/resources/design-system/palette_dark.inc | resources | low | legacy | TBD
 src/resources/design-system/palette_light.inc | resources | low | legacy | TBD
 src/resources/design-system/parser_example.asm | resources | low | legacy | TBD
 src/user/apps.asm | user-apps | medium | legacy | TBD
-src/user/apps/about.inc | user-apps | medium | migrating | src/user/nexushl/apps/about.nxh
+src/user/apps/about.inc | user-apps | medium | migrating | src/user/grithl/apps/about.ghl
 src/user/apps/common.inc | user-apps | medium | legacy | TBD
 src/user/apps/launch.inc | user-apps | medium | legacy | TBD
 src/user/apps/launch_handlers.inc | user-apps | medium | legacy | TBD
@@ -259,12 +259,12 @@ src/user/apps/media_viewer_scaler.inc | user-apps | medium | legacy | TBD
 src/user/apps/media_viewer_vector.inc | user-apps | medium | legacy | TBD
 src/user/apps/media_viewer_video.inc | user-apps | medium | legacy | TBD
 src/user/apps/security_probe.inc | user-apps | medium | legacy | TBD
-src/user/apps/settings.inc | user-apps | medium | migrating | src/user/nexushl/apps/settings.nxh
-src/user/apps/shell.inc | user-apps | medium | migrating | src/user/nexushl/apps/explorer.nxh
+src/user/apps/settings.inc | user-apps | medium | migrating | src/user/grithl/apps/settings.ghl
+src/user/apps/shell.inc | user-apps | medium | migrating | src/user/grithl/apps/explorer.ghl
 src/user/apps/state.inc | user-apps | medium | legacy | TBD
-src/user/lib/nexus_app.inc | user-lib | medium | legacy | TBD
-src/user/lib/nexus_fs.inc | user-lib | medium | legacy | TBD
-src/user/lib/nexus_window.inc | user-lib | medium | legacy | TBD
+src/user/lib/grit_app.inc | user-lib | medium | legacy | TBD
+src/user/lib/grit_fs.inc | user-lib | medium | legacy | TBD
+src/user/lib/grit_window.inc | user-lib | medium | legacy | TBD
 src/user/poc/exploit_poc_syscall9.asm | user-poc | low | legacy | TBD
 src/user/poc/poc_standalone_prelude.inc | user-poc | low | legacy | TBD
 src/user/poc/shadow_stack_poc.asm | user-poc | low | legacy | TBD

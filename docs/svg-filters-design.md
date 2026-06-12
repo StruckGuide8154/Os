@@ -1,13 +1,13 @@
-# SVG Advanced Features — Design Document
+# SVG Advanced Features - Design Document
 
 Status: **in-progress.** Stage 1a (`feOffset`), Stage 2a (rect clipPath),
 and Stage 3b/3c (text layout) landed and wired into the render loop. Buffered
 filter primitives (blur/colorMatrix), geometry-stencil clips, masks, and the
-TTF glyph path remain scaffolded — see the migration checklist below.
+TTF glyph path remain scaffolded - see the migration checklist below.
 
 This document captures the architecture decisions for implementing SVG filters,
-masks/clipping, and full text layout in the NexusHL static SVG renderer
-(`src/user/nexushl/lib/svg2/`). It exists so that future contributors don't
+masks/clipping, and full text layout in the GritHL static SVG renderer
+(`src/user/grithl/lib/svg2/`). It exists so that future contributors don't
 need to re-derive the tradeoffs.
 
 ---
@@ -28,20 +28,20 @@ bidi text, complex shaping (ligatures, contextual forms), variable fonts.
 
 ### The render-target problem
 
-Today all rasterization goes through kernel syscalls (40–44 in
-`src/user/nexushl/lib/svg.nxh`). The kernel writes pixels directly to the
+Today all rasterization goes through kernel syscalls (40-44 in
+`src/user/grithl/lib/svg.ghl`). The kernel writes pixels directly to the
 back buffer. Filters require rendering a subtree into an **intermediate ARGB
 buffer**, transforming the pixels (convolve, color-multiply, offset), then
 compositing back.
 
 ### Decision: user-mode ARGB canvas, no new kernel syscalls (chosen)
 
-Filter intermediates live in a NexusHL `state {}` buffer (BSS in the SVG
+Filter intermediates live in a GritHL `state {}` buffer (BSS in the SVG
 renderer's app slot). User-mode code rasterizes into the canvas with direct
-`sw()` writes — no kernel round-trip per pixel. To composite the filtered
+`sw()` writes - no kernel round-trip per pixel. To composite the filtered
 result back, we loop over canvas pixels and call the existing
 `sc_blend_pixel` syscall. This is O(region_pixels) syscalls per filter
-application — fine for typical icon-sized regions (≤ 128² = 16 K pixels),
+application - fine for typical icon-sized regions (≤ 128² = 16 K pixels),
 and a future `sc_gui_blit_argb` syscall can replace the loop without
 changing any caller.
 
@@ -68,9 +68,9 @@ integer overflow in offset computation.
 
 ### Decision: render context threaded through callsites
 
-`raster.nxh` gains a small **render context** struct (target buffer, pitch,
+`raster.ghl` gains a small **render context** struct (target buffer, pitch,
 w, h, clip rect). All shape renderers accept a `ctx` handle. The default
-context wraps the back buffer (syscalls 40–44). Filter code allocates an
+context wraps the back buffer (syscalls 40-44). Filter code allocates an
 intermediate context, redirects the subtree render, then runs filter passes
 read/writing through the new buffer syscalls.
 
@@ -86,7 +86,7 @@ space, clip it to a hard maximum of **1024×1024 px** (4 MiB per buffer), and
 allocate two ping-pong buffers from a per-render scratch arena.
 
 Scratch arena: 8 MiB at `APP_SLOT_TOP - 0x800000` for the SVG-renderer slot.
-Allocator is bump-only and resets on each `svg_render()` call — filters can't
+Allocator is bump-only and resets on each `svg_render()` call - filters can't
 outlive a render call. This rules out a whole class of UAF bugs by
 construction.
 
@@ -121,8 +121,8 @@ Two-pass separable convolution. Kernel computed once: `G(x) = exp(-x² /
 
 ### Filter graph evaluation
 Parse `<filter>` children once into a primitive list. Each primitive has
-`in1`, `in2`, `result`. Maintain a string-keyed result map (small — most
-filters are 1–4 primitives). Evaluate top-to-bottom. Last primitive's output
+`in1`, `in2`, `result`. Maintain a string-keyed result map (small - most
+filters are 1-4 primitives). Evaluate top-to-bottom. Last primitive's output
 is composited back to the original render target inside the filter region.
 
 ---
@@ -133,7 +133,7 @@ is composited back to the original render target inside the filter region.
 Easier than masks. Two cases:
 
 1. **Axis-aligned rect clip** → push onto the existing scanline clip rect in
-   `raster.nxh`. Fast path.
+   `raster.ghl`. Fast path.
 2. **Arbitrary geometry clip** → rasterize the clipPath's contents to a 1-bit
    stencil buffer over the bounding box. Scanline filler ANDs with the
    stencil before emitting each span.
@@ -155,7 +155,7 @@ B·0.0721, then ×A) or `alpha` (just A) per `mask-type`.
 ### Decision: minimal TrueType subset, embedded font
 
 We embed **one** TTF (DejaVu Sans Book, ~700 KB) into the SVG2 lib as
-`lib/svg2/font_data.nxh` (generated from the `.ttf` via a build-time
+`lib/svg2/font_data.ghl` (generated from the `.ttf` via a build-time
 PowerShell script). Parsed tables we need:
 
 | Table | Purpose | Skip if missing |
@@ -170,17 +170,17 @@ PowerShell script). Parsed tables we need:
 | `kern` format 0 | pair kerning | optional, off when absent |
 
 **Glyph rendering**: outlines flattened with the existing Bezier subdivider
-(`flatten.nxh`) into the polygon buffer; filled with the scanline rasterizer.
+(`flatten.ghl`) into the polygon buffer; filled with the scanline rasterizer.
 Glyph advance and metrics from `hmtx`.
 
 **No hinting.** No subpixel rendering. No GPOS/GSUB. No script shaping.
 
 ### Layout features
 
-- `text-anchor`: start / middle / end — adjust x by 0, -width/2, -width.
+- `text-anchor`: start / middle / end - adjust x by 0, -width/2, -width.
 - `<tspan>` with absolute `x`/`y` or relative `dx`/`dy`: chains positioning;
   each tspan is an independent sub-run.
-- `<textPath>`: walk along the referenced path using flatten.nxh, advancing
+- `<textPath>`: walk along the referenced path using flatten.ghl, advancing
   by each glyph's hmtx width, computing tangent angle for rotation.
 - `kerning="auto"` (default): apply `kern` table; `kerning="0"` disables.
 
@@ -190,15 +190,15 @@ Glyph advance and metrics from `hmtx`.
 
 ```
 lib/svg2/
-  filter.nxh         # filter graph parse + dispatch
-  filter_offset.nxh  # feOffset
-  filter_blur.nxh    # feGaussianBlur (separable conv)
-  filter_color.nxh   # feColorMatrix
-  filter_ctx.nxh     # intermediate-buffer scratch arena + ARGB ops
-  mask.nxh           # <mask> + <clipPath>
-  ttf.nxh            # TrueType parser
-  font_data.nxh      # embedded DejaVu Sans bytes
-  text_layout.nxh    # tspan, textPath, text-anchor, kerning
+  filter.ghl         # filter graph parse + dispatch
+  filter_offset.ghl  # feOffset
+  filter_blur.ghl    # feGaussianBlur (separable conv)
+  filter_color.ghl   # feColorMatrix
+  filter_ctx.ghl     # intermediate-buffer scratch arena + ARGB ops
+  mask.ghl           # <mask> + <clipPath>
+  ttf.ghl            # TrueType parser
+  font_data.ghl      # embedded DejaVu Sans bytes
+  text_layout.ghl    # tspan, textPath, text-anchor, kerning
 ```
 
 Each module < 400 lines. Independent test paths (one minimal SVG per
@@ -210,32 +210,32 @@ feature in `build/test_svg/`).
 
 - [x] **Stage 0**: design doc (this file).
 - [x] **Stage 1a**: `feOffset` standalone (matrix-translate shortcut). Lands
-      in `filter.nxh` today.
+      in `filter.ghl` today.
 - [ ] **Stage 1b**: kernel syscalls 50/51/52 + bounds validation tests.
-- [ ] **Stage 1c**: filter_ctx.nxh (scratch arena + intermediate buffers).
+- [ ] **Stage 1c**: filter_ctx.ghl (scratch arena + intermediate buffers).
 - [ ] **Stage 1d**: filter graph parser (`<feFoo in="" result="">` resolution).
 - [ ] **Stage 1e**: feGaussianBlur (separable conv).
 - [ ] **Stage 1f**: feColorMatrix.
-- [x] **Stage 2a**: clipPath (rect fast path). `clip.nxh` wired into
-      `svg2.nxh:svg_render_node` — clip rect saved to render-loop locals
+- [x] **Stage 2a**: clipPath (rect fast path). `clip.ghl` wired into
+      `svg2.ghl:svg_render_node` - clip rect saved to render-loop locals
       (nesting-safe) and intersected for `clip-path="url(#id)"` nodes.
 - [ ] **Stage 2b**: clipPath (geometry stencil).
 - [ ] **Stage 2c**: mask.
 - [ ] **Stage 3a**: TTF parser + glyph outline → polygon.
 - [x] **Stage 3b/3c**: hmtx-driven advance + text-anchor + tspan positioning.
-      `text_layout.nxh` wired into `render_dispatch` (replaces the legacy
-      `shapes.nxh:svg_draw_text`). Bitmap-font metrics until 3a lands.
+      `text_layout.ghl` wired into `render_dispatch` (replaces the legacy
+      `shapes.ghl:svg_draw_text`). Bitmap-font metrics until 3a lands.
 - [x] **Stage 3d**: textPath along arbitrary path.
 - [ ] **Stage 3e**: kern table application.
 
 ### Compiler prerequisite (landed)
 
 The svg2 advanced modules need functions with >6 parameters (`flatten_cubic`,
-`flatten_arc`, `pp_emit_arc`) and wide local-variable frames. `nxhc.py` was
+`flatten_arc`, `pp_emit_arc`) and wide local-variable frames. `gritc.py` was
 extended accordingly:
 
-- Params 7+ are passed on the stack per System V — caller pushes them
-  right-to-left, callee reads them at `[rbp+16]`, `[rbp+24]`, … Recursion-safe
+- Params 7+ are passed on the stack per System V - caller pushes them
+  right-to-left, callee reads them at `[rbp+16]`, `[rbp+24]`, ... Recursion-safe
   because stack args live in the caller frame.
 - Per-function frame sizing: the prologue's `sub rsp` is sized from a
   `let`-count pre-pass instead of a fixed 512-byte cap, so wide functions

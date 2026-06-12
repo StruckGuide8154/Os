@@ -1,9 +1,9 @@
 # =============================================================================
-# test_enforcement_meta.ps1 — meta-tests for the repository-enforcement guards.
+# test_enforcement_meta.ps1 - meta-tests for the repository-enforcement guards.
 #
 # Beyond-zero-trust Track 1 (docs/track1-repo-enforcement-todo.md, "Tests for
 # the enforcement itself (meta-tests)"). These assert that the guards actually
-# FAIL on planted violations — a guard that never fires is no guard.
+# FAIL on planted violations - a guard that never fires is no guard.
 #
 # Each test plants a violation in the working tree, runs the relevant guard,
 # asserts a non-zero exit, then restores the tree EXACTLY (try/finally so a

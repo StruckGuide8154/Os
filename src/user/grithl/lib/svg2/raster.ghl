@@ -1,0 +1,357 @@
+# GritHL SVG2 - scanline polygon filler.
+#
+# Builds an edge table from a polygon vertex list (16.16 fixed dest-space
+# coords), then for each scanline computes intersections, sorts by X, and
+# emits spans applying the active paint server.
+#
+# Vertex buffer layout:  poly_buf[i*2+0] = x_fx, poly_buf[i*2+1] = y_fx.
+# Subpath terminator: a vertex with x_fx == POLY_END marks "end of subpath";
+# the filler resets pen-state but continues with the next subpath.  This lets
+# a single buffer hold multiple closed contours, all rendered with one fill
+# rule (even-odd or nonzero, per fill_rule arg).
+#
+# fill_rule: 0 = nonzero (default), 1 = even-odd.
+
+use svg2.matrix
+use svg2.fixed
+use svg2.paint
+use svg2.render_ctx
+use svg2.stencil
+
+const POLY_MAX = 1024
+const POLY_END = 0x7FFFFFFE
+const EDGE_MAX = 256
+# Each edge entry: ymin(i32) ymax(i32) x_at_ymin_fx(i32) dx_per_y_fx(i32) winding(i32) = 20 bytes
+const EDGE_STRIDE = 20
+
+state {
+    poly_buf: 8192;          # 1024 vertices * 2 * 4
+    poly_count: 4;
+    edge_buf: 5120;          # 256 edges * 20
+    edge_count: 4;
+    aet_idx: 1024;           # 256 active-edge indices (int32)
+    aet_xs:  1024;           # 256 parallel x-at-scan slots (16.16 fixed)
+    aet_count: 4;
+    raster_fill_rule: 4;
+    raster_clip_x0: 4;
+    raster_clip_y0: 4;
+    raster_clip_x1: 4;
+    raster_clip_y1: 4;
+    svg_span_buf: 8192;      # batched scanline run: 2048 ARGB pixels
+}
+
+fn poly_begin() {
+    sw(&poly_count, 0);
+}
+
+fn poly_add(x_fx, y_fx) {
+    let n = lw(&poly_count);
+    if n >= POLY_MAX { return; }
+    sw(&poly_buf + n * 8 + 0, x_fx);
+    sw(&poly_buf + n * 8 + 4, y_fx);
+    sw(&poly_count, n + 1);
+}
+
+fn poly_end_subpath() {
+    poly_add(POLY_END, 0);
+}
+
+fn raster_set_clip(x0, y0, x1, y1) {
+    sw(&raster_clip_x0, x0);
+    sw(&raster_clip_y0, y0);
+    sw(&raster_clip_x1, x1);
+    sw(&raster_clip_y1, y1);
+}
+
+fn raster_set_fill_rule(r) {
+    sw(&raster_fill_rule, r);
+}
+
+# Push an edge given two endpoints in 16.16 fixed.  Horizontal edges skipped.
+fn edge_push(x0, y0, x1, y1) {
+    if y0 == y1 { return; }
+    let n = lw(&edge_count);
+    if n >= EDGE_MAX { return; }
+    let ymin = y0;
+    let ymax = y1;
+    let xat = x0;
+    let wind = 1;
+    if y0 > y1 {
+        ymin = y1;
+        ymax = y0;
+        xat = x1;
+        wind = 0 - 1;
+    }
+    let dy = ymax - ymin;
+    let dx = 0;
+    if y0 < y1 { dx = fx_div(x1 - x0, y1 - y0); }
+    else       { dx = fx_div(x0 - x1, y0 - y1); }
+    let base = &edge_buf + n * EDGE_STRIDE;
+    sw(base + 0,  ymin);
+    sw(base + 4,  ymax);
+    sw(base + 8,  xat);
+    sw(base + 12, dx);
+    sw(base + 16, wind);
+    sw(&edge_count, n + 1);
+}
+
+# Build edge table from poly_buf.  Subpaths separated by POLY_END markers.
+fn build_edges() {
+    sw(&edge_count, 0);
+    let n = lw(&poly_count);
+    if n < 2 { return; }
+    let i = 0;
+    let sub_start = 0;
+    let have_pen = 0;
+    let pen_x = 0;
+    let pen_y = 0;
+    while i < n {
+        let x = lw(&poly_buf + i * 8 + 0);
+        let y = lw(&poly_buf + i * 8 + 4);
+        if x == POLY_END {
+            # close subpath: connect pen to start
+            if have_pen == 1 {
+                let sx = lw(&poly_buf + sub_start * 8 + 0);
+                let sy = lw(&poly_buf + sub_start * 8 + 4);
+                if pen_x != sx { edge_push(pen_x, pen_y, sx, sy); }
+                else { if pen_y != sy { edge_push(pen_x, pen_y, sx, sy); } }
+            }
+            sub_start = i + 1;
+            have_pen = 0;
+        } else {
+            if have_pen == 0 {
+                sub_start = i;
+                have_pen = 1;
+            } else {
+                edge_push(pen_x, pen_y, x, y);
+            }
+            pen_x = x;
+            pen_y = y;
+        }
+        i = i + 1;
+    }
+    # close trailing subpath if user forgot terminator
+    if have_pen == 1 {
+        let sx = lw(&poly_buf + sub_start * 8 + 0);
+        let sy = lw(&poly_buf + sub_start * 8 + 4);
+        if pen_x != sx { edge_push(pen_x, pen_y, sx, sy); }
+        else { if pen_y != sy { edge_push(pen_x, pen_y, sx, sy); } }
+    }
+}
+
+# Sort AET entries (indices + parallel xs) by xs, insertion sort.
+fn aet_sort_by_xs() {
+    let n = lw(&aet_count);
+    let i = 1;
+    while i < n {
+        let key_idx = lw(&aet_idx + i * 4);
+        let key_x   = lw(&aet_xs  + i * 4);
+        let j = i - 1;
+        while j >= 0 {
+            let ox = lw(&aet_xs + j * 4);
+            if ox <= key_x { break; }
+            sw(&aet_idx + (j + 1) * 4, lw(&aet_idx + j * 4));
+            sw(&aet_xs  + (j + 1) * 4, ox);
+            j = j - 1;
+        }
+        sw(&aet_idx + (j + 1) * 4, key_idx);
+        sw(&aet_xs  + (j + 1) * 4, key_x);
+        i = i + 1;
+    }
+}
+
+# --- Anti-aliased coverage filling ------------------------------------------
+#
+# poly_fill samples AA_SUBSAMPLES sub-scanlines per pixel row and accumulates
+# fractional pixel coverage into aa_cov. Vertical AA comes from the multiple
+# sub-scanlines; horizontal AA from fractional span endpoints. The row is then
+# emitted once: paint server colour modulated by coverage.
+#
+# Coverage is 16.16 fixed: a fully-covered pixel reaches FX_ONE after all
+# sub-samples. aa_cov is indexed by (device_x - clip_x0); the clipped width is
+# capped at AA_COV_MAX pixels.
+
+const AA_SUBSAMPLES = 4
+const AA_COV_MAX    = 2048
+
+state {
+    aa_cov: 8192;                # AA_COV_MAX fixed-point coverage cells
+    aa_row_min: 4;               # nonzero-coverage extent for this row
+    aa_row_max: 4;
+}
+
+# Accumulate one sub-scanline span [xa_fx, xb_fx) into the coverage row.
+# `w` is the per-sub-sample weight (FX_ONE / AA_SUBSAMPLES). `cx0`/`cw` are
+# the clip origin and clipped width.
+fn aa_add_span(cx0, cw, xa_fx, xb_fx, w) {
+    let lo = cx0 * FX_ONE;
+    let hi = (cx0 + cw) * FX_ONE;
+    if xa_fx < lo { xa_fx = lo; }
+    if xb_fx > hi { xb_fx = hi; }
+    if xa_fx >= xb_fx { return; }
+    let xa_p = fx_floor_i(xa_fx);
+    let xb_p = fx_floor_i(xb_fx);
+    let li = xa_p - cx0;
+    let ri = xb_p - cx0;
+    if li < lw(&aa_row_min) { sw(&aa_row_min, li); }
+    if ri > lw(&aa_row_max) { sw(&aa_row_max, ri); }
+    if xa_p == xb_p {
+        let f = ((xb_fx - xa_fx) * w) / FX_ONE;
+        sw(&aa_cov + li * 4, lw(&aa_cov + li * 4) + f);
+        return;
+    }
+    let left_frac = FX_ONE - (xa_fx - xa_p * FX_ONE);
+    sw(&aa_cov + li * 4, lw(&aa_cov + li * 4) + (left_frac * w) / FX_ONE);
+    let px = xa_p + 1;
+    while px < xb_p {
+        let ci = px - cx0;
+        sw(&aa_cov + ci * 4, lw(&aa_cov + ci * 4) + w);
+        px = px + 1;
+    }
+    let right_frac = xb_fx - xb_p * FX_ONE;
+    if right_frac > 0 {
+        sw(&aa_cov + ri * 4, lw(&aa_cov + ri * 4) + (right_frac * w) / FX_ONE);
+    }
+}
+
+# Emit the accumulated coverage row at integer `y`: paint server colour with
+# alpha scaled by coverage, batched through the active render context.
+fn aa_emit_row(y, cx0, cw) {
+    let lo = lw(&aa_row_min);
+    let hi = lw(&aa_row_max);
+    if lo < 0 { lo = 0; }
+    if hi > cw - 1 { hi = cw - 1; }
+    if lo > hi { return; }
+    let i = lo;
+    let n = 0;
+    while i <= hi {
+        let cv = lw(&aa_cov + i * 4);
+        let argb = 0;
+        if cv > 0 {
+            if cv > FX_ONE { cv = FX_ONE; }
+            let dx = cx0 + i;
+            if stencil_test(dx, y) == 1 {
+                let c = paint_eval(dx, y);
+                let a = ((((c >> 24) & 0xFF) * cv) / FX_ONE);
+                argb = (a << 24) | (c & 0xFFFFFF);
+            }
+        }
+        sw(&svg_span_buf + n * 4, argb);
+        n = n + 1;
+        i = i + 1;
+    }
+    fctx_emit_span_argb(cx0 + lo, y, n, &svg_span_buf);
+}
+
+# Build the active-edge table for a single sub-scanline at `scan_fx`.
+fn aa_build_aet(scan_fx, n) {
+    sw(&aet_count, 0);
+    let k = 0;
+    while k < n {
+        let base = &edge_buf + k * EDGE_STRIDE;
+        let ymin = lw(base + 0);
+        let ymax = lw(base + 4);
+        if scan_fx >= ymin {
+            if scan_fx < ymax {
+                let x_at = lw(base + 8);
+                let dx = lw(base + 12);
+                let dy = scan_fx - ymin;
+                let x_here = x_at + fx_mul(dx, dy);
+                let ai = lw(&aet_count);
+                if ai < EDGE_MAX {
+                    sw(&aet_xs  + ai * 4, x_here);
+                    sw(&aet_idx + ai * 4, k);
+                    sw(&aet_count, ai + 1);
+                }
+            }
+        }
+        k = k + 1;
+    }
+    aet_sort_by_xs();
+}
+
+# Walk the sorted AET under the active fill rule, accumulating each interior
+# span into the coverage row with sub-sample weight `w`.
+fn aa_accumulate(cx0, cw, rule, w) {
+    let m = lw(&aet_count);
+    if rule == 1 {
+        let p = 0;
+        while p + 1 < m {
+            aa_add_span(cx0, cw, lw(&aet_xs + p * 4),
+                        lw(&aet_xs + (p + 1) * 4), w);
+            p = p + 2;
+        }
+        return;
+    }
+    let p2 = 0;
+    let winding = 0;
+    let span_open = 0;
+    let span_x_fx = 0;
+    while p2 < m {
+        let ei = lw(&aet_idx + p2 * 4);
+        let wd = lw(&edge_buf + ei * EDGE_STRIDE + 16);
+        let xnow = lw(&aet_xs + p2 * 4);
+        let was = winding;
+        winding = winding + wd;
+        if was == 0 {
+            if winding != 0 { span_open = 1; span_x_fx = xnow; }
+        } else {
+            if winding == 0 {
+                if span_open == 1 {
+                    aa_add_span(cx0, cw, span_x_fx, xnow, w);
+                    span_open = 0;
+                }
+            }
+        }
+        p2 = p2 + 1;
+    }
+}
+
+# Fill the polygon currently in poly_buf using the active paint server, with
+# AA_SUBSAMPLES-tap anti-aliased coverage.
+fn poly_fill() {
+    build_edges();
+    let n = lw(&edge_count);
+    if n <= 0 { return; }
+    # Find ymin, ymax bounds in integer scanlines.
+    let i = 0;
+    let ymin_fx = 0x7FFFFFFF;
+    let ymax_fx = 0 - 0x7FFFFFFF;
+    while i < n {
+        let base = &edge_buf + i * EDGE_STRIDE;
+        let a = lw(base + 0);
+        let b = lw(base + 4);
+        if a < ymin_fx { ymin_fx = a; }
+        if b > ymax_fx { ymax_fx = b; }
+        i = i + 1;
+    }
+    let y0 = fx_floor_i(ymin_fx);
+    let y1 = fx_ceil_i(ymax_fx);
+    let cy0 = lw(&raster_clip_y0);
+    let cy1 = lw(&raster_clip_y1);
+    if y0 < cy0 { y0 = cy0; }
+    if y1 > cy1 { y1 = cy1; }
+    let cx0 = lw(&raster_clip_x0);
+    let cw = lw(&raster_clip_x1) - cx0;
+    if cw > AA_COV_MAX { cw = AA_COV_MAX; }
+    if cw <= 0 { return; }
+    let rule = lw(&raster_fill_rule);
+    let w = FX_ONE / AA_SUBSAMPLES;
+
+    let y = y0;
+    while y < y1 {
+        let z = 0;
+        while z < cw { sw(&aa_cov + z * 4, 0); z = z + 1; }
+        sw(&aa_row_min, cw);
+        sw(&aa_row_max, 0 - 1);
+        let s = 0;
+        while s < AA_SUBSAMPLES {
+            let scan_fx = y * FX_ONE + ((2 * s + 1) * FX_ONE) / (2 * AA_SUBSAMPLES);
+            aa_build_aet(scan_fx, n);
+            aa_accumulate(cx0, cw, rule, w);
+            s = s + 1;
+        }
+        aa_emit_row(y, cx0, cw);
+        y = y + 1;
+    }
+}

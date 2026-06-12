@@ -1,8 +1,8 @@
-# Dependabot configuration for NexusOS.
+# Dependabot configuration for GritOS.
 # Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
 updates:
-  # Python tooling (QRNG seed generation) — requirements.txt lives here.
+  # Python tooling (QRNG seed generation) - requirements.txt lives here.
   - package-ecosystem: "pip"
     directory: "/tools/quantum"
     schedule:

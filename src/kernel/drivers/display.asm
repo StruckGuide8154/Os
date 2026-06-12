@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - VBE Framebuffer Display Driver (SSE2 Optimized)
+; GritOS v3.0 - VBE Framebuffer Display Driver (SSE2 Optimized)
 ; Pixel, rect, char, string, blit, double buffer
 ; Uses SSE2 non-temporal stores for VRAM writes (massive speedup)
 ; Uses SSE2 128-bit fills for back buffer operations (4 pixels/instruction)

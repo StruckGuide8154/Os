@@ -5,7 +5,7 @@ FN_BEGIN tb_draw, 0, 0, FN_RET_SCALAR
     push r13
     push r14
 
-    ; 1. Taskbar Background — spans the full current screen width
+    ; 1. Taskbar Background - spans the full current screen width
     mov rdi, 0
     mov esi, [scr_taskbar_y]
     mov edx, [scr_width]
@@ -219,7 +219,7 @@ FN_BEGIN tb_draw, 0, 0, FN_RET_SCALAR
     mov rcx, COLOR_BEVEL_DK
     call draw_hline
 
-    ; Iterate the entry table — one row per entry, with optional separator
+    ; Iterate the entry table - one row per entry, with optional separator
     ; above and dim color, both driven by the per-entry flags byte.
     lea rbx, [rel menu_entries]
     xor r12d, r12d                       ; r12 = row index

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Auto-wrap `global X` + `X:` patterns into `FN_BEGIN X, …`.
+"""Auto-wrap `global X` + `X:` patterns into `FN_BEGIN X, ...`.
 
 For every `.asm` file in the configured slice, the script:
 
@@ -8,7 +8,7 @@ For every `.asm` file in the configured slice, the script:
   * if the label is not already preceded by an ``FN_BEGIN`` or ``FN_DECL``,
     rewrites the ``global NAME`` line to a stub comment and replaces the
     ``NAME:`` label with ``FN_BEGIN NAME, 0, 0, FN_RET_SCALAR`` (default
-    signature — argc/kindmask are placeholders the author can refine later).
+    signature - argc/kindmask are placeholders the author can refine later).
 
 Existing FN_BEGIN'd functions are left untouched.  An allowlist skips data
 symbols (``wm_window_count`` etc.) and special-purpose entry points where
@@ -27,7 +27,7 @@ from pathlib import Path
 GLOBAL_RE = re.compile(r"^\s*global\s+([A-Za-z_.$][\w.$]*)\s*$")
 LABEL_RE_TPL = r"^(?P<indent>\s*){name}\s*:\s*(?:;.*)?$"
 
-# Symbols that are data, not functions — never wrap.
+# Symbols that are data, not functions - never wrap.
 DATA_ALLOW = {
     "wm_window_count",
     "wm_focused_window",

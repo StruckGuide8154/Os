@@ -64,7 +64,7 @@ global amd_dcn_fw_probe
 ; amd_dcn_fw_probe
 ;  Find DCN35DMC.BIN on the ramdisk, read+parse, populate globals.
 ;  Safe to call multiple times; second call reuses results.
-;  No DMCUB writes — purely read-only.
+;  No DMCUB writes - purely read-only.
 ; ----------------------------------------------------------------------------
 amd_dcn_fw_probe:
     push rax

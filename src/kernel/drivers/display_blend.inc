@@ -66,7 +66,7 @@ FN_BEGIN blend_span, 0, 0, FN_RET_SCALAR
 
 ; --- Blend horizontal span from a per-pixel ARGB buffer (source-over) ---
 ; EDI = x, ESI = y, EDX = len, RCX = src buffer (len * 4 bytes, ARGB each)
-; One syscall replaces `len` calls to blend_pixel — used by the SVG raster
+; One syscall replaces `len` calls to blend_pixel - used by the SVG raster
 ; scanline filler to avoid the kernel round-trip per pixel.
 FN_BEGIN blend_span_argb, 0, 0, FN_RET_SCALAR
     push rax

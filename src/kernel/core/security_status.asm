@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Security feature status inventory
+; GritOS v3.0 - Security feature status inventory
 ; ----------------------------------------------------------------------------
 ; Read-only snapshot of every hardening feature's RUNTIME state, taken once at
 ; the very end of kmain (after lockdown + the nested-kernel page-table monitor
@@ -11,12 +11,12 @@
 ; kl_done) plus a couple of cheap runtime probes (CR4 for SMAP, the kernel's own
 ; load address for KASLR). So a feature that fails to engage (e.g. the NK
 ; monitor bailing because the boot paging layout changed, or lockdown not
-; completing) is REPORTED here as SECST_FAILED instead of bricking the box —
+; completing) is REPORTED here as SECST_FAILED instead of bricking the box -
 ; the user sees it in Settings and the system stays usable. Tamper checks that
 ; must fail closed (measured boot, app-blob MAC) still panic in their own code;
 ; if we reached this snapshot they passed, so they read SECST_ACTIVE.
 ;
-; Per-feature status codes (mirrored in src/user/nexushl/apps/settings.nxh):
+; Per-feature status codes (mirrored in src/user/grithl/apps/settings.ghl):
 ;   0 SECST_OFF      - not compiled in / disabled for this build
 ;   1 SECST_ACTIVE   - fully armed
 ;   2 SECST_SOFTWARE - hardware unavailable, software fallback is active
@@ -24,7 +24,7 @@
 ;   4 SECST_FAILED   - compiled + attempted but did not engage (degraded, not fatal)
 ;
 ; Feature index order (selector 210+i). The Settings app hardcodes the matching
-; names in the same order — keep the two in lockstep.
+; names in the same order - keep the two in lockstep.
 ;   0  SMEP / SMAP
 ;   1  CET hardware shadow stack
 ;   2  KPTI (kernel page-table isolation)

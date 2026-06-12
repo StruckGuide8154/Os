@@ -1,16 +1,16 @@
-# gpu/ — AMD GFX11 (Strix Point, gfx1150) kernel-side bring-up
+# gpu/ - AMD GFX11 (Strix Point, gfx1150) kernel-side bring-up
 
 Wave-2 modules that take the GPU from "BAR0 mapped, DCN read-only probed"
 to "CP GFX ring programmed, doorbell mapped". The CP itself is **not**
-started here — that needs PFP/ME/CE microcode load (a later wave).
+started here - that needs PFP/ME/CE microcode load (a later wave).
 
 ## Status
 
 Gated. The default build does not include any of this. To enable:
 
 ```powershell
-$env:NEXUS_GFX_BRINGUP = 1
-nasm -dNEXUS_GFX_BRINGUP ...   # or pass via build_uefi.ps1 KernelDefines
+$env:GRIT_GFX_BRINGUP = 1
+nasm -dGRIT_GFX_BRINGUP ...   # or pass via build_uefi.ps1 KernelDefines
 ```
 
 Even with the flag, hardware contact only happens when something calls
@@ -26,7 +26,7 @@ Even with the flag, hardware contact only happens when something calls
 | `amd_cp_ring.asm` | Task J | CP ring buffer regs + BAR2 doorbell capture.            |
 | `amd_psp.asm`     | Wave 3 | PSP SOS GPCOM ring + TMR primitive.                     |
 | `amd_psp_fwload.asm` | Task K/L | PSP `LOAD_IP_FW` staging for RLC/CP blobs.        |
-| `amd_gfx.asm`     | —      | Orchestrator: walks H → I → J, records last stage.      |
+| `amd_gfx.asm`     | -      | Orchestrator: walks H → I → J, records last stage.      |
 
 Shared layout lives in `src/include/amdgpu_gfx.inc`. PPSMC opcodes are in
 `src/include/amdgpu_ppsmc.inc`. Register dword offsets are in

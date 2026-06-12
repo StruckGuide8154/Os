@@ -1,0 +1,300 @@
+# ============================================================================
+# boot_features.ghl - RUNTIME boot-parameter feature toggles.  ZERO-ASM GritHLK.
+#
+# Purpose (two jobs):
+#   (1) Hardened "secure boot" profiles: disable attack surface (drivers,
+#       subsystems, individual syscalls) per-boot with NO rebuild.
+#   (2) A live-bug bisection tool: turn individual hot-path subsystems
+#       (per-frame cursor blit, frame_present refresh, frame pacing, HID/mouse
+#       init) off one at a time and watch the symptom move.
+#
+# MECHANISM
+#   The UEFI loader reads an OPTIONAL ESP config file \EFI\BOOT\BOOTCFG.TXT into
+#   firmware RAM and publishes (base,size) in the boot-info struct at the fixed
+#   identity-mapped address VBE_INFO (0x9000), offsets VBE_BOOTCFG_BASE_OFF /
+#   VBE_BOOTCFG_SIZE_OFF (src/include/boot_memory.inc). boot_features_init()
+#   parses that text into a 64-bit feature bitmask `feat_mask` in kernel BSS.
+#
+#   DEFAULT = everything ON. If the file is absent (size==0) the mask stays
+#   all-ones and the kernel behaves byte-for-byte like before - fail-safe.
+#
+# FILE FORMAT (line-oriented, tiny, forgiving)
+#   * `# ...`               comment line (ignored)
+#   * `disable=a,b,c`       turn OFF each named feature
+#   * `enable=a,b,c`        turn ON  each named feature (re-enable)
+#   * `<name>=0` / `<name>=1`   per-feature key=value
+#   Whitespace and CR are skipped. Unknown names are ignored (forward-compat).
+#   Feature names (case-insensitive): cursor, present, pacing, mouse, hid,
+#   setmode  (see ft_match_name below - the SINGLE place to add a new name).
+#
+# A build-time default-disable fallback is also honoured so the gates are
+# testable even before the file path is verified on a given platform:
+#   cfg "FEAT_DEFAULT_DISABLE_CURSOR" { ... } etc. (off unless -d'd).
+#
+# Each disabled feature is logged to COM1 at boot as `[FEAT] <name>=off` so a
+# serial capture shows exactly what was active for a given screendump.
+#
+# ADDING A NEW GATE (one-liner pattern):
+#   1. Give it a bit:           const FEAT_FOO = (1 << 9);
+#   2. Add a name in ft_match_name:   if ft_streq(p, &nm_foo) { return FEAT_FOO; }
+#      (+ a `data nm_foo: ... = "foo";` string + a `[FEAT] foo` log entry).
+#   3. At the call site:        if feat_on(FEAT_FOO) != 0 { foo(); }
+#      (asm callers: `call feat_enabled` with the bit in RDI; 1/0 in RAX.)
+# ============================================================================
+
+module "boot_features";
+
+unsafe raw_mem;          # lb/lq/sb/sq over the boot-info struct + parser buffer
+unsafe implicit_extern;  # &feat_mask / &nm_* module-local data
+
+global boot_features_init;
+global feat_enabled;     # asm-callable: RDI = bit mask -> RAX = 1 if enabled
+global feat_on;          # GHLK-callable: feat_on(bit) -> 1 if enabled (System V)
+
+# Boot-info struct (identity-mapped, never slid). Mirror of boot_memory.inc.
+const VBE_INFO            = 0x9000;
+const VBE_BOOTCFG_BASE_OFF = 0x70;
+const VBE_BOOTCFG_SIZE_OFF  = 0x78;
+
+# Feature bits. Add new gates here (see header one-liner pattern).
+const FEAT_CURSOR_DRAW           = 1;        # per-frame cursor blit (cursor.ghl)
+const FEAT_FRAME_PRESENT_REFRESH = 2;        # render_frame present fast paths
+const FEAT_FRAME_PACING          = 4;        # frame_pacing.ghl deadline wait
+const FEAT_MOUSE_INIT            = 8;        # mouse_init()
+const FEAT_HID_INIT              = 16;       # usb_hid/i2c_hid/spi_hid init
+const FEAT_SYSCALL_SET_MODE      = 32;       # SYS_DISPLAY_SET_MODE handler
+const FEAT_DISPLAY_INIT          = 64;       # display_init()+early display_flip in kmain
+const FEAT_FBPERF_WC             = 128;      # fbperf_arm_wc()+fbperf_wc_activate()
+const FEAT_FX_BENCH              = 256;      # 64-flip [FX] FBPERF boot bench
+const FEAT_DEBUG_OVERLAY         = 512;      # per-frame usb_debug_overlay() draw
+
+const ALL_FEATURES = 1023;   # OR of every bit above (default-on mask)
+
+# Serial glyphs.
+const CH_LBRACK = 91;  const CH_RBRACK = 93;
+const CH_CR = 13;      const CH_LF = 10;
+const CH_EQ = 61;      const CH_o = 111;  const CH_f = 102;
+const CH_SP = 32;
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+data feat_mask: 1 x 8 = 0;     # 0 means "not yet parsed"; init sets ALL_FEATURES
+
+# Feature name strings (lowercase, NUL-terminated). Matched case-insensitively.
+data nm_cursor:  7 = [99,117,114,115,111,114,0];          # "cursor"
+data nm_present: 8 = [112,114,101,115,101,110,116,0];     # "present"
+data nm_pacing:  7 = [112,97,99,105,110,103,0];           # "pacing"
+data nm_mouse:   6 = [109,111,117,115,101,0];             # "mouse"
+data nm_hid:     4 = [104,105,100,0];                     # "hid"
+data nm_setmode: 8 = [115,101,116,109,111,100,101,0];     # "setmode"
+data nm_dispinit: 9 = [100,105,115,112,105,110,105,116,0];     # "dispinit"
+data nm_fbwc:    5 = [102,98,119,99,0];                   # "fbwc"
+data nm_fxbench: 8 = [102,120,98,101,110,99,104,0];       # "fxbench"
+data nm_overlay: 8 = [111,118,101,114,108,97,121,0];      # "overlay"
+
+# "[FEAT] " prefix and the matching names for the off-log.
+data s_feat:     8 = [91,70,69,65,84,93,32,0];            # "[FEAT] "
+
+# ---------------------------------------------------------------------------
+# feat_enabled(bit) - asm-callable predicate. RDI = bit; RAX = 1 if set else 0.
+# Cheap: a single AND against feat_mask, used on the hot syscall/present path.
+# ---------------------------------------------------------------------------
+fn feat_enabled(rdi bit)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if (lq(&feat_mask) & bit) != 0 { return 1; }
+    return 0;
+}
+
+# Internal convenience for GHLK call sites in this build unit.
+fn feat_on(bit) {
+    if (lq(&feat_mask) & bit) != 0 { return 1; }
+    return 0;
+}
+
+# Lower-case an ASCII byte ('A'..'Z' -> 'a'..'z').
+fn ft_lower(c) {
+    if c >= 65 { if c <= 90 { return c + 32; } }
+    return c;
+}
+
+# Case-insensitive compare of NUL-terminated string at `a` (in the cfg buffer,
+# may end at a separator) against the lowercase literal at `lit`. The buffer
+# token is delimited by NUL here (caller NUL-terminates each token in place).
+fn ft_streq(a, lit) {
+    let i = 0;
+    while 1 != 0 {
+        let ca = ft_lower(lb(a + i));
+        let cb = lb(lit + i);
+        if ca != cb { return 0; }
+        if cb == 0 { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Map a NUL-terminated token to its feature bit, or 0 if unknown.
+# *** The SINGLE place to register a new feature name. ***
+fn ft_match_name(p) {
+    if ft_streq(p, &nm_cursor)  != 0 { return FEAT_CURSOR_DRAW; }
+    if ft_streq(p, &nm_present) != 0 { return FEAT_FRAME_PRESENT_REFRESH; }
+    if ft_streq(p, &nm_pacing)  != 0 { return FEAT_FRAME_PACING; }
+    if ft_streq(p, &nm_mouse)   != 0 { return FEAT_MOUSE_INIT; }
+    if ft_streq(p, &nm_hid)     != 0 { return FEAT_HID_INIT; }
+    if ft_streq(p, &nm_setmode) != 0 { return FEAT_SYSCALL_SET_MODE; }
+    if ft_streq(p, &nm_dispinit) != 0 { return FEAT_DISPLAY_INIT; }
+    if ft_streq(p, &nm_fbwc)    != 0 { return FEAT_FBPERF_WC; }
+    if ft_streq(p, &nm_fxbench) != 0 { return FEAT_FX_BENCH; }
+    if ft_streq(p, &nm_overlay) != 0 { return FEAT_DEBUG_OVERLAY; }
+    return 0;
+}
+
+# Emit "[FEAT] " then the token at `p` then "=off\r\n" on COM1.
+fn ft_log_off(p) {
+    call serial_puts(rdi: &s_feat);
+    let i = 0;
+    while lb(p + i) != 0 {
+        call svg_dump_putc(al: lb(p + i));
+        i = i + 1;
+    }
+    call svg_dump_putc(al: CH_EQ);
+    call svg_dump_putc(al: CH_o);
+    call svg_dump_putc(al: CH_f);
+    call svg_dump_putc(al: CH_f);
+    call svg_dump_putc(al: CH_CR);
+    call svg_dump_putc(al: CH_LF);
+}
+
+# Apply one token (already NUL-terminated, lowercased on compare) to the mask.
+# mode: 0 = disable (clear bit), 1 = enable (set bit).
+fn ft_apply_token(p, mode) {
+    let bit = ft_match_name(p);
+    if bit == 0 { return; }
+    if mode == 0 {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ bit));
+        ft_log_off(p);
+    } else {
+        sq(&feat_mask, lq(&feat_mask) | bit);
+    }
+}
+
+# Parse `key=val` or a `disable=`/`enable=` comma list spanning [s, e). Tokens
+# are extracted in place by NUL-terminating the working copy. We operate on the
+# raw buffer bytes; '=' and ',' become NUL as we walk. `mode` flips for
+# disable=/enable=; a bare `name=0/1` sets mode from the value.
+#
+# Because in-place NUL-termination mutates the firmware buffer (single-pass,
+# never re-read), this is safe and simple.
+
+# Returns 1 if the byte ends a line.
+fn ft_is_eol(c) {
+    if c == CH_CR { return 1; }
+    if c == CH_LF { return 1; }
+    if c == 0 { return 1; }
+    return 0;
+}
+
+# Handle a single logical line [ls, le): split on the first '=' into key/val.
+fn ft_handle_line(buf, ls, le) {
+    # Skip leading spaces.
+    let i = ls;
+    while i < le { if lb(buf + i) == CH_SP { i = i + 1; } else { i = le + 1; } }
+    if i == le { return; }                  # blank line
+    i = ls;
+    while i < le { if lb(buf + i) == CH_SP { i = i + 1; } else { break; } }
+    if lb(buf + i) == 35 { return; }        # '#' comment
+
+    # Find '='.
+    let eq = i;
+    while eq < le { if lb(buf + eq) == CH_EQ { break; } eq = eq + 1; }
+    if eq >= le { return; }                 # no '=' -> ignore
+
+    # key = [i, eq), val = [eq+1, le). Lowercase-compare the key against
+    # disable/enable; otherwise treat key as a feature name with a 0/1 value.
+    sb(buf + eq, 0);                         # NUL-terminate key
+    let key = buf + i;
+
+    # Is the key "disable" or "enable"? (inline 7/6-char compare via streq)
+    let listmode = -1;                       # -1 = not a list directive
+    if ft_streq(key, &nm_disable) != 0 { listmode = 0; }
+    if ft_streq(key, &nm_enable)  != 0 { listmode = 1; }
+
+    if listmode >= 0 {
+        # Comma-separated feature list.
+        let t = eq + 1;
+        let tstart = t;
+        while t <= le {
+            let c = 0;
+            if t < le { c = lb(buf + t); }
+            if t == le { c = 0; }
+            if c == 44 { c = 0; }            # ',' -> token end
+            if c == CH_SP { c = 0; }
+            if c == 0 {
+                sb(buf + t, 0);
+                if t > tstart { ft_apply_token(buf + tstart, listmode); }
+                tstart = t + 1;
+            }
+            t = t + 1;
+        }
+        return;
+    }
+
+    # name=value form. value: first non-space char after '='.
+    let v = eq + 1;
+    while v < le { if lb(buf + v) == CH_SP { v = v + 1; } else { break; } }
+    let val = 1;
+    if v < le { if lb(buf + v) == 48 { val = 0; } }   # '0'
+    # NUL-terminate the value region end so the key token is clean.
+    ft_apply_token(key, val);
+}
+
+# ---------------------------------------------------------------------------
+# boot_features_init - seed the default-on mask, apply any build-time default
+# disables, then parse BOOTCFG.TXT if the loader supplied one.
+# ---------------------------------------------------------------------------
+fn boot_features_init() {
+    sq(&feat_mask, ALL_FEATURES);
+
+    # Build-time default-disable fallback (testable before file-path is proven).
+    cfg "FEAT_DEFAULT_DISABLE_CURSOR" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_CURSOR_DRAW));
+        ft_log_off(&nm_cursor);
+    }
+    cfg "FEAT_DEFAULT_DISABLE_PRESENT" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_FRAME_PRESENT_REFRESH));
+        ft_log_off(&nm_present);
+    }
+    cfg "FEAT_DEFAULT_DISABLE_PACING" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_FRAME_PACING));
+        ft_log_off(&nm_pacing);
+    }
+    cfg "FEAT_DEFAULT_DISABLE_MOUSE" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_MOUSE_INIT));
+        ft_log_off(&nm_mouse);
+    }
+    cfg "FEAT_DEFAULT_DISABLE_HID" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_HID_INIT));
+        ft_log_off(&nm_hid);
+    }
+
+    let base = lq(VBE_INFO + VBE_BOOTCFG_BASE_OFF);
+    let size = lq(VBE_INFO + VBE_BOOTCFG_SIZE_OFF);
+    if base == 0 { return; }
+    if size == 0 { return; }
+
+    # Walk the buffer line by line, applying each directive.
+    let ls = 0;
+    let i = 0;
+    while i < size {
+        if ft_is_eol(lb(base + i)) != 0 {
+            if i > ls { ft_handle_line(base, ls, i); }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    if size > ls { ft_handle_line(base, ls, size); }
+}
+
+# disable/enable directive names.
+data nm_disable: 8 = [100,105,115,97,98,108,101,0];   # "disable"
+data nm_enable:  7 = [101,110,97,98,108,101,0];        # "enable"

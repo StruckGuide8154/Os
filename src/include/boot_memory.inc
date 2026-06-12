@@ -1,7 +1,7 @@
 %ifndef BOOT_MEMORY_INC
 %define BOOT_MEMORY_INC
 
-; NexusOS boot memory contract.
+; GritOS boot memory contract.
 ; Keep loader, paging, and kernel users on one map while relocation work lands.
 
 STAGE2_LOAD_ADDR    equ 0x7E00
@@ -21,7 +21,7 @@ KERNEL_LOAD_ADDR    equ KERNEL_BASE_OVERRIDE
 KERNEL_LOAD_ADDR    equ 0x100000
 %endif
 ; Canonical link base of the WRAPPED payload (pass A), independent of the
-; two-pass KERNEL_BASE_OVERRIDE diff. Use this — NOT KERNEL_LOAD_ADDR — anywhere
+; two-pass KERNEL_BASE_OVERRIDE diff. Use this - NOT KERNEL_LOAD_ADDR - anywhere
 ; a constant must compare against the kernel's *unslid* base at runtime: an
 ; absolute immediate built from KERNEL_LOAD_ADDR differs between the A/B ORG
 ; passes, so extract_kaslr_fixups.py flags it and the loader relocates it along
@@ -57,7 +57,7 @@ EVENT_BUFFER_ADDR     equ 0x2420000
 ; --- Userland app arenas ------------------------------------------------
 ; APP_DATA_ADDR must be 2 MiB aligned because paging.asm derives the
 ; user PDE index as (APP_DATA_ADDR / 0x200000). Each slot is 2 MiB so the
-; generated NexusHL app blob, including the full SVG wallpaper renderer, fits
+; generated GritHL app blob, including the full SVG wallpaper renderer, fits
 ; below the per-slot shadow window/stack.
 APP_SLOT_COUNT         equ 12
 APP_DATA_ADDR         equ 0x2600000              ; 38 MiB, 2 MiB aligned
@@ -89,7 +89,7 @@ ARENA_SLOT_PAGES      equ (APP_SLOT_SIZE / 0x1000) ; 512 4KB pages per slot
 ; otherwise 2 MiB-large supervisor PDE in PD0. Both bootloaders reserve a
 ; physical PT page here so the kernel can split that PDE into 4 KiB pages
 ; at init time and clear PRESENT on the per-slot guard PTE. The bootloader
-; does not know the kernel BSS address — l3_install_syscall_stack_pt
+; does not know the kernel BSS address - l3_install_syscall_stack_pt
 ; (src/kernel/proc/usermode.asm) computes the PDE index at runtime, walks
 ; CR3 to find PD0, populates this PT, and atomically swaps the PDE.
 ; alignb 0x20000 on l3_syscall_stacks guarantees the array (MAX_WINDOWS *
@@ -98,7 +98,7 @@ ARENA_SLOT_PAGES      equ (APP_SLOT_SIZE / 0x1000) ; 512 4KB pages per slot
 SYSCALL_STACK_PT_BASE equ 0x82000
 
 ; --- Paging bit constants used by W^X enforcement ------------------------
-; PAGE_NX is bit 63 of the PTE/PDE — requires EFER.NXE=1 (set by both boot
+; PAGE_NX is bit 63 of the PTE/PDE - requires EFER.NXE=1 (set by both boot
 ; paths: uefi_loader.asm in the EFER fix-up, stage2.asm in the LME path).
 ; A page with PAGE_NX cleared is executable iff its CS-selected segment
 ; permits exec; with PAGE_NX set, instruction fetches from the page fault
@@ -119,11 +119,11 @@ PAGE_NX               equ (1 << 63)
 ;   off 0x18 .. 0x1F  SLOT_META_WX_CODE_END_OFF      (u64, 4KB-aligned)
 ;
 ; Manifest versions:
-;   0 — absent. Legacy fallback: every blob page stays W+X (no NX, W=1).
+;   0 - absent. Legacy fallback: every blob page stays W+X (no NX, W=1).
 ;       Stack/shadow page (and any future enforced region) still W+NX.
 ;       This lets existing apps boot unchanged while individual apps
 ;       migrate to declaring a manifest.
-;   1 — present. Kernel enforces strict W+NX everywhere except
+;   1 - present. Kernel enforces strict W+NX everywhere except
 ;       [code_start_off, code_end_off) which becomes X+!W. Both bounds
 ;       must be 4KB-aligned and inside [L3_APP_CODE_OFF, L3_SHADOW_WIN_OFF);
 ;       a malformed manifest is treated as version 0 (defensive fallback,
@@ -131,7 +131,7 @@ PAGE_NX               equ (1 << 63)
 ;
 ; SYS_MPROTECT_WX (syscall #68) flips individual pages within the declared
 ; code range between W+NX (mode 0) and X+!W (mode 1). Pages outside the
-; declared range are rejected — apps that want JIT must declare a code
+; declared range are rejected - apps that want JIT must declare a code
 ; range that covers their JIT pages.
 SLOT_META_WX_MANIFEST_VER_OFF   equ 0x08
 SLOT_META_WX_CODE_START_OFF_OFF equ 0x10
@@ -142,7 +142,7 @@ MPROT_WX_MODE_WNX      equ 0       ; W=1, NX=1 (data)
 MPROT_WX_MODE_XRO      equ 1       ; W=0, NX=0 (code)
 
 ; (The slot-internal constants L3_APP_CODE_OFF / L3_SHADOW_WIN_OFF are
-; defined locally in usermode.asm — NASM `equ` cannot be %ifndef-guarded,
+; defined locally in usermode.asm - NASM `equ` cannot be %ifndef-guarded,
 ; so syscall.asm and any other consumer of those values must redeclare
 ; them with the same expressions. Keep this comment as the canonical
 ; reference for what they should be:
@@ -152,7 +152,7 @@ MPROT_WX_MODE_XRO      equ 1       ; W=0, NX=0 (code)
 ; Per-slot user-stack guard page. The user stack top is
 ; L3_SHADOW_WIN_OFF - 16 = APP_SLOT_SIZE - 528 = 0x1FFDF0; the stack grows
 ; down 16 KiB (L3_USER_STACK_SIZE) to 0x1FBDF0. Page containing the lowest
-; reachable byte is 0x1FB000; the page immediately below — 0x1FA000 — is
+; reachable byte is 0x1FB000; the page immediately below - 0x1FA000 - is
 ; cleared of PAGE_PRESENT in paging setup, so a stack overflow faults into
 ; isr_common_stub's guard fast path instead of clobbering slot data.
 ; PTE index within the slot's PT = 0x1FA000 / 0x1000 = 0x1FA.
@@ -190,7 +190,7 @@ VBE_APP_ARENA_SIZE_OFF equ 0x48
 ; reads up to the registered size (so a smaller actual file is fine).
 VBE_RAMDISK_BASE_OFF   equ 0x50
 VBE_RAMDISK_SIZE_OFF   equ 0x58
-DATA_IMG_MAX_SIZE      equ 0x2000000   ; 32 MiB cap — bumped 2026-05-26 to fit Phoenix GFX FW set
+DATA_IMG_MAX_SIZE      equ 0x2000000   ; 32 MiB cap - bumped 2026-05-26 to fit Phoenix GFX FW set
 
 ; --- Persistent storage backing (Phase 1 contract) ------------------------
 ; The UEFI loader, while firmware services are still available, resolves
@@ -216,8 +216,8 @@ VBE_STORAGE_EXT_PTR_OFF equ 0x68   ; u64 (physical pointer to extent array)
 
 ; --- Runtime feature-toggle config (BOOTCFG.TXT) --------------------------
 ; The UEFI loader reads the OPTIONAL ESP file \EFI\BOOT\BOOTCFG.TXT into
-; firmware RAM and publishes (base,size) here. The kernel's NHLK module
-; boot_features.nxh (boot_features_init) parses it into the feat_mask bitmask
+; firmware RAM and publishes (base,size) here. The kernel's GHLK module
+; boot_features.ghl (boot_features_init) parses it into the feat_mask bitmask
 ; that gates subsystem init / per-frame work / individual syscalls. Absent
 ; file -> size 0 -> default-everything-on (byte-compatible with prior boots).
 VBE_BOOTCFG_BASE_OFF    equ 0x70   ; u64 base of the loaded config text (0 = none)
@@ -227,7 +227,7 @@ BOOTCFG_MAX_SIZE        equ 0x1000 ; 4 KiB cap (one firmware page)
 ; --- Track 2 signed-artifact envelopes (SYSSIG.ENV / KUPDATE.ENV) ----------
 ; The loader reads two OPTIONAL signed-artifact envelope files
 ; (docs/signed-artifact-envelope.md v1) from the ESP and publishes (base,size)
-; here for the kernel's envelope gate (src/kernel/nexushlk/envelope_gate.nxh):
+; here for the kernel's envelope gate (src/kernel/grithlk/envelope_gate.ghl):
 ;   SYSSIG.ENV  - REQUIRED by the kernel (fail-closed): quorum-signed envelope
 ;                 whose payload is the per-app integrity table; verified via
 ;                 envelope_verify_signed at boot (K5) before any app runs.
@@ -245,7 +245,7 @@ KUPDATE_MAX_SIZE        equ 0x100000 ; 1 MiB cap for a staged update envelope
 ; --- Track 2 quorum-change tracking path (KQUORUM.ENV) ---------------------
 ; Optional staged quorum-change artifact: a policy-class envelope whose
 ; payload requests raising the active per-class threshold quorum. Admitted
-; only by quorum_change_admit (envelope_gate.nxh), which requires the
+; only by quorum_change_admit (envelope_gate.ghl), which requires the
 ; signature set to satisfy BOTH the current (old) and the proposed (new)
 ; quorum and validates the transition via security_threshold_change_valid.
 ; Absent file -> base/size 0 -> "no quorum change staged".
@@ -260,16 +260,16 @@ KQUORUM_MAX_SIZE        equ 0x2000 ; 8 KiB cap (header + 18B payload + sigs)
 ; envelope AND of the PRISTINE container bytes it read from disk (the
 ; trampoline copies the payload out, so the firmware-allocated read buffer
 ; stays byte-identical to the at-rest file). kernel_env_verify_boot
-; (envelope_gate.nxh, kmain K5) re-hashes those pristine bytes and verifies
-; the envelope FAIL-CLOSED — missing/rejected/mismatched = kernel panic.
+; (envelope_gate.ghl, kmain K5) re-hashes those pristine bytes and verifies
+; the envelope FAIL-CLOSED - missing/rejected/mismatched = kernel panic.
 VBE_KERNENV_BASE_OFF    equ 0xB0   ; u64 base of loaded KERNEL.ENV (0 = none)
 VBE_KERNENV_SIZE_OFF    equ 0xB8   ; u64 byte length
 VBE_KIMG_BASE_OFF       equ 0xC0   ; u64 base of pristine KERNEL.BIN file bytes
 VBE_KIMG_SIZE_OFF       equ 0xC8   ; u64 byte length actually read
 KERNENV_MAX_SIZE        equ 0x2000 ; 8 KiB cap (header + 32B payload + sigs)
 
-; Feature bits — MUST stay in lockstep with src/kernel/nexushlk/boot_features.nxh.
-; (asm callers — e.g. the SYS_DISPLAY_SET_MODE gate — use these names.)
+; Feature bits - MUST stay in lockstep with src/kernel/grithlk/boot_features.ghl.
+; (asm callers - e.g. the SYS_DISPLAY_SET_MODE gate - use these names.)
 FEAT_CURSOR_DRAW           equ 1
 FEAT_FRAME_PRESENT_REFRESH equ 2
 FEAT_FRAME_PACING          equ 4
@@ -285,7 +285,7 @@ STORAGE_EXTENTS_MAX     equ 256      ; max extents (256 * 16B = 4 KiB)
 STORAGE_EXTENT_SIZE     equ 16       ; bytes per extent entry
 
 ; --- Per-slot handle table (pointer-table refactor) ----------------------
-; Indexed, slot-local table; ring 3 sees only opaque packed u32 handles —
+; Indexed, slot-local table; ring 3 sees only opaque packed u32 handles -
 ; same shape as iOS Mach port rights / Linux fds. As of Phase 2,
 ; SYS_FS_ENTRY returns a HANDLE_KIND_DIR_ENTRY handle, the FN_KIND_HANDLE
 ; validator arm calls handle_resolve, and FS syscall handlers translate
@@ -293,7 +293,7 @@ STORAGE_EXTENT_SIZE     equ 16       ; bytes per extent entry
 ; reads entry fields by value through SYS_FS_ENTRY_INFO.
 ;
 ; Lives at slot+0x1D5000. The 16 KiB region at slot+0x1D1000..0x1D5000
-; was the legacy dir-entry snapshot cache (now unused — kept as a hole
+; was the legacy dir-entry snapshot cache (now unused - kept as a hole
 ; for the next per-slot cache that needs it). Well below the user-stack
 ; guard at slot+0x1FA000.
 L3_HANDLE_TABLE_OFF     equ 0x1D5000
@@ -338,7 +338,7 @@ HANDLE_ENT_PAYLOAD_OFF  equ 8
 ;   bits [21: 6]  generation (16-bit; must match the stored gen)
 ;   bits [29:22]  kind tag    (8-bit;  must match the stored kind)
 ;   bits [31:30]  magic 0b10  (rejects bare scalars/pointers misused as
-;                              handles — random ring-3 values rarely set
+;                              handles - random ring-3 values rarely set
 ;                              exactly this two-bit pattern)
 ; Handle value 0 is reserved as INVALID. The allocator never returns 0
 ; because (a) a fresh entry has generation >= 1 and (b) kind >= 1.

@@ -1,7 +1,7 @@
 ; DEPRECATED: raw assembly Settings implementation.
 ;
 ; The active Settings app is now:
-;   src/user/nexushl/apps/settings.nxh
+;   src/user/grithl/apps/settings.ghl
 ;
 ; Launch wiring must use the generated callbacks:
 ;   app_hl_settings_draw

@@ -1,0 +1,263 @@
+# ============================================================================
+# syscall_secure.ghl  -  GritHLK (zero-asm) syscall security LEAF helpers.
+#
+# Stage 2b of docs/ghlk-syscall-rearchitecture.md. Ports the kdomain-HMAC /
+# capability-mask authenticator leaf cluster out of src/kernel/proc/
+# syscall_security.inc into STRUCTURED GritHLK fns, with the EXACT same global
+# names and the EXACT same register ABI the rest of the kernel binds to. There
+# is NO assembly in this module - every helper is expressed as a structured
+# `fn` over the kdomain-HMAC arithmetic and bounds-checked byte-array indexing.
+#
+# Compile (kernel emit mode) with:
+#   python src/user/grithl/compiler/gritc.py \
+#       src/kernel/grithlk/syscall_secure.ghl -o build/ghl/syscall_secure.asm \
+#       -L src/user/grithl/lib --embed --target kernel
+# and %include the generated build/ghl/syscall_secure.asm into kernel_build.asm
+# (section .text) BEFORE the syscall.asm dispatcher include. Because the kernel
+# is one NASM translation unit, the kernel_canary / slot_cap_mask / slot_cap_hmac
+# data symbols (defined in syscall_data.inc) and kernel_panic_canary resolve as
+# forward references with no extern wiring.
+#
+# ---------------------------------------------------------------------------
+# THE HMAC PRIMITIVE (was the KHMAC_TAG macro, src/include/kdomain_hmac.inc §13)
+#   tag = kernel_canary ^ in0 [^ in1] [^ domain], then truncated to the tag
+#   width (low 8 or low 16 bits). domain==0 (CPI) is the XOR identity, so the
+#   emitted arithmetic is byte-identical to the macro's value-preserving form.
+# Reproduced inline below as a plain expression; the &kernel_canary load is the
+# 64-bit secret, masked to the retained width with `& 0xFFFF` / `& 0xFF`.
+#   KDOM_CPI      = 0x00   (CPI callbacks; was domainless)
+#   KDOM_CAP_MASK = 0x5C   (cap-mask authenticator; == legacy CAP_HMAC_DOMAIN)
+#
+# WHAT STAYS IN ASM (left in syscall_security.inc / syscall_perm.inc with a
+# comment pointer, NOT ported):
+#   * cap_audit_log, sc_record_strike, sc_anomaly_scan_all, sc_trace_dump,
+#     kernel_panic_canary, kernel_panic_shadow, shadow_stack_poc_* - non-leaf
+#     (serial I/O, r15-keyed teardown, ring writes, panic tails) and/or operate
+#     on u16 arrays (slot_sc_strikes / sc_trace_hist) for which GHLK has no
+#     16-bit mem accessor (lw/sw are 32-bit).
+#   * sc_build_allow_bitmap, sc_reset_allow_bitmap, sc_slot_perm_* and
+#     kernel_apply_app_manifest - their loop bounds / row strides are
+#     syscall_table_count and SC_ALLOW_BYTES, which are NASM ASSEMBLE-TIME `equ`s
+#     derived from the syscall table, NOT stable GHLK numeric literals. GHLK
+#     `const`/`state` sizes must be literals, so reproducing these zero-asm would
+#     require hardcoding the table count - a fragility/security regression if the
+#     table ever grows. Left in asm by design (see HARD CONSTRAINTS in the doc).
+# ============================================================================
+
+module "syscall_secure";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over CPI signing/HMAC state
+unsafe implicit_extern;  # &fn / &data resolved as same-unit kernel labels (-f bin)
+
+global cpi_sign_callback;
+global cpi_verify_callback;
+global cap_mask_sign;
+global cap_mask_store;
+global slot_cap_hmac_init;
+
+extern dbg_event_emit6;
+extern sc_slot_integrity_kill;  # per-slot integrity teardown (r15=slot, edx=reason)
+
+# Domain-separation constants (kdomain_hmac.inc §13). Literals - value-preserving.
+const KDOM_CPI       = 0x00;   # CPI callback tag (domainless)
+const KDOM_CAP_MASK  = 0x5C;   # cap-mask authenticator (== legacy CAP_HMAC_DOMAIN)
+
+# MAX_WINDOWS == APP_SLOT_COUNT (boot_memory.inc) - the slot-array dimension of
+# slot_cap_mask[] / slot_cap_hmac[]. Stable literal (12); the bounds guards below
+# reproduce the callers' / init loop's existing range checks against it.
+const MAX_WINDOWS    = 12;
+
+# Tag-width masks and the field layout for the CPI callback stamp.
+const CPI_TAG_MASK   = 0xFFFF;              # low16 retained for the CPI tag
+const CPI_PTR_MASK   = 0x0000FFFFFFFFFFFF;  # callback-pointer bits (low 48)
+const CPI_HI_MASK    = 0xFFFF000000000000;  # stored-tag bits (high 16)
+const CPI_TAG_SHIFT  = 48;                  # tag occupies bits [48:64]
+const CAP_TAG_MASK   = 0xFF;                # low8 retained for the cap-mask tag
+const EVT_CPI_SIGN        = 0x43504947;     # CPIG
+const EVT_CPI_VERIFY_FAIL = 0x43504956;     # CPIV
+const WINDOW_POOL_ADDR = 0x2410000;
+const WINDOW_STRUCT_SIZE = 256;
+const WIN_OFF_ID       = 0;
+const WIN_OFF_FLAGS    = 40;
+const WIN_OFF_APPDATA  = 96;
+const WIN_OFF_DRAWFN   = 112;
+const WIN_OFF_KEYFN    = 120;
+const WIN_OFF_CLICKFN  = 128;
+const WIN_OFF_DRAGFN   = 144;
+const WIN_OFF_RCLICKFN = 152;
+
+# ----------------------------------------------------------------------------
+# cpi_sign_callback(rdi=raw_fn, rsi=&window, rdx=field_offset) -> rax=stamped.
+# Tag = low16(kernel_canary ^ &window ^ field_offset) stamped into bits[48:64];
+# a stored qword of exactly 0 signs to 0 (the detach sentinel). Clobbers only
+# rax (everything else is in preserves(), so rcx etc. are restored). rax is the
+# lone OUTPUT register (not preserved -> written back from its slot on exit).
+# ----------------------------------------------------------------------------
+fn cpi_sign_callback(rax result, rdi raw, rsi win, rdx off)
+        preserves(rdi, rsi, rdx, rcx, r8) {
+    if raw == 0 {
+        result = 0;
+    } else {
+        # tag bits = low16(canary ^ win ^ off) << 48; pointer bits = raw & low48.
+        let tag = (lq(&kernel_canary) ^ win ^ off ^ KDOM_CPI) & CPI_TAG_MASK;
+        result = (raw & CPI_PTR_MASK) | (tag << CPI_TAG_SHIFT);
+        cfg "ENABLE_DEBUG_SERIAL" {
+            call dbg_event_emit6(rdi: EVT_CPI_SIGN, rsi: 0, rdx: raw, rcx: win, r8: off, r9: result);
+            cb_ser(67); cb_ser(80); cb_ser(73); cb_ser(71); cb_ser(32); # "CPIG "
+            cb_ser(114);
+            call ser_print_hex64(rdi: raw);
+            cb_ser(32); cb_ser(119);
+            call ser_print_hex64(rdi: win);
+            cb_ser(32); cb_ser(111);
+            call ser_print_hex64(rdi: off);
+            cb_ser(32); cb_ser(116);
+            call ser_print_hex64(rdi: tag << CPI_TAG_SHIFT);
+            cb_ser(32); cb_ser(115);
+            call ser_print_hex64(rdi: result);
+            cb_ser(13);
+            cb_ser(10);
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# cpi_verify_callback(rdi=stored, rsi=&window, rdx=field_offset)
+#   -> rax = raw_fn (top 16 bits cleared) on success, or 0 if stored was 0.
+# A non-zero stored value whose tag does not match is a CPI violation: hand the
+# observed bad qword to kernel_panic_canary (rdi=bad, rsi=detection RIP) - it
+# never returns. Clobbers only rax on the success/zero paths (rcx/r8 preserved).
+# ----------------------------------------------------------------------------
+fn cpi_verify_callback(rax result, rdi stored, rsi win, rdx off)
+        preserves(rdi, rsi, rdx, rcx, r8) {
+    if stored == 0 {
+        result = 0;
+    } else {
+        # expected high-16 tag bits for this (window, offset)
+        let exp = ((lq(&kernel_canary) ^ win ^ off ^ KDOM_CPI) & CPI_TAG_MASK) << CPI_TAG_SHIFT;
+        if (stored & CPI_HI_MASK) == exp {
+            result = stored & CPI_PTR_MASK;
+        } else {
+            call dbg_event_emit6(rdi: EVT_CPI_VERIFY_FAIL, rsi: 0, rdx: stored, rcx: exp, r8: win, r9: off);
+            cfg "ENABLE_DEBUG_SERIAL" {
+                # CPIV: callback-pointer integrity mismatch.
+                # s=stored, g=got high tag, e=expected high tag, p=low48 raw ptr,
+                # w=window ptr, o=field offset, i/f/a=window id/flags/appdata,
+                # d/k/c/h/r=current draw/key/click/drag/right-click fields.
+                cb_ser(67); cb_ser(80); cb_ser(73); cb_ser(86); cb_ser(32);
+                cb_ser(115);
+                call ser_print_hex64(rdi: stored);
+                cb_ser(32); cb_ser(103);
+                call ser_print_hex64(rdi: stored & CPI_HI_MASK);
+                cb_ser(32); cb_ser(101);
+                call ser_print_hex64(rdi: exp);
+                cb_ser(32); cb_ser(112);
+                call ser_print_hex64(rdi: stored & CPI_PTR_MASK);
+                cb_ser(32); cb_ser(119);
+                call ser_print_hex64(rdi: win);
+                cb_ser(32); cb_ser(111);
+                call ser_print_hex64(rdi: off);
+                if win >= WINDOW_POOL_ADDR {
+                    if win < WINDOW_POOL_ADDR + MAX_WINDOWS * WINDOW_STRUCT_SIZE {
+                        cb_ser(32); cb_ser(105);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_ID));
+                        cb_ser(32); cb_ser(102);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_FLAGS));
+                        cb_ser(32); cb_ser(97);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_APPDATA));
+                        cb_ser(32); cb_ser(100);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_DRAWFN));
+                        cb_ser(32); cb_ser(107);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_KEYFN));
+                        cb_ser(32); cb_ser(99);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_CLICKFN));
+                        cb_ser(32); cb_ser(104);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_DRAGFN));
+                        cb_ser(32); cb_ser(114);
+                        call ser_print_hex64(rdi: lq(win + WIN_OFF_RCLICKFN));
+                    }
+                }
+                cb_ser(13);
+                cb_ser(10);
+            }
+            # Pointer corruption detected on a SIGNED click/key callback. The
+            # forged qword lives in this tenant's own window struct, so it is
+            # attributable to ONE slot - kill only that slot instead of halting
+            # every tenant (was: kernel_panic_canary global halt). Derive the
+            # slot id from the window's pool offset (window id == slot id for app
+            # slots; WINDOW_STRUCT_SIZE == 256, so >>8 = index). sc_slot_integrity
+            # _kill takes r15=slot, edx=reason ('CPIV'); it logs+dumps+audits+
+            # closes the slot's window, never panicking. After it returns we fail
+            # CLOSED for this slot: return 0 (the detach sentinel) so the caller
+            # treats the callback as absent and never dispatches the bad pointer.
+            let slot = (win - WINDOW_POOL_ADDR) >> 8;
+            call sc_slot_integrity_kill(r15: slot, edx: EVT_CPI_VERIFY_FAIL);
+            result = 0;
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# cap_mask_sign(rdi=slot, rsi=mask) -> rax = authenticator byte (0..255).
+# tag = low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK). Pure function of the
+# inputs + kernel_canary; clobbers only rax (rcx/r8 preserved). slot/mask are
+# masked to a byte to match the asm's movzx of dil/sil.
+# ----------------------------------------------------------------------------
+fn cap_mask_sign(rax result, rdi slot, rsi mask)
+        preserves(rdi, rsi, rcx, r8) {
+    let s = slot & 0xFF;
+    let m = mask & 0xFFFF;
+    # Fold the high byte into the low byte so the 8-bit authenticator covers all
+    # 16 mask bits - a tamper of CAP_FS_* (high byte) is detected just like a
+    # low-byte flip. The dispatcher gate recomputes the identical fold.
+    let mf = (m ^ (m >> 8)) & 0xFF;
+    result = (lq(&kernel_canary) ^ s ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
+}
+
+# ----------------------------------------------------------------------------
+# cap_mask_store(rdi=slot, rsi=mask): write slot_cap_mask[slot]=mask AND its
+# authenticator slot_cap_hmac[slot] together so the pair is always consistent -
+# the single place mask writes go through. Caller must have range-checked
+# slot < MAX_WINDOWS; we re-check defensively (the asm trusted the caller, so a
+# guarded skip is strictly safer and behavior-preserving for in-range slots).
+# Clobbers rax (rdi/rsi preserved); rcx/r8 are private scratch.
+#
+# The authenticator is computed INLINE (identical arithmetic to cap_mask_sign:
+# low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK)) rather than via an inner
+# call - a regabi callee's rax return cannot be captured into a GHLK `let`, and
+# inlining the one-XOR-chain is byte-equivalent. cap_mask_sign remains the
+# exported standalone source of truth for any external single-shot signer.
+# Both byte writes are bounds-checked against MAX_WINDOWS.
+# ----------------------------------------------------------------------------
+fn cap_mask_store(rdi slot, rsi mask)
+        preserves(rdi, rsi, rcx, r8) {
+    let s = slot & 0xFF;
+    let m = mask & 0xFFFF;
+    if s < MAX_WINDOWS {
+        let mf = (m ^ (m >> 8)) & 0xFF;     # fold high byte into the authenticator
+        let auth = (lq(&kernel_canary) ^ s ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
+        sb(&slot_cap_mask + s, m & 0xFF);          # mask low byte
+        sb(&slot_cap_mask_hi + s, (m >> 8) & 0xFF);# mask high byte (CAP_FS_* etc.)
+        sb(&slot_cap_hmac + s, auth);              # matching authenticator
+    }
+}
+
+# ----------------------------------------------------------------------------
+# slot_cap_hmac_init(): stamp every slot's authenticator to match its current
+# (static CAP_ALL) mask, using the now-final kernel_canary. Called once from
+# kernel_main right after kernel_canary_init, before any syscall can dispatch.
+# Loops slot = 0..MAX_WINDOWS-1; reads slot_cap_mask[slot], signs it, writes
+# slot_cap_hmac[slot]. Clobbers rax/rcx/rdx/rsi/rdi/r8 (no preserves - matches
+# the asm's documented clobber set; it is a void init helper). Authenticator is
+# computed inline (same arithmetic as cap_mask_sign), each access bounds-checked.
+# ----------------------------------------------------------------------------
+fn slot_cap_hmac_init() {
+    let slot = 0;
+    while slot < MAX_WINDOWS {
+        let lo = lb(&slot_cap_mask + slot);          # mask low byte
+        let hi = lb(&slot_cap_mask_hi + slot);       # mask high byte
+        let mf = (lo ^ hi) & 0xFF;                   # same fold as cap_mask_sign
+        let auth = (lq(&kernel_canary) ^ slot ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
+        sb(&slot_cap_hmac + slot, auth);
+        slot = slot + 1;
+    }
+}

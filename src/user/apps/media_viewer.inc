@@ -1,20 +1,20 @@
 ; ============================================================================
-; NexusOS Media Player — kernel-side renderer & timeline driver.
+; GritOS Media Player - kernel-side renderer & timeline driver.
 ;
 ; This file lives inside the user app blob (apps.asm) but its main entry
 ; point `app_media_draw` is registered as a window draw fn, which means
 ; the window manager invokes it in kernel context. That is what lets us
-; read `bb_addr`, `scr_pitch`, `scr_height`, and `tick_count` directly —
+; read `bb_addr`, `scr_pitch`, `scr_height`, and `tick_count` directly -
 ; those symbols would not be reachable from a Ring-3 slot copy.
 ;
 ; Surface area, kept small and documented
 ; ---------------------------------------
 ;   Pixel I/O   : direct writes to `[bb_addr + y*pitch + x*4]` (UEFI GOP
-;                 framebuffer, BGRA). No iGPU acceleration, no SIMD —
+;                 framebuffer, BGRA). No iGPU acceleration, no SIMD -
 ;                 plain scalar code that is portable across every machine
-;                 NexusOS boots on. See docs/media-formats.md → "Scope".
+;                 GritOS boots on. See docs/media-formats.md → "Scope".
 ;   Timing      : the global 100 Hz PIT `tick_count`. Per-window state
-;                 stored slot-local (see media.nxh `state { ... }`) so
+;                 stored slot-local (see media.ghl `state { ... }`) so
 ;                 two players can coexist.
 ;   Scaling     : nearest-neighbor with a 16.16 fixed-point step, aspect
 ;                 preserved, letterboxed inside the client area. Shared
@@ -35,12 +35,12 @@
 ;   §7  Control bar UI                       (play / ±10s / scrubber)
 ;   §8  Future-work notes
 ;
-; Adding a codec — checklist
+; Adding a codec - checklist
 ; --------------------------
 ;   1. Pick a 32-bit magic and constant in §1.
 ;   2. Add one `cmp eax, <MAGIC>` row in §2.
-;   3. Implement `nx_media_blit_<fmt>(rdi=file, rsi=window)` in §4–§6.
-;   4. (Optional) Extend media.nxh `media_probe` so user-mode tools can
+;   3. Implement `nx_media_blit_<fmt>(rdi=file, rsi=window)` in §4-§6.
+;   4. (Optional) Extend media.ghl `media_probe` so user-mode tools can
 ;      recognise it for thumbnails / property dialogs.
 ;   5. Update docs/media-formats.md.
 ; ============================================================================

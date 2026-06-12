@@ -1,0 +1,52 @@
+# ============================================================================
+# Early kernel console and klog mirror.  ZERO-ASM.
+# Owns debug_print: RSI = NUL-terminated message; preserves all registers.
+# Structured GritHLK (was a register-exact asm shim).
+# ============================================================================
+
+module "kernel_console";
+
+unsafe raw_mem;   # lb/lw/lq/sw against kernel-resident console state
+
+global debug_print;
+
+const COL_GREEN   = 0x0000FF00;   # console text colour (0x00RRGGBB)
+const COL_BLACK   = 0x00000000;   # background / clear colour
+const CON_FILL_X  = 0;            # x of the per-line clear rect
+const CON_TEXT_X  = 10;           # x of the rendered text
+const CON_WIDTH   = 800;          # clear-rect width
+const CON_LINE_H  = 16;           # line height (also the y advance)
+const CON_Y_WRAP  = 600;          # wrap debug_y back to 0 at this y
+const GUI_READY   = 1;            # gui_initialized sentinel
+
+# Kernel-resident state this reads/writes (defined elsewhere in the unit).
+extern bb_addr;             # qword: back-buffer address (0 until framebuffer up)
+extern gui_initialized;     # byte: 1 once the window manager owns the screen
+extern kb_repeat_scancode;  # byte: nonzero while a key is held (reveals console)
+extern debug_y;             # dword: next console line y
+
+# rsi = NUL-terminated message. Always mirrors into the klog ring; additionally
+# draws the green boot console when the framebuffer is up and either the GUI has
+# started or a key is held (so the boot splash owns the screen otherwise).
+# Preserves all registers (rsi is input-only).
+fn debug_print(rsi msg) preserves(all) {
+    call klog_write(rsi: msg);
+
+    if lq(&bb_addr) == 0 { return; }
+
+    # Pre-GUI, stay hidden unless a key is held; once the GUI is up, always draw.
+    if lb(&gui_initialized) != GUI_READY {
+        if lb(&kb_repeat_scancode) == 0 { return; }
+    }
+
+    # Clear the line, render the text, advance + wrap the cursor.
+    fill_rect(CON_FILL_X, lw(&debug_y), CON_WIDTH, CON_LINE_H, COL_BLACK);
+    render_text(CON_TEXT_X, lw(&debug_y), msg, COL_GREEN, COL_BLACK);
+    sw(&debug_y, lw(&debug_y) + CON_LINE_H);
+    if lw(&debug_y) >= CON_Y_WRAP { sw(&debug_y, 0); }
+
+    # Pre-GUI we own the flip; once the WM is up it presents frames itself.
+    if lb(&gui_initialized) != GUI_READY {
+        display_flip();
+    }
+}

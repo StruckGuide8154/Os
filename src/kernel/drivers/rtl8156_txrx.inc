@@ -1,8 +1,8 @@
-; DHCP/ARP transmit builders moved to zero-asm NexusHLK:
+; DHCP/ARP transmit builders moved to zero-asm GritHLK:
 ;   rtl8156_send_dhcp_discover / rtl8156_send_dhcp_request /
-;   rtl8156_build_dhcp_base / rtl8156_finish_dhcp_udp -> rtl8156_dhcp_build.nxh
-;   rtl8156_send_arp_gateway -> rtl8156_arp.nxh
-;   (src/kernel/nexushlk/, %included via kernel_build.asm before this file).
+;   rtl8156_build_dhcp_base / rtl8156_finish_dhcp_udp -> rtl8156_dhcp_build.ghl
+;   rtl8156_send_arp_gateway -> rtl8156_arp.ghl
+;   (src/kernel/grithlk/, %included via kernel_build.asm before this file).
 rtl8156_send_icmp_gateway:
     push rax
     push rbx
@@ -120,10 +120,10 @@ rtl8156_net_tx_frame:
     pop rcx
     ret
 
-; rtl8156_rx_once — non-blocking RX pump. Pulls at most one transfer event
+; rtl8156_rx_once - non-blocking RX pump. Pulls at most one transfer event
 ; off the shared xHCI event ring and dispatches it via consume_event (NIC) or
 ; the HID requeue path. Used at boot (before usb_poll_mouse is running) and
-; redundantly from DHCP/ICMP wait loops — both paths just call this; whoever
+; redundantly from DHCP/ICMP wait loops - both paths just call this; whoever
 ; pops the event from the ring wins, and either flows into handle_frame the
 ; same way through rtl8156_consume_event.
 rtl8156_rx_once:
@@ -148,7 +148,7 @@ rtl8156_rx_once:
     movzx ecx, byte [rtl8156_slot_id]
     cmp edx, ecx
     je .nic_event
-    ; Other slot — re-prime HID so its mouse ring stays armed.
+    ; Other slot - re-prime HID so its mouse ring stays armed.
     extern usb_hid_requeue_slot1_one
     call usb_hid_requeue_slot1_one
     jmp .done

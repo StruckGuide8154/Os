@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Interrupt Service Routines
+; GritOS v3.0 - Interrupt Service Routines
 ; Exception handlers (0-31) and IRQ stubs (0-15 -> vectors 32-47)
 ; ============================================================================
 bits 64
@@ -122,7 +122,7 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     SER 13
     SER 10
     ; If from ring 3, hand off to the existing slot-abort tail. From ring 0
-    ; this is a kernel bug — halt loudly (the nested-exc guard already fired).
+    ; this is a kernel bug - halt loudly (the nested-exc guard already fired).
     mov rax, [rsp + 160]               ; saved CS
     and rax, 3
     cmp rax, 3
@@ -711,7 +711,7 @@ kfault_jmp_rip:          dq 0
 kfault_recovered_count:  dq 0          ; total ring-0 faults recovered (diag)
 global kfault_recovered_count
 ; armed flag exposed so a section can cheaply check "am I (or an outer guard)
-; already armed?" before deciding to arm — the buffer is single-slot / not
+; already armed?" before deciding to arm - the buffer is single-slot / not
 ; reentrant (see kfault_arm header).
 global kfault_armed
 

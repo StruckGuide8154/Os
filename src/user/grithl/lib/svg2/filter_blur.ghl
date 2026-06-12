@@ -1,0 +1,259 @@
+# GritHL SVG2 - feGaussianBlur via 3-pass separable box blur.
+#
+# Each axis pass uses a running-sum sliding window, so cost per pixel is
+# O(1) regardless of radius. Three passes approximate a Gaussian to within
+# ~3% RMS error - visually indistinguishable from the true kernel that the
+# old implementation computed via per-tap exp(). Edge handling: clamp.
+#
+# Radius mapping: for N box passes of half-width r, the effective sigma is
+# r * sqrt(N * ((2r+1)^2 - 1) / (12 * (2r+1))). For r << large this collapses
+# to r * sqrt(N/3); we just pick r = stdDeviation, clamped to BLUR_MAX_RADIUS.
+
+use svg2.filter_ctx
+use svg2.fixed
+
+const BLUR_MAX_RADIUS = 31       # safety cap on per-axis half-width
+const BLUR_BOX_PASSES = 3        # 3 ≈ Gaussian
+
+state {
+    blur_kernel: 128;            # legacy: kept so other modules referencing
+                                  # blur_kernel still link; unused by box path.
+    blur_radius: 4;
+}
+
+# --- Single 1-D box-blur pass over an ARGB buffer ---------------------------
+#
+# Reads `src` (w*h ARGB), writes `dst`. `stride_main` is the byte distance
+# between consecutive pixels along the blur axis (4 for horizontal, w*4 for
+# vertical). `stride_cross` is the byte distance between successive lines
+# perpendicular to the axis. `count_main` is the pixel count along the axis,
+# `count_cross` is the perpendicular pixel count.
+#
+# We keep four running channel sums (a,r,g,b). When the window slides by one
+# pixel we add the new pixel and subtract the pixel that just fell off the
+# left edge. Out-of-bounds reads clamp to the edge pixel. The divisor is
+# (2r+1) regardless of position - clamped edge reads are what makes that valid.
+fn box_blur_axis(src, dst, r, count_main, count_cross, stride_main, stride_cross) {
+    if r <= 0 { return; }
+    let win = 2 * r + 1;
+    let line = 0;
+    while line < count_cross {
+        let base = line * stride_cross;
+        # Prime the window: read pixels at indices -r..r along the axis,
+        # clamping negatives to 0.
+        let acc_a = 0;
+        let acc_r = 0;
+        let acc_g = 0;
+        let acc_b = 0;
+        let i = 0 - r;
+        while i <= r {
+            let idx = i;
+            if idx < 0 { idx = 0; }
+            if idx >= count_main { idx = count_main - 1; }
+            let p = lw(src + base + idx * stride_main);
+            acc_a = acc_a + ((p >> 24) & 0xFF);
+            acc_r = acc_r + ((p >> 16) & 0xFF);
+            acc_g = acc_g + ((p >> 8) & 0xFF);
+            acc_b = acc_b + (p & 0xFF);
+            i = i + 1;
+        }
+        let x = 0;
+        while x < count_main {
+            let oa = acc_a / win;
+            let orr = acc_r / win;
+            let og = acc_g / win;
+            let ob = acc_b / win;
+            sw(dst + base + x * stride_main,
+               (oa << 24) | (orr << 16) | (og << 8) | ob);
+            # Slide: subtract pixel at (x - r), add pixel at (x + r + 1).
+            let add_idx = x + r + 1;
+            let sub_idx = x - r;
+            if add_idx >= count_main { add_idx = count_main - 1; }
+            if sub_idx < 0 { sub_idx = 0; }
+            let pa = lw(src + base + add_idx * stride_main);
+            let ps = lw(src + base + sub_idx * stride_main);
+            acc_a = acc_a + ((pa >> 24) & 0xFF) - ((ps >> 24) & 0xFF);
+            acc_r = acc_r + ((pa >> 16) & 0xFF) - ((ps >> 16) & 0xFF);
+            acc_g = acc_g + ((pa >> 8) & 0xFF) - ((ps >> 8) & 0xFF);
+            acc_b = acc_b + (pa & 0xFF) - (ps & 0xFF);
+            x = x + 1;
+        }
+        line = line + 1;
+    }
+}
+
+# Fixed-point exp(-x) for x >= 0, x in 16.16. Returns 16.16. Uses a 5-term
+# Taylor expansion around 0 plus repeated halving for larger x.
+# exp(-x) = exp(-x/2)^2 -> compute exp(-x/N) for small x/N and square N times.
+fn blur_exp_neg(x) {
+    if x <= 0 { return FX_ONE; }
+    # Reduce: count how many times we need to halve to get x_red <= 0.25 (16384 in fixed).
+    let halves = 0;
+    let xr = x;
+    while xr > 16384 {
+        xr = xr >> 1;
+        halves = halves + 1;
+        if halves > 16 { break; }
+    }
+    # Taylor: 1 - x + x^2/2 - x^3/6 + x^4/24 - x^5/120, in 16.16.
+    let x2 = fx_mul(xr, xr);
+    let x3 = fx_mul(x2, xr);
+    let x4 = fx_mul(x3, xr);
+    let x5 = fx_mul(x4, xr);
+    let t = FX_ONE;
+    t = t - xr;
+    t = t + (x2 >> 1);
+    t = t - x3 / 6;
+    t = t + x4 / 24;
+    t = t - x5 / 120;
+    if t < 0 { t = 0; }
+    # Square `halves` times.
+    while halves > 0 {
+        t = fx_mul(t, t);
+        halves = halves - 1;
+    }
+    if t < 0 { t = 0; }
+    if t > FX_ONE { t = FX_ONE; }
+    return t;
+}
+
+# Set the per-axis box-blur half-width for a given stdDeviation. The box
+# approximation needs only this number; no per-tap weights are computed.
+fn blur_build_kernel(sigma) {
+    if sigma < 1 { sigma = 1; }
+    let r = sigma;
+    if r > BLUR_MAX_RADIUS { r = BLUR_MAX_RADIUS; }
+    sw(&blur_radius, r);
+}
+
+# Component-wise convolve one pixel along an axis. (px, py) is the center;
+# dx, dy is the step (1,0) for horizontal pass, (0,1) for vertical.
+fn blur_sample(src_buf, px, py, dx, dy) {
+    let r = lw(&blur_radius);
+    let w0 = lw(&blur_kernel);
+    let center = fctx_read_pixel(src_buf, px, py);
+    let ca = (center >> 24) & 0xFF;
+    let cr = (center >> 16) & 0xFF;
+    let cg = (center >> 8) & 0xFF;
+    let cb = center & 0xFF;
+    let acc_a = (ca * w0) >> 8;       # premul by weight at 16.8 effective
+    let acc_r = (cr * w0) >> 8;
+    let acc_g = (cg * w0) >> 8;
+    let acc_b = (cb * w0) >> 8;
+    let i = 1;
+    while i <= r {
+        let wi = lw(&blur_kernel + i * 4);
+        let pn = fctx_read_pixel(src_buf, px + dx * i, py + dy * i);
+        let pp = fctx_read_pixel(src_buf, px - dx * i, py - dy * i);
+        let na = (pn >> 24) & 0xFF;
+        let nr = (pn >> 16) & 0xFF;
+        let ng = (pn >> 8) & 0xFF;
+        let nb = pn & 0xFF;
+        let pa = (pp >> 24) & 0xFF;
+        let pr = (pp >> 16) & 0xFF;
+        let pg = (pp >> 8) & 0xFF;
+        let pb = pp & 0xFF;
+        acc_a = acc_a + (((na + pa) * wi) >> 8);
+        acc_r = acc_r + (((nr + pr) * wi) >> 8);
+        acc_g = acc_g + (((ng + pg) * wi) >> 8);
+        acc_b = acc_b + (((nb + pb) * wi) >> 8);
+        i = i + 1;
+    }
+    # acc_* are in 16.8 (weight FX_ONE = 65536 / 256 = 256 scale). Shift by 8.
+    let oa = acc_a >> 8;
+    let orr = acc_r >> 8;
+    let og = acc_g >> 8;
+    let ob = acc_b >> 8;
+    if oa > 255 { oa = 255; }
+    if orr > 255 { orr = 255; }
+    if og > 255 { og = 255; }
+    if ob > 255 { ob = 255; }
+    if oa < 0 { oa = 0; }
+    if orr < 0 { orr = 0; }
+    if og < 0 { og = 0; }
+    if ob < 0 { ob = 0; }
+    return (oa << 24) | (orr << 16) | (og << 8) | ob;
+}
+
+# Apply gaussian blur to the active canvas with stdDeviation = sigma.
+# Three separable box-blur passes per axis. Result ends up in the active
+# buffer after the swaps.
+fn blur_apply(sigma) {
+    blur_build_kernel(sigma);
+    let r = lw(&blur_radius);
+    if r <= 0 { return; }
+    let w = lw(&fctx_w);
+    let h = lw(&fctx_h);
+    let row = w * 4;
+    let n = 0;
+    while n < BLUR_BOX_PASSES {
+        # Horizontal: active -> other.
+        let src1 = fctx_active_addr();
+        let dst1 = fctx_other_addr();
+        box_blur_axis(src1, dst1, r, w, h, 4, row);
+        fctx_swap();
+        # Vertical: active -> other.
+        let src2 = fctx_active_addr();
+        let dst2 = fctx_other_addr();
+        box_blur_axis(src2, dst2, r, h, w, row, 4);
+        fctx_swap();
+        n = n + 1;
+    }
+}
+
+# --- Arena-buffer variant (used by the multi-primitive filter graph) ---
+#
+# Edge-clamped read from an explicit w*h ARGB buffer.
+fn blur_read_buf(buf, w, h, x, y) {
+    if x < 0 { x = 0; }
+    if y < 0 { y = 0; }
+    if x >= w { x = w - 1; }
+    if y >= h { y = h - 1; }
+    return lw(buf + (y * w + x) * 4);
+}
+
+# Convolve one pixel of `src` (w*h ARGB) along (dx,dy) at center (px,py).
+fn blur_sample_buf(src, w, h, px, py, dx, dy) {
+    let r = lw(&blur_radius);
+    let w0 = lw(&blur_kernel);
+    let center = blur_read_buf(src, w, h, px, py);
+    let acc_a = (((center >> 24) & 0xFF) * w0) >> 8;
+    let acc_r = (((center >> 16) & 0xFF) * w0) >> 8;
+    let acc_g = (((center >> 8) & 0xFF) * w0) >> 8;
+    let acc_b = ((center & 0xFF) * w0) >> 8;
+    let i = 1;
+    while i <= r {
+        let wi = lw(&blur_kernel + i * 4);
+        let pn = blur_read_buf(src, w, h, px + dx * i, py + dy * i);
+        let pp = blur_read_buf(src, w, h, px - dx * i, py - dy * i);
+        acc_a = acc_a + ((((((pn >> 24) & 0xFF)) + (((pp >> 24) & 0xFF))) * wi) >> 8);
+        acc_r = acc_r + ((((((pn >> 16) & 0xFF)) + (((pp >> 16) & 0xFF))) * wi) >> 8);
+        acc_g = acc_g + ((((((pn >> 8) & 0xFF)) + (((pp >> 8) & 0xFF))) * wi) >> 8);
+        acc_b = acc_b + (((((pn & 0xFF)) + ((pp & 0xFF))) * wi) >> 8);
+        i = i + 1;
+    }
+    let oa = acc_a >> 8;
+    let orr = acc_r >> 8;
+    let og = acc_g >> 8;
+    let ob = acc_b >> 8;
+    if oa > 255 { oa = 255; }   if oa < 0 { oa = 0; }
+    if orr > 255 { orr = 255; } if orr < 0 { orr = 0; }
+    if og > 255 { og = 255; }   if og < 0 { og = 0; }
+    if ob > 255 { ob = 255; }   if ob < 0 { ob = 0; }
+    return (oa << 24) | (orr << 16) | (og << 8) | ob;
+}
+
+# Gaussian-blur the ARGB buffer `buf` (w*h) in place, using `scratch`
+# (same size) as the separable-pass intermediate. Three box-blur passes.
+fn blur_apply_buf(buf, scratch, w, h, sigma) {
+    blur_build_kernel(sigma);
+    let r = lw(&blur_radius);
+    if r <= 0 { return; }
+    let row = w * 4;
+    let n = 0;
+    while n < BLUR_BOX_PASSES {
+        box_blur_axis(buf, scratch, r, w, h, 4, row);
+        box_blur_axis(scratch, buf, r, h, w, row, 4);
+        n = n + 1;
+    }
+}

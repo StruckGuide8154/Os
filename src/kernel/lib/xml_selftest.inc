@@ -176,7 +176,7 @@ xt_b5:  db '<a><!-- bad'
 xt_b5e:
 xt_f6:  db '<!DOCTYPE doc><doc>ok</doc>'
 xt_f6e:
-xt_f7:  db '<!DOCTYPE doc [<!ENTITY brand "NexusOS"> <!ELEMENT doc ANY>]>',10
+xt_f7:  db '<!DOCTYPE doc [<!ENTITY brand "GritOS"> <!ELEMENT doc ANY>]>',10
         db '<doc>Made by &brand;</doc>'
 xt_f7e:
 xt_f8:  db '<doc>a<b/>c<b/>d</doc>'

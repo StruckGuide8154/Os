@@ -13,10 +13,10 @@ szMenuPaint    db "Paint", 0
 szMenuTaskMgr  db "Task Manager", 0
 szMenuPing     db "Networking", 0
 szMenuMedia    db "Media Player", 0
-szMenuAbout    db "About NexusOS", 0
+szMenuAbout    db "About GritOS", 0
 
 ; ============================================================================
-; Start menu entry table — single source of truth for the menu.
+; Start menu entry table - single source of truth for the menu.
 ; To add a row: append one MENU_ENTRY line. Everything else (item count,
 ; menu height, draw loop, click hit-testing, app dispatch) updates automatically.
 ;

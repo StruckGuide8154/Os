@@ -140,7 +140,7 @@ FN_BEGIN l3_randomize_user_stack_top, 0, 0, FN_RET_VOID
     push rdi
     push r8
     mov r8d, edi
-%ifdef NEXUS_NO_MEM_RANDOM
+%ifdef GRIT_NO_MEM_RANDOM
     mov ecx, r8d
     mov qword [rel l3_slot_ustack_off + rcx*8], L3_SLOT_USTACK_TOP_HIGH
     jmp .lrust_done

@@ -8,9 +8,9 @@
     CI job invokes. It:
 
       1. Calls the verification entry point
-         scripts/test/test_nhl_security_guards.ps1 (privacy + no-asm + inventory +
+         scripts/test/test_ghl_security_guards.ps1 (privacy + no-asm + inventory +
          policy-module compile + checker fixtures + invariants) and captures
-         pass/fail. This drives the "NHL-only trusted path" signal.
+         pass/fail. This drives the "GHL-only trusted path" signal.
 
       2. Runs the legacy-quarantine check with ADDITIONS-ONLY semantics: it shells
          out to tools/security/check_no_asm.ps1 -InventoryGuard and treats only
@@ -25,7 +25,7 @@
 
     It then prints exactly two machine-greppable summary lines:
 
-         NHL-only trusted path: pass|fail
+         GHL-only trusted path: pass|fail
          legacy assembly quarantine unchanged: pass|fail
 
     The script exits 0 only if BOTH summary lines are "pass" AND the dirty-output
@@ -33,7 +33,7 @@
 
 .NOTES
     Owned by the CI-surfacing track. It only CALLS the guard rule scripts; it does
-    not modify check_no_asm.ps1, test_nhl_security_guards.ps1, or the inventory.
+    not modify check_no_asm.ps1, test_ghl_security_guards.ps1, or the inventory.
 #>
 param(
     [string]$RepoRoot
@@ -61,7 +61,7 @@ if ($RepoRoot) {
     $root = Get-RepoRoot
 }
 
-$EntryPoint = Join-Path $root 'scripts\test\test_nhl_security_guards.ps1'
+$EntryPoint = Join-Path $root 'scripts\test\test_ghl_security_guards.ps1'
 $NoAsmGuard = Join-Path $root 'tools\security\check_no_asm.ps1'
 # The dirty-output guard is a sibling owned script; resolve it next to this
 # wrapper so the pair travels together regardless of -RepoRoot.
@@ -81,9 +81,9 @@ Write-Host '=== [ci-security] Dirty-output baseline snapshot ===' -ForegroundCol
 & powershell -NoProfile -ExecutionPolicy Bypass -File $DirtyGuard -RepoRoot $root -Snapshot $snapshotFile
 
 # ---------------------------------------------------------------------------
-# 1. NHL-only trusted path: run the full security verification entry point.
+# 1. GHL-only trusted path: run the full security verification entry point.
 # ---------------------------------------------------------------------------
-Write-Host '=== [ci-security] NHL-only trusted path verification ===' -ForegroundColor Cyan
+Write-Host '=== [ci-security] GHL-only trusted path verification ===' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass -File $EntryPoint
 $trustedPathPass = ($LASTEXITCODE -eq 0)
 
@@ -160,7 +160,7 @@ $dirtyLabel = if ($dirtyOutputPass) { 'pass' } else { 'fail' }
 
 Write-Host ''
 Write-Host '=== [ci-security] SUMMARY ===' -ForegroundColor Cyan
-Write-Host "NHL-only trusted path: $trustedPathLabel"
+Write-Host "GHL-only trusted path: $trustedPathLabel"
 Write-Host "legacy assembly quarantine unchanged: $quarantineLabel"
 Write-Host "dirty-output guard: $dirtyLabel"
 

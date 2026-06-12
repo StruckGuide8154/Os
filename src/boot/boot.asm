@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v2.0 - Legacy standalone UEFI graphical boot image
+; GritOS v2.0 - Legacy standalone UEFI graphical boot image
 ;
 ; Owner: legacy UEFI boot image maintainers
 ;

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - PCI Driver
+; GritOS v3.0 - PCI Driver
 ; Basic mechanism to read/write PCI configuration space
 ; ============================================================================
 bits 64
@@ -191,10 +191,10 @@ pci_gpu_scan:
 
     ; Ensure MEMORY + BUS_MASTER are enabled on the AMD iGPU. UEFI normally
     ; sets these for any device with an active framebuffer, but a few
-    ; vendor BIOSes leave Bus Master off — which silently breaks any path
+    ; vendor BIOSes leave Bus Master off - which silently breaks any path
     ; that lets the GPU initiate reads (PSP DMA, IMU autoload, CP ucode
     ; fetch). Setting these bits when already set is a no-op; setting them
-    ; when off cannot hurt — we never need to *clear* MEMORY/BM on a
+    ; when off cannot hurt - we never need to *clear* MEMORY/BM on a
     ; running display device.
     mov ecx, eax                         ; ecx = current cmd
     and ecx, 0x0000FFFF                  ; keep low 16 bits (PCI cmd is 16-bit)

@@ -1,0 +1,403 @@
+# ============================================================================
+# Frame presentation and live-refresh policy.  ZERO-ASM.
+# Owns render_frame plus focused Task Manager and Media Player refresh fast
+# paths. Structured GritHLK (was a register-exact asm shim): the local
+# subroutine-labels the original `call`ed (.rf_update_fps / .rf_draw_fps_text /
+# .rf_restore_fps_region) and the per-state tail blocks (full / fast / drag /
+# wallpaper-busy) are factored into module-internal helper fns; the goto dispatch
+# becomes structured if/return.
+#
+# Assembly-time layout constants are referenced by name via `const X = extern;`
+# (NASM resolves the canonical equ), so no value is duplicated into GHLK.
+# ============================================================================
+
+module "frame_present";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq of framebuffer + window + slot state
+unsafe kernel_priv;      # smap_open()/smap_close() (stac/clac) around slot reads
+unsafe implicit_extern;  # &<symbol> over the many shared data/app deps
+
+global render_frame;
+global taskmgr_live_refresh;
+global media_live_refresh;
+global netpanel_live_refresh;
+
+# Runtime feature toggle: FEAT_FRAME_PRESENT_REFRESH gates the whole per-frame
+# present/refresh path. When disabled (BOOTCFG disable=present) render_frame is a
+# no-op after the boot-time first paint - used to bisect the 1664x262 scanout
+# clobber. feat_on() lives in boot_features.ghl (same NASM translation unit).
+extern feat_on;
+const FEAT_FRAME_PRESENT_REFRESH = 2;
+
+# Window pool layout + flags (src/include/window_layout.inc, constants.inc).
+const WINDOW_POOL_ADDR   = extern;
+const WINDOW_STRUCT_SIZE = extern;
+const MAX_WINDOWS        = extern;
+const WIN_OFF_ID         = extern;
+const WIN_OFF_X          = extern;
+const WIN_OFF_Y          = extern;
+const WIN_OFF_W          = extern;
+const WIN_OFF_H          = extern;
+const WIN_OFF_FLAGS      = extern;
+const WIN_OFF_DRAWFN     = extern;
+const WF_ACTIVE          = extern;
+const WF_VISIBLE         = extern;
+const WF_MINIMIZED       = extern;
+const WF_FOCUSED         = extern;
+
+# FPS overlay region + saved-backbuffer base (core_runtime_state.asm, boot_memory.inc).
+const FPS_REGION_X       = extern;
+const FPS_REGION_Y       = extern;
+const FPS_REGION_W       = extern;
+const FPS_REGION_H       = extern;
+const BACK_BUFFER_SAVE_ADDR = extern;
+
+# Media/NBA slot layout (core_runtime_state.asm, constants.inc).
+const APP_SLOT_BMP_FILE_OFF = extern;
+const NBA1_MAGIC         = extern;
+const BORDER_WIDTH       = extern;
+const TITLEBAR_HEIGHT    = extern;
+
+const NO_DRAG = -1;            # wm_drag_window_id sentinel
+const BLINK_DIV = 30;          # caret blink phase divisor (PIT ticks)
+const FPS_WINDOW = 100;        # FPS averaging window (PIT ticks)
+const TASKMGR_PERIOD = 100;    # task-manager live-refresh cadence (PIT ticks)
+const CTRL_STRIP_H = 26;       # media control-strip height (direct-present flush)
+const COL_FPS = 0x00FFFFFF;    # FPS text colour
+const COL_TRANSPARENT = -1;    # render_text transparent background
+
+# ---- FPS counter + text helpers ----
+
+# Tick the frame counter; every FPS_WINDOW ticks publish frames-per-window into
+# last_fps and restart the window.
+fn rf_update_fps() {
+    sw(&frame_count, lw(&frame_count) + 1);
+    let t = lq(&tick_count);
+    if t - lq(&start_tick) >= FPS_WINDOW {
+        sw(&last_fps, lw(&frame_count));
+        sw(&frame_count, 0);
+        sq(&start_tick, t);
+    }
+}
+
+# Render the FPS readout into the overlay region (transparent background).
+fn rf_draw_fps_text() {
+    call uint32_to_str(rdi: lw(&last_fps), rsi: &fps_str);
+    render_text(FPS_REGION_X + 4, FPS_REGION_Y + 4, &szFPSPrefix, COL_FPS, COL_TRANSPARENT);
+}
+
+# Restore the FPS region of the live backbuffer from the saved snapshot (used by
+# the idle fast path so the rest of the frame is untouched). Row-wise dword copy.
+fn rf_restore_fps_region() {
+    let pitch = lq(&scr_pitch_q);
+    let base = FPS_REGION_Y * pitch + FPS_REGION_X * 4;
+    let dst = lq(&bb_addr) + base;
+    let src = BACK_BUFFER_SAVE_ADDR + base;
+    let row = FPS_REGION_H;
+    while row > 0 {
+        let c = 0;
+        while c < FPS_REGION_W {
+            sw(dst + c * 4, lw(src + c * 4));
+            c = c + 1;
+        }
+        dst = dst + pitch;
+        src = src + pitch;
+        row = row - 1;
+    }
+}
+
+# Cache the inputs the idle fast path keys off, so a truly-idle frame is skipped.
+fn rf_save_idle_keys() {
+    sw(&rf_last_mouse_x, lw(&mouse_x));
+    sw(&rf_last_mouse_y, lw(&mouse_y));
+    sw(&rf_last_fps, lw(&last_fps));
+}
+
+# ---- per-state tail paths ----
+
+# Full repaint: desktop + taskbar + menus + FPS, save, flush, cursor.
+fn rf_full_path() {
+    wm_draw_desktop();
+    if lb(&wallpaper_render_active) != 0 {
+        sb(&scene_dirty, 1);          # wallpaper AP busy: defer to next frame
+        return;
+    }
+    tb_draw();
+    tb_draw_submenu();
+    ctx_menu_draw();
+    rf_update_fps();
+    rf_draw_fps_text();
+    let saved = 1;
+    cfg "RELEASE_BUILD" {
+        if lb(&rf_first_frame_defer_save) != 0 {
+            saved = 0;
+            sb(&rf_first_frame_defer_save, 0);
+        }
+    }
+    if saved != 0 { render_save_backbuffer(); }
+    sb(&scene_dirty, 0);
+    # Frame timing is owned by the central pacer (frame_pacing.ghl); the old
+    # per-path wait_vsync() busy-spun here AND held the cursor hidden across the
+    # whole wait, which is what made the pointer vanish for whole frames. Keep
+    # the hide->flush->draw window as tight as possible so the cursor is only
+    # absent for the brief flush.
+    cursor_hide();
+    render_mark_full();
+    render_flush();
+    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+    rf_save_idle_keys();
+    if saved == 0 { sb(&scene_dirty, 1); }
+}
+
+# Compositor-only present while the wallpaper AP rasterizes (no app draw).
+fn rf_wallpaper_busy_present() {
+    render_restore_backbuffer();
+    tb_draw();
+    tb_draw_submenu();
+    ctx_menu_draw();
+    if lq(&wm_drag_window_id) != NO_DRAG { wm_draw_drag_outline(); }
+    rf_update_fps();
+    rf_draw_fps_text();
+    cursor_hide();
+    render_mark_full();
+    render_flush();
+    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+    rf_save_idle_keys();
+    sb(&scene_dirty, 1);
+}
+
+# Idle fast path: only the FPS region + cursor change.
+fn rf_fast_path() {
+    rf_update_fps();
+    rf_restore_fps_region();
+    rf_draw_fps_text();
+    cursor_hide();
+    display_flip_rect(FPS_REGION_X, FPS_REGION_Y, FPS_REGION_W, FPS_REGION_H);
+    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+    rf_save_idle_keys();
+}
+
+# Window drag: restore from the dirty backbuffer + draw the outline + FPS.
+fn rf_draw_drag() {
+    render_restore_dirty_backbuffer();
+    wm_draw_drag_outline();
+    rf_update_fps();
+    rf_draw_fps_text();
+    render_mark_dirty(FPS_REGION_X, FPS_REGION_Y, FPS_REGION_W, FPS_REGION_H);
+    cursor_hide();
+    render_flush();
+    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+}
+
+# ---- render_frame ----
+
+fn render_frame() {
+    # Runtime gate: suppress all per-frame present/refresh work when disabled.
+    # The boot-time first paint (kmain's initial render_frame) is also gated, so
+    # with present=off the desktop is whatever display_init/display_flip left.
+    if feat_on(FEAT_FRAME_PRESENT_REFRESH) == 0 { return; }
+
+    # F12 klog overlay owns the whole screen: draw it, full-flush, cursor, done.
+    if lb(&klog_visible) != 0 {
+        klog_render_overlay();
+        render_mark_full();
+        render_flush();
+        cursor_draw(lw(&mouse_x), lw(&mouse_y));
+        return;
+    }
+
+    # Wallpaper AP active: pump it; if still busy, present compositor-only.
+    if lb(&wallpaper_render_active) != 0 {
+        wm_poll_wallpaper_render();
+        if lb(&wallpaper_render_active) != 0 {
+            rf_wallpaper_busy_present();
+            return;
+        }
+    }
+
+    taskmgr_live_refresh();
+    media_live_refresh();
+    netpanel_live_refresh();
+
+    # Track caret blink phase but do NOT dirty the scene (idle-CPU fix).
+    sb(&ui_blink_phase, (lq(&tick_count) / BLINK_DIV) & 1);
+
+    if lq(&wm_drag_window_id) != NO_DRAG { rf_draw_drag(); return; }
+    if lb(&scene_dirty) != 0 { rf_full_path(); return; }
+
+    # Truly idle: skip everything unless the cursor moved or FPS changed.
+    if lw(&mouse_x) == lw(&rf_last_mouse_x) {
+        if lw(&mouse_y) == lw(&rf_last_mouse_y) {
+            if lw(&last_fps) == lw(&rf_last_fps) {
+                return;
+            }
+        }
+    }
+    rf_fast_path();
+}
+
+# ---- Task Manager live refresh ----
+
+# Repaint a focused, open Task Manager window on a low cadence (it shows live
+# counters) even when no input dirtied the desktop.
+fn taskmgr_live_refresh() {
+    let now = lq(&tick_count);
+    if now - lq(&taskmgr_last_refresh_tick) < TASKMGR_PERIOD { return; }
+    sq(&taskmgr_last_refresh_tick, now);
+
+    let win = WINDOW_POOL_ADDR;
+    let i = 0;
+    while i < MAX_WINDOWS {
+        let fl = lq(win + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 && (fl & WF_MINIMIZED) == 0 {
+            if lq(win + WIN_OFF_DRAWFN) == &app_hl_taskmgr_draw {
+                if (fl & WF_FOCUSED) != 0 {
+                    cursor_hide();
+                    wm_draw_window(lq(win + WIN_OFF_ID));
+                    render_mark_dirty(lw(win + WIN_OFF_X), lw(win + WIN_OFF_Y),
+                                      lw(win + WIN_OFF_W), lw(win + WIN_OFF_H));
+                    render_save_dirty_backbuffer();
+                    render_flush();
+                    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+                    return;
+                }
+                sb(&scene_dirty, 1);
+                return;
+            }
+        }
+        win = win + WINDOW_STRUCT_SIZE;
+        i = i + 1;
+    }
+}
+
+data rf_first_frame_defer_save: 1 x 1 = 1;
+
+# ---- Media Player live refresh ----
+
+# Decide whether a focused NBA media window has real work this tick (seek
+# pending, first timer seed, or the next source frame is due). Reads several user
+# (PTE.U=1) slot fields under a SMAP AC bracket. Returns 1 if the window should
+# be woken, 0 otherwise.
+fn media_window_due(win) {
+    let slot = l3_slot_base(lw(win + WIN_OFF_ID));
+    let mp_paused_off = &app_hl_media_mp_paused - &app_blob_start;
+    let mp_seek_off   = &app_hl_media_mp_seek_to - &app_blob_start;
+    let mp_tick_off   = &app_hl_media_mp_last_tick - &app_blob_start;
+    let due = 0;
+    smap_open();
+    if (lw(slot + APP_SLOT_BMP_FILE_OFF) & 0xFFFFFFFF) == NBA1_MAGIC {
+        if (lw(slot + APP_SLOT_BMP_FILE_OFF + 12) & 0xFFFFFFFF) > 1 {       # frame_count
+            let fps = lw(slot + APP_SLOT_BMP_FILE_OFF + 16) & 0xFFFFFFFF;
+            if fps != 0 {
+                if lw(slot + mp_paused_off) == 0 {
+                    if lw(slot + mp_seek_off) != 0 {
+                        due = 1;                                            # seek pending
+                    } else {
+                        let last_tick = lq(slot + mp_tick_off);
+                        if last_tick == 0 {
+                            due = 1;                                        # first seed
+                        } else {
+                            let interval = 100 / fps;                      # max(1, 100/fps)
+                            if interval == 0 { interval = 1; }
+                            if lq(&tick_count) - last_tick >= interval { due = 1; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    smap_close();
+    return due;
+}
+
+# Repaint a focused Media Player NBA window only when it has work, flushing just
+# the window rectangle (or the control strip if the video was direct-presented).
+fn media_live_refresh() {
+    let win = WINDOW_POOL_ADDR;
+    let i = 0;
+    while i < MAX_WINDOWS {
+        let fl = lq(win + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 && (fl & WF_MINIMIZED) == 0 {
+            if lq(win + WIN_OFF_DRAWFN) == &app_media_draw {
+                if media_window_due(win) != 0 {
+                    # Already-dirty or unfocused -> let the full path handle it.
+                    if lb(&scene_dirty) != 0 { sb(&scene_dirty, 1); return; }
+                    if (fl & WF_FOCUSED) == 0 { sb(&scene_dirty, 1); return; }
+                    cursor_hide();
+                    sb(&media_direct_present, 1);
+                    sb(&media_direct_presented, 0);
+                    media_draw_dispatch(win);
+                    sb(&media_direct_present, 0);
+                    if lb(&media_direct_presented) == 1 {
+                        # Pixels already mirrored to VRAM: flush only the control strip.
+                        render_mark_dirty(lw(win + WIN_OFF_X) + BORDER_WIDTH,
+                                          lw(win + WIN_OFF_Y) + lw(win + WIN_OFF_H) - BORDER_WIDTH - CTRL_STRIP_H,
+                                          lw(win + WIN_OFF_W) - BORDER_WIDTH * 2,
+                                          CTRL_STRIP_H);
+                    } else {
+                        render_mark_dirty(lw(win + WIN_OFF_X) + BORDER_WIDTH,
+                                          lw(win + WIN_OFF_Y) + TITLEBAR_HEIGHT,
+                                          lw(win + WIN_OFF_W) - BORDER_WIDTH * 2,
+                                          lw(win + WIN_OFF_H) - TITLEBAR_HEIGHT - BORDER_WIDTH);
+                    }
+                    render_save_dirty_backbuffer();
+                    render_flush();
+                    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+                    return;
+                }
+            }
+        }
+        win = win + WINDOW_STRUCT_SIZE;
+        i = i + 1;
+    }
+}
+
+# ---- Network panel (ping app) live refresh ----
+
+# Repaint a focused, open ping window when an *in-app* async net event resolves
+# - a DHCP lease binds or an ICMP reply arrives - instead of waiting for the
+# next user click. Two triggers, both kernel-visible without touching the slot:
+#   * in-flight: DHCP DISCOVER/REQUEST (state 1/2) or ping awaiting reply
+#     (async 1). Repaint each frame so the app's draw() re-pumps the FSM and the
+#     "pinging.../acquiring..." UI stays live.
+#   * resolved: the dhcp/ping state byte changed since we last looked (BOUND/
+#     FAILED, reply-ready/idle). Repaint the one frame that shows the result.
+# Idle (no in-flight op, no state change) costs nothing - we fall through.
+fn netpanel_live_refresh() {
+    let dhcp = lb(&rtl8156_dhcp_state);
+    let png  = lb(&rtl8156_ping_async_state);
+    let busy = 0;
+    if dhcp == 1 { busy = 1; }
+    if dhcp == 2 { busy = 1; }
+    if png == 1 { busy = 1; }
+    let changed = 0;
+    if dhcp != lb(&netpanel_last_dhcp) { changed = 1; }
+    if png != lb(&netpanel_last_ping) { changed = 1; }
+    sb(&netpanel_last_dhcp, dhcp);
+    sb(&netpanel_last_ping, png);
+    if busy == 0 { if changed == 0 { return; } }
+
+    let win = WINDOW_POOL_ADDR;
+    let i = 0;
+    while i < MAX_WINDOWS {
+        let fl = lq(win + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 && (fl & WF_MINIMIZED) == 0 {
+            if lq(win + WIN_OFF_DRAWFN) == &app_hl_ping_draw {
+                if (fl & WF_FOCUSED) != 0 {
+                    cursor_hide();
+                    wm_draw_window(lq(win + WIN_OFF_ID));
+                    render_mark_dirty(lw(win + WIN_OFF_X), lw(win + WIN_OFF_Y),
+                                      lw(win + WIN_OFF_W), lw(win + WIN_OFF_H));
+                    render_save_dirty_backbuffer();
+                    render_flush();
+                    cursor_draw(lw(&mouse_x), lw(&mouse_y));
+                    return;
+                }
+                sb(&scene_dirty, 1);
+                return;
+            }
+        }
+        win = win + WINDOW_STRUCT_SIZE;
+        i = i + 1;
+    }
+}

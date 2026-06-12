@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_imu.asm — IMU + RLC backdoor autoload scaffolding (Phoenix, gfx_11_0_3)
+; amd_imu.asm - IMU + RLC backdoor autoload scaffolding (Phoenix, gfx_11_0_3)
 ; ----------------------------------------------------------------------------
 ; Read-only by default. Provides a builder that scans the FAT16 ramdisk for
 ; Phoenix GFX firmware blobs and constructs a `psp_gfx_uc_info[]` TOC plus
@@ -39,13 +39,13 @@ global imu_autoload_build
 global imu_autoload_kick
 global imu_autoload_status
 
-global imu_autoload_count        ; uint32 — entries successfully placed
-global imu_autoload_total_size   ; uint32 — TOC + payload, bytes
-global imu_autoload_toc_addr     ; uint64 — phys addr of the TOC
-global imu_autoload_missing      ; uint32 — bitmask of expected types absent
-global imu_autoload_last_type    ; uint32 — last type scanned (diag)
-global imu_autoload_fat_count    ; uint32 — fat16_file_count at scan time
-global imu_autoload_first_name   ; 16 bytes — first dir entry name (diag)
+global imu_autoload_count        ; uint32 - entries successfully placed
+global imu_autoload_total_size   ; uint32 - TOC + payload, bytes
+global imu_autoload_toc_addr     ; uint64 - phys addr of the TOC
+global imu_autoload_missing      ; uint32 - bitmask of expected types absent
+global imu_autoload_last_type    ; uint32 - last type scanned (diag)
+global imu_autoload_fat_count    ; uint32 - fat16_file_count at scan time
+global imu_autoload_first_name   ; 16 bytes - first dir entry name (diag)
 
 extern fat16_file_count
 extern fat16_get_entry
@@ -75,7 +75,7 @@ extern gpu_bringup_state
 %define IMU_BLOB_ALIGN       0x1000      ; 4 KiB blob alignment
 
 ; Required-blob bitmask. If any of these are missing, IMU autoload cannot
-; bring CP up. The bit numbers are arbitrary (internal to this driver) —
+; bring CP up. The bit numbers are arbitrary (internal to this driver) -
 ; one bit per blob we try to load.
 %define IMU_REQ_PFP          (1 << 0)
 %define IMU_REQ_ME           (1 << 1)
@@ -150,7 +150,7 @@ imu_autoload_build:
     ;   [0..10]  11-byte 8.3 alias
     ;   [11]     padding
     ;   [12]     fw_type (uint8)
-    ;   [13]     req_bit (uint8) — which IMU_REQ_* bit this represents
+    ;   [13]     req_bit (uint8) - which IMU_REQ_* bit this represents
     ;   [14..15] padding
     lea  r14, [rel fw_name_table]
 .tbl_loop:
@@ -256,7 +256,7 @@ imu_autoload_kick:
     jne  .blocked
 
     ; (1) Program FW directory phys address (the start of our staging
-    ;     region — which is where imu_autoload_build placed the TOC).
+    ;     region - which is where imu_autoload_build placed the TOC).
     mov  rax, GPU_PSP_FW_STAGING_BASE
     mov  edi, GFX_IMU_FW_GTS_LO_DW
     mov  esi, eax
@@ -360,7 +360,7 @@ _imu_find_by_name:
 section .data
 align 16
 
-; fw_name_table — 11-byte 8.3 alias, pad, fw_type, req_bit, pad pad.
+; fw_name_table - 11-byte 8.3 alias, pad, fw_type, req_bit, pad pad.
 ; Entries terminated by a row with fw_type == 0.
 ;
 ; Alias convention: "PHXxxx  BIN" where xxx is a short tag. Rename the
@@ -387,7 +387,7 @@ fw_name_table:
     db 0, 0
     db "PHXMES  BIN",         0,  PSP_GFX_FW_TYPE_CP_MES, 5
     db 0, 0
-    ; Terminator — type=0 stops _imu_find_by_name walk.
+    ; Terminator - type=0 stops _imu_find_by_name walk.
     db "           ",         0,  0,                       0
     db 0, 0
 

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS — Per-slot handle table (pointer-table refactor)
+; GritOS - Per-slot handle table (pointer-table refactor)
 ;
 ; Primitives for the opaque-handle ABI that replaces raw kernel pointers
 ; across the syscall boundary. As of Phase 2:
@@ -12,7 +12,7 @@
 ;     entry fields by value so kernel VAs never leak to ring 3.
 ;
 ; Future kinds (XML node, net socket, window) reuse these primitives by
-; allocating with a different HANDLE_KIND_* tag — the validator arm picks
+; allocating with a different HANDLE_KIND_* tag - the validator arm picks
 ; the expected kind from the syscall table's argument descriptor.
 ;
 ; All operations are slot-local and lock-free: each slot's table is touched
@@ -34,7 +34,7 @@ global handle_set_quota
 global slot_handle_quota
 
 ; ---------------------------------------------------------------------------
-; handle_table_clear — zero this slot's handle table.
+; handle_table_clear - zero this slot's handle table.
 ;   RDI = slot base ptr (as returned by l3_slot_base).
 ; Clobbers: RAX, RCX, RDI. Preserves all other regs.
 ; ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ handle_table_clear:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_alloc — reserve a fresh handle in this slot's table.
+; handle_alloc - reserve a fresh handle in this slot's table.
 ;   RDI = slot base ptr
 ;   AL  = kind (must be non-zero; see HANDLE_KIND_*)
 ;   R8  = payload (kind-specific, e.g. valid-entry index for DIR_ENTRY)
@@ -68,7 +68,7 @@ handle_table_clear:
 ; stored generation is incremented (skipping 0 on wrap) so a stale handle
 ; from the previous occupant resolves as mismatched.
 ;
-; Quota: the slot's soft cap (slot_handle_quota[slot]) is enforced first — the
+; Quota: the slot's soft cap (slot_handle_quota[slot]) is enforced first - the
 ; allocator counts currently-live entries and fails if issuing one more would
 ; exceed the quota. HANDLE_TABLE_CAP remains the hard physical ceiling.
 ; ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ handle_alloc:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_resolve — verify a ring-3 handle and return its payload.
+; handle_resolve - verify a ring-3 handle and return its payload.
 ;   RDI = slot base ptr
 ;   EDX = handle (untrusted)
 ;   AL  = expected kind
@@ -172,7 +172,7 @@ handle_resolve:
     push rsi
     movzx r10d, al                    ; r10d = expected kind (zero-extended;
                                       ; the cmp below uses r10d so the upper
-                                      ; bytes MUST be clean — `mov r10b, al`
+                                      ; bytes MUST be clean - `mov r10b, al`
                                       ; alone leaves caller garbage in
                                       ; r10[31:8] and rejects valid handles).
     ; Magic check (bits 31:30 must be 0b10).
@@ -243,7 +243,7 @@ handle_resolve:
     jne .hr_fail
     cmp edx, r9d                      ; stored gen must match handle's gen
     jne .hr_fail
-    mov r8, rax                       ; OK — commit payload
+    mov r8, rax                       ; OK - commit payload
     pop rsi
     pop rdi
     mov eax, 1
@@ -255,7 +255,7 @@ handle_resolve:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_close — release a handle in this slot's table.
+; handle_close - release a handle in this slot's table.
 ;   RDI = slot base ptr
 ;   EDX = handle (untrusted)
 ;   AL  = expected kind (so close() can't free another kind's slot)
@@ -271,7 +271,7 @@ handle_close:
     pop rdx
     test eax, eax
     jz .hc_done
-    ; Re-walk to the entry and zero its kind. Generation is left alone —
+    ; Re-walk to the entry and zero its kind. Generation is left alone -
     ; the allocator bumps it on the next reuse, so a stale handle from
     ; before this close still mismatches.
     mov ecx, edx
@@ -292,7 +292,7 @@ handle_close:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_slot_id_from_base — derive the 0-based slot index from a slot base
+; handle_slot_id_from_base - derive the 0-based slot index from a slot base
 ; ptr (as returned by l3_slot_base).
 ;   RDI = slot base ptr (preserved)
 ; Returns:
@@ -315,7 +315,7 @@ handle_slot_id_from_base:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_set_quota — set a slot's soft max-FD quota (per-manifest §5).
+; handle_set_quota - set a slot's soft max-FD quota (per-manifest §5).
 ;   EDI = slot index
 ;   ESI = requested quota
 ; The value is clamped to [0, HANDLE_TABLE_CAP] (the hard physical ceiling).
@@ -335,7 +335,7 @@ handle_set_quota:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_seal — mark a live handle non-transferable (§4 sealed capabilities).
+; handle_seal - mark a live handle non-transferable (§4 sealed capabilities).
 ; Once sealed, any transfer/duplication path (the FN_KIND_HANDLE validator arm
 ; and any future dup/grant syscall) must refuse it via handle_is_sealed.
 ;   RDI = slot base ptr
@@ -370,7 +370,7 @@ handle_seal:
     ret
 
 ; ---------------------------------------------------------------------------
-; handle_is_sealed — query the sealed flag for a (resolved) handle. Transfer/
+; handle_is_sealed - query the sealed flag for a (resolved) handle. Transfer/
 ; duplication paths call this and must refuse when it returns 1, formalizing
 ; the slot-local rule: a sealed handle is bound to the slot it was issued to.
 ;   RDI = slot base ptr
@@ -412,7 +412,7 @@ handle_is_sealed:
     ret
 
 ; ---------------------------------------------------------------------------
-; Per-slot soft FD quota (kernel BSS — NOT in ring-3-writable slot memory, so
+; Per-slot soft FD quota (kernel BSS - NOT in ring-3-writable slot memory, so
 ; an app can't widen its own quota via a slot-memory write bug). A byte of 0
 ; means "unset" and handle_alloc treats it as HANDLE_DEFAULT_QUOTA (full
 ; capacity); a manifest narrows a slot via handle_set_quota (clamped to

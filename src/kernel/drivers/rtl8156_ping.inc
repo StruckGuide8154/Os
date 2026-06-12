@@ -11,7 +11,7 @@ rtl8156_icmp_ping_ipv4:
 
     cmp byte [rtl8156_active], 1
     je .active
-    ; If we already walked the bus once and found nothing, don't re-walk —
+    ; If we already walked the bus once and found nothing, don't re-walk -
     ; that path stomps over other USB devices' xHCI slot contexts.
     cmp byte [rtl8156_probed], 1
     je .fail
@@ -25,7 +25,7 @@ rtl8156_icmp_ping_ipv4:
 
     cmp byte [rtl8156_dhcp_bound], 1
     je .lease_ready
-    ; Don't trigger a synchronous dhcp_configure from inside a ping syscall —
+    ; Don't trigger a synchronous dhcp_configure from inside a ping syscall -
     ; on a flaky USB link this re-runs DISCOVER over a half-initialised endpoint
     ; and has been observed to triple-fault the kernel. Just report no reply
     ; and let userspace press DHCP explicitly.
@@ -56,7 +56,7 @@ rtl8156_icmp_ping_ipv4:
 .ping_current_profile:
     mov rax, [tick_count]
     mov [rtl8156_ping_start_tick], rax
-    ; Reuse cached gateway MAC across calls — Windows ping caches ARP, so
+    ; Reuse cached gateway MAC across calls - Windows ping caches ARP, so
     ; should we. Without this, every syscall ping adds ~1ms of fresh ARP
     ; round-trip on top of the actual ICMP RTT.
     cmp byte [rtl8156_have_gw_mac], 1
@@ -77,8 +77,8 @@ rtl8156_icmp_ping_ipv4:
     mov byte [rtl8156_ping_reply], 0
     ; Stamp the start TSC AFTER send_icmp_gateway returns. That call blocks on
     ; the bulk-OUT TX completion (tx_frame -> bulk_out -> wait_completion), so it
-    ; returns the instant the packet is actually on the wire. Stamping here — not
-    ; before the send — excludes the host-side USB-OUT submit/complete plumbing
+    ; returns the instant the packet is actually on the wire. Stamping here - not
+    ; before the send - excludes the host-side USB-OUT submit/complete plumbing
     ; from the reported RTT. That leg is emulation-only overhead under QEMU
     ; usb-host (on real HW the controller completes via the event ring in us); it
     ; is NOT part of the ICMP round-trip, and counting it inflated the number
@@ -184,7 +184,7 @@ rtl8156_ping4_tick:
 .send_icmp:
     mov byte [rtl8156_ping_reply], 0
     ; Stamp start TSC AFTER the (TX-completion-blocking) send so the host USB-OUT
-    ; plumbing leg is excluded from the RTT — see the comment in the sync path.
+    ; plumbing leg is excluded from the RTT - see the comment in the sync path.
     call rtl8156_send_icmp_gateway
     rdtsc
     shl rdx, 32
@@ -245,7 +245,7 @@ rtl8156_ping4_tick:
 .send_icmp_initial:
     mov byte [rtl8156_ping_reply], 0
     ; Stamp start TSC AFTER the (TX-completion-blocking) send so the host USB-OUT
-    ; plumbing leg is excluded from the RTT — see the comment in the sync path.
+    ; plumbing leg is excluded from the RTT - see the comment in the sync path.
     call rtl8156_send_icmp_gateway
     rdtsc
     shl rdx, 32

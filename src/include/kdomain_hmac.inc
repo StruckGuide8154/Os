@@ -1,18 +1,18 @@
 %ifndef KDOMAIN_HMAC_INC
 %define KDOMAIN_HMAC_INC
 ; ============================================================================
-; NexusOS - One domain-separated kernel HMAC primitive (security_todo.md §13)
+; GritOS - One domain-separated kernel HMAC primitive (security_todo.md §13)
 ;
 ; Three kernel anti-tamper tags all derive a short MAC from the same secret,
 ; [rel kernel_canary], XORed with a couple of context words and truncated:
 ;
-;   * CPI callback signing  (cpi_sign_callback / cpi_verify_callback) —
+;   * CPI callback signing  (cpi_sign_callback / cpi_verify_callback) -
 ;       low16(kernel_canary ^ &window ^ field_offset), stamped into bits[48:64]
 ;       of a stored callback pointer.
-;   * Cap-mask authenticator (cap_mask_sign + the dispatcher's inline verify) —
+;   * Cap-mask authenticator (cap_mask_sign + the dispatcher's inline verify) -
 ;       low8(kernel_canary ^ slot ^ mask ^ CAP_HMAC_DOMAIN), stored beside the
 ;       1-byte mask in slot_cap_hmac[].
-;   * WIN_OFF_USER_ARG tag   (sc_wm_set_user_arg / sc_wm_get_user_arg) —
+;   * WIN_OFF_USER_ARG tag   (sc_wm_set_user_arg / sc_wm_get_user_arg) -
 ;       low16(kernel_canary ^ &window), stamped into bits[48:64] of user_arg.
 ;
 ; Before this convergence those were three look-alike copies; a fourth user
@@ -40,7 +40,7 @@ KDOM_CAP_MASK   equ 0x5C    ; cap-mask authenticator (== legacy CAP_HMAC_DOMAIN)
 ;   acc32  : acc's 32-bit name (ecx / edx / r9d ...). NASM has no portable way
 ;            to derive it from %1 (legacy regs aren't <name>+"d"), so it is
 ;            named explicitly; it MUST be the 32-bit alias of acc.
-;   trunc  : acc's sub-register naming the retained width — cl/dl/r9b... for an
+;   trunc  : acc's sub-register naming the retained width - cl/dl/r9b... for an
 ;            8-bit tag, cx/dx/r9w... for a 16-bit tag. MUST be a sub-register
 ;            of acc.
 ;   in0    : first 64-bit context operand to mix (already materialised by the

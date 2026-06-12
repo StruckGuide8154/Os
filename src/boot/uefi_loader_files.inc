@@ -302,7 +302,7 @@ load_data_img:
 
 ; ============================================================================
 ; LOAD_BOOTCFG - open OPTIONAL \EFI\BOOT\BOOTCFG.TXT, read into firmware RAM,
-; publish (base,size) in VBE_INFO so the kernel's boot_features.nxh parser can
+; publish (base,size) in VBE_INFO so the kernel's boot_features.ghl parser can
 ; build the runtime feature-toggle bitmask. Non-fatal on EVERY error (missing
 ; file is the common case): leaves the boot-info fields zero, which the kernel
 ; treats as "no config -> default everything ON". Mirrors load_data_img.

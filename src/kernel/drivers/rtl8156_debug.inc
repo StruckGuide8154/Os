@@ -123,7 +123,7 @@ rtl8156_ser_phex8:
     ret
 
 ; -------------------------------------------------------------------------
-; rtl8156_selftest — boot-time auto-test of the network stack.
+; rtl8156_selftest - boot-time auto-test of the network stack.
 ; Drives a deterministic serial trace: try RTL8156 USB NIC first, fall back
 ; to the emulated RTL8139 PCI NIC. Net path that succeeds gets DHCP +
 ; ICMP-echo exercised. Emits [NETSELFTEST <tag>] markers so a harness can
@@ -162,7 +162,7 @@ rtl8156_selftest:
     lea rsi, [rel ser_ping_gw_ok]
     call rtl8156_ser_puts
     ; Also exercise an off-LAN public address (8.8.8.8) so we know the gateway
-    ; actually forwards and replies. Non-fatal — selftest still passes if the
+    ; actually forwards and replies. Non-fatal - selftest still passes if the
     ; gateway responded; we just mark whether 8.8.8.8 was reachable.
     mov edi, 0x08080808            ; 8.8.8.8 packed A.B.C.D
     call rtl8156_icmp_ping_ipv4
@@ -191,7 +191,7 @@ rtl8156_selftest:
     ; lazy DHCP in the rtl8139 driver, so [DHCP DISC]/[DHCP OFFER]/[DHCP ACK]
     ; and TX/RX traffic markers all fire here. We then accept either a
     ; successful echo *or* a confirmed DHCP lease as proof the NIC RX/TX is
-    ; healthy — QEMU slirp doesn't always answer ICMP, so DHCP-bound is the
+    ; healthy - QEMU slirp doesn't always answer ICMP, so DHCP-bound is the
     ; reliable signal.
     mov edi, 0x0202000A            ; 10.0.2.2 packed A.B.C.D
     call net_ping_ipv4

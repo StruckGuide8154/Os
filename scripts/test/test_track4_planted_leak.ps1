@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# Track 4 Part D — Planted-Leak Negative Test
+# Track 4 Part D - Planted-Leak Negative Test
 #
 # WHAT THIS PROVES
 #   The exfiltration->elevation matrix (docs/track4-data-egress-elevation-matrix.md)
@@ -22,31 +22,31 @@
 #   We cannot modify kernel internals to inject "boot A" secrets into "boot B"
 #   at the kernel level without breaking the kernel's own logic, so the test
 #   instead demonstrates each barrier's independence by verifying that the
-#   per-boot/per-slot rotation properties hold — i.e., that the values ARE
+#   per-boot/per-slot rotation properties hold - i.e., that the values ARE
 #   re-randomized, making the attacker's captured state stale by construction.
 #
 #   The test has two tiers:
 #
-#   Tier 1 — Static symbol audit (compile-gate):
+#   Tier 1 - Static symbol audit (compile-gate):
 #     Build the kernel and confirm the symbols that would be targeted by a
 #     dump-informed attack are all present in the binary (they exist, so the
 #     barriers compile in), and that the binary includes the anti-elevation
 #     guards (nx_volatile_scrub_secrets, cpi_verify_callback, slot_cap_hmac,
 #     the syscall permutation, nk_pt_window_begin).
 #
-#   Tier 2 — Runtime ephemerality proof:
+#   Tier 2 - Runtime ephemerality proof:
 #     Boot the VM twice (headless, serial capture). Extract the [CANARY:...]
 #     and [NONCE:...] debug tokens from each serial log. These values MUST
-#     DIFFER between boots — because they are drawn from RDTSC^RDRAND, any
+#     DIFFER between boots - because they are drawn from RDTSC^RDRAND, any
 #     secret captured from boot A is unrelated to boot B.
 #     A match would mean the PRNG is broken or the draw is a constant (a real
 #     regression). This directly exercises barriers (1) and (2) of the matrix.
 #
-#   Tier 3 — Stale-tag rejection proof (structural):
+#   Tier 3 - Stale-tag rejection proof (structural):
 #     The CPI callback tag format (barrier 5) binds the live window VA AND the
 #     per-boot canary. Since Tier 2 proved the canary changes, any callback tag
 #     captured from boot A embeds a canary that no longer matches boot B's
-#     cpi_verify_callback check — the tag will reject without needing to inject
+#     cpi_verify_callback check - the tag will reject without needing to inject
 #     it (the algebra is direct). We assert this with a static analysis of the
 #     CPI tag computation, not a live exploit attempt.
 #
@@ -85,11 +85,11 @@ $SerialHost = '127.0.0.1'
 
 # The flat-binary kernel (nasm -f bin) carries NO symbol table, so symbol
 # presence is audited against the assembled sources instead: the generated
-# build\nxh\*.asm modules and the src\kernel asm/inc files, all of which are
+# build\ghl\*.asm modules and the src\kernel asm/inc files, all of which are
 # %included by kernel_build.asm (the build fails if any are missing, so a
 # grep hit here means the symbol is in the image).
 $AuditSources = @(
-    (Join-Path $BuildDir 'nxh\*.asm'),
+    (Join-Path $BuildDir 'ghl\*.asm'),
     (Join-Path $Root 'src\kernel\*.asm'),
     (Join-Path $Root 'src\kernel\**\*.asm'),
     (Join-Path $Root 'src\kernel\**\*.inc')
@@ -108,10 +108,12 @@ $RequiredSymbols = @(
     'nx_volatile_wipe_halt',       # barrier (1): wipe-on-shutdown
     'nx_volatile_panic_scrub',     # barrier (1): wipe-on-panic/tamper
     'nk_pt_window_begin',          # barrier (7): W^X nk-monitor window
-    'slot_cap_hmac'                # barrier (6): cap-mask HMAC
+    'slot_cap_hmac',               # barrier (6): cap-mask HMAC
+    'nx_atrest_poison',            # Part B item 6: poison freed memory
+    'nx_mem_key_rekey'             # Part B item 7: forward-secure rolling re-key
 )
 
-# Serial markers emitted by a clean boot — confirms the OS booted far enough
+# Serial markers emitted by a clean boot - confirms the OS booted far enough
 # for the per-boot secret draw to have run (both happen before [/BOOTTIME]).
 $BootHealthMarkers = @('[/BOOTTIME]', 'CPU:', 'CACHE:', 'MEMCAP:')
 
@@ -174,7 +176,7 @@ function Boot-AndCapture([string]$Label) {
                 if ($n -le 0) { break }
                 [void]$sb.Append([System.Text.Encoding]::ASCII.GetString($buf, 0, $n))
             }
-            # NOTE: must be a literal match — '-like' treats [..] as a char class
+            # NOTE: must be a literal match - '-like' treats [..] as a char class
             if ($sb.ToString().Contains('[/BOOTTIME]')) { break }
             Start-Sleep -Milliseconds 100
         }
@@ -203,7 +205,7 @@ $fails = [System.Collections.Generic.List[string]]::new()
 
 Write-Host ''
 Write-Host '============================================================' -ForegroundColor Cyan
-Write-Host ' Track 4 Part D — Planted-Leak Negative Test' -ForegroundColor Cyan
+Write-Host ' Track 4 Part D - Planted-Leak Negative Test' -ForegroundColor Cyan
 Write-Host ' Validating: a RAM-dump cannot compose into elevation' -ForegroundColor Cyan
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host ''
@@ -218,7 +220,7 @@ try {
     $null = New-Item -ItemType Directory -Path $BuildDir -Force
 
     # ------------------------------------------------------------------
-    # Tier 1 — Build + symbol audit
+    # Tier 1 - Build + symbol audit
     # ------------------------------------------------------------------
     Write-Host '--- Tier 1: Build + symbol audit ---' -ForegroundColor Cyan
 
@@ -235,7 +237,7 @@ try {
     }
 
     if (-not (Test-Path $BinPath)) {
-        throw "Kernel binary not found at $BinPath — build step failed?"
+        throw "Kernel binary not found at $BinPath - build step failed?"
     }
 
     # The flat binary has no symbol table; audit the assembled sources that
@@ -262,7 +264,7 @@ try {
     }
 
     # ------------------------------------------------------------------
-    # Tier 2 — Per-boot ephemerality (barrier 1 & 2)
+    # Tier 2 - Per-boot ephemerality (barrier 1 & 2)
     # Boot twice; assert canary/nonce/mem-key tokens DIFFER between boots.
     # ------------------------------------------------------------------
     Write-Host ''
@@ -297,12 +299,12 @@ try {
         if ($missing.Count -gt 0) {
             $overall = $false; $bootOk = $false
             $fails.Add("Tier 2: $label did not reach boot health markers: $($missing -join ', ')")
-            Write-Host "[track4-planted] Tier 2 WARN: $label missing boot markers — serial may be empty or boot stalled." -ForegroundColor Red
+            Write-Host "[track4-planted] Tier 2 WARN: $label missing boot markers - serial may be empty or boot stalled." -ForegroundColor Red
         }
     }
 
     if ($bootOk) {
-        Write-Host '    Both boots reached [/BOOTTIME] — secret draw complete.' -ForegroundColor Green
+        Write-Host '    Both boots reached [/BOOTTIME] - secret draw complete.' -ForegroundColor Green
 
         # Extract per-boot token values from serial log (debug builds emit these).
         # If the tokens are not present, we cannot do the differential check but
@@ -314,7 +316,7 @@ try {
 
         # KASLR-slid kernel base: the boot log prints it as a bare
         # "L<16 hex digits>" line (e.g. L00000000004788BE). With KASLR
-        # default-on this MUST differ between boots — a direct, observable
+        # default-on this MUST differ between boots - a direct, observable
         # per-boot randomization token (barrier 4: dump addresses go stale).
         $kbaseA = $null; $kbaseB = $null
         if ($log1 -match "(?m)^L([0-9A-F]{16})\s*$") { $kbaseA = $Matches[1] }
@@ -322,7 +324,7 @@ try {
         if ($kbaseA -and $kbaseB) {
             if ($kbaseA -eq $kbaseB) {
                 $overall = $false
-                $fails.Add("Tier 2: KASLR kernel base IDENTICAL across two boots (0x$kbaseA) — per-boot randomization broken (barrier 4 regression).")
+                $fails.Add("Tier 2: KASLR kernel base IDENTICAL across two boots (0x$kbaseA) - per-boot randomization broken (barrier 4 regression).")
                 Write-Host '[track4-planted] Tier 2 FAIL: KASLR base identical across boots!' -ForegroundColor Red
             } else {
                 Write-Host "    KASLR base Boot A: 0x$kbaseA  Boot B: 0x$kbaseB  -> DIFFER (PASS)" -ForegroundColor Green
@@ -335,7 +337,7 @@ try {
         if ($canaryA -and $canaryB) {
             if ($canaryA -eq $canaryB) {
                 $overall = $false
-                $fails.Add("Tier 2: CANARY is IDENTICAL across two boots ($canaryA) — per-boot entropy broken (barrier 1 regression).")
+                $fails.Add("Tier 2: CANARY is IDENTICAL across two boots ($canaryA) - per-boot entropy broken (barrier 1 regression).")
                 Write-Host '[track4-planted] Tier 2 FAIL: CANARY identical across boots!' -ForegroundColor Red
                 Write-Host "  Boot A: $canaryA  Boot B: $canaryB" -ForegroundColor Red
             } else {
@@ -349,7 +351,7 @@ try {
         if ($nonceA -and $nonceB) {
             if ($nonceA -eq $nonceB) {
                 $overall = $false
-                $fails.Add("Tier 2: NONCE is IDENTICAL across two boots ($nonceA) — per-boot entropy broken (barrier 1 regression).")
+                $fails.Add("Tier 2: NONCE is IDENTICAL across two boots ($nonceA) - per-boot entropy broken (barrier 1 regression).")
                 Write-Host '[track4-planted] Tier 2 FAIL: NONCE identical across boots!' -ForegroundColor Red
             } else {
                 Write-Host "    NONCE  Boot A: $nonceA  Boot B: $nonceB  -> DIFFER (PASS)" -ForegroundColor Green
@@ -364,11 +366,11 @@ try {
     }
 
     # ------------------------------------------------------------------
-    # Tier 3 — Structural CPI/cap/syscall barrier argument (barrier 3,5,6)
+    # Tier 3 - Structural CPI/cap/syscall barrier argument (barrier 3,5,6)
     # ------------------------------------------------------------------
     Write-Host ''
     Write-Host '--- Tier 3: Structural barrier argument (barriers 3, 5, 6) ---' -ForegroundColor Cyan
-    Write-Host '    (Static verification — no exploit injection required)' -ForegroundColor DarkGray
+    Write-Host '    (Static verification - no exploit injection required)' -ForegroundColor DarkGray
 
     # Check that cpi_verify_callback, syscall permutation, and cap-mask symbols exist
     $tier3Syms = @(
@@ -380,11 +382,11 @@ try {
     foreach ($entry in $tier3Syms) {
         $sym, $desc = $entry
         if (Test-SymbolCompiledIn $sym) {
-            Write-Host "    [x] $sym present  — $desc" -ForegroundColor Green
+            Write-Host "    [x] $sym present  - $desc" -ForegroundColor Green
         } else {
-            Write-Host "    [ ] $sym MISSING  — $desc (regression!)" -ForegroundColor Red
+            Write-Host "    [ ] $sym MISSING  - $desc (regression!)" -ForegroundColor Red
             $overall = $false; $tier3Ok = $false
-            $fails.Add("Tier 3: $sym missing from binary — $desc may be absent.")
+            $fails.Add("Tier 3: $sym missing from binary - $desc may be absent.")
         }
     }
 
@@ -403,7 +405,7 @@ try {
     if ($overall) {
         Write-Host ' Track 4 Part D planted-leak test: ALL TIERS PASS' -ForegroundColor Green
         Write-Host ' A fully-reversed RAM dump from Boot A cannot compose into' -ForegroundColor Green
-        Write-Host ' elevation on Boot B — all independent barriers confirmed.' -ForegroundColor Green
+        Write-Host ' elevation on Boot B - all independent barriers confirmed.' -ForegroundColor Green
         Write-Host ''
         Write-Host ' Barriers demonstrated by this test:' -ForegroundColor Gray
         Write-Host '  (1) Per-boot ephemeral secrets (RDTSC^RDRAND re-draw each boot)' -ForegroundColor Gray
@@ -413,10 +415,10 @@ try {
         Write-Host '  (6) Cap-mask HMAC re-keyed with fresh canary each boot' -ForegroundColor Gray
         Write-Host ''
         Write-Host ' NOT tested here (covered by other test scripts):' -ForegroundColor DarkGray
-        Write-Host '  (4) ASLR slide re-draw — tested by boot randomisation' -ForegroundColor DarkGray
-        Write-Host '  (7) W^X / nk-monitor — tested by test_security_regression.ps1' -ForegroundColor DarkGray
-        Write-Host '  (8) Measured boot MAC — tested by test_nhl_security_guards.ps1' -ForegroundColor DarkGray
-        Write-Host '  (12) Shadow stack ROP — tested by test_security_regression.ps1' -ForegroundColor DarkGray
+        Write-Host '  (4) ASLR slide re-draw - tested by boot randomisation' -ForegroundColor DarkGray
+        Write-Host '  (7) W^X / nk-monitor - tested by test_security_regression.ps1' -ForegroundColor DarkGray
+        Write-Host '  (8) Measured boot MAC - tested by test_ghl_security_guards.ps1' -ForegroundColor DarkGray
+        Write-Host '  (12) Shadow stack ROP - tested by test_security_regression.ps1' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host ' HARDWARE CAVEAT: TME/SME hardware FME not tested (QEMU TCG).' -ForegroundColor DarkYellow
         Write-Host '   Verify Part C on real silicon or KVM+SEV.' -ForegroundColor DarkYellow

@@ -1,4 +1,4 @@
-# NexusOS Source Layout
+# GritOS Source Layout
 
 This tree is organized by responsibility first, then by implementation detail.
 The goal is to keep ring-0 kernel code, ring-3 app code, boot code, and shared
@@ -55,13 +55,13 @@ responsibility instead of growing `apps.asm` again.
 `src/user/lib`
 Shared app-side includes and the future home for userland helper code.
 
-`src/user/nexushl`
-NexusHL SDK sources: compiler, standard library, and `.nxh` apps compiled into
-`build/nxh/generated_apps.inc` before kernel assembly.
+`src/user/grithl`
+GritHL SDK sources: compiler, standard library, and `.ghl` apps compiled into
+`build/ghl/generated_apps.inc` before kernel assembly.
 
 `src/user/templates`
-Small NexusHL templates for new user callbacks and app experiments. Legacy raw
-assembly templates may remain only for ABI/debug work that cannot use NexusHL.
+Small GritHL templates for new user callbacks and app experiments. Legacy raw
+assembly templates may remain only for ABI/debug work that cannot use GritHL.
 
 `src/user/poc`
 Security regression probes and PoCs that should stay isolated from normal app
@@ -70,7 +70,7 @@ code.
 ## Script layout
 
 `scripts/build`
-Build entrypoints for BIOS, UEFI, and NexusHL-generated app output.
+Build entrypoints for BIOS, UEFI, and GritHL-generated app output.
 
 `scripts/run`
 QEMU launch entrypoints for BIOS and UEFI profiles.

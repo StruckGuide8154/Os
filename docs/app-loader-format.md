@@ -1,4 +1,4 @@
-# NexusOS External App ABI and Loader Format
+# GritOS External App ABI and Loader Format
 
 This is the next-step contract for turning the current built-in app layer into a
 real external app model without rewriting the syscall boundary again.
@@ -16,7 +16,7 @@ Use a flat binary with a small fixed header followed by code/data.
 ### Header
 
 Offset `0x00`
-- Magic: `NXSAPP64`
+- Magic: `GRSAPP64`
 
 Offset `0x08`
 - ABI version (`u16`)
@@ -83,8 +83,8 @@ trampoline, it uses `SYS_APP_DONE`.
 
 Minimum include set:
 
-- `src/user/lib/nexus_app.inc`
-- `src/user/lib/nexus_window.inc`
+- `src/user/lib/grit_app.inc`
+- `src/user/lib/grit_window.inc`
 
 This keeps the syscall numbers and window/app constants stable for both
 handwritten assembly and future code generators.

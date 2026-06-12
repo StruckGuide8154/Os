@@ -1,0 +1,360 @@
+# GritHL SVG2 - multi-primitive filter graph.
+#
+# Architecture: docs/svg-filters-design.md, "Filter graph evaluation".
+#
+# Parses a <filter> element's children once into a primitive list, then
+# evaluates them top-to-bottom. Each primitive reads one or two named
+# inputs (SourceGraphic / SourceAlpha / a prior primitive's `result`) and
+# writes one arena ARGB buffer. The last primitive's output is composited
+# back into the device-space filter region.
+#
+# All intermediate surfaces are arena ARGB buffers (filter_arena.ghl) of the
+# filter region's clamped size; pixel (0,0) of every buffer maps to device
+# (region_x, region_y). Buffers never outlive the svg_render() call.
+#
+# Supported primitives: feOffset, feGaussianBlur, feColorMatrix, feFlood,
+# feMerge (+feMergeNode), feBlend, feComposite.
+
+use svg2.core
+use svg2.fixed
+use svg2.matrix
+use svg2.style
+use svg2.bbox
+use svg2.render_ctx
+use svg2.filter_arena
+use svg2.filter_blur
+use svg2.filter_color
+
+const FG_MAX_PRIM   = 16
+const FG_NAME_BYTES = 32          # per-primitive result-name slot
+
+# Input id encoding: >=0 -> primitive index; negatives are keywords.
+const FG_IN_SOURCEGRAPHIC = -1
+const FG_IN_SOURCEALPHA   = -2
+const FG_IN_PRIOR         = -3    # implicit: previous primitive's output
+const FG_IN_NONE          = -4
+
+# Primitive op codes.
+const FG_OP_OFFSET   = 1
+const FG_OP_BLUR     = 2
+const FG_OP_CMATRIX  = 3
+const FG_OP_FLOOD    = 4
+const FG_OP_MERGE    = 5
+const FG_OP_BLEND    = 6
+const FG_OP_COMPOSITE = 7
+const FG_OP_TURBULENCE = 8
+const FG_OP_DROPSHADOW = 9
+
+# feBlend modes.
+const FG_BLEND_NORMAL   = 0
+const FG_BLEND_MULTIPLY = 1
+const FG_BLEND_SCREEN   = 2
+const FG_BLEND_DARKEN   = 3
+const FG_BLEND_LIGHTEN  = 4
+
+# feComposite operators.
+const FG_COMP_OVER       = 0
+const FG_COMP_IN         = 1
+const FG_COMP_OUT        = 2
+const FG_COMP_ATOP       = 3
+const FG_COMP_XOR        = 4
+const FG_COMP_ARITHMETIC = 5
+
+state {
+    fg_count:      4;                  # number of primitives parsed
+    fg_op:         64;                 # FG_MAX_PRIM * 4
+    fg_in1:        64;
+    fg_in2:        64;
+    fg_param_a:    64;                 # dx / sigma / flood-argb / blend-mode
+    fg_param_b:    64;                 # dy / composite-op
+    fg_k1:         64;                 # arithmetic k1..k4 (16.16)
+    fg_k2:         64;
+    fg_k3:         64;
+    fg_k4:         64;
+    fg_node:       64;                 # XML node id (for feMerge child walk)
+    fg_result:     512;                # FG_MAX_PRIM * FG_NAME_BYTES
+    fg_reslen:     64;                 # result-name lengths
+    fg_buf:        128;                # FG_MAX_PRIM * 8 -> arena buffer ptr
+    fg_namebuf:    64;                 # scratch for an in/result attr read
+
+    fg_region_x:   4;
+    fg_region_y:   4;
+    fg_region_w:   4;
+    fg_region_h:   4;
+    fg_src_buf:    8;                  # SourceGraphic arena buffer
+    fg_alpha_buf:  8;                  # SourceAlpha arena buffer
+    fg_scratch:    8;                  # shared scratch buffer (blur passes)
+    fg_ok:         4;
+}
+
+fn fg_op_get(i)   { return lw(&fg_op + i * 4); }
+fn fg_buf_get(i)  { return lq(&fg_buf + i * 8); }
+fn fg_buf_set(i, p) { sq(&fg_buf + i * 8, p); }
+
+# Compare a freshly read attribute (in fg_namebuf, length `len`) against a
+# keyword. Returns 1 on exact match.
+fn fg_name_is(len, kw, kwlen) {
+    if len != kwlen { return 0; }
+    let i = 0;
+    while i < len {
+        if lb(&fg_namebuf + i) != lb(kw + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Resolve an `in`/`in2` attribute value (already in fg_namebuf, length len)
+# to an input id. `up_to` is the count of primitives parsed so far, so a
+# result name can only reference an earlier primitive.
+fn fg_resolve_input(len, up_to) {
+    if len <= 0 { return FG_IN_PRIOR; }
+    if fg_name_is(len, "SourceGraphic", 13) == 1 { return FG_IN_SOURCEGRAPHIC; }
+    if fg_name_is(len, "SourceAlpha", 11) == 1 { return FG_IN_SOURCEALPHA; }
+    # Match against a prior primitive's result name.
+    let i = 0;
+    while i < up_to {
+        let rl = lw(&fg_reslen + i * 4);
+        if rl == len {
+            let base = &fg_result + i * FG_NAME_BYTES;
+            let same = 1;
+            let k = 0;
+            while k < len {
+                if lb(base + k) != lb(&fg_namebuf + k) { same = 0; }
+                k = k + 1;
+            }
+            if same == 1 { return i; }
+        }
+        i = i + 1;
+    }
+    return FG_IN_PRIOR;
+}
+
+# Read `attr` from `node` into fg_namebuf; returns length or <=0 if absent.
+fn fg_read_attr(node, attr, alen) {
+    return xml_attr(node, attr, alen, &fg_namebuf, FG_NAME_BYTES);
+}
+
+# Store primitive `idx`'s result name from its `result=""` attribute.
+fn fg_store_result(idx, node) {
+    let l = fg_read_attr(node, "result", 6);
+    if l <= 0 { sw(&fg_reslen + idx * 4, 0); return; }
+    if l > FG_NAME_BYTES { l = FG_NAME_BYTES; }
+    let base = &fg_result + idx * FG_NAME_BYTES;
+    let i = 0;
+    while i < l {
+        sb(base + i, lb(&fg_namebuf + i));
+        i = i + 1;
+    }
+    sw(&fg_reslen + idx * 4, l);
+}
+
+# Parse one primitive child into slot `idx`. Returns 1 if recognized.
+fn fg_parse_primitive(child, idx) {
+    sw(&fg_node + idx * 4, child);
+    sw(&fg_in2 + idx * 4, FG_IN_NONE);
+    sw(&fg_param_a + idx * 4, 0);
+    sw(&fg_param_b + idx * 4, 0);
+    # `in` attribute -> in1.
+    let il = fg_read_attr(child, "in", 2);
+    sw(&fg_in1 + idx * 4, fg_resolve_input(il, idx));
+
+    if svg_tag_is(child, "feOffset", 8) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_OFFSET);
+        sw(&fg_param_a + idx * 4, svg_attr_int(child, "dx", 2, 0));
+        sw(&fg_param_b + idx * 4, svg_attr_int(child, "dy", 2, 0));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feGaussianBlur", 14) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_BLUR);
+        sw(&fg_param_a + idx * 4, svg_attr_int(child, "stdDeviation", 12, 1));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feColorMatrix", 13) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_CMATRIX);
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feFlood", 7) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_FLOOD);
+        let col = svg_attr_color(child, "flood-color", 11, 0);
+        if col < 0 { col = 0; }
+        let opa = svg_attr_int(child, "flood-opacity", 13, -1);
+        let a = 255;
+        if opa >= 0 {
+            a = opa;
+            if opa <= 1 { a = opa * 255; }
+            if a > 255 { a = 255; }
+        }
+        sw(&fg_param_a + idx * 4, pack_argb(col, a));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feMerge", 7) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_MERGE);
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feBlend", 7) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_BLEND);
+        let il2 = fg_read_attr(child, "in2", 3);
+        sw(&fg_in2 + idx * 4, fg_resolve_input(il2, idx));
+        sw(&fg_param_a + idx * 4, fg_parse_blend_mode(child));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feComposite", 11) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_COMPOSITE);
+        let il3 = fg_read_attr(child, "in2", 3);
+        sw(&fg_in2 + idx * 4, fg_resolve_input(il3, idx));
+        sw(&fg_param_b + idx * 4, fg_parse_comp_op(child));
+        sw(&fg_k1 + idx * 4, svg_attr_num(child, "k1", 2, 0, 0));
+        sw(&fg_k2 + idx * 4, svg_attr_num(child, "k2", 2, 0, 0));
+        sw(&fg_k3 + idx * 4, svg_attr_num(child, "k3", 2, 0, 0));
+        sw(&fg_k4 + idx * 4, svg_attr_num(child, "k4", 2, 0, 0));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feTurbulence", 12) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_TURBULENCE);
+        let bl = svg_attr(child, "baseFrequency", 13);
+        let bfx = FX_ONE;
+        let bfy = FX_ONE;
+        if bl > 0 {
+            bfx = svg_parse_num(&svg_attr_buf, bl, 0);
+            bfy = bfx;
+            let consumed = lw(&svg_num_end);
+            if consumed < bl {
+                let v2 = svg_parse_num(&svg_attr_buf + consumed, bl - consumed, 0);
+                if v2 > 0 { bfy = v2; }
+            }
+        }
+        let oct = svg_attr_int(child, "numOctaves", 10, 1);
+        if oct < 1 { oct = 1; }
+        if oct > 8 { oct = 8; }
+        let fractal = 0;
+        let tl = xml_attr(child, "type", 4, &fg_namebuf, FG_NAME_BYTES);
+        if tl > 0 {
+            if lb(&fg_namebuf) == 102 { fractal = 1; }   # 'f' fractalNoise
+        }
+        sw(&fg_param_a + idx * 4, oct);
+        sw(&fg_param_b + idx * 4, fractal);
+        sw(&fg_k1 + idx * 4, bfx);
+        sw(&fg_k2 + idx * 4, bfy);
+        sw(&fg_k3 + idx * 4, svg_attr_int(child, "seed", 4, 0));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    if svg_tag_is(child, "feDropShadow", 12) == 1 {
+        sw(&fg_op + idx * 4, FG_OP_DROPSHADOW);
+        sw(&fg_param_a + idx * 4, svg_attr_int(child, "stdDeviation", 12, 2));
+        let col = svg_attr_color(child, "flood-color", 11, 0);
+        if col < 0 { col = 0; }
+        let opa = svg_attr_int(child, "flood-opacity", 13, -1);
+        let a = 255;
+        if opa >= 0 {
+            a = opa;
+            if opa <= 1 { a = opa * 255; }
+            if a > 255 { a = 255; }
+        }
+        sw(&fg_param_b + idx * 4, pack_argb(col, a));
+        sw(&fg_k1 + idx * 4, svg_attr_int(child, "dx", 2, 2));
+        sw(&fg_k2 + idx * 4, svg_attr_int(child, "dy", 2, 2));
+        fg_store_result(idx, child);
+        return 1;
+    }
+    return 0;
+}
+
+# `mode` attribute -> FG_BLEND_*.
+fn fg_parse_blend_mode(node) {
+    let l = fg_read_attr(node, "mode", 4);
+    if l <= 0 { return FG_BLEND_NORMAL; }
+    let c0 = lb(&fg_namebuf);
+    if c0 == 109 { return FG_BLEND_MULTIPLY; }   # 'm'
+    if c0 == 115 { return FG_BLEND_SCREEN; }     # 's'
+    if c0 == 100 { return FG_BLEND_DARKEN; }     # 'd'
+    if c0 == 108 { return FG_BLEND_LIGHTEN; }    # 'l'
+    return FG_BLEND_NORMAL;
+}
+
+# `operator` attribute -> FG_COMP_*.
+fn fg_parse_comp_op(node) {
+    let l = fg_read_attr(node, "operator", 8);
+    if l <= 0 { return FG_COMP_OVER; }
+    let c0 = lb(&fg_namebuf);
+    if c0 == 105 { return FG_COMP_IN; }          # 'in'
+    if c0 == 111 {                               # 'o' -> out / over
+        if l >= 3 {
+            if lb(&fg_namebuf + 2) == 116 { return FG_COMP_OUT; }   # ou'T'
+        }
+        return FG_COMP_OVER;
+    }
+    if c0 == 120 { return FG_COMP_XOR; }         # 'xor'
+    if c0 == 97 {                                # 'a' -> atop / arithmetic
+        if l >= 2 {
+            if lb(&fg_namebuf + 1) == 114 { return FG_COMP_ARITHMETIC; }  # a'r'
+        }
+        return FG_COMP_ATOP;
+    }
+    return FG_COMP_OVER;
+}
+
+# Parse a <filter> element's children into the primitive list. Returns the
+# primitive count (0 = nothing usable).
+fn fg_parse(filter_node) {
+    sw(&fg_count, 0);
+    if filter_node < 0 { return 0; }
+    let child = xml_first_child(filter_node);
+    let idx = 0;
+    while child >= 0 {
+        if idx >= FG_MAX_PRIM { break; }
+        if fg_parse_primitive(child, idx) == 1 {
+            idx = idx + 1;
+        }
+        child = xml_next_sibling(child);
+    }
+    sw(&fg_count, idx);
+    return idx;
+}
+
+# Largest device-pixel distance a primitive can pull a sample from. Tiled
+# filters render each tile with this much padding overlap so blur/offset
+# spread does not seam at tile boundaries. Call after fg_parse.
+fn fg_estimate_pad() {
+    let n = lw(&fg_count);
+    let i = 0;
+    let pad = 0;
+    while i < n {
+        let op = fg_op_get(i);
+        let reach = 0;
+        if op == FG_OP_BLUR {
+            let r = lw(&fg_param_a + i * 4);
+            if r > 31 { r = 31; }
+            reach = 3 * r + 1;
+        }
+        if op == FG_OP_DROPSHADOW {
+            let r2 = lw(&fg_param_a + i * 4);
+            if r2 > 31 { r2 = 31; }
+            let ax = lw(&fg_k1 + i * 4);
+            if ax < 0 { ax = 0 - ax; }
+            let ay = lw(&fg_k2 + i * 4);
+            if ay < 0 { ay = 0 - ay; }
+            let amax = ax;
+            if ay > amax { amax = ay; }
+            reach = 3 * r2 + 1 + amax;
+        }
+        if op == FG_OP_OFFSET {
+            let ox = lw(&fg_param_a + i * 4);
+            if ox < 0 { ox = 0 - ox; }
+            let oy = lw(&fg_param_b + i * 4);
+            if oy < 0 { oy = 0 - oy; }
+            reach = ox;
+            if oy > reach { reach = oy; }
+        }
+        if reach > pad { pad = reach; }
+        i = i + 1;
+    }
+    return pad;
+}

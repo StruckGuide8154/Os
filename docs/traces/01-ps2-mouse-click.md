@@ -1,4 +1,4 @@
-# Trace 01 — PS/2 Mouse Click → Cursor Move + Click Dispatch
+# Trace 01 - PS/2 Mouse Click → Cursor Move + Click Dispatch
 
 ## Entry
 
@@ -11,7 +11,7 @@ Hardware state at entry: PS/2 controller has pushed a 3- or 4-byte mouse packet 
 |---|---|---|---|
 | 1 | `kernel/core/idt.asm` | IDT[44] → `irq_common_stub` (vec=44 in [rsp+8]) | RIP/CS/RFLAGS pushed by CPU; PUSH_ALL saves regs |
 | 2 | `kernel/core/isr.asm:222` | `cmp rax, 44 / je .irq_mouse` | Vector dispatch |
-| 3 | `kernel/core/isr.asm:243` | `.irq_mouse: call mouse_handler` | — |
+| 3 | `kernel/core/isr.asm:243` | `.irq_mouse: call mouse_handler` | - |
 | 4 | `kernel/drivers/mouse.asm` | mouse_handler reads port 0x60, advances `mouse_cycle` 0→1→2→(3 if IM) | `mouse_packet[0..3]`, `mouse_cycle` |
 | 5 | mouse.asm `.process_packet` | bytes → dx/dy signed, buttons LSB | `mouse_x += dx`, `mouse_y -= dy`, `mouse_buttons`, `mouse_moved=1` |
 | 6 | `kernel/core/isr.asm:244-247` | `call apic_eoi / call pic_eoi_slave / call pic_eoi_master` | LAPIC EOI@0xB0; 8259 EOIs to 0xA0 then 0x20 |
@@ -25,7 +25,7 @@ Hardware state at entry: PS/2 controller has pushed a 3- or 4-byte mouse packet 
 |---|---|---|
 | 8 | `kernel/core/main.asm:461` | `call mouse_check_moved` returns AL=1 if dirty |
 | 9 | main.asm:465-467 | edi=mouse_x, esi=mouse_y, dl=mouse_buttons |
-| 10 | main.asm:471 | `call wm_handle_mouse_event` — locates window under cursor |
+| 10 | main.asm:471 | `call wm_handle_mouse_event` - locates window under cursor |
 | 11 | window.asm wm_handle | iterates `window_pool` slots with WF_ACTIVE; hit-test (X..X+W, Y..Y+H) |
 | 12 | window.asm | if button & 0x01 and click handler set: `call [WIN_OFF_CLICKFN]` |
 | 13 | callback (e.g. `app_explorer_click` explorer.inc:464) | runs in kernel context; returns |

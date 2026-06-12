@@ -1,0 +1,76 @@
+# GritHL SVG2 - per-render scratch arena for filter intermediates.
+#
+# Design: docs/svg-filters-design.md, "filter-region-bounded buffers".
+#
+# A bump allocator over a fixed BSS block. Every <filter> application carves
+# its ping-pong ARGB buffers from here. The arena is reset (bump pointer ->
+# 0) at the start of every svg_render() call, so a filter buffer can never
+# outlive the render call that created it - this rules out use-after-free by
+# construction.
+#
+# Capacity note: the design doc reserves 8 MiB at APP_SLOT_TOP. GritHL has
+# no way to address arbitrary slot memory, so we back the arena with a BSS
+# block sized for the practical cap: two 256x256 ARGB ping-pong buffers
+# (256*256*4*2 = 512 KiB) plus headroom. Filter regions larger than a single
+# buffer's worth clip down (see filter_arena_alloc).
+
+use svg2.fixed
+
+const FARENA_BYTES   = 600000        # ~586 KiB: 2x 256x256 ARGB + slack
+const FARENA_MAX_DIM = 256           # hard cap on any one buffer edge
+
+state {
+    farena_mem: 600000;
+    farena_top: 4;                   # bump pointer (byte offset into mem)
+}
+
+# Reset the bump pointer. Called once per svg_render().
+fn filter_arena_reset() {
+    sw(&farena_top, 0);
+}
+
+# Allocate `n` bytes (8-byte aligned). Returns the absolute address, or 0 if
+# the arena is exhausted - callers must treat 0 as "filter unavailable" and
+# render unfiltered.
+fn filter_arena_alloc(n) {
+    let t = lw(&farena_top);
+    n = (n + 7) & (0 - 8);
+    if t + n > FARENA_BYTES { return 0; }
+    sw(&farena_top, t + n);
+    return &farena_mem + t;
+}
+
+# Allocate one zeroed ARGB buffer of w*h pixels. w/h are clamped to
+# FARENA_MAX_DIM. Returns the buffer address (0 on exhaustion).
+fn filter_arena_argb(w, h) {
+    if w > FARENA_MAX_DIM { w = FARENA_MAX_DIM; }
+    if h > FARENA_MAX_DIM { h = FARENA_MAX_DIM; }
+    if w < 1 { w = 1; }
+    if h < 1 { h = 1; }
+    let buf = filter_arena_alloc(w * h * 4);
+    if buf == 0 { return 0; }
+    let total = w * h;
+    let i = 0;
+    while i < total {
+        sw(buf + i * 4, 0);
+        i = i + 1;
+    }
+    return buf;
+}
+
+# Save / restore the bump pointer. Tiled filters reset to a mark before each
+# tile so per-tile buffers are reused instead of exhausting the arena.
+fn filter_arena_mark() {
+    return lw(&farena_top);
+}
+
+fn filter_arena_restore(m) {
+    sw(&farena_top, m);
+}
+
+# Clamp a requested filter dimension to what the arena can serve.
+fn filter_arena_clamp(d) {
+    if d > FARENA_MAX_DIM { return FARENA_MAX_DIM; }
+    if d < 1 { return 1; }
+    return d;
+}

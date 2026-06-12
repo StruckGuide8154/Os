@@ -1,0 +1,684 @@
+# ============================================================================
+# envelope_gate.ghl - Track 2 "signed everything" artifact ADMISSION GATE.
+#
+# This module binds envelope_verify_signed (ed25519_check.ghl) into the real
+# boot-chain / update-path call sites, so no unsigned input path remains:
+#
+#   artifact_gate_admit(base, total_len, expected_type, now, ...)
+#       The single admission entry point. Computes the payload SHA-256
+#       (crypto.ghl) itself, consults the verified-artifact hash cache, and
+#       returns ENVR_OK only if the envelope passes the FULL check
+#       (structure + semantics + threshold Ed25519 quorum) AND its artifact
+#       type is the one this call site expects.
+#
+#   syssig_verify_boot()   [boot-chain call site, kmain K5]
+#       FAIL-CLOSED verification of \EFI\BOOT\SYSSIG.ENV: a quorum-signed
+#       envelope whose payload must be byte-identical to the in-image per-app
+#       integrity table (app_integrity_table). The table transitively covers
+#       every app segment via per-entry SHA-256 digests, so after this gate
+#       no app code runs whose hash was not threshold-signed at build time.
+#       Missing/rejected envelope = kernel panic (no unsigned fallback).
+#
+#   boot_update_check()    [update-path call site, kmain K5]
+#       Admission gate for an OPTIONAL staged update artifact
+#       \EFI\BOOT\KUPDATE.ENV. Acceptance/rejection (with the precise
+#       ENVR_ERR_* reason) is decided ONLY by artifact_gate_admit; the
+#       verdict is logged on COM1 and latched for the future staging/commit
+#       logic. There is no other path by which update input is accepted.
+#
+# Verified-artifact hash cache (Track 2 perf gate): keyed by the SHA-256 of
+# the ENTIRE envelope byte range [base, base+total_len) - header, payload and
+# signature block - so any single-bit change misses the cache. A hit proves
+# "the threshold signatures over these exact bytes already verified this
+# boot" and skips only the Ed25519 crypto; the structural + SEMANTIC checks
+# (validity window vs now, device binding, anti-rollback context) are
+# re-evaluated on every admit, because they depend on caller context, not on
+# the bytes alone.
+#
+# Verifier context: device identity is a build-time constant (matching
+# scripts/build/write_envelope.py defaults). The anti-rollback floors are
+# PERSISTENT (floor_store.ghl): per-class minimums loaded from the floor
+# sector at K5, ratcheted forward by every accepted envelope's signed
+# monotonic fields, and written back after the K5 call sites - so a signed
+# but superseded artifact stays inadmissible across reboots. The
+# wallclock for the validity window is REAL: kmain K5 samples the CMOS RTC
+# (rtc_time.ghl) and binds it via gate_time_set; the clock is clamped to a
+# build-time floor (a dead/rolled-back RTC can never move the verifier into
+# the past) and ratchets forward-only within a boot. Until/unless a sample
+# arrives, gate_time_now answers the floor - so envelope validity windows
+# (not_before/not_after) are always judged against a sane wallclock.
+# ============================================================================
+
+module "envelope_gate";
+
+unsafe raw_mem;          # lb over envelope bytes, lq over the VBE_INFO struct
+unsafe implicit_extern;  # &gate_* module-local data
+
+global artifact_gate_admit;
+global syssig_verify_boot;
+global kernel_env_verify_boot;
+global boot_update_check;
+global quorum_change_admit;
+global boot_quorum_check;
+global gate_quorum_active_min;
+global gate_quorum_active_required;
+global gate_time_set;
+global gate_time_now;
+global envelope_gate_abi_version;
+
+extern sha256_init;
+extern sha256_update;
+extern sha256_final;
+extern envelope_verify;          # structure + semantics (envelope_reader.ghl)
+extern envelope_verify_signed;   # + threshold Ed25519 (ed25519_check.ghl)
+extern ed25519_last_verified_roles;            # ed25519_check.ghl
+extern envelope_rd_scalar;                     # envelope_reader.ghl
+extern security_threshold_class_min_count;     # threshold_check.ghl
+extern security_threshold_class_required_mask;
+extern security_threshold_rule_valid;
+extern security_threshold_change_valid;
+extern security_threshold_popcount6;
+extern floor_required_version;                 # floor_store.ghl (persistent
+extern floor_required_counter;                 # per-class anti-rollback
+extern floor_required_epoch;                   # floors, data.img FLOOR_LBA)
+extern floor_observe;
+extern kernel_panic_canary;
+extern serial_puts;
+extern serial_crlf;
+extern ser_print_hex64;
+extern app_integrity_table;      # 16B marker + 1444B table (apps.asm)
+
+# Boot-info struct (identity-mapped). Mirror of src/include/boot_memory.inc.
+const VBE_INFO             = 0x9000;
+const VBE_SYSSIG_BASE_OFF  = 0x80;
+const VBE_SYSSIG_SIZE_OFF  = 0x88;
+const VBE_KUPDATE_BASE_OFF = 0x90;
+const VBE_KUPDATE_SIZE_OFF = 0x98;
+const VBE_KQUORUM_BASE_OFF = 0xA0;
+const VBE_KQUORUM_SIZE_OFF = 0xA8;
+const VBE_KERNENV_BASE_OFF = 0xB0;
+const VBE_KERNENV_SIZE_OFF = 0xB8;
+const VBE_KIMG_BASE_OFF    = 0xC0;
+const VBE_KIMG_SIZE_OFF    = 0xC8;
+
+# Envelope geometry (mirror of signed_envelope.ghl / envelope_reader.ghl).
+const ENV_HEADER_FIXED = 18;
+const MAX_ENVELOPE_TOTAL_LEN = 16777216;
+const GATE_ERR_BOUNDS = 1;          # == ENVR_ERR_BOUNDS
+const GATE_ERR_CALLER_TYPE = 23;    # artifact type != the type this call site binds
+
+# Quorum-change tracking-path reject reasons (continue the ENVR_*/GATE_* space).
+const GATE_ERR_QCH_FORMAT = 24;     # payload is not a well-formed QCH1 record
+const GATE_ERR_QCH_STATE = 25;      # declared old rule != the ACTIVE rule (stale/replay)
+const GATE_ERR_QCH_RULE = 26;       # new rule invalid or a downgrade (change_valid=0)
+const GATE_ERR_QCH_APPROVAL = 27;   # signature set does not satisfy BOTH quorums
+const GATE_ERR_QUORUM_RATCHET = 28; # envelope's declared quorum below the ACTIVE rule
+
+# Artifact classes this module's call sites expect (signed_envelope.ghl ART_*).
+const ART_KERNEL = 2;
+const ART_APP = 5;
+const ART_POLICY = 6;
+const ART_UPDATE = 8;
+const ART_CLASS_MAX = 9;
+
+# Quorum-change payload: "QCH1" magic + 7 u16 fields (18 bytes total).
+const QCH_MAGIC_LEN = 4;
+const QCH_PAYLOAD_BYTES = 18;
+
+# Verifier context (see header note). Device identity matches the
+# write_envelope.py defaults; the anti-rollback floors are PERSISTENT -
+# floor_required_*(class) from floor_store.ghl (build-time default 1 per
+# class, ratcheted forward by every accepted envelope's signed monotonic
+# fields and persisted across boots).
+const GATE_DEVICE_ID = 1;
+const GATE_DEVICE_CLASS = 0;
+
+# Verifier-clock floor: 2026-01-01 00:00:00 UTC. The clock can never answer
+# below this, so an envelope whose not_after predates the build era is
+# inadmissible even with a dead CMOS battery.
+const GATE_TIME_FLOOR = 1767225600;
+
+# SYSSIG payload = manifest marker (16) + manifest table (1444), see crypto.ghl.
+const SYSSIG_PAYLOAD_BYTES = 1460;
+
+# Panic codes ('SSG0'..'SSG3').
+const PANIC_SYSSIG_MISSING  = 0x53534730;
+const PANIC_SYSSIG_REJECTED = 0x53534731;
+const PANIC_SYSSIG_PAYLOAD  = 0x53534732;
+const PANIC_SYSSIG_MISMATCH = 0x53534733;
+
+# Loader-side KERNEL.BIN envelope panic codes ('KSG0'..'KSG3').
+const PANIC_KERNSIG_MISSING  = 0x4B534730;
+const PANIC_KERNSIG_REJECTED = 0x4B534731;
+const PANIC_KERNSIG_PAYLOAD  = 0x4B534732;
+const PANIC_KERNSIG_MISMATCH = 0x4B534733;
+
+# KERNEL.ENV payload = the 32-byte SHA-256 of the KERNEL.BIN container file.
+const KERNSIG_PAYLOAD_BYTES = 32;
+
+# ---------------------------------------------------------------------------
+# Verified-artifact hash cache: 8 round-robin entries x 32-byte whole-envelope
+# SHA-256. Only ACCEPTED envelopes are inserted.
+# ---------------------------------------------------------------------------
+const GATE_CACHE_ENTRIES = 8;
+data gate_cache_keys: 256;       # 8 x 32
+data gate_cache_count: 1;        # valid entries (saturates at 8)
+data gate_cache_next: 1;         # round-robin insert cursor
+data gate_stat_hits: 1 x 4;      # admit calls satisfied from the cache
+data gate_stat_checks: 1 x 4;    # full (Ed25519) verifications performed
+
+data gate_payload_digest: 32;    # caller-computed payload SHA-256 scratch
+data gate_env_digest: 32;        # whole-envelope SHA-256 scratch (cache key)
+
+# Update-path verdict latch (read by future staging/commit logic + tests).
+data kupdate_present: 1;
+data kupdate_rc: 1 x 4;          # last gate verdict (ENVR_OK / ENVR_ERR_*)
+
+# ---------------------------------------------------------------------------
+# ACTIVE per-class threshold quorum (the change-TRACKING state). Initialized
+# from the build-time class policy (threshold_check.ghl) on first use; only
+# quorum_change_admit may move it, and only forward (ratchet up, enforced by
+# security_threshold_change_valid). artifact_gate_admit re-checks every
+# admitted envelope's DECLARED quorum rule against this table, so a ratchet
+# binds all later admissions - including hash-cache hits, because the declared
+# rule is part of the signed (and cache-keyed) bytes.
+# Indexed by artifact class 1..9; entry 0 unused.
+# ---------------------------------------------------------------------------
+data gate_quorum_min: 10 x 4;
+data gate_quorum_allowed: 10 x 4;
+data gate_quorum_required: 10 x 4;
+data gate_quorum_init: 1;
+data gate_quorum_changes: 1 x 4; # accepted quorum changes (observability)
+
+# Quorum-change verdict latch (mirrors the update-path latch).
+data kquorum_present: 1;
+data kquorum_rc: 1 x 4;
+
+# Verifier wallclock (unix seconds). 0 = no RTC sample bound yet -> the
+# floor is answered. Forward-ratchet only: see gate_time_set.
+data gate_now_unix: 1 x 8;
+
+# Serial strings.
+data s_syssig_ok:   16 = [91,83,89,83,83,73,71,93,32,111,107,32,99,61,0];  # "[SYSSIG] ok c="
+data s_syssig_rc:   14 = [91,83,89,83,83,73,71,93,32,114,99,61,0];         # "[SYSSIG] rc="
+data s_upd_none:    15 = [91,85,80,68,65,84,69,93,32,110,111,110,101,0];   # "[UPDATE] none"
+data s_upd_accept:  19 = [91,85,80,68,65,84,69,93,32,97,99,99,101,112,116,101,100,0];  # "[UPDATE] accepted"
+data s_upd_reject:  23 = [91,85,80,68,65,84,69,93,32,114,101,106,101,99,116,101,100,32,114,99,61,0];  # "[UPDATE] rejected rc="
+data s_qch_none:    15 = [91,81,85,79,82,85,77,93,32,110,111,110,101,0];    # "[QUORUM] none"
+data s_qch_accept:  22 = [91,81,85,79,82,85,77,93,32,97,99,99,101,112,116,101,100,32,107,61,0];  # "[QUORUM] accepted k="
+data s_qch_reject:  23 = [91,81,85,79,82,85,77,93,32,114,101,106,101,99,116,101,100,32,114,99,61,0];  # "[QUORUM] rejected rc="
+data s_rtcnow:      15 = [91,82,84,67,78,79,87,93,32,110,111,119,61,0];     # "[RTCNOW] now="
+data s_kernsig_ok:  18 = [91,75,69,82,78,83,73,71,93,32,111,107,32,110,61,0];  # "[KERNSIG] ok n="
+data s_kernsig_rc:  15 = [91,75,69,82,78,83,73,71,93,32,114,99,61,0];          # "[KERNSIG] rc="
+data kimg_digest:   32;          # SHA-256 of the pristine KERNEL.BIN bytes
+
+# Declared-field scratch (filled by gate_read_declared_quorum: the signed
+# COSIGNER_ROLES rule plus the signed monotonic fields for the floor ratchet).
+data gate_decl_min: 1 x 4;
+data gate_decl_allowed: 1 x 4;
+data gate_decl_required: 1 x 4;
+data gate_decl_version: 1 x 4;
+data gate_decl_counter: 1 x 4;
+data gate_decl_epoch: 1 x 4;
+
+# Constant-control-flow byte-range equality (no early exit).
+fn gate_ct_memeq(a, b, n) {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc | (lb(a + i) ^ lb(b + i));
+        i = i + 1;
+    }
+    if acc == 0 { return 1; }
+    return 0;
+}
+
+fn gate_cache_find(key) {
+    let n = lb(&gate_cache_count);
+    let i = 0;
+    while i < n {
+        if gate_ct_memeq(&gate_cache_keys + i * 32, key, 32) != 0 { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn gate_cache_insert(key) {
+    let slot = lb(&gate_cache_next);
+    let dst = &gate_cache_keys + slot * 32;
+    let i = 0;
+    while i < 32 {
+        sb(dst + i, lb(key + i));
+        i = i + 1;
+    }
+    slot = slot + 1;
+    if slot >= GATE_CACHE_ENTRIES { slot = 0; }
+    sb(&gate_cache_next, slot);
+    let n = lb(&gate_cache_count);
+    if n < GATE_CACHE_ENTRIES { sb(&gate_cache_count, n + 1); }
+}
+
+fn gate_rd_u16(p) {
+    return lb(p) | (lb(p + 1) << 8);
+}
+
+fn gate_rd_u32(p) {
+    return lb(p) | (lb(p + 1) << 8) | (lb(p + 2) << 16) | (lb(p + 3) << 24);
+}
+
+fn envelope_gate_abi_version() {
+    return 4;
+}
+
+# ---------------------------------------------------------------------------
+# Verifier wallclock (Track 2 RTC/now binding).
+#
+# gate_time_set(now): bind a wallclock sample (unix seconds; kmain K5 passes
+# rtc_now_unix() from rtc_time.ghl). The clock is clamped to GATE_TIME_FLOOR
+# (a dead CMOS / rolled-back RTC reads as the floor, never the past) and only
+# ever moves FORWARD within a boot (a later worse sample cannot re-open an
+# expired validity window). The bound value is logged on COM1.
+#
+# gate_time_now(): the clock every envelope validity window is judged
+# against. Answers the floor until a sample is bound.
+# ---------------------------------------------------------------------------
+fn gate_time_set(now) {
+    let v = now;
+    if v < GATE_TIME_FLOOR { v = GATE_TIME_FLOOR; }
+    if v > lq(&gate_now_unix) { sq(&gate_now_unix, v); }
+    serial_puts(&s_rtcnow);
+    call ser_print_hex64(rdi: lq(&gate_now_unix));
+    serial_crlf();
+    return 0;
+}
+
+fn gate_time_now() {
+    let now = lq(&gate_now_unix);
+    if now == 0 { return GATE_TIME_FLOOR; }
+    return now;
+}
+
+# ---------------------------------------------------------------------------
+# ACTIVE quorum table management (quorum-change tracking state).
+# ---------------------------------------------------------------------------
+fn gate_quorum_ensure_init() {
+    if lb(&gate_quorum_init) != 0 { return 0; }
+    let k = 1;
+    while k <= ART_CLASS_MAX {
+        sw(&gate_quorum_min + k * 4, security_threshold_class_min_count(k));
+        sw(&gate_quorum_allowed + k * 4, 63);   # THRESHOLD_ALL_ROLES
+        sw(&gate_quorum_required + k * 4, security_threshold_class_required_mask(k));
+        k = k + 1;
+    }
+    sb(&gate_quorum_init, 1);
+    return 0;
+}
+
+fn gate_quorum_active_min(kind) {
+    if kind < 1 { return 0; }
+    if kind > ART_CLASS_MAX { return 0; }
+    gate_quorum_ensure_init();
+    return lw(&gate_quorum_min + kind * 4);
+}
+
+fn gate_quorum_active_required(kind) {
+    if kind < 1 { return 0; }
+    if kind > ART_CLASS_MAX { return 0; }
+    gate_quorum_ensure_init();
+    return lw(&gate_quorum_required + kind * 4);
+}
+
+# Parse the (already structurally validated) signed TLVs the gate consumes
+# after acceptance into the gate_decl_* scratch: COSIGNER_ROLES (id 10) for
+# the quorum ratchet, and MONOTONIC_VERSION / ROLLBACK_COUNTER /
+# REVOCATION_EPOCH (ids 8 / 9 / 11) for the persistent anti-rollback floor
+# ratchet. Same walk envelope_verify_signed performs.
+fn gate_read_declared_quorum(base) {
+    let header_len = gate_rd_u16(base + 12);
+    let p = base + ENV_HEADER_FIXED;
+    let hdr_end = base + header_len;
+    sw(&gate_decl_min, 0);
+    sw(&gate_decl_allowed, 0);
+    sw(&gate_decl_required, 0);
+    sw(&gate_decl_version, 0);
+    sw(&gate_decl_counter, 0);
+    sw(&gate_decl_epoch, 0);
+    while p < hdr_end {
+        let id_width = lb(p);
+        let field_id = envelope_rd_scalar(p + 1, id_width);
+        let len_width = lb(p + 1 + id_width);
+        let field_len = envelope_rd_scalar(p + 2 + id_width, len_width);
+        let vptr = p + 2 + id_width + len_width;
+        if field_id == 8 { sw(&gate_decl_version, gate_rd_u32(vptr)); }
+        if field_id == 9 { sw(&gate_decl_counter, gate_rd_u32(vptr)); }
+        if field_id == 10 {
+            sw(&gate_decl_min, gate_rd_u16(vptr));
+            sw(&gate_decl_allowed, gate_rd_u16(vptr + 2));
+            sw(&gate_decl_required, gate_rd_u16(vptr + 4));
+        }
+        if field_id == 11 { sw(&gate_decl_epoch, gate_rd_u32(vptr)); }
+        p = vptr + field_len;
+    }
+    return 0;
+}
+
+# Does a cryptographically-verified role set satisfy a quorum rule?
+fn gate_quorum_satisfied(verified, min_count, allowed_mask, required_mask) {
+    let eff = verified & allowed_mask;
+    if security_threshold_popcount6(eff) < min_count { return 0; }
+    if (eff & required_mask) != required_mask { return 0; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# The single admission entry point (see module header).
+# Returns ENVR_OK (0) or the precise reject reason.
+# ---------------------------------------------------------------------------
+fn artifact_gate_admit(base, total_len, expected_type) {
+    # Minimal geometry sanity BEFORE hashing anything; envelope_verify
+    # re-validates all of this fail-closed.
+    if base == 0 { return GATE_ERR_BOUNDS; }
+    if total_len < ENV_HEADER_FIXED { return GATE_ERR_BOUNDS; }
+    if total_len > MAX_ENVELOPE_TOTAL_LEN { return GATE_ERR_BOUNDS; }
+    let header_len = gate_rd_u16(base + 12);
+    let payload_len = gate_rd_u32(base + 14);
+    if header_len < ENV_HEADER_FIXED { return GATE_ERR_BOUNDS; }
+    if header_len + payload_len > total_len { return GATE_ERR_BOUNDS; }
+
+    # Payload digest for the HASH-field binding inside envelope_verify.
+    sha256_init();
+    sha256_update(base + header_len, payload_len);
+    sha256_final(&gate_payload_digest);
+
+    # Cache key: the WHOLE envelope byte range (header + payload + sigs).
+    sha256_init();
+    sha256_update(base, total_len);
+    sha256_final(&gate_env_digest);
+
+    # Persistent anti-rollback context for THIS call site's artifact class
+    # (the kind==expected_type binding below makes any mismatch inadmissible
+    # anyway, so judging floors by expected_type is sound and lets the floors
+    # be enforced inside envelope_verify with precise reason codes).
+    let req_ver = floor_required_version(expected_type);
+    let req_ctr = floor_required_counter(expected_type);
+    let req_epo = floor_required_epoch(expected_type);
+
+    let vnow = gate_time_now();
+    let rc = 0;
+    if gate_cache_find(&gate_env_digest) != 0 {
+        # Threshold signatures over these exact bytes already verified this
+        # boot; re-run only structure + context-dependent semantics (incl.
+        # the validity window against the LIVE clock and the LIVE floors - a
+        # cached artifact can still expire or fall below a ratcheted floor).
+        sw(&gate_stat_hits, lw(&gate_stat_hits) + 1);
+        rc = envelope_verify(base, total_len, &gate_payload_digest, vnow, GATE_DEVICE_ID, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
+    } else {
+        sw(&gate_stat_checks, lw(&gate_stat_checks) + 1);
+        rc = envelope_verify_signed(base, total_len, &gate_payload_digest, vnow, GATE_DEVICE_ID, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
+        if rc == 0 { gate_cache_insert(&gate_env_digest); }
+    }
+    if rc != 0 { return rc; }
+
+    # Bind the call site to its artifact class: a validly signed envelope of
+    # the WRONG class must not be admissible here (header type is signed; the
+    # reader already proved header == signed TYPE field).
+    let kind = gate_rd_u16(base + 6);
+    if kind != expected_type { return GATE_ERR_CALLER_TYPE; }
+
+    # ACTIVE-quorum ratchet: the envelope's DECLARED (and signed) quorum rule
+    # must be at least as strict as the current active rule for its class -
+    # min not below, allowed not wider, required not missing any active-
+    # required role. envelope_verify_signed already proved the signatures
+    # satisfy the declared rule, so this transitively binds the ratchet even
+    # on hash-cache hits (the declared rule is inside the cache-keyed bytes).
+    gate_quorum_ensure_init();
+    gate_read_declared_quorum(base);
+    if lw(&gate_decl_min) < lw(&gate_quorum_min + kind * 4) { return GATE_ERR_QUORUM_RATCHET; }
+    let act_allowed = lw(&gate_quorum_allowed + kind * 4);
+    if (lw(&gate_decl_allowed) & act_allowed) != lw(&gate_decl_allowed) { return GATE_ERR_QUORUM_RATCHET; }
+    let act_required = lw(&gate_quorum_required + kind * 4);
+    if (lw(&gate_decl_required) & act_required) != act_required { return GATE_ERR_QUORUM_RATCHET; }
+
+    # ADMITTED: ratchet the persistent anti-rollback floors forward from the
+    # envelope's signed monotonic fields (already proven >= the active floors
+    # by envelope_verify above; persisted by kmain K5 via floor_persist).
+    floor_observe(kind, lw(&gate_decl_version), lw(&gate_decl_counter), lw(&gate_decl_epoch));
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Quorum-change tracking path. The ONLY writer of the active quorum table.
+#
+# A quorum change is itself a signed POLICY-class envelope whose 18-byte
+# payload is:   'Q','C','H','1'  magic
+#               u16 kind         artifact class whose quorum is changed
+#               u16 old_min  u16 old_allowed  u16 old_required
+#               u16 new_min  u16 new_allowed  u16 new_required
+# Admission requires ALL of:
+#   - full envelope_verify_signed (structure + semantics + Ed25519), run
+#     FRESH (never from the hash cache) so the verified-role set is current;
+#   - the declared OLD rule is byte-equal to the ACTIVE rule (a stale or
+#     replayed change against superseded state is rejected);
+#   - the NEW rule is well-formed (security_threshold_rule_valid) and a
+#     non-downgrade (security_threshold_change_valid; required roles may
+#     only be added, never dropped);
+#   - the signature set satisfies BOTH the old AND the new quorum - the
+#     Track-2 "quorum change requires both old and new quorum approval" rule.
+# ---------------------------------------------------------------------------
+fn quorum_change_admit(base, total_len) {
+    gate_quorum_ensure_init();
+    if base == 0 { return GATE_ERR_BOUNDS; }
+    if total_len < ENV_HEADER_FIXED { return GATE_ERR_BOUNDS; }
+    if total_len > MAX_ENVELOPE_TOTAL_LEN { return GATE_ERR_BOUNDS; }
+    let header_len = gate_rd_u16(base + 12);
+    let payload_len = gate_rd_u32(base + 14);
+    if header_len < ENV_HEADER_FIXED { return GATE_ERR_BOUNDS; }
+    if header_len + payload_len > total_len { return GATE_ERR_BOUNDS; }
+
+    sha256_init();
+    sha256_update(base + header_len, payload_len);
+    sha256_final(&gate_payload_digest);
+
+    # Always the FULL crypto path (no cache): the dual-quorum judgment below
+    # consumes the fresh verified-role set from this exact run. Anti-rollback
+    # context = the POLICY class's persistent floors (this call site only
+    # admits ART_POLICY, enforced right below).
+    sw(&gate_stat_checks, lw(&gate_stat_checks) + 1);
+    let rc = envelope_verify_signed(base, total_len, &gate_payload_digest, gate_time_now(), GATE_DEVICE_ID, GATE_DEVICE_CLASS, floor_required_version(ART_POLICY), floor_required_counter(ART_POLICY), floor_required_epoch(ART_POLICY));
+    if rc != 0 { return rc; }
+    if gate_rd_u16(base + 6) != ART_POLICY { return GATE_ERR_CALLER_TYPE; }
+
+    # Payload format.
+    if payload_len != QCH_PAYLOAD_BYTES { return GATE_ERR_QCH_FORMAT; }
+    let pl = base + header_len;
+    if lb(pl) != 81 { return GATE_ERR_QCH_FORMAT; }       # 'Q'
+    if lb(pl + 1) != 67 { return GATE_ERR_QCH_FORMAT; }   # 'C'
+    if lb(pl + 2) != 72 { return GATE_ERR_QCH_FORMAT; }   # 'H'
+    if lb(pl + 3) != 49 { return GATE_ERR_QCH_FORMAT; }   # '1'
+    let kind = gate_rd_u16(pl + 4);
+    if kind < 1 { return GATE_ERR_QCH_FORMAT; }
+    if kind > ART_CLASS_MAX { return GATE_ERR_QCH_FORMAT; }
+    let old_min = gate_rd_u16(pl + 6);
+    let old_allowed = gate_rd_u16(pl + 8);
+    let old_required = gate_rd_u16(pl + 10);
+    let new_min = gate_rd_u16(pl + 12);
+    let new_allowed = gate_rd_u16(pl + 14);
+    let new_required = gate_rd_u16(pl + 16);
+
+    # Change tracking: the declared old rule must BE the active rule.
+    if old_min != lw(&gate_quorum_min + kind * 4) { return GATE_ERR_QCH_STATE; }
+    if old_allowed != lw(&gate_quorum_allowed + kind * 4) { return GATE_ERR_QCH_STATE; }
+    if old_required != lw(&gate_quorum_required + kind * 4) { return GATE_ERR_QCH_STATE; }
+
+    # New rule must be well-formed and a non-downgrade transition.
+    if security_threshold_rule_valid(new_min, 8, new_allowed, new_required) == 0 { return GATE_ERR_QCH_RULE; }
+    if security_threshold_change_valid(old_min, new_min, old_allowed, new_allowed) == 0 { return GATE_ERR_QCH_RULE; }
+    if (new_required & old_required) != old_required { return GATE_ERR_QCH_RULE; }
+
+    # BOTH-quorum approval over the freshly verified role set.
+    let verified = ed25519_last_verified_roles();
+    if gate_quorum_satisfied(verified, old_min, old_allowed, old_required) == 0 { return GATE_ERR_QCH_APPROVAL; }
+    if gate_quorum_satisfied(verified, new_min, new_allowed, new_required) == 0 { return GATE_ERR_QCH_APPROVAL; }
+
+    # Apply: ratchet the active rule forward.
+    sw(&gate_quorum_min + kind * 4, new_min);
+    sw(&gate_quorum_allowed + kind * 4, new_allowed);
+    sw(&gate_quorum_required + kind * 4, new_required);
+    sw(&gate_quorum_changes, lw(&gate_quorum_changes) + 1);
+    # ADMITTED: ratchet the POLICY-class persistent anti-rollback floors from
+    # the change envelope's signed monotonic fields.
+    gate_read_declared_quorum(base);
+    floor_observe(ART_POLICY, lw(&gate_decl_version), lw(&gate_decl_counter), lw(&gate_decl_epoch));
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Quorum-change call site (kmain K5, after syssig/update - a staged ratchet
+# governs admissions from acceptance onward; this boot's loader-staged
+# artifacts were already admitted under the rule the change supersedes).
+# ---------------------------------------------------------------------------
+fn boot_quorum_check() {
+    let base = lq(VBE_INFO + VBE_KQUORUM_BASE_OFF);
+    let size = lq(VBE_INFO + VBE_KQUORUM_SIZE_OFF);
+    if base == 0 {
+        sb(&kquorum_present, 0);
+        sw(&kquorum_rc, 0);
+        serial_puts(&s_qch_none);
+        serial_crlf();
+        return;
+    }
+    sb(&kquorum_present, 1);
+    let rc = quorum_change_admit(base, size);
+    sw(&kquorum_rc, rc);
+    if rc == 0 {
+        serial_puts(&s_qch_accept);
+        call ser_print_hex64(rdi: lw(&gate_quorum_changes));
+        serial_crlf();
+        return;
+    }
+    serial_puts(&s_qch_reject);
+    call ser_print_hex64(rdi: rc);
+    serial_crlf();
+}
+
+# ---------------------------------------------------------------------------
+# Boot-chain call site (kmain K5). FAIL-CLOSED.
+# ---------------------------------------------------------------------------
+fn syssig_panic(code, rc) {
+    serial_puts(&s_syssig_rc);
+    call ser_print_hex64(rdi: rc);
+    serial_crlf();
+    kernel_panic_canary(code, &syssig_verify_boot, code);
+}
+
+fn syssig_verify_boot() {
+    let base = lq(VBE_INFO + VBE_SYSSIG_BASE_OFF);
+    let size = lq(VBE_INFO + VBE_SYSSIG_SIZE_OFF);
+    if base == 0 {
+        syssig_panic(PANIC_SYSSIG_MISSING, 0);
+    }
+    let rc = artifact_gate_admit(base, size, ART_APP);
+    if rc != 0 {
+        syssig_panic(PANIC_SYSSIG_REJECTED, rc);
+    }
+    # The signed payload must BE the live in-image integrity table (marker +
+    # count + entries + HMAC), byte for byte.
+    let header_len = gate_rd_u16(base + 12);
+    let payload_len = gate_rd_u32(base + 14);
+    if payload_len != SYSSIG_PAYLOAD_BYTES {
+        syssig_panic(PANIC_SYSSIG_PAYLOAD, payload_len);
+    }
+    if gate_ct_memeq(base + header_len, &app_integrity_table, SYSSIG_PAYLOAD_BYTES) == 0 {
+        syssig_panic(PANIC_SYSSIG_MISMATCH, 0);
+    }
+    # Re-admit: must hit the verified-hash cache (and still accept). This both
+    # exercises the perf gate every boot and makes it observable on COM1.
+    rc = artifact_gate_admit(base, size, ART_APP);
+    if rc != 0 {
+        syssig_panic(PANIC_SYSSIG_REJECTED, rc);
+    }
+    serial_puts(&s_syssig_ok);
+    call ser_print_hex64(rdi: lw(&gate_stat_hits));
+    serial_crlf();
+}
+
+# ---------------------------------------------------------------------------
+# Loader-side KERNEL.BIN envelope call site (kmain K5). FAIL-CLOSED.
+#
+# The loader publishes (a) \EFI\BOOT\KERNEL.ENV - a KERNEL-class quorum-
+# signed envelope whose 32-byte payload is the SHA-256 of the KERNEL.BIN
+# container file - and (b) the PRISTINE container bytes it read from disk
+# (the trampoline copies the runnable payload OUT of that buffer, so it
+# remains byte-identical to the at-rest file). We re-hash those bytes here
+# and require the signed payload to equal the digest, closing the last
+# "no unsigned input" residual: an unsigned / tampered / rolled-back
+# KERNEL.BIN (the envelope's monotonic fields ratchet the KERNEL-class
+# persistent floor) is a boot panic, not a boot.
+# ---------------------------------------------------------------------------
+fn kernsig_panic(code, rc) {
+    serial_puts(&s_kernsig_rc);
+    call ser_print_hex64(rdi: rc);
+    serial_crlf();
+    kernel_panic_canary(code, &kernel_env_verify_boot, code);
+}
+
+fn kernel_env_verify_boot() {
+    let base = lq(VBE_INFO + VBE_KERNENV_BASE_OFF);
+    let size = lq(VBE_INFO + VBE_KERNENV_SIZE_OFF);
+    let kimg = lq(VBE_INFO + VBE_KIMG_BASE_OFF);
+    let klen = lq(VBE_INFO + VBE_KIMG_SIZE_OFF);
+    if base == 0 {
+        kernsig_panic(PANIC_KERNSIG_MISSING, 0);
+    }
+    if kimg == 0 {
+        kernsig_panic(PANIC_KERNSIG_MISSING, 1);
+    }
+    let rc = artifact_gate_admit(base, size, ART_KERNEL);
+    if rc != 0 {
+        kernsig_panic(PANIC_KERNSIG_REJECTED, rc);
+    }
+    let header_len = gate_rd_u16(base + 12);
+    let payload_len = gate_rd_u32(base + 14);
+    if payload_len != KERNSIG_PAYLOAD_BYTES {
+        kernsig_panic(PANIC_KERNSIG_PAYLOAD, payload_len);
+    }
+    # The signed payload must BE the SHA-256 of the pristine container bytes.
+    sha256_init();
+    sha256_update(kimg, klen);
+    sha256_final(&kimg_digest);
+    if gate_ct_memeq(base + header_len, &kimg_digest, KERNSIG_PAYLOAD_BYTES) == 0 {
+        kernsig_panic(PANIC_KERNSIG_MISMATCH, 0);
+    }
+    serial_puts(&s_kernsig_ok);
+    call ser_print_hex64(rdi: klen);
+    serial_crlf();
+}
+
+# ---------------------------------------------------------------------------
+# Update-path call site (kmain K5). The ONLY admission path for update input.
+# ---------------------------------------------------------------------------
+fn boot_update_check() {
+    let base = lq(VBE_INFO + VBE_KUPDATE_BASE_OFF);
+    let size = lq(VBE_INFO + VBE_KUPDATE_SIZE_OFF);
+    if base == 0 {
+        sb(&kupdate_present, 0);
+        sw(&kupdate_rc, 0);
+        serial_puts(&s_upd_none);
+        serial_crlf();
+        return;
+    }
+    sb(&kupdate_present, 1);
+    let rc = artifact_gate_admit(base, size, ART_UPDATE);
+    sw(&kupdate_rc, rc);
+    if rc == 0 {
+        # Verdict only: staging/commit (write-back + reboot) is the next
+        # Update System increment. Until then an accepted artifact is merely
+        # latched; a rejected or unsigned one is unreachable by construction.
+        serial_puts(&s_upd_accept);
+        serial_crlf();
+        return;
+    }
+    serial_puts(&s_upd_reject);
+    call ser_print_hex64(rdi: rc);
+    serial_crlf();
+}

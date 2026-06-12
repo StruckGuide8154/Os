@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - ACPI EC Battery Driver
+; GritOS v3.0 - ACPI EC Battery Driver
 ;
 ; EC I/O: 0x62 = data port, 0x66 = command/status port
 ; Protocol: wait IBF=0, write 0x80 to cmd port, wait IBF=0,
@@ -61,7 +61,7 @@ EC_REG_C_DES_HI     equ 0xB5
 EC_REG_C_STATUS     equ 0xA0
 EC_REG_C_AC         equ 0xA1
 
-; Layout D registers (Acer Nitro V16 AI / Strix Point — empirically verified
+; Layout D registers (Acer Nitro V16 AI / Strix Point - empirically verified
 ; by EC RAM diff under plug/unplug, see memory amd_dcn_bar0_uc.md).
 ;   EC[0x00] bit0 = AC adapter present
 ;   EC[0x07]      = 0x41 board signature (used to fingerprint this EC layout)

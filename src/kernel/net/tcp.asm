@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS TCP protocol module
+; GritOS TCP protocol module
 ; ----------------------------------------------------------------------------
 ; Lightweight generic TCP foundation. The first exported TX path builds a
 ; standards-compliant SYN segment and sends it through IPv4/NIC abstractions;
@@ -19,7 +19,7 @@ extern net_info
 extern net_ipv4_tx_proto
 extern net_nic_poll_rx
 extern tick_count
-; Track 4 Part B item 4: per-boot secret-whitening mask (ram_atrest.nxh). The TCP
+; Track 4 Part B item 4: per-boot secret-whitening mask (ram_atrest.ghl). The TCP
 ; ISN key is stored XOR-masked at rest and unmasked only into a register at use.
 extern nx_secret_mask
 
@@ -100,7 +100,7 @@ net_tcp_connect_ipv4:
     pop rdx
     test eax, eax
     jz .fail
-    ; Source-port randomization: the kernel — not ring-3 — picks the ephemeral
+    ; Source-port randomization: the kernel - not ring-3 - picks the ephemeral
     ; port, drawn fresh per outbound connection from the same keyed PRNG that
     ; produces the ISN, mapped into the IANA dynamic range [49152, 65535]. The
     ; caller-supplied DX is intentionally ignored so an app cannot pin a
@@ -408,7 +408,7 @@ section .bss
 alignb 16
 net_tcp_segment: resb 1500
 net_tcp_pseudo:  resb 1536
-; Exported so the Track 4 volatile scrub (ram_volatile.nxh) can zero the TCP ISN
+; Exported so the Track 4 volatile scrub (ram_volatile.ghl) can zero the TCP ISN
 ; key/state (per-boot RDTSC^RDRAND secret) on shutdown/panic/tamper.
 global net_tcp_rng_key
 global net_tcp_rng_state

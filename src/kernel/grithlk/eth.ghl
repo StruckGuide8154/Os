@@ -1,0 +1,37 @@
+# ============================================================================
+# eth.ghl - GritOS network Ethernet/IP helpers.  ZERO-ASM.
+# Owns net_checksum: the Internet (one's-complement) checksum used by IP / ICMP
+# / UDP / TCP headers. Structured GritHLK port of the former eth.asm leaf.
+# ============================================================================
+
+module "eth";
+
+unsafe raw_mem;   # lb() over the caller-supplied packet buffer
+
+global net_checksum;
+
+const MASK16 = 0xFFFF;
+
+# Internet checksum.
+#   rdi = buffer, ecx = byte count.
+# Sums the buffer as a stream of big-endian 16-bit words (a trailing odd byte
+# is ignored, matching the original ">= 2 bytes per step" loop), folds the carry
+# twice, one's-complements the 16-bit result, then byte-swaps it so the value is
+# returned in network byte order in AX. Preserves rbx/rcx/rdx/rdi (rax = result).
+fn net_checksum(rdi buf, ecx count) preserves(rbx, rcx, rdx, rdi) {
+    let sum = 0;
+    let p = buf;
+    let n = count;
+    while n >= 2 {
+        sum = sum + ((lb(p) << 8) | lb(p + 1));
+        p = p + 2;
+        n = n - 2;
+    }
+    # Fold the high 16 bits into the low 16 bits, twice (covers the carry-out
+    # produced by the first fold).
+    sum = (sum & MASK16) + ((sum >> 16) & MASK16);
+    sum = (sum & MASK16) + ((sum >> 16) & MASK16);
+    # One's-complement, then swap bytes to network order (xchg al, ah).
+    let c = (sum ^ MASK16) & MASK16;
+    return ((c >> 8) | ((c << 8) & 0xFF00)) & MASK16;
+}

@@ -1,0 +1,266 @@
+# THREAT: overclaiming RAM-encryption posture (reporting FME active when DRAM is plaintext) so an operator trusts a dump-exposed machine.
+# GHL-native Track 4 full-memory-encryption status checker.
+#
+# Live CPUID/MSR reads remain a kernel integration task. This module owns the
+# pure policy contract: constants, feature predicates, and SECST-compatible
+# status mapping for Intel TME/MKTME and AMD SME/SEV-family inventory.
+#
+# HONEST CAVEATS (Track 4 Part C â€" do not overclaim):
+#   1. QEMU TCG does NOT emulate the TME/SME memory-controller crypto. Guest
+#      DRAM stays plaintext on the host, so a `pmemsave` dump under TCG reflects
+#      only the Part B software at-rest layer. A SECST_ACTIVE row reported from a
+#      TCG boot proves the detect/report path, NOT that DRAM is encrypted. Part C
+#      is verifiable only on real silicon (or KVM+SEV). Never claim FME works from
+#      a TCG boot.
+#   2. TME/SME defeat PASSIVE DRAM capture only (cold-boot / physical-DIMM /
+#      DMA-of-DRAM). They do NOT defend against an attacker executing on the same
+#      CPU: the memory controller transparently decrypts for any on-die access, so
+#      anything the CPU can read is plaintext to code running on it. Containing
+#      that attacker is the Â§1-Â§12 ring-3 containment job (Track 4 Part D â€"
+#      leak != elevation), not this module's.
+#   3. HARD LIMIT (do not pretend otherwise): even with TME/SME *active*, the
+#      executing `.text`, the live page tables, the active-slot working set, and
+#      the current register/stack frame are PLAINTEXT at dump time â€" the memory
+#      controller has already decrypted them for the running CPU. FME + the Part
+#      A/B layers shrink the readable surface to this irreducible live set; they
+#      do NOT reduce it to nothing. Mirrored in docs/STATUS.md Â§9 ("Residual
+#      still plaintext at dump time").
+
+module "security_fme_memory_encryption_check";
+
+global security_fme_tme_supported;
+global security_fme_tme_enabled;
+global security_fme_tme_locked;
+global security_fme_tme_keyid_bits;
+global security_fme_mktme_supported;
+global security_fme_amd_sme_supported;
+global security_fme_amd_sev_supported;
+global security_fme_amd_snp_supported;
+global security_fme_amd_sme_cbit_pos;
+global security_fme_amd_sme_enabled;
+global security_fme_ram_encryption_status;
+global security_fme_confidential_guest_status;
+
+const SECST_OFF = 0;
+const SECST_ACTIVE = 1;
+const SECST_SOFTWARE = 2;
+const SECST_UNSUPP = 3;
+const SECST_FAILED = 4;
+
+const CPUID7_ECX_TME = 0x2000;
+
+const CPUID_AMD_MEM_EAX_SME = 0x01;
+const CPUID_AMD_MEM_EAX_SEV = 0x02;
+const CPUID_AMD_MEM_EAX_SEV_ES = 0x08;
+const CPUID_AMD_MEM_EAX_SEV_SNP = 0x10;
+
+# Intel TDX guest enumeration: CPUID leaf 0x21, sub-leaf 0 returns the vendor
+# signature "IntelTDX    " in EBX/EDX/ECX (same register order as the leaf-0
+# "GenuineIntel" string). A TD guest is the only context in which this leaf is
+# defined, so a signature match IS the TDX-guest detection.
+const CPUID_TDX_LEAF = 0x21;
+const TDX_SIG_EBX = 0x65746E49;
+const TDX_SIG_EDX = 0x5844546C;
+const TDX_SIG_ECX = 0x20202020;
+
+const IA32_TME_CAPABILITY = 0x981;
+const IA32_TME_ACTIVATE = 0x982;
+const IA32_TME_ACTIVATE_LOCKED = 0x01;
+const IA32_TME_ACTIVATE_ENABLED = 0x02;
+const IA32_TME_ACTIVATE_KEYID_SHIFT = 32;
+const IA32_TME_ACTIVATE_KEYID_MASK = 0x0F;
+
+const MSR_AMD64_SYSCFG = 0xC0010010;
+const MSR_AMD64_SYSCFG_MEM_ENCRYPT = 0x800000;
+const MSR_AMD64_SEV = 0xC0010131;
+const MSR_AMD64_SEV_ENABLED = 0x01;
+const MSR_AMD64_SEV_ES_ENABLED = 0x02;
+const MSR_AMD64_SEV_SNP_ENABLED = 0x04;
+const MSR_AMD64_RMP_BASE = 0xC0010132;
+const MSR_AMD64_RMP_END = 0xC0010133;
+
+fn security_fme_tme_supported(cpuid7_ecx) {
+    if (cpuid7_ecx & CPUID7_ECX_TME) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_tme_enabled(tme_activate_lo) {
+    if (tme_activate_lo & IA32_TME_ACTIVATE_ENABLED) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_tme_locked(tme_activate_lo) {
+    if (tme_activate_lo & IA32_TME_ACTIVATE_LOCKED) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_tme_keyid_bits(tme_activate_hi) {
+    return tme_activate_hi & IA32_TME_ACTIVATE_KEYID_MASK;
+}
+
+fn security_fme_mktme_supported(tme_activate_hi) {
+    if security_fme_tme_keyid_bits(tme_activate_hi) != 0 { return 1; }
+    return 0;
+}
+
+# Usable MKTME KeyID count = (2^TME_KEYID_BITS) - 1. KeyID 0 is the default TME
+# key (the whole-memory key), so the per-domain/per-slot keys available to the
+# OS are 1..(2^bits - 1). Drives the Â§10 per-slot key model on Intel parts.
+fn security_fme_mktme_key_count(tme_activate_hi) {
+    let bits = security_fme_tme_keyid_bits(tme_activate_hi);
+    if bits == 0 { return 0; }
+    return (1 << bits) - 1;
+}
+
+fn security_fme_amd_sme_supported(cpuid_8000001f_eax) {
+    if (cpuid_8000001f_eax & CPUID_AMD_MEM_EAX_SME) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_amd_sev_supported(cpuid_8000001f_eax) {
+    if (cpuid_8000001f_eax & CPUID_AMD_MEM_EAX_SEV) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_amd_snp_supported(cpuid_8000001f_eax) {
+    if (cpuid_8000001f_eax & CPUID_AMD_MEM_EAX_SEV_SNP) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_amd_sme_cbit_pos(cpuid_8000001f_ebx) {
+    return cpuid_8000001f_ebx & 63;
+}
+
+fn security_fme_amd_sme_enabled(msr_amd64_syscfg_lo) {
+    if (msr_amd64_syscfg_lo & MSR_AMD64_SYSCFG_MEM_ENCRYPT) != 0 { return 1; }
+    return 0;
+}
+
+# Opportunistic per-page C-bit policy (the software-decidable half of SME use).
+# Once firmware has set SYSCFG[23], the OS encrypts an individual page by ORing
+# the C-bit (at the EBX[5:0] position) into that page's PTE. This returns the
+# mask to OR; the kernel PTE writer consumes it under its nk-monitor WP window.
+fn security_fme_amd_cbit_mask(cpuid_8000001f_ebx) {
+    let pos = security_fme_amd_sme_cbit_pos(cpuid_8000001f_ebx);
+    return 1 << pos;
+}
+
+# Page-marking is only safe when SME is both supported AND firmware-enabled â€"
+# setting the C-bit with SYSCFG[23] clear makes the page unreadable garbage.
+fn security_fme_amd_sme_page_markable(cpuid_8000001f_eax, msr_amd64_syscfg_lo) {
+    if security_fme_amd_sme_supported(cpuid_8000001f_eax) == 0 { return 0; }
+    if security_fme_amd_sme_enabled(msr_amd64_syscfg_lo) == 0 { return 0; }
+    return 1;
+}
+
+# Highest-value page classes that get the C-bit opportunistically. Ordered so a
+# caller walking 0..N marks the most sensitive first if it must cap how many
+# pages it converts.
+const SME_PAGECLASS_KERNEL_SECRET = 0;
+const SME_PAGECLASS_SLOT_ARENA = 1;
+const SME_PAGECLASS_FS_CACHE = 2;
+const SME_PAGECLASS_COUNT = 3;
+
+fn security_fme_amd_sme_class_wants_cbit(page_class) {
+    if page_class == SME_PAGECLASS_KERNEL_SECRET { return 1; }
+    if page_class == SME_PAGECLASS_SLOT_ARENA { return 1; }
+    if page_class == SME_PAGECLASS_FS_CACHE { return 1; }
+    return 0;
+}
+
+# AMD multi-key / per-page-ASID capacity. CPUID 0x8000001F ECX = the number of
+# encryption ASIDs (NumEncryptedGuests) the memory controller can hold keys for
+# simultaneously; this is AMD's analogue of MKTME's KeyID count and is what a
+# future per-slot key model (Â§10) would draw from. EDX = the minimum ASID usable
+# for a SEV (no-ES) context. A nonzero ASID count means per-page key separation
+# is physically available.
+fn security_fme_amd_asid_count(cpuid_8000001f_ecx) {
+    return cpuid_8000001f_ecx;
+}
+
+fn security_fme_amd_min_sev_asid(cpuid_8000001f_edx) {
+    return cpuid_8000001f_edx;
+}
+
+fn security_fme_amd_perpage_key_supported(cpuid_8000001f_eax, cpuid_8000001f_ecx) {
+    if security_fme_amd_sme_supported(cpuid_8000001f_eax) == 0 { return 0; }
+    if cpuid_8000001f_ecx == 0 { return 0; }
+    return 1;
+}
+
+fn security_fme_amd_sev_es_supported(cpuid_8000001f_eax) {
+    if (cpuid_8000001f_eax & CPUID_AMD_MEM_EAX_SEV_ES) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_sev_enabled(msr_amd64_sev_lo) {
+    if (msr_amd64_sev_lo & MSR_AMD64_SEV_ENABLED) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_sev_es_enabled(msr_amd64_sev_lo) {
+    if (msr_amd64_sev_lo & MSR_AMD64_SEV_ES_ENABLED) != 0 { return 1; }
+    return 0;
+}
+
+fn security_fme_sev_snp_enabled(msr_amd64_sev_lo) {
+    if (msr_amd64_sev_lo & MSR_AMD64_SEV_SNP_ENABLED) != 0 { return 1; }
+    return 0;
+}
+
+# SNP integrity rests on the Reverse Map Table actually being provisioned: a
+# zero RMP_END means firmware never populated the RMP, so SNP is not truly
+# armed even if the SEV_SNP-active bit is set. RMP_END holds the inclusive last
+# byte of the table, so a nonzero value is the provisioned signal.
+fn security_fme_sev_snp_armed(msr_amd64_sev_lo, rmp_end) {
+    if security_fme_sev_snp_enabled(msr_amd64_sev_lo) == 0 { return 0; }
+    if rmp_end == 0 { return 0; }
+    return 1;
+}
+
+fn security_fme_tdx_guest_present(cpuid21_ebx, cpuid21_ecx, cpuid21_edx) {
+    if cpuid21_ebx != TDX_SIG_EBX { return 0; }
+    if cpuid21_edx != TDX_SIG_EDX { return 0; }
+    if cpuid21_ecx != TDX_SIG_ECX { return 0; }
+    return 1;
+}
+
+fn security_fme_ram_encryption_status(cpuid7_ecx, tme_activate_lo, cpuid_8000001f_eax, msr_amd64_syscfg_lo) {
+    if security_fme_tme_supported(cpuid7_ecx) != 0 {
+        if security_fme_tme_enabled(tme_activate_lo) != 0 {
+            return SECST_ACTIVE;
+        }
+        return SECST_FAILED;
+    }
+    if security_fme_amd_sme_supported(cpuid_8000001f_eax) != 0 {
+        if security_fme_amd_sme_enabled(msr_amd64_syscfg_lo) != 0 {
+            return SECST_ACTIVE;
+        }
+        return SECST_FAILED;
+    }
+    return SECST_SOFTWARE;
+}
+
+# Confidential-guest posture: SEV-SNP (with a provisioned RMP) is the strongest
+# AMD tier, then SEV-ES, then plain SEV; Intel TDX is detected purely from the
+# leaf-0x21 guest signature. SEV *supported but not active* reports OFF (the CPU
+# can host SEV but this boot is not encrypted-from-host); no SEV and no TDX
+# signature reports UNSUPP.
+fn security_fme_confidential_guest_status(cpuid_8000001f_eax, msr_amd64_sev_lo, rmp_end, cpuid21_ebx, cpuid21_ecx, cpuid21_edx) {
+    if security_fme_amd_sev_supported(cpuid_8000001f_eax) != 0 {
+        if security_fme_sev_snp_armed(msr_amd64_sev_lo, rmp_end) != 0 {
+            return SECST_ACTIVE;
+        }
+        if security_fme_sev_es_enabled(msr_amd64_sev_lo) != 0 {
+            return SECST_ACTIVE;
+        }
+        if security_fme_sev_enabled(msr_amd64_sev_lo) != 0 {
+            return SECST_ACTIVE;
+        }
+        return SECST_OFF;
+    }
+    if security_fme_tdx_guest_present(cpuid21_ebx, cpuid21_ecx, cpuid21_edx) != 0 {
+        return SECST_ACTIVE;
+    }
+    return SECST_UNSUPP;
+}

@@ -92,10 +92,10 @@ app_launch_impl:
     jmp .done
 
 .launch_terminal:
-    ; Terminal is now a pure-NexusHL app (src/user/nexushl/apps/terminal.nxh).
+    ; Terminal is now a pure-GritHL app (src/user/grithl/apps/terminal.ghl).
     ; Per-slot state lives in its state{} block (zero-initialised on copy) and
     ; the welcome banner is seeded lazily on first draw, so no launch-time
-    ; state/history/fat16 seeding is required — same shape as .launch_ping.
+    ; state/history/fat16 seeding is required - same shape as .launch_ping.
     lea rdi, [rel szTermTitle]
     mov rsi, 200
     mov rdx, 150
@@ -117,7 +117,7 @@ app_launch_impl:
     SER 'N'
     SER 'n'
     ; Per-instance state is owned by the L3 slot; app_seed_notepad_slot below
-    ; populates it. Do NOT touch the kernel image's np_* master copies here —
+    ; populates it. Do NOT touch the kernel image's np_* master copies here -
     ; they are linker placeholders, not shared state, and were a source of
     ; cross-instance corruption when used as scratch.
     lea rdi, [rel szNotepadTitle]
@@ -179,7 +179,7 @@ app_launch_impl:
 .launch_paint:
     SER 'P'
     SER 'p'
-    ; Per-instance paint state is owned by the L3 slot via the NexusHL
+    ; Per-instance paint state is owned by the L3 slot via the GritHL
     ; `state {}` block; the kernel-image paint_* placeholders are unused.
     lea rdi, [rel szPaintTitle]
     mov rsi, 150
@@ -290,8 +290,8 @@ app_launch_impl:
 .launch_media:
     ; The Media Player's draw fn is the kernel asm renderer (codec dispatch
     ; in media_viewer.asm), not the auto-generated app_hl_media_draw stub.
-    ; Click/key still route through the nxh handlers so future UI work can
-    ; live in media.nxh without touching this glue.
+    ; Click/key still route through the ghl handlers so future UI work can
+    ; live in media.ghl without touching this glue.
     lea rdi, [rel szMediaTitle]
     mov rsi, 180
     mov rdx, 120

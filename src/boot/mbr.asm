@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - MBR Boot Sector (Stage 1)
+; GritOS v3.0 - MBR Boot Sector (Stage 1)
 ; Exactly 512 bytes. Loads Stage 2 from disk and jumps to it.
 ; ============================================================================
 bits 16
@@ -72,7 +72,7 @@ mbr_start:
 
 load_done:
     ; Verify stage 2 magic number
-    cmp word [0x7E00], 0x4E58   ; 'NX' magic
+    cmp word [0x7E00], 0x4752   ; 'NX' magic
     jne magic_error
 
     ; Jump to stage 2
@@ -108,7 +108,7 @@ print16:
 
 ; --- Data ---
 boot_drive:     db 0
-msg_loading:    db 'NexusOS', 0
+msg_loading:    db 'GritOS', 0
 msg_disk_err:   db ' Disk!', 0
 msg_magic_err:  db ' Bad!', 0
 

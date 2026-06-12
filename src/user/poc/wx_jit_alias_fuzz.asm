@@ -26,13 +26,13 @@
 
 bits 64
 
-%include "nexus_app.inc"
+%include "grit_app.inc"
 
 APP_SLOT_SIZE_LOCAL equ 0x200000
 
 ; A staging page positioned BEFORE the manifest's code_start. The blob loader
 ; maps every page of the assembled blob, so this page exists with a present
-; PTE inside the slot but outside the committed code range — needed for the
+; PTE inside the slot but outside the committed code range - needed for the
 ; low-edge overlap subtest T08.
 align 4096
 fuzz_pre_code_page:
@@ -215,7 +215,7 @@ align 4096
 fuzz_x_page:
     times 4096 db 0
 
-; The page immediately before code_end — used as the partial-overlap (high
+; The page immediately before code_end - used as the partial-overlap (high
 ; edge) base for T07.
 align 4096
 fuzz_last_code_page:

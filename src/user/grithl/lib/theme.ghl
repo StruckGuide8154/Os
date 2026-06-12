@@ -1,0 +1,195 @@
+# GritHL theme palette.
+#
+# Holds the resolved color table for the active theme pack. Apps call
+# `theme_init()` once at startup; widgets in `gui.ghl` then resolve their
+# colors through `theme_col(TC_*)` so a single switch of the active theme
+# repaints every standard widget. See `docs/theme-pack.md` for the pack
+# standard.
+#
+# The palette is per-app - each app links its own copy of this lib and
+# seeds it from a baked-in table (light or dark) selected at init. A
+# follow-up will replace the baked tables with a parse of
+# `assets/themes/<active>/theme.xml` once the FS+XML wiring is in place;
+# the public surface (`theme_col`, `theme_set`, `theme_override`) is
+# already what the disk-backed loader will expose.
+
+use core
+
+# Palette slot indices. Stable contract - adding a slot appends.
+const TC_BG_BASE     = 0
+const TC_SURFACE     = 1
+const TC_SURFACE_2   = 2
+const TC_BORDER      = 3
+const TC_BORDER_2    = 4
+const TC_ACCENT      = 5
+const TC_FOCUS       = 6
+const TC_ERROR       = 7
+const TC_WARNING     = 8
+const TC_SUCCESS     = 9
+const TC_TEXT        = 10
+const TC_TEXT_MUTED  = 11
+const TC_TEXT_INVERT = 12
+const TC_MENU        = 13
+const TC_DROPDOWN    = 14
+const TC_COUNT       = 15
+
+# Active-theme id values. These MUST also match the legacy DESKTOP_BG_*
+# enum the kernel still maintains (see core.ghl) so theme_set() can keep
+# the two states in sync - diverging them lets a future kernel
+# boot-anim or screensaver read a stale id.
+const THEME_LIGHT = 0
+const THEME_DARK  = 1
+
+# Backing store layout (do not reorder).
+#   theme_palette : TC_COUNT slots × 8 bytes each, accessed via lq/sq.
+#                   Sized to 128 bytes (16 slots) so adding one TC_* slot
+#                   in future does not require changing app code.
+#                   Initial content is zeroed by the app slot loader.
+const PALETTE_SLOTS = 16
+const PALETTE_BYTES = 128
+state {
+    theme_palette: 128;
+    theme_state: 8;
+}
+
+# theme_state layout (8 bytes, lq-aligned):
+#   byte 0 - active-theme id (THEME_*). Stored as a byte; range 0..255.
+#   byte 1 - initialized flag (0 = unseeded, 1 = seeded).
+#   bytes 2..7 - reserved, must remain 0 (future event-version field).
+
+fn theme_active() {
+    return lb(&theme_state);
+}
+
+fn theme_inited() {
+    return lb(&theme_state + 1);
+}
+
+fn theme_set_state(id, inited) {
+    # id is masked to a byte deliberately - THEME_* values fit in 0..255
+    # and the on-disk pack standard defines no theme id ≥ 256. Anything
+    # higher is a bug: pin to LIGHT so the screen is at least readable.
+    if id < 0 { id = THEME_LIGHT; }
+    if id > 255 { id = THEME_LIGHT; }
+    sb(&theme_state, id);
+    sb(&theme_state + 1, inited);
+}
+
+fn theme_seed_id(id) {
+    if id == THEME_DARK {
+        theme_seed_dark();
+        theme_set_state(THEME_DARK, 1);
+        return;
+    }
+    theme_seed_light();
+    theme_set_state(THEME_LIGHT, 1);
+}
+
+fn theme_sync() {
+    if theme_inited() != 0 { return; }
+    theme_seed_id(THEME_LIGHT);
+}
+
+fn theme_slot_addr(idx) {
+    return &theme_palette + idx * 8;
+}
+
+# ---------------------------------------------------------------------------
+# Seed tables
+# ---------------------------------------------------------------------------
+# DRIFT WARNING: the hex values in theme_seed_light / theme_seed_dark MUST
+# match `assets/themes/light/theme.xml` and `assets/themes/dark/theme.xml`
+# byte-for-byte. The tables here exist because the disk-backed XML loader
+# has not landed yet; once it does, both seed functions disappear and the
+# XML files become the single source of truth.
+#
+# A guard in `scripts/test/test_source_guards.ps1` greps for distinctive
+# palette values in both this file AND the corresponding theme.xml - if
+# either side is edited without the other, the build fails. When editing
+# a palette, change BOTH places in the same commit.
+# ---------------------------------------------------------------------------
+
+# Direct table writers - used by theme_seed_light / theme_seed_dark. Values
+# are 0x00RRGGBB so they slot straight into render_rect.
+fn theme_seed_light() {
+    sq(theme_slot_addr(TC_BG_BASE),     0x00F5F6FA);
+    sq(theme_slot_addr(TC_SURFACE),     0x00FFFFFF);
+    sq(theme_slot_addr(TC_SURFACE_2),   0x00ECEFF4);
+    sq(theme_slot_addr(TC_BORDER),      0x00D8DDE3);
+    sq(theme_slot_addr(TC_BORDER_2),    0x00C4CBD3);
+    sq(theme_slot_addr(TC_ACCENT),      0x002A6FFF);
+    sq(theme_slot_addr(TC_FOCUS),       0x002A6FFF);
+    sq(theme_slot_addr(TC_ERROR),       0x00E5474D);
+    sq(theme_slot_addr(TC_WARNING),     0x00F7B52C);
+    sq(theme_slot_addr(TC_SUCCESS),     0x002EB56E);
+    sq(theme_slot_addr(TC_TEXT),        0x000F141E);
+    sq(theme_slot_addr(TC_TEXT_MUTED),  0x004B5563);
+    sq(theme_slot_addr(TC_TEXT_INVERT), 0x00FFFFFF);
+    sq(theme_slot_addr(TC_MENU),        0x00ECEFF4);
+    sq(theme_slot_addr(TC_DROPDOWN),    0x00FFFFFF);
+}
+
+fn theme_seed_dark() {
+    sq(theme_slot_addr(TC_BG_BASE),     0x00121419);
+    sq(theme_slot_addr(TC_SURFACE),     0x001B1E25);
+    sq(theme_slot_addr(TC_SURFACE_2),   0x0023272F);
+    sq(theme_slot_addr(TC_BORDER),      0x002E343D);
+    sq(theme_slot_addr(TC_BORDER_2),    0x003A414C);
+    sq(theme_slot_addr(TC_ACCENT),      0x004FACFE);
+    sq(theme_slot_addr(TC_FOCUS),       0x004FACFE);
+    sq(theme_slot_addr(TC_ERROR),       0x00FF6B70);
+    sq(theme_slot_addr(TC_WARNING),     0x00FFC754);
+    sq(theme_slot_addr(TC_SUCCESS),     0x0055D690);
+    sq(theme_slot_addr(TC_TEXT),        0x00E6E9EF);
+    sq(theme_slot_addr(TC_TEXT_MUTED),  0x008A93A1);
+    sq(theme_slot_addr(TC_TEXT_INVERT), 0x000F141E);
+    sq(theme_slot_addr(TC_MENU),        0x001B1E25);
+    sq(theme_slot_addr(TC_DROPDOWN),    0x0023272F);
+}
+
+# Public API ---------------------------------------------------------------
+
+# Load the active theme. Apps call this once before drawing. The id matches
+# the THEME_* constants; future revisions will read /themes/ACTIVE instead
+# of taking the id directly.
+#
+# Side effect: pokes the kernel's legacy DESKTOP_BG_* state via
+# desktop_set_bg() so anything still reading that syscall (kernel
+# boot-anim hook, possible future screensaver) sees the same id userspace
+# is rendering. THEME_LIGHT maps to DESKTOP_BG_FROSTED_BLOOM and
+# THEME_DARK maps to DESKTOP_BG_GLASS_RIBBONS - the only two backgrounds
+# the active pack standard ships.
+fn theme_set(id) {
+    if id == THEME_DARK {
+        theme_seed_id(THEME_DARK);
+        desktop_set_bg(DESKTOP_BG_GLASS_RIBBONS);
+        return;
+    }
+    theme_seed_id(THEME_LIGHT);
+    desktop_set_bg(DESKTOP_BG_FROSTED_BLOOM);
+}
+
+# One-shot init. Idempotent - safe to call from every draw if an app does
+# not have a clear startup hook.
+fn theme_init() {
+    theme_sync();
+}
+
+# Resolve a palette slot to a 0x00RRGGBB color. Out-of-range index returns
+# 0 (black) rather than crashing - callers don't have to guard.
+fn theme_col(idx) {
+    if idx < 0 { return 0; }
+    if idx >= TC_COUNT { return 0; }
+    if theme_inited() == 0 { theme_init(); }
+    return lq(theme_slot_addr(idx));
+}
+
+# Per-app slot override. Patches one slot in the current process's palette
+# without affecting other apps. Use for "this one window has a magenta
+# accent" without leaving the theme system.
+fn theme_override(idx, value) {
+    if idx < 0 { return; }
+    if idx >= TC_COUNT { return; }
+    if theme_inited() == 0 { theme_init(); }
+    sq(theme_slot_addr(idx), value);
+}

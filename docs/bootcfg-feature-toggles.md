@@ -11,7 +11,7 @@ subsystems, individual syscalls) and to bisect live framebuffer/render bugs.
   `VBE_INFO` (0x9000), offsets `VBE_BOOTCFG_BASE_OFF` (0x70) /
   `VBE_BOOTCFG_SIZE_OFF` (0x78). See `src/include/boot_memory.inc`.
 * Early in `kmain` (right after `memory_init`), `boot_features_init()`
-  (`src/kernel/nexushlk/boot_features.nxh`) parses that text into a 64-bit
+  (`src/kernel/grithlk/boot_features.ghl`) parses that text into a 64-bit
   `feat_mask` in kernel BSS.
 * **Default = everything ON.** If the file is absent (`size == 0`) the mask
   stays all-ones and boot is byte-for-byte identical to before. Fail-safe.
@@ -36,7 +36,7 @@ Feature names (case-insensitive): `cursor`, `present`, `pacing`, `mouse`,
 
 | name      | bit | gates                                                            |
 |-----------|-----|------------------------------------------------------------------|
-| cursor    | 1   | per-frame cursor blit (`cursor.nxh cursor_draw`)                 |
+| cursor    | 1   | per-frame cursor blit (`cursor.ghl cursor_draw`)                 |
 | present   | 2   | whole per-frame present/refresh path (`frame_present render_frame`) |
 | pacing    | 4   | `frame_pace_wait()` in the main loop (`kernel_lifecycle`)        |
 | mouse     | 8   | `mouse_init()`                                                   |
@@ -45,13 +45,13 @@ Feature names (case-insensitive): `cursor`, `present`, `pacing`, `mouse`,
 
 ## Adding a new gate (one-liner pattern)
 
-1. Give it a bit in `boot_features.nxh` (and mirror in `boot_memory.inc`):
+1. Give it a bit in `boot_features.ghl` (and mirror in `boot_memory.inc`):
    `const FEAT_FOO = (1 << 9);`
 2. Register the name in `ft_match_name`:
    `if ft_streq(p, &nm_foo) != 0 { return FEAT_FOO; }`
    (+ a `data nm_foo: ... ;` string).
 3. At the call site:
-   * NHLK:  `if feat_on(FEAT_FOO) != 0 { foo(); }`
+   * GHLK:  `if feat_on(FEAT_FOO) != 0 { foo(); }`
    * asm:   `mov rdi, FEAT_FOO` / `call feat_enabled` / `test rax,rax` / `jz skip`
      (`feat_enabled` preserves all registers except RAX).
 
@@ -73,7 +73,7 @@ A/B screendump test (`scripts/test/agent2_fbtest.ps1`), build
 Both runs show correct `scr_width=0x780 (1920) / scr_height=0x4B0 (1200)` at
 boot in the FBPERF dump, then the scanout is clobbered later. Conclusion:
 **the per-frame cursor blit, the frame_present refresh path, and frame pacing
-are EXONERATED** — disabling all three does not stop the clobber. The trigger
+are EXONERATED** - disabling all three does not stop the clobber. The trigger
 lies elsewhere (candidate next probes: the FBPERF WC arm/activate path, the
-debug-only 64-flip `display_flip` bench `[FX]`, or `display_init` itself —
+debug-only 64-flip `display_flip` bench `[FX]`, or `display_init` itself -
 none of which are render_frame). Extend the toggle set to bisect those next.

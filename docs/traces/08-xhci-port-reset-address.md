@@ -1,4 +1,4 @@
-# Trace 08 — xHCI Port Reset → ADDRESS_DEVICE → Endpoint Ready
+# Trace 08 - xHCI Port Reset → ADDRESS_DEVICE → Endpoint Ready
 
 ## Entry
 
@@ -34,7 +34,7 @@
 | 11 | xhci.asm:1151-1155 | post-reset 20 ms dwell via PIT (2 ticks; Round 5) |
 | 12 | xhci.asm:1156-1175 | wait PED with PIT 50-tick deadline; read final speed |
 
-(Pre-Round 5: lines 1126/1152/1162 were CPU spins of 50000/20000/50000 — ~50 µs to 5 ms on fast cores, way under USB-spec 10 ms reset hold. Devices never enumerated on real Strix Point hardware.)
+(Pre-Round 5: lines 1126/1152/1162 were CPU spins of 50000/20000/50000 - ~50 µs to 5 ms on fast cores, way under USB-spec 10 ms reset hold. Devices never enumerated on real Strix Point hardware.)
 
 ## Step 4: ENABLE_SLOT command
 
@@ -47,13 +47,13 @@ Submit Enable Slot TRB to command ring; doorbell to slot 0; wait command-complet
 - Slot Context: route, speed, context entries=1, root hub port.
 - EP0 Context: control type, MaxPacketSize per speed (8/64/512), TR Dequeue Pointer = transfer ring base.
 - DCBAA[slot] = output device context.
-- Submit ADDRESS_DEVICE TRB; wait completion (PIT 200 ticks = 2 s — Round 3, MEMORY.md #31). Real-HW takes 50-500 ms; pre-fix CPU loop fired in 0.6 ms.
+- Submit ADDRESS_DEVICE TRB; wait completion (PIT 200 ticks = 2 s - Round 3, MEMORY.md #31). Real-HW takes 50-500 ms; pre-fix CPU loop fired in 0.6 ms.
 
 ## Step 6: enumerate config / endpoints
 
 - GET_DESCRIPTOR(Device) via control transfer.
 - SET_CONFIGURATION(1).
-- For each interface, call `xhci_configure_endpoint(EP_num, MaxPacketSize, Interval)` — Round 3 fix added missing `push r12-r14`. Function uses r12-r14 as scratch for EP num / packet size / interval.
+- For each interface, call `xhci_configure_endpoint(EP_num, MaxPacketSize, Interval)` - Round 3 fix added missing `push r12-r14`. Function uses r12-r14 as scratch for EP num / packet size / interval.
 
 ## Step 7: queue first read
 
@@ -63,7 +63,7 @@ For HID interrupt-IN endpoint: queue Normal TRB pointing to `XHCI_MOUSE_BUF_ADDR
 
 - All long waits PIT-deadlined: cmd-ring submit, completion wait, port reset, post-reset dwell, PED wait. None depend on CPU clock speed.
 - `xhci_configure_endpoint` preserves r12-r14 (callee-save).
-- Slot-ID routing (slot1 vs slot2 mouse) at event dispatch (`usb_poll_mouse`) — MEMORY.md #28.
+- Slot-ID routing (slot1 vs slot2 mouse) at event dispatch (`usb_poll_mouse`) - MEMORY.md #28.
 
 ## Failure modes
 

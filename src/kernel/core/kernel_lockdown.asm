@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Read-only kernel after init (security_todo.md §9)
+; GritOS v3.0 - Read-only kernel after init (security_todo.md §9)
 ; ----------------------------------------------------------------------------
 ; After kernel_main finishes setup, mark the kernel's executable image
 ; read-only at the page-table level so any kernel-side self-modification
@@ -21,7 +21,7 @@
 ; The two partial edges (the 2 MiB page holding _start, and the one holding
 ; _kernel_text_end) stay writable: the first also covers sub-1MB boot scratch,
 ; the last also covers the start of .data. So this protects the bulk interior
-; of kernel .text — the large, gadget-rich body — while never locking a page
+; of kernel .text - the large, gadget-rich body - while never locking a page
 ; that also backs writable data.
 ;
 ; CR0.WP: the UEFI loader cleared CR0.WP (to write the firmware-RO 0x100000),
@@ -44,7 +44,7 @@ PDE_2MB           equ 0x200000
 extern _start
 extern _kernel_text_end
 ; Nested-kernel monitor (nk_monitor.asm): the ONLY WP-toggle site. Lockdown is
-; the monitor's first client — it brackets its .text PDE edits in a window and
+; the monitor's first client - it brackets its .text PDE edits in a window and
 ; relies on nk_pt_window_end to set CR0.WP for the first time + flush the TLB.
 extern nk_pt_window_begin
 extern nk_pt_window_end
@@ -105,7 +105,7 @@ FN_BEGIN kernel_lockdown_ro, 0, 0, FN_RET_VOID
     shr rax, 21
     cmp rax, 512
     jae .next_pde                        ; defensive: outside PD0
-    ; Only clear RW on a PRESENT large (PS) page — leave anything unexpected
+    ; Only clear RW on a PRESENT large (PS) page - leave anything unexpected
     ; (e.g. a PDE already split to a 4 KiB PT) untouched.
     mov rdx, [r9 + rax*8]
     test rdx, 0x01                       ; PRESENT?
@@ -122,7 +122,7 @@ FN_BEGIN kernel_lockdown_ro, 0, 0, FN_RET_VOID
     ; Close the monitor window (restores pre-window WP=0 + flush + IF), then
     ; perform the deliberate one-time WP off->on engage so supervisor writes now
     ; honor the read-only .text PDEs cleared above. Both WP toggles live in the
-    ; monitor (nk_monitor.asm) — this routine never touches CR0 directly.
+    ; monitor (nk_monitor.asm) - this routine never touches CR0 directly.
     call nk_pt_window_end
     call nk_engage_wp
 

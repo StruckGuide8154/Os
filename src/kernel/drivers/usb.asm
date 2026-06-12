@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - USB Controller Discovery & Basic Legacy Support
+; GritOS v3.0 - USB Controller Discovery & Basic Legacy Support
 ; Attempts to find USB controllers (UHCI/OHCI/EHCI/XHCI) via PCI
 ; and enable legacy keyboad/mouse emulation if supported by BIOS.
 ; ============================================================================
