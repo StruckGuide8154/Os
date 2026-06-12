@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ATA PIO Disk Driver
+; Grit v3.0 - ATA PIO Disk Driver
 ; Provides sector read/write using ATA PIO mode (ports 0x1F0-0x1F7)
 ; ============================================================================
 bits 64

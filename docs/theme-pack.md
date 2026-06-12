@@ -1,4 +1,4 @@
-# GritOS theme pack standard
+# Grit theme pack standard
 
 A theme pack is a self-contained bundle that controls the visual surface of
 GritHL apps: the color palette, the desktop background, and the system icon
@@ -33,7 +33,7 @@ Single root `<theme>` element. Children:
 
 ```xml
 <theme>
-  <meta name="light" display="Light" author="GritOS" />
+  <meta name="light" display="Light" author="Grit" />
   <palette>
     <color name="bg_base"     value="0xF5F6FA" />
     <color name="surface"     value="0xFFFFFF" />

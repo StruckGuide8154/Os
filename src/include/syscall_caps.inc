@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - Per-slot syscall capability bits ("app manifest")
+; Grit - Per-slot syscall capability bits ("app manifest")
 ;
 ; Each syscall is tagged with a CAP_* bit. Each slot has a current cap mask
 ; in slot_cap_mask[]. At dispatch, the kernel rejects calls whose tag is not

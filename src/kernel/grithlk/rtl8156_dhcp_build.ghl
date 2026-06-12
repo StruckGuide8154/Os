@@ -145,7 +145,7 @@ fn rtl8156_finish_dhcp_udp(rcx len) preserves(all) {
 }
 
 # ---------------------------------------------------------------------------
-# rtl8156_send_dhcp_discover - DISCOVER with hostname "GritOS" and a parameter
+# rtl8156_send_dhcp_discover - DISCOVER with hostname "Grit" and a parameter
 # request list (subnet/router/DNS). Byte-identical to the asm builder. Preserves
 # all.
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ fn rtl8156_send_dhcp_discover() preserves(all) {
     # option 53: DHCP message type = DISCOVER(1)
     sb(F + o, 53); sb(F + o + 1, 1); sb(F + o + 2, 1);
     o = o + 3;
-    # option 12: hostname "GritOS"
+    # option 12: hostname "Grit"
     sb(F + o, 12); sb(F + o + 1, 7);
     sb(F + o + 2, 78); sb(F + o + 3, 101); sb(F + o + 4, 120); sb(F + o + 5, 117);
     sb(F + o + 6, 115); sb(F + o + 7, 79); sb(F + o + 8, 83);
@@ -187,7 +187,7 @@ fn rtl8156_send_dhcp_request() preserves(all) {
     sb(F + o, 54); sb(F + o + 1, 4);
     sw(F + o + 2, lw(&rtl8156_dhcp_server));
     o = o + 6;
-    # option 12: hostname "GritOS"
+    # option 12: hostname "Grit"
     sb(F + o, 12); sb(F + o + 1, 7);
     sb(F + o + 2, 78); sb(F + o + 3, 101); sb(F + o + 4, 120); sb(F + o + 5, 117);
     sb(F + o + 6, 115); sb(F + o + 7, 79); sb(F + o + 8, 83);

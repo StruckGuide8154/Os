@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v2.0 - Legacy standalone UEFI graphical boot image
+; Grit v2.0 - Legacy standalone UEFI graphical boot image
 ;
 ; Owner: legacy UEFI boot image maintainers
 ;

@@ -36,7 +36,7 @@ s_unk: u {'Unknown command. Type "help".'}
        dw 13,10,0
 
 s_hh: dw 13,10
-      u {'  === GritOS Commands ==='}
+      u {'  === Grit Commands ==='}
       dw 13,10,0
 s_h1: u {'  help      - This help screen'}
       dw 13,10,0
@@ -50,7 +50,7 @@ s_h5: u {'  time      - Date and time'}
       dw 13,10,0
 s_h6: u {'  ver       - Version'}
       dw 13,10,0
-s_h7: u {'  about     - About GritOS'}
+s_h7: u {'  about     - About Grit'}
       dw 13,10,0
 s_h8: u {'  desktop   - Show graphical desktop'}
       dw 13,10,0
@@ -60,7 +60,7 @@ s_h10: u {'  shutdown  - Power off'}
        dw 13,10,0
 s_h11: dw 13,10,0
 
-s_verfull: u {'GritOS v2.0 [x86-64 UEFI] - Graphical Assembly OS'}
+s_verfull: u {'Grit v2.0 [x86-64 UEFI] - Graphical Assembly OS'}
            dw 13,10,0
 
 s_si1: dw 13,10
@@ -74,7 +74,7 @@ s_si4: u {'  Boot:     UEFI'}
 s_si5: u {'  Display:  '}
 
 s_ab1: dw 13,10
-       u {'  -- About GritOS --'}
+       u {'  -- About Grit --'}
        dw 13,10,13,10,0
 s_ab2: u {'  Written from absolute zero in x86-64 assembly.'}
        dw 13,10,0
@@ -84,17 +84,17 @@ s_ab4: u {'  Now with GOP graphical desktop UI.'}
        dw 13,10,13,10,0
 
 ; ASCII strings for graphics rendering
-a_title: db 'GritOS v2.0',0
+a_title: db 'Grit v2.0',0
 a_wintitle: db 'System Console',0
 a_clock: db '00:00',0
-a_startbtn: db 'GritOS',0
+a_startbtn: db 'Grit',0
 a_closebtn: db 'x',0
 a_minbtn: db '_',0
 a_status: db 'UEFI x86-64 | GOP',0
 a_mok: db 'Mouse:OK',0
 a_mno: db 'Mouse:--',0
 
-a_ln1: db '=== Welcome to GritOS ===',0
+a_ln1: db '=== Welcome to Grit ===',0
 a_ln2: db 'A complete operating system written from scratch.',0
 a_ln3: db 'Every byte hand-crafted in x86-64 assembly.',0
 a_ln4: db 'No C compiler. No Rust. No libraries.',0

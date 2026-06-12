@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Framebuffer performance instrumentation + WC plan
+; Grit v3.0 - Framebuffer performance instrumentation + WC plan
 ; ----------------------------------------------------------------------------
 ; Tracks per-flip TSC timing, byte volume, and full-vs-rect ratio. Reads
 ; IA32_PAT, IA32_MTRRCAP, IA32_MTRR_DEF_TYPE, all variable MTRRs, and walks the

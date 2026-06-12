@@ -130,7 +130,7 @@ ROLE_NAMES = {1: 'BOOT', 2: 'KERNEL', 3: 'POLICY', 4: 'UPDATE',
 
 
 def dev_role_secret(role):
-    return _sha512(b'GritOS-DEV-ed25519-cosigner-role-%d' % role)[:32]
+    return _sha512(b'Grit-DEV-ed25519-cosigner-role-%d' % role)[:32]
 
 
 def dev_role_public(role):

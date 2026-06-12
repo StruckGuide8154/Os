@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - UEFI Bootloader (BOOTX64.EFI)
+; Grit v3.0 - UEFI Bootloader (BOOTX64.EFI)
 ; Loads KERNEL.BIN from EFI partition, sets up GOP/paging, jumps to kernel.
 ; ============================================================================
 bits 64

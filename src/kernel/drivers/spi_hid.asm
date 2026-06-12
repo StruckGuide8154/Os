@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - SPI HID Touchpad Driver
+; Grit v3.0 - SPI HID Touchpad Driver
 ; Implements Microsoft HID-over-SPI protocol (Windows Precision Touchpad)
 ;
 ; Protocol (per Microsoft HID-over-SPI spec):

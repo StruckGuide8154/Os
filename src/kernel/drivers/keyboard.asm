@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - PS/2 Keyboard Driver
+; Grit v3.0 - PS/2 Keyboard Driver
 ; IRQ1 handler, scancode set 1 -> ASCII translation, circular buffer
 ; ============================================================================
 bits 64

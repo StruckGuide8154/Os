@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - Per-slot handle table (pointer-table refactor)
+; Grit - Per-slot handle table (pointer-table refactor)
 ;
 ; Primitives for the opaque-handle ABI that replaces raw kernel pointers
 ; across the syscall boundary. As of Phase 2:

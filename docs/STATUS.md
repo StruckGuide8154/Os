@@ -1,4 +1,4 @@
-# GritOS - Project Status
+# Grit - Project Status
 
 _Last updated: 2026-05-25_
 
@@ -16,7 +16,7 @@ duplicate detail there.
 
 ## TL;DR
 
-GritOS boots cleanly on the target hardware (Acer Nitro V16 AI,
+Grit boots cleanly on the target hardware (Acer Nitro V16 AI,
 AMD Strix Point) under both BIOS and UEFI, runs a graphical desktop,
 handles USB/I2C/PS-2 input, has working FAT16 ramdisk and
 networking, and pushes pixels to the GOP framebuffer with WC-mapped
@@ -170,7 +170,7 @@ cryptographic-identity (§10) hardening in `docs/security_todo.md` are
 evaluated against. It is the prerequisite decision for the rest of those
 sections - fix the threat model first, then build to it.
 
-**Root of trust = measured boot + a kernel-held key, NOT silicon.** GritOS
+**Root of trust = measured boot + a kernel-held key, NOT silicon.** Grit
 targets UEFI-GOP / broadly-compatible hardware (see MEMORY.md: per-vendor
 MMIO bring-up is discontinued). We do **not** assume a Secure Enclave, a TPM,
 TEE/SEV memory encryption, fused per-device keys, or any hardware-anchored
@@ -208,7 +208,7 @@ A fused, hardware-verified boot chain is a non-goal for this project.
 
 **Refinement (2026-06-04): a one-shot RAM-dump / snapshot attacker is now a
 BEST-EFFORT in-scope goal** (Track 4, `docs/track4-ram-secure-erasure-todo.md`).
-GritOS is moving to RAM-only / volatile operation with three layers:
+Grit is moving to RAM-only / volatile operation with three layers:
   - **Software at-rest encryption** of stored DRAM (FS cache, app blobs, idle slot
     arenas, kernel secrets) under a per-boot ephemeral key - protects *stored*
     data; the only software residual is the on-die/cache state and the single
@@ -245,7 +245,7 @@ overstated it: software protects *stored* data and hardware FME extends that to
 all DRAM; only on-die transient state is irreducible. Every claim is bounded by
 Track 4's `pmemsave` test and the Part D planted-leak negative test.
 
-**Part A landed (2026-06-08): RAM-only / volatile execution.** GritOS runs from
+**Part A landed (2026-06-08): RAM-only / volatile execution.** Grit runs from
 RAM only - FS writes go to a session-only ramdisk (`ata_write_sectors` →
 `ramdisk_intercept_write`; the `ramdisk_flush` write-back is an unimplemented
 stub) and there is no swap / hibernation / scratch file, so nothing survives

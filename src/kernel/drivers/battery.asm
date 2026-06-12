@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ACPI EC Battery Driver
+; Grit v3.0 - ACPI EC Battery Driver
 ;
 ; EC I/O: 0x62 = data port, 0x66 = command/status port
 ; Protocol: wait IBF=0, write 0x80 to cmd port, wait IBF=0,

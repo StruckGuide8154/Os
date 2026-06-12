@@ -25,6 +25,6 @@ hello_key:
     ret
 
 section .rodata
-.title:   db "Hello from a GritOS ring-3 callback", 0
+.title:   db "Hello from a Grit ring-3 callback", 0
 .clicked: db "hello_callback: click", 0
 .bye:     db "hello_callback: escape pressed", 0

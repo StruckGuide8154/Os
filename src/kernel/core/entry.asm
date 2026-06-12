@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Kernel Entry Point (64-bit Long Mode)
+; Grit v3.0 - Kernel Entry Point (64-bit Long Mode)
 ; Loaded at 0x100000 by Stage 2
 ; ============================================================================
 bits 64

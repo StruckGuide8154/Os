@@ -1,13 +1,13 @@
-# GritOS Media Formats and Player Architecture
+# Grit Media Formats and Player Architecture
 
 This document defines the native image and video container formats used
-by GritOS, the dispatch model the Media Player uses to render them, and
+by Grit, the dispatch model the Media Player uses to render them, and
 the layered library structure that lets future apps reuse the timeline
 widget without rewriting any pixel-pushing code.
 
 ## Scope and explicit non-goals
 
-GritOS targets widely-compatible interfaces. The Media Player follows
+Grit targets widely-compatible interfaces. The Media Player follows
 the same rule:
 
 - **Framebuffer only.** All blitting goes through the UEFI GOP linear
@@ -24,12 +24,12 @@ the same rule:
   there is also no kernel scheduler primitive user apps can spawn
   against. The current path keeps idle CPU low because the per-frame
   work is just a single nearest-neighbor pass - well under a millisecond
-  on the machines GritOS boots on.
+  on the machines Grit boots on.
 - **No audio.** Out of scope until the kernel has a mixer.
 
 ## Container formats
 
-### NIC1 - GritOS Image (static)
+### NIC1 - Grit Image (static)
 
 Used by `src/resources/design-system/icons/*.nic` and by Media Player
 for any single-frame image.
@@ -43,7 +43,7 @@ for any single-frame image.
 | 9      | 7     | reserved | zero-filled                              |
 | 16     | w·h·4 | pixels   | row-major top-down BGRA, alpha 0 = skip  |
 
-### NBA1 - GritOS Animation (video)
+### NBA1 - Grit Animation (video)
 
 Used by `/BOOTANIM.NBA`. Frame sequence, no audio. Frames are top-down
 BGRA, identical pitch to NIC1.

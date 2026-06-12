@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - Nested-Kernel Memory Monitor (portable, MMU + CR0.WP based)
+; Grit - Nested-Kernel Memory Monitor (portable, MMU + CR0.WP based)
 ; ----------------------------------------------------------------------------
 ; security_todo.md - "intra-kernel privilege separation without CPU lock-in."
 ;

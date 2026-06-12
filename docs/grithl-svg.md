@@ -1,6 +1,6 @@
 # GritHL SVG Support
 
-GritOS has two SVG-facing GritHL libraries:
+Grit has two SVG-facing GritHL libraries:
 
 - `svg.ghl`: lightweight wallpaper IDs and raster primitive wrappers. Use this
   from normal apps that only need desktop background controls or direct line,

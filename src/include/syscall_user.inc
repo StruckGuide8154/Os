@@ -4,7 +4,7 @@
 %include "app_sysno.inc"
 
 ; ============================================================================
-; GritOS v3.0 - Usermode Syscall Wrappers
+; Grit v3.0 - Usermode Syscall Wrappers
 ; ============================================================================
 
 %macro SYS_PRINT 1

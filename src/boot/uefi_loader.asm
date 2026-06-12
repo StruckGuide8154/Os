@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - UEFI Bootloader (BOOTX64.EFI)
+; Grit v3.0 - UEFI Bootloader (BOOTX64.EFI)
 ;
 ; This file is the boot-order manifest for the active UEFI loader. Keep the
 ; included sections in emitted-image order; the include files are split by

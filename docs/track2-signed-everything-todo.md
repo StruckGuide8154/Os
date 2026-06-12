@@ -2,7 +2,7 @@
 
 Goal: every artifact the system trusts arrives inside one canonical **signed
 envelope**, and nothing unsigned, malformed, mis-targeted, expired, downgraded,
-replayed, or wrong-role is ever accepted. This is what lets GritOS exceed iOS on
+replayed, or wrong-role is ever accepted. This is what lets Grit exceed iOS on
 the axis iOS does not cover: *no single key and no single component can mint
 trusted state.*
 

@@ -1,6 +1,6 @@
 # GritHL XML Support
 
-GritOS exposes a small XML 1.0 DOM parser to user apps through
+Grit exposes a small XML 1.0 DOM parser to user apps through
 `src/user/grithl/lib/xml.ghl`. It is designed for trusted local documents such
 as SVG assets, app metadata, and simple configuration files.
 

@@ -1,4 +1,4 @@
-# GritOS App Authoring
+# Grit App Authoring
 
 This repo still ships built-in apps inside the monolithic kernel image, but
 GritHL is now the supported SDK path for app code that should be maintained

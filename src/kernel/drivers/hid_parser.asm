@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - HID Report Descriptor Parser & Gesture Engine
+; Grit v3.0 - HID Report Descriptor Parser & Gesture Engine
 ; Parses HID report descriptors to extract field layouts (X, Y, buttons,
 ; contact count, tip switch) and provides gesture detection (tap-to-click,
 ; two-finger scroll).

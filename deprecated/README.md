@@ -1,7 +1,7 @@
 # Deprecated Subsystems
 
 This folder preserves source code, documentation, firmware, and research notes
-for GritOS subsystems that have been retired from the active build.
+for Grit subsystems that have been retired from the active build.
 
 The goals are:
 

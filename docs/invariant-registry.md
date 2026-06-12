@@ -1,4 +1,4 @@
-# GritOS Invariant Registry
+# Grit Invariant Registry
 
 This page is normative. Update it with any change to fixed memory, L3 slot
 layout, syscall numbers, callback entry, or process ownership.

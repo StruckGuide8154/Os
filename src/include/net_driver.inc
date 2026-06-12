@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS network driver ABI
+; Grit network driver ABI
 ; ----------------------------------------------------------------------------
 ; A NIC driver should stay hardware-only:
 ;   - probe/init the device
@@ -72,7 +72,7 @@ SPLITMIX64_MIX1             equ 0xBF58476D1CE4E5B9
 SPLITMIX64_MIX2             equ 0x94D049BB133111EB
 
 ; --- DNS public fallback resolver -------------------------------------------
-; Google Public DNS primary anycast address 8.8.8.8, in GritOS A.B.C.D-packed
+; Google Public DNS primary anycast address 8.8.8.8, in Grit A.B.C.D-packed
 ; scalar form. Tried by net_dns_query_a (src/kernel/net/dns.asm) when the
 ; DHCP-provided resolver does not answer. RFC 8482-class always-on resolver.
 NET_DNS_FALLBACK_IP         equ 0x08080808

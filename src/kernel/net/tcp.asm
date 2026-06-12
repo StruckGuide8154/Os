@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS TCP protocol module
+; Grit TCP protocol module
 ; ----------------------------------------------------------------------------
 ; Lightweight generic TCP foundation. The first exported TX path builds a
 ; standards-compliant SYN segment and sends it through IPv4/NIC abstractions;

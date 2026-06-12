@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - I2C HID Touchpad Driver (Complete)
+; Grit v3.0 - I2C HID Touchpad Driver (Complete)
 ;
 ; Supports:
 ;   - AMD FCH DesignWare I2C (fixed MMIO: FEDC2000-FEDC5000)

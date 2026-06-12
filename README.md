@@ -1,4 +1,4 @@
-# GritOS
+# Grit
 
 A hobbyist 64-bit x86-64 operating system with a graphical desktop, a ring-3
 app runtime, and a security architecture that aims past conventional zero
@@ -68,7 +68,7 @@ Outputs:
 - `build\mbr.bin`
 - `build\stage2.bin`
 - `build\kernel.bin`
-- `build\GritOS.img`
+- `build\Grit.img`
 
 ## Verification
 

@@ -236,7 +236,7 @@ Busy case:
 
 ## What to do after reboot
 
-Boot GritOS from the updated USB/ESP, press `=`, photograph/paste these lines:
+Boot Grit from the updated USB/ESP, press `=`, photograph/paste these lines:
 
 - `DMUB ring arm=... status=... sys=... fb=...`
 - `DMUB ring inFb=... outFb=...`

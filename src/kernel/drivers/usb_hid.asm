@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - USB HID Mouse Driver
+; Grit v3.0 - USB HID Mouse Driver
 ; Implements USB HID protocol over XHCI
 ; ============================================================================
 bits 64

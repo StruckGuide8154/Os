@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS kernel runtime state and cross-module constants.
+; Grit kernel runtime state and cross-module constants.
 ; Split from the former src/kernel/core/main.asm owner file.
 ; ============================================================================
 %include "constants.inc"

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - In-memory block device (RAM disk)
+; Grit v3.0 - In-memory block device (RAM disk)
 ; ----------------------------------------------------------------------------
 ; Provides an LBA-addressed read/write window over a contiguous region of
 ; physical RAM. The UEFI loader fills `\EFI\BOOT\DATA.IMG` into firmware-

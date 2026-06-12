@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - User-blob signature (security_todo.md §9 "Sign the user blob")
+; Grit - User-blob signature (security_todo.md §9 "Sign the user blob")
 ; ----------------------------------------------------------------------------
 ; Shared constants for the kernel-verified HMAC-SHA256 over the built-in user
 ; blob [app_blob_start, app_blob_end). See src/kernel/grithlk/crypto.ghl

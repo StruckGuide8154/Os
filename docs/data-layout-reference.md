@@ -1,4 +1,4 @@
-# GritOS Data Layout Reference
+# Grit Data Layout Reference
 
 This document covers the important live structures and in-memory layouts that
 maintainers frequently need when debugging bugs across subsystem boundaries.

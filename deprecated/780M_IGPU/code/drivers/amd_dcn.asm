@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - AMD DCN (Display Core Next) read-only probe
+; Grit v3.0 - AMD DCN (Display Core Next) read-only probe
 ;
 ; Phase 1 (this file): safely probe the AMD display BAR0, walk page tables for
 ; its cache type, read a small set of registers, and expose the results for

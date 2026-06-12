@@ -1,4 +1,4 @@
-# GritOS State Machine Reference
+# Grit State Machine Reference
 
 This document describes the important maintainer-level state machines and
 interaction flows for GUI/input/USB subsystems.

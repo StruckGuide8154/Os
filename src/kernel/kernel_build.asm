@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Monolithic Kernel Build Wrapper
+; Grit v3.0 - Monolithic Kernel Build Wrapper
 ; Combines all kernel components into a single binary
 ; ============================================================================
 [bits 64]

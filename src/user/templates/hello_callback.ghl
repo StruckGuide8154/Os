@@ -7,7 +7,7 @@ use core
 
 app "HelloCallback" { stack = 4096; }
 
-str s_title   = "Hello from a GritOS ring-3 callback";
+str s_title   = "Hello from a Grit ring-3 callback";
 str s_clicked = "hello_callback: click";
 str s_bye     = "hello_callback: escape pressed";
 

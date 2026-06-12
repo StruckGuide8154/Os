@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Interrupt Service Routines
+; Grit v3.0 - Interrupt Service Routines
 ; Exception handlers (0-31) and IRQ stubs (0-15 -> vectors 32-47)
 ; ============================================================================
 bits 64

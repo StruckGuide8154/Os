@@ -1,7 +1,7 @@
 %ifndef KDOMAIN_HMAC_INC
 %define KDOMAIN_HMAC_INC
 ; ============================================================================
-; GritOS - One domain-separated kernel HMAC primitive (security_todo.md §13)
+; Grit - One domain-separated kernel HMAC primitive (security_todo.md §13)
 ;
 ; Three kernel anti-tamper tags all derive a short MAC from the same secret,
 ; [rel kernel_canary], XORed with a couple of context words and truncated:

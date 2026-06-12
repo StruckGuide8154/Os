@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - String and Memory Utility Functions
+; Grit v3.0 - String and Memory Utility Functions
 ; ============================================================================
 bits 64
 

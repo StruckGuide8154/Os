@@ -1,4 +1,4 @@
-# GritOS Reference Index
+# Grit Reference Index
 
 This is the maintainer-facing map of the codebase. The goal is to let you find
 the owning file and exported entrypoints for a bug or feature without tracing

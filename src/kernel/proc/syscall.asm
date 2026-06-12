@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - System Call Handler (64-bit Long Mode)
+; Grit v3.0 - System Call Handler (64-bit Long Mode)
 ; Clean L3 syscall path. Saves user state before any helper calls.
 ; ============================================================================
 bits 64

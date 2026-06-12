@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Desktop Environment
+; Grit v3.0 - Desktop Environment
 ; Data-driven icons with add/remove support
 ; ============================================================================
 bits 64

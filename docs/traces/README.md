@@ -1,6 +1,6 @@
 # Granular Data-Path Traces
 
-Each file traces one specific end-to-end data path through GritOS, with file:line references, register conventions, and the audit-pass guarantees that hold for that path.
+Each file traces one specific end-to-end data path through Grit, with file:line references, register conventions, and the audit-pass guarantees that hold for that path.
 
 These are independently testable: each trace can be exercised in isolation by triggering its entry point.
 

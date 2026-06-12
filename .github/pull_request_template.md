@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to GritOS! -->
+<!-- Thanks for contributing to Grit! -->
 
 ## Summary
 

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ACPI RSDP Locator
+; Grit v3.0 - ACPI RSDP Locator
 ; Locates the Root System Description Pointer from memory/UEFI
 ; ============================================================================
 bits 64

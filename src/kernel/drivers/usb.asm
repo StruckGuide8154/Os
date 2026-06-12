@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - USB Controller Discovery & Basic Legacy Support
+; Grit v3.0 - USB Controller Discovery & Basic Legacy Support
 ; Attempts to find USB controllers (UHCI/OHCI/EHCI/XHCI) via PCI
 ; and enable legacy keyboad/mouse emulation if supported by BIOS.
 ; ============================================================================

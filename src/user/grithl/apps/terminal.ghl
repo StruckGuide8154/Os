@@ -1,4 +1,4 @@
-# GritOS Terminal - GritHL port of the former src/user/apps/terminal.inc.
+# Grit Terminal - GritHL port of the former src/user/apps/terminal.inc.
 #
 # A minimal interactive console: a scrolling history pane plus a "C:\> " input
 # row. Recognised builtins:
@@ -60,7 +60,7 @@ state {
 # ----------------------------------------------------------------------------
 # Strings
 # ----------------------------------------------------------------------------
-str welcome      = "GritOS Terminal v3.0";
+str welcome      = "Grit Terminal v3.0";
 str help_hint    = "Type 'help', 'ver', or 'cls'";
 str prompt       = "C:\\> ";
 str cursor_glyph = "_";

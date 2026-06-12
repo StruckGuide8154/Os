@@ -46,7 +46,7 @@
 ; "Sanitize FS/GS on user entry/exit").
 ;
 ; THREAT MODEL / WHY THIS LIVES HERE
-;   GritOS runs a FLAT segment model: there is no swapgs anywhere, and the
+;   Grit runs a FLAT segment model: there is no swapgs anywhere, and the
 ;   FS_BASE (MSR 0xC0000100), GS_BASE (0xC0000101) and KERNEL_GS_BASE
 ;   (0xC0000102) MSRs are never written by the kernel - FS/GS are only ever
 ;   selectors into the flat GDT data segments. CR4.FSGSBASE is left disabled,

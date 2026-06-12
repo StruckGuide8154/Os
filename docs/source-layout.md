@@ -1,4 +1,4 @@
-# GritOS Source Layout
+# Grit Source Layout
 
 This tree is organized by responsibility first, then by implementation detail.
 The goal is to keep ring-0 kernel code, ring-3 app code, boot code, and shared

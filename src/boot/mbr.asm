@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - MBR Boot Sector (Stage 1)
+; Grit v3.0 - MBR Boot Sector (Stage 1)
 ; Exactly 512 bytes. Loads Stage 2 from disk and jumps to it.
 ; ============================================================================
 bits 16
@@ -108,7 +108,7 @@ print16:
 
 ; --- Data ---
 boot_drive:     db 0
-msg_loading:    db 'GritOS', 0
+msg_loading:    db 'Grit', 0
 msg_disk_err:   db ' Disk!', 0
 msg_magic_err:  db ' Bad!', 0
 

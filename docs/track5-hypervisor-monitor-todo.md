@@ -2,7 +2,7 @@
 
 Goal: provide the **two guarantees that software alone cannot** - and provide them
 on **every virtualization-capable ISA** behind one vendor-neutral interface, so
-GritOS gets maximum hardware compatibility instead of being Intel-only. This is
+Grit gets maximum hardware compatibility instead of being Intel-only. This is
 the hardware half of `docs/The final goal after the rest.txt`. Everything in that
 goal file that does NOT require hardware moves to **Track 6** (the compartmentalized
 software "-1" monitor); this track is *only* the residual that genuinely needs
@@ -56,7 +56,7 @@ safety after arbitrary total hardware compromise.
 
 ## The vendor-neutral monitor HAL (do this FIRST - it is the compatibility story)
 
-Everything below plugs into one abstract interface so the rest of GritOS, and
+Everything below plugs into one abstract interface so the rest of Grit, and
 all of Track 6, are vendor-agnostic. Adding a new ISA = implementing the HAL, not
 touching callers.
 

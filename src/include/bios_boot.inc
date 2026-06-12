@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - legacy BIOS boot-path constants  (src/boot mbr/stage2/vesa/paging)
+; Grit - legacy BIOS boot-path constants  (src/boot mbr/stage2/vesa/paging)
 ; ----------------------------------------------------------------------------
 ; Named values for the magic literals the BIOS loader bakes into its real-mode
 ; firmware calls (INT 15h E820 memory map, VESA/VBE), the long-mode entry MSR,

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ACPI Table Setup
+; Grit v3.0 - ACPI Table Setup
 ; Discovers and parses FACP, MADT, MCFG, DSDT/SSDT config
 ; ============================================================================
 bits 64

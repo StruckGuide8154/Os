@@ -155,7 +155,7 @@ if ($Trace) {
 }
 
 Write-Host ''
-Write-Host '  GritOS UEFI Build System' -ForegroundColor Cyan
+Write-Host '  Grit UEFI Build System' -ForegroundColor Cyan
 Write-Host '  =========================' -ForegroundColor Cyan
 Write-Host ("  Mode: " + ($(if ($Release) { 'release' } else { 'debug' }))) -ForegroundColor DarkGray
 Write-Host "  Perf: $PerfProfile" -ForegroundColor DarkGray
@@ -488,7 +488,7 @@ $totalClusters = [int]($dataSectors / $sectPerClus)
 # Write BPB
 $bpbOff = $fatPartStart
 $imgBytes[$bpbOff + 0] = 0xEB; $imgBytes[$bpbOff + 1] = 0x3C; $imgBytes[$bpbOff + 2] = 0x90
-$oem = [System.Text.Encoding]::ASCII.GetBytes("GRITOS  ")
+$oem = [System.Text.Encoding]::ASCII.GetBytes("GRIT    ")
 [Array]::Copy($oem, 0, $imgBytes, $bpbOff + 3, 8)
 $imgBytes[$bpbOff + 11] = [byte]($bytesPerSect -band 0xFF)
 $imgBytes[$bpbOff + 12] = [byte](($bytesPerSect -shr 8) -band 0xFF)
@@ -560,16 +560,16 @@ function Write-FileData($data) {
 }
 
 $entryIdx = 0
-Write-DirEntry ($rootDirOff + $entryIdx * 32) "GRITOS" "   " 0x08 0 0
+Write-DirEntry ($rootDirOff + $entryIdx * 32) "GRIT" "   " 0x08 0 0
 $entryIdx++
 
-$readmeText = "Welcome to GritOS v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
+$readmeText = "Welcome to Grit v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
 $readmeData = [System.Text.Encoding]::ASCII.GetBytes($readmeText)
 $readmeCluster = Write-FileData $readmeData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "README" "TXT" 0x20 $readmeCluster $readmeData.Length
 $entryIdx++
 
-$helloText = "Hello from GritOS!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
+$helloText = "Hello from Grit!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
 $helloData = [System.Text.Encoding]::ASCII.GetBytes($helloText)
 $helloCluster = Write-FileData $helloData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "HELLO" "TXT" 0x20 $helloCluster $helloData.Length
@@ -581,7 +581,7 @@ $notesCluster = Write-FileData $notesData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "NOTES" "TXT" 0x20 $notesCluster $notesData.Length
 $entryIdx++
 
-$sysText = "GritOS System Information`r`n==========================`r`nKernel: GritOS v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
+$sysText = "Grit System Information`r`n==========================`r`nKernel: Grit v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
 $sysData = [System.Text.Encoding]::ASCII.GetBytes($sysText)
 $sysCluster = Write-FileData $sysData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "SYSTEM" "TXT" 0x20 $sysCluster $sysData.Length
@@ -689,7 +689,7 @@ Write-Host '  BUILD SUCCESSFUL' -ForegroundColor Green
 Write-Host ''
 Write-Host "  Output: $ESP\" -ForegroundColor White
 Write-Host '    BOOTX64.EFI  (UEFI bootloader)' -ForegroundColor Gray
-Write-Host '    KERNEL.BIN   (GritOS kernel)' -ForegroundColor Gray
+Write-Host '    KERNEL.BIN   (Grit kernel)' -ForegroundColor Gray
 Write-Host '    APPS.BIN     (GritHL app blob)' -ForegroundColor Gray
 Write-Host '    DATA.IMG     (FAT16 ramdisk for real hardware)' -ForegroundColor Gray
 Write-Host "    $dataImgPath  (FAT16 data disk for QEMU IDE)" -ForegroundColor Gray

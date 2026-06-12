@@ -10,7 +10,7 @@
 #
 # HONEST MATURITY: `modeled`. A predicate returning "usable" means the ISA
 # advertises the virtualization facility and it is not firmware-locked-off â€" NOT
-# that GritOS has launched a guest under it. The only path proven on TCG is the
+# that Grit has launched a guest under it. The only path proven on TCG is the
 # FALLBACK contract (floor-only); see security claims in the Track 5 doc.
 
 module "security_mon_hal_detect";

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS ICMP protocol module
+; Grit ICMP protocol module
 ; ----------------------------------------------------------------------------
 ; ICMP ping is exposed through net_ping_ipv4 in nic.asm, which selects the
 ; active backend and preserves the existing syscall contract. Echo builders

@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Page Table Setup (BIOS path)
+; Grit v3.0 - Page Table Setup (BIOS path)
 ; Identity-maps first 4GB. PD0..PD2 use 2MB pages; the app arena PDEs in PD0
 ; instead point at 4KB page tables so the kernel can toggle USER per slot
 ; (and W^X per page) at ring-3 entry. PD3 is relocated to 0x81000 because

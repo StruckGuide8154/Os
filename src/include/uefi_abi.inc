@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS - UEFI / PE-COFF / FAT32 ABI constants  (src/boot UEFI loader)
+; Grit - UEFI / PE-COFF / FAT32 ABI constants  (src/boot UEFI loader)
 ; ----------------------------------------------------------------------------
 ; Named values for the magic literals the BOOTX64.EFI loader bakes into its
 ; PE/COFF image header, UEFI BootServices/protocol calls, GOP mode selection,
@@ -151,10 +151,10 @@ KERNEL_LOAD_MAX_BYTES equ 0x2000000   ; 32 MiB cap passed to EFI_FILE.Read
 KERNEL_LOAD_MAX_PAGES equ 0x2000       ; 8192 * 4 KiB = 32 MiB (AllocatePages)
 
 ; ----------------------------------------------------------------------------
-; Previous-boot kernel-log flush region (GritOS-internal handoff contract)
+; Previous-boot kernel-log flush region (Grit-internal handoff contract)
 ; ----------------------------------------------------------------------------
 ; The kernel leaves a magic-tagged buffer at a fixed low-memory address for the
-; next boot's loader to flush to \KLOG.TXT. Not a spec value - a GritOS ABI.
+; next boot's loader to flush to \KLOG.TXT. Not a spec value - a Grit ABI.
 ;   +0  qword magic "KLOGNS01"   +8 qword payload length   +16 ASCII payload
 KLOG_FLUSH_ADDR_LO    equ 0x600000
 KLOG_MAGIC_QWORD      equ 0x3130534E474F4C4B  ; "KLOGNS01" little-endian

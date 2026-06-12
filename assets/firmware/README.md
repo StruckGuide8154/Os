@@ -1,7 +1,7 @@
 # DMCUB firmware blobs
 
 These are the AMD DMCUB (Display MicroController Unit B) firmware images
-from the upstream `linux-firmware` repository, mirrored verbatim. GritOS
+from the upstream `linux-firmware` repository, mirrored verbatim. Grit
 loads them at boot to drive AMD GPU display features (panel control,
 brightness, IPS power management, etc.).
 

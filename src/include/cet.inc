@@ -7,7 +7,7 @@
 ; security_todo.md §3 - "CET shadow stack + IBT on supported CPUs."
 ;
 ; RELATIONSHIP TO THE EXISTING SOFTWARE SHADOW STACK
-;   GritOS already ships a *software* kernel shadow stack on the syscall path
+;   Grit already ships a *software* kernel shadow stack on the syscall path
 ;   (shadow_stack.inc: the KPROLOGUE/KEPILOGUE macros mirror each return
 ;   address into the per-slot +0x1000 shadow page and trap a mismatch in
 ;   kernel_panic_shadow). That mitigation is portable - it works on every CPU
@@ -50,7 +50,7 @@
 ;     and -dENABLE_CET_IBT is also given), so enabling CET cannot trap a kernel
 ;     RET against an unseeded SSP and brick the boot.
 ;
-;   * Full IBT (an endbr64 at every indirect-branch target). GritOS has many
+;   * Full IBT (an endbr64 at every indirect-branch target). Grit has many
 ;     indirect jumps/calls (the syscall dispatcher's jmp [r12+HANDLER], the
 ;     app-callback trampolines, etc.); landing endbr64 on every one is a broad,
 ;     cross-file change that would touch files owned by other concurrent

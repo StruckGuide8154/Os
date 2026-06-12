@@ -2,7 +2,7 @@
 # ============================================================================
 # fetch_phoenix_fw.sh — pull Phoenix (Ryzen 780M, gfx_11_0_3) firmware blobs
 #                      from a Linux box's /lib/firmware/amdgpu/, rename to
-#                      the 8.3 PHX*.BIN aliases GritOS expects, and place
+#                      the 8.3 PHX*.BIN aliases Grit expects, and place
 #                      them in assets/firmware/.
 #
 # Run on a Linux machine that has:
@@ -126,4 +126,4 @@ for entry in "${MAP[@]}"; do
 done
 
 echo
-echo "  Done. Rebuild GritOS with -Gfx and the FAT16 image will pick these up."
+echo "  Done. Rebuild Grit with -Gfx and the FAT16 image will pick these up."

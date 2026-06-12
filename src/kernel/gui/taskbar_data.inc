@@ -13,7 +13,7 @@ szMenuPaint    db "Paint", 0
 szMenuTaskMgr  db "Task Manager", 0
 szMenuPing     db "Networking", 0
 szMenuMedia    db "Media Player", 0
-szMenuAbout    db "About GritOS", 0
+szMenuAbout    db "About Grit", 0
 
 ; ============================================================================
 ; Start menu entry table - single source of truth for the menu.

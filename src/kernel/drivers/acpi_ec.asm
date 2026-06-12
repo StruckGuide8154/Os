@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - ACPI Embedded Controller Driver
+; Grit v3.0 - ACPI Embedded Controller Driver
 ; Safely reads/writes EC registers per ACPI Specification 12.2
 ; Handles EmbeddedControl region operations for battery, thermals, etc
 ; ============================================================================

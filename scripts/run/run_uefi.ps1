@@ -87,7 +87,7 @@ if (-not $GuestMemory) {
     $GuestMemory = if ($PerfProfile -eq 'Cache32Max') { '256M' } else { '512M' }
 }
 
-Write-Host "Launching GritOS UEFI with XHCI+HID ($PerfProfile, $GuestMemory RAM, net=$NetworkMode)..." -ForegroundColor Cyan
+Write-Host "Launching Grit UEFI with XHCI+HID ($PerfProfile, $GuestMemory RAM, net=$NetworkMode)..." -ForegroundColor Cyan
 
 $qemuArgs = @(
     '-bios', "$BUILD\OVMF.fd",
@@ -203,7 +203,7 @@ $qemuArgs += @(
     '-serial', $SERIAL,
     '-no-reboot',
     '-monitor', 'telnet:127.0.0.1:4444,server,nowait',
-    '-name', 'GritOS_UEFI'
+    '-name', 'Grit_UEFI'
 )
 if ($IntLog) {
     Write-Host "Interrupt/reset logging -> $BUILD\qemu_int.log" -ForegroundColor Yellow

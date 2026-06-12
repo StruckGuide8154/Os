@@ -1,4 +1,4 @@
-# GritOS TODO Checklist
+# Grit TODO Checklist
 
 This checklist is based on the current repository state, the latest verification
 run, the complexity report, and the existing audit notes. It is intentionally
@@ -15,7 +15,7 @@ reduce maintenance risk.
 - [ ] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes.
 - [ ] Re-run full `.\scripts\test\test_verify_all.ps1` after the SMP marker fix.
 - [ ] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`.
-- [ ] Ensure QEMU is fully stopped before rebuilding `build\GritOS.img`.
+- [ ] Ensure QEMU is fully stopped before rebuilding `build\Grit.img`.
 - [ ] Consider making `scripts\test\test_cache32_boot.ps1` delete/retry the image only after confirming no QEMU process holds it.
 
 ## P0: Test And Guard Staleness

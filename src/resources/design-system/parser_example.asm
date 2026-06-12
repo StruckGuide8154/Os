@@ -1,5 +1,5 @@
 ; ============================================================
-;  parser_example.asm - GritOS resource format parsers
+;  parser_example.asm - Grit resource format parsers
 ;  ------------------------------------------------------------
 ;  Reference NASM implementation:
 ;    nx_palette_load       - validate and locate a .NPL palette

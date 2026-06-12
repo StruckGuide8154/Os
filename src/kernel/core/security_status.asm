@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Security feature status inventory
+; Grit v3.0 - Security feature status inventory
 ; ----------------------------------------------------------------------------
 ; Read-only snapshot of every hardening feature's RUNTIME state, taken once at
 ; the very end of kmain (after lockdown + the nested-kernel page-table monitor

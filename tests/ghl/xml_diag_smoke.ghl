@@ -9,7 +9,7 @@ str single_a = "<a/>";
 str single_b = "<b><c/></b>";
 str mixed_xml = "<p>one<b/>two<i/>three</p>";
 str ns_xml = "<svg:path xmlns:svg=\"urn:svg\"/>";
-str entity_xml = "<!DOCTYPE doc [<!ENTITY brand \"GritOS\">]><doc>&brand;</doc>";
+str entity_xml = "<!DOCTYPE doc [<!ENTITY brand \"Grit\">]><doc>&brand;</doc>";
 str prefix_svg = "svg";
 str entity_brand = "brand";
 str pass_msg = "[ghll] xml diag pass";

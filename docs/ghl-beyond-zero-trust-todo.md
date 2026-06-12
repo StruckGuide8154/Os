@@ -682,13 +682,13 @@ in `docs/track4-ram-secure-erasure-todo.md` Part C.
       `_sme_class_wants_cbit`); PTE write is the kernel-integration tail.
       See track4 Part C.
 - [x] **AMD SEV / SEV-ES / SEV-SNP** + **Intel TDX** detect - confidential-VM
-      tier; only if GritOS runs as a guest or hosts VMs. Decide whether to target
+      tier; only if Grit runs as a guest or hosts VMs. Decide whether to target
       running as a confidential guest (cheapest path to true whole-memory opacity
       on cloud hardware). Detect landed in `fme_memory_encryption_check.ghl`
       (SEV/ES/SNP CPUID+MSR tiers, SNP `armed` gated on a provisioned RMP, TDX via
       the `CPUID 0x21` "IntelTDX" signature). DECISION: detect-and-report only, do
       NOT target being a guest - conceding a trusted host hypervisor contradicts
-      the Track 5/6 "GritOS is the most-privileged software" model and the
+      the Track 5/6 "Grit is the most-privileged software" model and the
       bare-metal direction (full rationale in track4 Part C).
 - [x] Caveat doc: QEMU TCG does NOT emulate TME/SME - verifiable only on real
       silicon (or KVM+SEV); the software at-rest layer is what TCG `pmemsave` tests.

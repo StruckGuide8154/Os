@@ -1,6 +1,6 @@
-# GritOS Design System Resources
+# Grit Design System Resources
 
-This directory is the source-owned copy of the dropped `GritOS Design System.zip`.
+This directory is the source-owned copy of the dropped `Grit Design System.zip`.
 
 - `*.npl` and `palette_*.inc` define semantic light/dark palette tokens.
 - `font_*.nft` and `font_*.inc` define fixed-size bitmap fonts.

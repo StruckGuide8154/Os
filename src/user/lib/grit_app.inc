@@ -2,7 +2,7 @@
 %define GRIT_APP_INC
 
 ; ============================================================================
-; GritOS v3.0 - User App Kit
+; Grit v3.0 - User App Kit
 ; Shared include for ring-3 apps. Pulls in the syscall wrappers and the shared
 ; window/constants definitions that callback code usually needs.
 ; ============================================================================

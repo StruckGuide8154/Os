@@ -1,5 +1,5 @@
 ; ============================================================================
-; GritOS v3.0 - Taskbar + Start Menu
+; Grit v3.0 - Taskbar + Start Menu
 ; Now shows open windows with names and close (X) buttons
 ; ============================================================================
 bits 64

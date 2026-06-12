@@ -1,4 +1,4 @@
-# GritOS Memory Map Reference
+# Grit Memory Map Reference
 
 This document collects the fixed-address regions and major in-memory ownership
 rules used across boot, kernel, drivers, GUI, and ring 3.

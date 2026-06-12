@@ -1,4 +1,4 @@
-# GritOS External App ABI and Loader Format
+# Grit External App ABI and Loader Format
 
 This is the next-step contract for turning the current built-in app layer into a
 real external app model without rewriting the syscall boundary again.
