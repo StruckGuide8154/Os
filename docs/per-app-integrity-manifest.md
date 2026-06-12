@@ -36,7 +36,7 @@ security (each app verified independently, right before it runs).
 - NOTE re fixups: per-app digests must exclude the same sliding-qword fixups that
   fall within each segment (zero them before hashing, mirroring hmac_blob_canonical).
 
-### Boot (crypto.nxh)
+### Boot (crypto.ghl)
 - Replace `app_blob_verify_signature` whole-blob HMAC with
   `app_manifest_verify()`: HMAC-verify the (tiny) manifest table only -> sub-ms.
   Fail-closed. Sets a "manifest trusted" flag.
@@ -67,10 +67,10 @@ security (each app verified independently, right before it runs).
 ## Risks / gotchas
 - Sliding-q「word fixups must be partitioned per-segment (a fixup belongs to whichever
   segment contains its offset). gen_app_manifest.py must replicate the zeroing.
-- KASLR: offsets are blob-relative (slide-independent), like app_sysno fixups — safe.
+- KASLR: offsets are blob-relative (slide-independent), like app_sysno fixups - safe.
 - The whole blob is still copied per slot (unchanged); we only change WHAT is hashed
   and WHEN. No change to slot isolation / syscall permutation.
-- security_probe stays raw asm (adversarial harness) — its segment is hashed like any
+- security_probe stays raw asm (adversarial harness) - its segment is hashed like any
   other; do not migrate it.
 - Verify entry points: scripts/test/boot_markers.ps1 (markers), plus new negative
-  tamper tests; test_nhl_security_guards.ps1 for the beyond-zero-trust gate.
+  tamper tests; test_ghl_security_guards.ps1 for the beyond-zero-trust gate.

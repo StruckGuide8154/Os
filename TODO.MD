@@ -1,4 +1,4 @@
-# NexusOS TODO Checklist
+# GritOS TODO Checklist
 
 This checklist is based on the current repository state, the latest verification
 run, the complexity report, and the existing audit notes. It is intentionally
@@ -15,7 +15,7 @@ reduce maintenance risk.
 - [ ] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes.
 - [ ] Re-run full `.\scripts\test\test_verify_all.ps1` after the SMP marker fix.
 - [ ] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`.
-- [ ] Ensure QEMU is fully stopped before rebuilding `build\NexusOS.img`.
+- [ ] Ensure QEMU is fully stopped before rebuilding `build\GritOS.img`.
 - [ ] Consider making `scripts\test\test_cache32_boot.ps1` delete/retry the image only after confirming no QEMU process holds it.
 
 ## P0: Test And Guard Staleness
@@ -127,15 +127,15 @@ reduce maintenance risk.
 - [ ] Expand invariant checks for every fixed address listed in the complexity dashboard.
 - [ ] Verify `APP_DATA_ADDR`, syscall stacks, GUI buffers, FAT buffers, and boot buffers cannot overlap under BIOS and UEFI profiles.
 
-## P2: NexusHL
+## P2: GritHL
 
-- [ ] Use `docs/nhl-beyond-zero-trust-todo.md` as the master plan for the
-      NHL-only beyond-zero-trust architecture: no new `.asm`, no new `.inc`, no
+- [ ] Use `docs/ghl-beyond-zero-trust-todo.md` as the master plan for the
+      GHL-only beyond-zero-trust architecture: no new `.asm`, no new `.inc`, no
       inline assembly, signed everything, release privacy by default, and
       partitioned authority that survives single-component compromise.
-- [ ] Add compiler tests for `src/user/nexushl/compiler/nxhc.py`: lex, parse, sema, emit.
-- [ ] Add golden output tests for `hello.nxh`, `explorer.nxh`, and `notepad.nxh`.
-- [ ] Add source maps from NXH lines to generated assembly labels.
+- [ ] Add compiler tests for `src/user/grithl/compiler/gritc.py`: lex, parse, sema, emit.
+- [ ] Add golden output tests for `hello.ghl`, `explorer.ghl`, and `notepad.ghl`.
+- [ ] Add source maps from GHL lines to generated assembly labels.
 - [ ] Add better compiler errors with line/column context for semantic failures.
 - [ ] Define what `app "<Name>" { stack = N }` currently does vs future loader behavior.
 - [ ] Add support or explicit rejection tests for reserved syntax like arrays.

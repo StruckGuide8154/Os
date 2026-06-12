@@ -23,10 +23,10 @@ else {
     $KernelDefines += '-dRELEASE_BUILD'
 }
 if ($PerfProfile -eq 'Cache32Max') {
-    $KernelDefines += '-dNEXUS_CACHE32_MAX'
-    $KernelDefines += '-dNEXUS_SMP'
-    $KernelDefines += '-dNEXUS_CACHE32_AP_STARTUP'
-    $KernelDefines += '-dNEXUS_ENABLE_RING3_AP'
+    $KernelDefines += '-dGRIT_CACHE32_MAX'
+    $KernelDefines += '-dGRIT_SMP'
+    $KernelDefines += '-dGRIT_CACHE32_AP_STARTUP'
+    $KernelDefines += '-dGRIT_ENABLE_RING3_AP'
 }
 if ($Trace) {
     $KernelDefines += '-dENABLE_TRACE'
@@ -38,7 +38,7 @@ if (-not (Test-Path $BUILD_DIR)) {
     New-Item -Path $BUILD_DIR -ItemType Directory | Out-Null
 }
 
-Write-Host "NexusOS (BIOS) Build System" -ForegroundColor Cyan
+Write-Host "GritOS (BIOS) Build System" -ForegroundColor Cyan
 Write-Host "===========================" -ForegroundColor Cyan
 Write-Host ("Mode:   " + ($(if ($Release) { 'release' } else { 'debug' })))
 Write-Host "Perf:   $PerfProfile"
@@ -46,8 +46,8 @@ Write-Host ("Trace:  " + ($(if ($Trace) { 'on' } else { 'off' })))
 
 $NxhBuildArgs = @()
 if ($Release) { $NxhBuildArgs += '-Release' }
-& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_nxh.ps1') @NxhBuildArgs
-if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED NexusHL compile' -ForegroundColor Red; exit 1 }
+& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
 $CoverageTool = Join-Path $Root 'tools\check_coverage.py'
 if (Test-Path $CoverageTool) {
     & python $CoverageTool
@@ -89,11 +89,11 @@ Write-Host "[3/3] Assembling Kernel..." -ForegroundColor Yellow
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 # 4. Create Disk Image (Concatenate headers + kernel)
-Write-Host "[4/4] Creating Disk Image (NexusOS.img)..." -ForegroundColor Yellow
+Write-Host "[4/4] Creating Disk Image (GritOS.img)..." -ForegroundColor Yellow
 $mbrPath = "$BUILD_DIR\mbr.bin"
 $stage2Path = "$BUILD_DIR\stage2.bin"
 $kernelPath = "$BUILD_DIR\kernel.bin"
-$imgPath = "$BUILD_DIR\NexusOS.img"
+$imgPath = "$BUILD_DIR\GritOS.img"
 
 # Combine files: MBR + Stage2 + Kernel using byte array concatenation in memory for safety/control
 try {
@@ -153,7 +153,7 @@ try {
     $imgBytes[$bpbOff + 1] = 0x3C
     $imgBytes[$bpbOff + 2] = 0x90
     # OEM Name
-    $oem = [System.Text.Encoding]::ASCII.GetBytes("NEXUSOS ")
+    $oem = [System.Text.Encoding]::ASCII.GetBytes("GRITOS ")
     [Array]::Copy($oem, 0, $imgBytes, $bpbOff + 3, 8)
     # Bytes per sector (11-12)
     $imgBytes[$bpbOff + 11] = [byte]($bytesPerSect -band 0xFF)
@@ -267,7 +267,7 @@ try {
     $entryIdx = 0
 
     # Volume label
-    Write-DirEntry ($rootDirOff + $entryIdx * 32) "NEXUSOS" "   " 0x08 0 0
+    Write-DirEntry ($rootDirOff + $entryIdx * 32) "GRITOS" "   " 0x08 0 0
     $entryIdx++
 
     # DOCS directory
@@ -291,14 +291,14 @@ try {
     Write-DirEntry ($docsDirOff + 64) "SECRET" "TXT" 0x20 $secretCluster $secretData.Length
 
     # README.TXT (back in root)
-    $readmeText = "Welcome to NexusOS v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
+    $readmeText = "Welcome to GritOS v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
     $readmeData = [System.Text.Encoding]::ASCII.GetBytes($readmeText)
     $readmeCluster = Write-FileData $readmeData
     Write-DirEntry ($rootDirOff + $entryIdx * 32) "README" "TXT" 0x20 $readmeCluster $readmeData.Length
     $entryIdx++
 
     # HELLO.TXT
-    $helloText = "Hello from NexusOS!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
+    $helloText = "Hello from GritOS!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
     $helloData = [System.Text.Encoding]::ASCII.GetBytes($helloText)
     $helloCluster = Write-FileData $helloData
     Write-DirEntry ($rootDirOff + $entryIdx * 32) "HELLO" "TXT" 0x20 $helloCluster $helloData.Length
@@ -312,7 +312,7 @@ try {
     $entryIdx++
 
     # SYSTEM.TXT (system info)
-    $sysText = "NexusOS System Information`r`n==========================`r`nKernel: NexusOS v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
+    $sysText = "GritOS System Information`r`n==========================`r`nKernel: GritOS v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
     $sysData = [System.Text.Encoding]::ASCII.GetBytes($sysText)
     $sysCluster = Write-FileData $sysData
     Write-DirEntry ($rootDirOff + $entryIdx * 32) "SYSTEM" "TXT" 0x20 $sysCluster $sysData.Length

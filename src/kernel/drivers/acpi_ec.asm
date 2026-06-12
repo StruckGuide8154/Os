@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - ACPI Embedded Controller Driver
+; GritOS v3.0 - ACPI Embedded Controller Driver
 ; Safely reads/writes EC registers per ACPI Specification 12.2
 ; Handles EmbeddedControl region operations for battery, thermals, etc
 ; ============================================================================
@@ -184,7 +184,7 @@ acpi_ec_dump_zone:
     jnz .lp1
     mov byte [acpi_ec_dump_ok], 1
 
-    ; Mid zone 0x20..0x6F (80 bytes) — covers thermal/fan + likely
+    ; Mid zone 0x20..0x6F (80 bytes) - covers thermal/fan + likely
     ; brightness scratch byte that firmware updates on Fn-brightness keys.
     lea rdi, [acpi_ec_dump_mid]
     mov ebx, 0x20

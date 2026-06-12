@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - USB XHCI Host Controller Driver
+; GritOS v3.0 - USB XHCI Host Controller Driver
 ; PCI discovery, controller init, ring management, port/device enumeration
 ; ============================================================================
 bits 64
@@ -27,7 +27,7 @@ extern mmio_bounds_assert
     push rdx
     mov rdi, %1
     test rdi, rdi
-    jz %%skip                       ; base unresolved — nothing registered yet
+    jz %%skip                       ; base unresolved - nothing registered yet
     ; Probe an 8-byte access AT THE BASE, not the whole window: xhci_op_base/
     ; rt_base/db_base are OFFSETS inside the BAR (base+caps_len), so asserting a
     ; full-MMIO_XHCI_WINDOW span from here overshoots the registered region end

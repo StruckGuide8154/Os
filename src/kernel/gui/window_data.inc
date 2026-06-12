@@ -12,7 +12,7 @@ wm_drag_window_id dq -1
 wm_drag_off_x     dq 0
 wm_drag_off_y     dq 0
 ; App-drag (per-window drag callback) tracking. Independent from the
-; titlebar window-drag above — that one moves the whole window; this one
+; titlebar window-drag above - that one moves the whole window; this one
 ; routes mouse-move events to the app while the left button stays held.
 ; Latched on left-button-down inside a client area whose window has a
 ; non-zero WIN_OFF_DRAGFN. Cleared on left-button release.
@@ -53,7 +53,7 @@ wallpaper_render_target_addr dq WALLPAPER_CACHE0_ADDR
 align 64
 wallpaper_render_pack times 32 db 0
 
-; §6 per-slot callback target table (kernel BSS — OUTSIDE the ring-3 app arena,
+; §6 per-slot callback target table (kernel BSS - OUTSIDE the ring-3 app arena,
 ; so a slot-memory write bug can't forge an entry). One trusted kernel-image VA
 ; per (slot, field). Indexed [slot * WM_CB_FIELDS + field]; a zero entry means
 ; "no callback interned". BSS-zero = empty, so no boot seed is needed; a

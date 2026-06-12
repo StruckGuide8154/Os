@@ -2,7 +2,7 @@
 
 ## Why
 
-NexusOS's filesystem driver (`src/kernel/fs/fat16.asm`) reads sectors via
+GritOS's filesystem driver (`src/kernel/fs/fat16.asm`) reads sectors via
 `ata_read_sectors`, which talks to legacy IDE ports `0x1F0-0x1F7`. That works
 under QEMU when we attach `build/data.img` with `-drive if=ide`. On a modern
 laptop (NVMe storage, USB boot) there is no legacy IDE controller, those

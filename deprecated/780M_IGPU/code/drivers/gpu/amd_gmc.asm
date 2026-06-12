@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_gmc.asm — GFXHUB (GCVM) page-table setup (Task I)
+; amd_gmc.asm - GFXHUB (GCVM) page-table setup (Task I)
 ; ----------------------------------------------------------------------------
 ; Build a minimal GPUVM page table for GFXHUB context 0 that identity-maps
 ; the GPU work region, program the GFXHUB context-0 registers, invalidate
@@ -9,9 +9,9 @@
 ; GFXHUB vs MMHUB
 ; ---------------
 ; GFX11 has two VM hubs:
-;   * GFXHUB (regGCVM_*) — sits inside the GC block. CP, MEC, RLC, and
+;   * GFXHUB (regGCVM_*) - sits inside the GC block. CP, MEC, RLC, and
 ;     shaders translate through this. THIS IS WHAT WE NEED for ring/draw.
-;   * MMHUB (regMMVM_*)  — sits outside GC. Serves DCN, VCN, SDMA-MM.
+;   * MMHUB (regMMVM_*)  - sits outside GC. Serves DCN, VCN, SDMA-MM.
 ;
 ; This module programs only GFXHUB. MMHUB programming is deferred until
 ; SDMA or DCN page-flip work needs it.
@@ -51,7 +51,7 @@ extern gpu_mmio_r32
 extern gpu_mmio_w32
 extern gpu_mmio_wait_eq
 
-; Sub-stage progress markers — written into gmc_substep as we go.
+; Sub-stage progress markers - written into gmc_substep as we go.
 GMC_SUBSTEP_NONE            equ 0
 GMC_SUBSTEP_PT_WRITTEN      equ 1
 GMC_SUBSTEP_BASE_PROGRAMMED equ 2
@@ -77,8 +77,8 @@ GMC_SUBSTEP_FAULT_CHECKED   equ 7
 
 ; CONTEXT0_CNTL bits (Linux gfxhub_v3_0_setup_vmid_config, vmid 0):
 ;   bit  0    ENABLE_CONTEXT
-;   bit  1    PAGE_TABLE_DEPTH = 0 (single level — matches our flat PT)
-;   bits 6:3  PAGE_TABLE_BLOCK_SIZE — 9 means 2^(9+9) = 2 MiB block (= our PTE)
+;   bit  1    PAGE_TABLE_DEPTH = 0 (single level - matches our flat PT)
+;   bits 6:3  PAGE_TABLE_BLOCK_SIZE - 9 means 2^(9+9) = 2 MiB block (= our PTE)
 ;   bits ...  the various fault-on-* enables (we want them OFF during bring-up
 ;             so a stray bad addr doesn't latch and wedge the hub)
 ; Linux's "enable + fault-retry + range-check + no-fault-on-anything" template
@@ -86,7 +86,7 @@ GMC_SUBSTEP_FAULT_CHECKED   equ 7
 %define GCVM_CTX0_CNTL_ENABLE       0x1FFFC03
 
 ; ---------------------------------------------------------------------------
-; uint8 gmc_init(void)   — Task I entry
+; uint8 gmc_init(void)   - Task I entry
 ;   Returns 1 on success, 0 on any check failure. gmc_substep records the
 ;   last step *entered*; on failure it points at where we got stuck.
 ; ---------------------------------------------------------------------------
@@ -109,10 +109,10 @@ gmc_init:
     cld
     rep  stosq
 
-    ; PTE 0 — identity-map 2 MiB at GPU_WORK_BASE. RWX + SYSTEM + BLOCK.
+    ; PTE 0 - identity-map 2 MiB at GPU_WORK_BASE. RWX + SYSTEM + BLOCK.
     mov  rax, GPU_WORK_BASE
     or   rax, GPU_PTE_RWX
-    mov  rbx, GPU_PTE_BLOCK      ; bit 54 — won't fit in OR-imm32
+    mov  rbx, GPU_PTE_BLOCK      ; bit 54 - won't fit in OR-imm32
     or   rax, rbx
     mov  rdi, GPU_PT_ROOT
     mov  [rdi], rax
@@ -185,7 +185,7 @@ gmc_init:
     ; Poll ACK bit 0 (PER_VMID_INVALIDATE_ACK[0]); short timeout (~5 ms).
     ; Engine 0 on GFXHUB is conventionally KIQ-reserved on GFX11; without
     ; KIQ running the ack may never come. We capture whatever the ACK reg
-    ; reads for diag, but DO NOT fail the stage — we just enabled the
+    ; reads for diag, but DO NOT fail the stage - we just enabled the
     ; context with a fresh PT, there's nothing in any TLB to flush yet.
     ; The real success criterion is the fault-status check below.
     mov  edi, GCVM_INV_ENG0_ACK_DW

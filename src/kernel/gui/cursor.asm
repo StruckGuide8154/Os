@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Mouse Cursor Rendering
+; GritOS v3.0 - Mouse Cursor Rendering
 ; Draws cursor to front buffer, saves/restores background
 ; ============================================================================
 bits 64

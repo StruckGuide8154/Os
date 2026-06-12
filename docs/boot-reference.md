@@ -1,4 +1,4 @@
-# NexusOS Boot Reference
+# GritOS Boot Reference
 
 This document covers the early boot chain and the files that own each stage.
 

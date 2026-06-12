@@ -1,4 +1,4 @@
-; palette_light.inc — modern light theme
+; palette_light.inc - modern light theme
 NPL1_MAGIC equ 0x314C504E
 
 align 8

@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - ACPI RSDP Locator
+; GritOS v3.0 - ACPI RSDP Locator
 ; Locates the Root System Description Pointer from memory/UEFI
 ; ============================================================================
 bits 64

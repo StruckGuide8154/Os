@@ -1,7 +1,7 @@
 ; DEPRECATED: raw assembly About implementation.
 ;
 ; The active About app is now:
-;   src/user/nexushl/apps/about.nxh
+;   src/user/grithl/apps/about.ghl
 ;
 ; Launch wiring must use the generated callbacks:
 ;   app_hl_about_draw

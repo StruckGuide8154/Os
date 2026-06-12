@@ -1,4 +1,4 @@
-# NexusOS Syscall ABI
+# GritOS Syscall ABI
 
 This is the current ring-3 syscall surface exported by
 `C:\Users\user\Documents\new\src\kernel\proc\syscall.asm` and wrapped by
@@ -21,7 +21,7 @@ Use the x86-64 `syscall` instruction.
 
 User apps should normally call the wrapper macros from
 `C:\Users\user\Documents\new\src\include\syscall_user.inc` or the convenience
-include `C:\Users\user\Documents\new\src\user\lib\nexus_app.inc`.
+include `C:\Users\user\Documents\new\src\user\lib\grit_app.inc`.
 
 For the built-in apps and future external apps, the kernel now treats these
 address classes differently:
@@ -137,7 +137,7 @@ Rejected pointer-bearing syscalls now return `-1` in `RAX`.
 - Args: none
 - Effect: read the kernel PIT tick counter
 - Returns: current tick count in `RAX`
-- Intended use: UI animation such as NexusHL blinking carets
+- Intended use: UI animation such as GritHL blinking carets
 
 `19` `SYS_FS_DELETE`
 - Args: `RDI=entry`
@@ -281,7 +281,7 @@ Rejected pointer-bearing syscalls now return `-1` in `RAX`.
 `55` `SYS_SYSINFO`
 - Args: `RDI=selector`, `RSI=arg`
 - Returns: system information scalar such as FPS, RAM, CPU MHz, core count, or
-  per-core utilization. See `src/user/nexushl/lib/core.nxh`.
+  per-core utilization. See `src/user/grithl/lib/core.ghl`.
 - GPU selectors expose the passive AMD display provider state used by Settings:
   provider/status, BDF, device/vendor ID, class, BAR0 low/high dwords, command
   register, and active flag. These are identity/readiness values only; the
@@ -292,8 +292,8 @@ Rejected pointer-bearing syscalls now return `-1` in `RAX`.
   `0x08080808`
 - Returns: approximate ICMP echo RTT in milliseconds, or `-1` after a 2 second
   timeout or network failure
-- Scope: system-wide kernel network service. Apps should call the NexusHL
-  wrapper in `src/user/nexushl/lib/net.nxh` instead of issuing the syscall
+- Scope: system-wide kernel network service. Apps should call the GritHL
+  wrapper in `src/user/grithl/lib/net.ghl` instead of issuing the syscall
   directly.
 
 `57` `SYS_NET_INFO`
@@ -302,7 +302,7 @@ Rejected pointer-bearing syscalls now return `-1` in `RAX`.
   DNS server in A.B.C.D order, falling back to the DHCP server identifier when
   no DNS option was provided.
 - Scope: diagnostic/app status surface. Apps should use `net_info()` and the
-  `NI_*` constants in `src/user/nexushl/lib/core.nxh`.
+  `NI_*` constants in `src/user/grithl/lib/core.ghl`.
 
 `60` `SYS_NET_TCP_CONNECT4`
 - Args: `RDI=IPv4 address packed as A.B.C.D`, `RSI=destination port`,
@@ -337,13 +337,13 @@ Rejected pointer-bearing syscalls now return `-1` in `RAX`.
 ## Authoring rules for user apps
 
 - Keep callback code under `src/user`.
-- Include `nexus_app.inc` for the stable wrapper surface.
-- Include `nexus_window.inc` when app code needs window offsets or app ids.
+- Include `grit_app.inc` for the stable wrapper surface.
+- Include `grit_window.inc` when app code needs window offsets or app ids.
 - Treat every kernel-facing pointer as privileged: only pass app-owned buffers
   and app-owned strings.
 - Treat FAT16 entry pointers as opaque handles. They are kernel objects, not
   user-owned memory.
-- Use `src/user/lib/nexus_fs.inc` helpers such as `NFS_NAME83` when converting
+- Use `src/user/lib/grit_fs.inc` helpers such as `NFS_NAME83` when converting
   user-visible filenames to the 11-byte FAT 8.3 names accepted by write,
   rename, and mkdir.
 - Return from callbacks with `ret` unless you intentionally end the callback

@@ -3,12 +3,12 @@
 #
 # Used by write_envelope.py to emit REAL threshold signatures over the
 # canonical envelope bytes, and by eval_ed25519.py as the independent
-# reference implementation the in-kernel NHL verifier is differentially
+# reference implementation the in-kernel GHL verifier is differentially
 # tested against.
 #
 # DEV KEYS: role keypairs are derived from FIXED public seeds so the host
 # writer and the in-kernel pubkey table cannot drift during development.
-# These provide NO secrecy — production signing replaces dev_role_secret()
+# These provide NO secrecy - production signing replaces dev_role_secret()
 # with real HSM-held keys and re-bakes the kernel pubkey table.
 
 import hashlib
@@ -123,14 +123,14 @@ def verify(pub32, msg, sig64):
 
 
 # --- DEV role keys (threshold role bit i+1 <-> role index 1..6) -------------
-# 1=BOOT 2=KERNEL 3=POLICY 4=UPDATE 5=RECOVERY 6=AUDIT (threshold_check.nxh)
+# 1=BOOT 2=KERNEL 3=POLICY 4=UPDATE 5=RECOVERY 6=AUDIT (threshold_check.ghl)
 
 ROLE_NAMES = {1: 'BOOT', 2: 'KERNEL', 3: 'POLICY', 4: 'UPDATE',
               5: 'RECOVERY', 6: 'AUDIT'}
 
 
 def dev_role_secret(role):
-    return _sha512(b'NexusOS-DEV-ed25519-cosigner-role-%d' % role)[:32]
+    return _sha512(b'GritOS-DEV-ed25519-cosigner-role-%d' % role)[:32]
 
 
 def dev_role_public(role):

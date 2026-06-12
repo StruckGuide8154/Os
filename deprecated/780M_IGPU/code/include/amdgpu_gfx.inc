@@ -1,5 +1,5 @@
 ; ============================================================================
-; amdgpu_gfx.inc — shared layout, memory map, and extern table for GFX11
+; amdgpu_gfx.inc - shared layout, memory map, and extern table for GFX11
 ; ----------------------------------------------------------------------------
 ; This is the load-bearing seam between the gpu/* driver modules. Each module
 ; (amd_smu, amd_gmc, amd_cp_ring, amd_gfx) includes this header so it sees the
@@ -103,9 +103,9 @@ GPU_DOORBELL_INDEX_CP_GFX  equ 0x0000
 extern gpu_mmio_r32                 ; (uint32 abs_dword_offset) -> eax
 extern gpu_mmio_w32                 ; (uint32 abs_dword_offset, uint32 val)
 extern gpu_mmio_wait_eq             ; (offset, mask, value, timeout_ticks) -> al
-extern gpu_bar0_base                ; uint64 — physical, post BAR0 mask
-extern gpu_doorbell_base            ; uint64 — kernel VA of doorbell window
-extern gpu_bringup_state            ; uint8  — see GPU_STATE_* below
+extern gpu_bar0_base                ; uint64 - physical, post BAR0 mask
+extern gpu_doorbell_base            ; uint64 - kernel VA of doorbell window
+extern gpu_bringup_state            ; uint8  - see GPU_STATE_* below
 extern amd_display_bar0             ; reused: same BAR0 as DCN probe
 
 ; --- Bring-up state machine ----------------------------------------------

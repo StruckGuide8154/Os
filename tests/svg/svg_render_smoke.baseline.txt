@@ -1,4 +1,4 @@
-fixture: tests/nxh/svg_render_smoke.nxh
+fixture: tests/ghl/svg_render_smoke.ghl
 viewport: 200x200
-expected-marker: [nxhl] svg2 render pass
+expected-marker: [ghll] svg2 render pass
 coverage: viewBox, background style, inherited fill/stroke, chained translate/scale, rect, circle, approximate ellipse, line, text, tspan, text-anchor, clipPath (rect fast path), polygon, polyline, path M/Q/A/Z

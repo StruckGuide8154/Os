@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_ip_disc.asm — read-only IP discovery table scanner (Phoenix gfx_11_0_3)
+; amd_ip_disc.asm - read-only IP discovery table scanner (Phoenix gfx_11_0_3)
 ; ----------------------------------------------------------------------------
 ; The IP discovery table is the authoritative list of every IP block in the
 ; SoC and its SMN base addresses. It's how Linux amdgpu avoids hardcoding
@@ -47,7 +47,7 @@
 ;   * Reads only from the framebuffer BAR window (already mapped by the
 ;     UEFI handoff / amd_display path).
 ;   * If the signature is not found within the scan window, all bases come
-;     back as 0 — no fallback, no fake values.
+;     back as 0 - no fallback, no fake values.
 ;
 ; The output goes to diag globals. main.asm prints them. The first place
 ; to look on the boot screen after this lands is `IPDISC sig=44504924
@@ -63,12 +63,12 @@ section .text
 global ip_disc_scan
 global ip_disc_scan_vram        ; fallback: MM_INDEX/DATA VRAM scan
 global ip_disc_found
-global ip_disc_vram_hit_offset  ; uint32 — VRAM offset where sig was found
-global ip_disc_scan_addr        ; uint64 — where we started scanning
-global ip_disc_bin_size         ; uint16 — binary_size from header
-global ip_disc_version          ; uint16 — major<<8 | minor
+global ip_disc_vram_hit_offset  ; uint32 - VRAM offset where sig was found
+global ip_disc_scan_addr        ; uint64 - where we started scanning
+global ip_disc_bin_size         ; uint16 - binary_size from header
+global ip_disc_version          ; uint16 - major<<8 | minor
 global ip_disc_num_dies         ; uint16
-global ip_disc_mp0_base         ; uint32 — MP0 SEG0
+global ip_disc_mp0_base         ; uint32 - MP0 SEG0
 global ip_disc_mp1_base         ; uint32
 global ip_disc_gc_base          ; uint32
 global ip_disc_mmhub_base       ; uint32
@@ -83,7 +83,7 @@ extern gpu_mmio_w32
 ; --- Signatures (little-endian dword form, as they appear in memory) -------
 ; "$IPD" = 0x24 0x49 0x50 0x44 → 0x44504924
 %define SIG_BIN_HEADER  0x44504924
-; "IPCM" = 0x49 0x50 0x43 0x4D → 0x4D435049 — appears as little-endian dword
+; "IPCM" = 0x49 0x50 0x43 0x4D → 0x4D435049 - appears as little-endian dword
 %define SIG_IP_DISC     0x4D435049
 
 ; HW IDs we care about.
@@ -156,7 +156,7 @@ ip_disc_scan:
 .candidate:
     ; r12 → potential binary_signature dword. The binary_header layout puts
     ; binary_signature at offset 12 (after table_list_offset, ip_table_offset,
-    ; binary_checksum, binary_size, version_major, version_minor — six u16s).
+    ; binary_checksum, binary_size, version_major, version_minor - six u16s).
     ; So the table START is r12 - 12.
     mov  rbx, r12
     sub  rbx, 12
@@ -209,7 +209,7 @@ ip_disc_scan:
     test ecx, ecx
     jz   .out_ok
 
-    ; ip_v4 record (the layout used in v4 discovery — Phoenix uses this):
+    ; ip_v4 record (the layout used in v4 discovery - Phoenix uses this):
     ;   uint16 hw_id
     ;   uint8  num_instances
     ;   uint8  num_base_address
@@ -307,12 +307,12 @@ ip_disc_scan:
 ;   stride 4 (16K reads per candidate = ~3 ms).
 ;
 ;   If the signature is found, latches ip_disc_vram_hit_offset and sets
-;   ip_disc_found. Parsing of fields beyond the signature is deferred —
+;   ip_disc_found. Parsing of fields beyond the signature is deferred -
 ;   reading the full 64 KiB through MM_INDEX/DATA is doable but slow, and
 ;   we want to first prove the access path works before optimising.
 ;
 ;   Returns 1 on found, 0 otherwise. Side effects: scribbles mmMM_INDEX
-;   while running (harmless — Linux uses this register the same way and
+;   while running (harmless - Linux uses this register the same way and
 ;   it's designed to be re-latched per access).
 ; ---------------------------------------------------------------------------
 %define MM_INDEX_DW   0x0000

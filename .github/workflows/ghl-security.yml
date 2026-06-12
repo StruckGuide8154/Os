@@ -1,0 +1,39 @@
+name: GHL security (beyond-zero-trust)
+
+# Track 1 "P0 - CI surfacing" (docs/track1-repo-enforcement-todo.md):
+# run the full GHL/GritHLK security verification on every PR and push, and
+# surface the two machine-greppable signal lines as the job result.
+on:
+  push:
+    branches: ["master", "dev"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghl-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ghl-security:
+    name: GHL-only trusted path + legacy quarantine
+    # windows-latest: the guards are PowerShell 5.1 (Set-StrictMode / desktop
+    # PowerShell semantics) and the repo is Windows-centric. The entry point
+    # shells out to `python src/user/grithl/compiler/gritc.py`, so we also set
+    # up Python on the runner.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Run GHL security verification + surface signal lines
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/ci_security_summary.ps1
+          exit $LASTEXITCODE

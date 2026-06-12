@@ -1,0 +1,237 @@
+# GritHL SVG2 - <mask> compositing.
+#
+# Algorithm (docs/svg-filters-design.md, "Masks"):
+#   1. Resolve mask="url(#id)" -> <mask> node.
+#   2. Compute the masked subtree's device-space bbox -> region.
+#   3. Rasterize the mask's contents into an ARGB arena buffer, honoring
+#      maskContentUnits (userSpaceOnUse | objectBoundingBox).
+#   4. Render the masked subtree into a second ARGB arena buffer.
+#   5. For each pixel: factor = luminance(mask) (mask-type=luminance, default)
+#      or mask.alpha (mask-type=alpha); multiply the subtree pixel's alpha by
+#      that factor and composite the result back.
+#
+# Mask rasterization re-enters svg_render_node with svg_filter_skip set, the
+# same recursion guard the buffered filter path uses.
+
+use svg2.core
+use svg2.fixed
+use svg2.matrix
+use svg2.bbox
+use svg2.render_ctx
+use svg2.filter_arena
+
+const MASK_TYPE_LUMINANCE = 0
+const MASK_TYPE_ALPHA     = 1
+
+state {
+    mask_id_buf: 64;
+    mask_id_len: 4;
+    mask_resolved_node: 4;
+    mask_region_x: 4;
+    mask_region_y: 4;
+    mask_region_w: 4;
+    mask_region_h: 4;
+    mask_content_buf: 8;             # ARGB: rasterized mask contents
+    mask_subject_buf: 8;             # ARGB: masked subtree
+    mask_attrbuf: 32;
+}
+
+fn mask_parse_url_ref(attr_len) {
+    if attr_len < 6 { return 0; }
+    if lb(&svg_attr_buf + 0) != 117 { return 0; }
+    if lb(&svg_attr_buf + 1) != 114 { return 0; }
+    if lb(&svg_attr_buf + 2) != 108 { return 0; }
+    if lb(&svg_attr_buf + 3) != 40  { return 0; }
+    let i = 4;
+    if lb(&svg_attr_buf + i) == 35 { i = i + 1; }
+    let start = i;
+    while i < attr_len {
+        if lb(&svg_attr_buf + i) == 41 { break; }
+        i = i + 1;
+    }
+    let n = i - start;
+    if n <= 0 { return 0; }
+    if n > 63 { return 0; }
+    let k = 0;
+    while k < n {
+        sb(&mask_id_buf + k, lb(&svg_attr_buf + start + k));
+        k = k + 1;
+    }
+    sw(&mask_id_len, n);
+    return n;
+}
+
+fn mask_id_matches(node) {
+    let want = lw(&mask_id_len);
+    let got = xml_attr(node, "id", 2, &svg_tag_buf, SVG_TAG_MAX);
+    if got != want { return 0; }
+    let i = 0;
+    while i < want {
+        if lb(&svg_tag_buf + i) != lb(&mask_id_buf + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn mask_resolve_in(parent) {
+    if parent < 0 { return -1; }
+    let child = xml_first_child(parent);
+    while child >= 0 {
+        if svg_tag_is(child, "mask", 4) == 1 {
+            if mask_id_matches(child) == 1 { return child; }
+        }
+        let nested = mask_resolve_in(child);
+        if nested >= 0 { return nested; }
+        child = xml_next_sibling(child);
+    }
+    return -1;
+}
+
+# Looks up the <mask> node a `mask="url(#id)"` attribute refers to. Returns
+# the XML node id or -1.
+fn mask_lookup(node) {
+    sw(&mask_resolved_node, -1);
+    let l = xml_attr(node, "mask", 4, &svg_attr_buf, SVG_ATTR_MAX);
+    if l <= 0 { return -1; }
+    if mask_parse_url_ref(l) == 0 { return -1; }
+    let m = mask_resolve_in(xml_root());
+    sw(&mask_resolved_node, m);
+    return m;
+}
+
+# mask-type attribute -> MASK_TYPE_*. SVG2 default is luminance.
+fn mask_type_of(mask_node) {
+    let l = xml_attr(mask_node, "mask-type", 9, &mask_attrbuf, 32);
+    if l <= 0 { return MASK_TYPE_LUMINANCE; }
+    if lb(&mask_attrbuf) == 97 { return MASK_TYPE_ALPHA; }   # 'a'
+    return MASK_TYPE_LUMINANCE;
+}
+
+# 1 if maskContentUnits == objectBoundingBox.
+fn mask_content_is_obb(mask_node) {
+    let l = xml_attr(mask_node, "maskContentUnits", 16, &mask_attrbuf, 32);
+    if l <= 0 { return 0; }
+    if lb(&mask_attrbuf) == 111 { return 1; }                # 'o'
+    return 0;
+}
+
+fn mask_units_user_space(mask_node) {
+    let l = xml_attr(mask_node, "maskUnits", 9, &mask_attrbuf, 32);
+    if l <= 0 { return 0; }
+    if lb(&mask_attrbuf) == 117 { return 1; }                 # userSpaceOnUse
+    return 0;
+}
+
+fn mask_region_attr_obb(mask_node, name, nlen, basis, def_pct) {
+    let l = xml_attr(mask_node, name, nlen, &svg_attr_buf, SVG_ATTR_MAX);
+    if l <= 0 { return (basis * def_pct) / 100; }
+    let is_pct = 0;
+    if lb(&svg_attr_buf + l - 1) == 37 { is_pct = 1; }
+    let v = svg_parse_num(&svg_attr_buf, l, basis);
+    if is_pct == 1 { return fx_to_i(v); }
+    return fx_to_i(fx_mul(v, fx_from_i(basis)));
+}
+
+fn mask_region_attr_user(mask_node, name, nlen, ref_dim, defv) {
+    let l = xml_attr(mask_node, name, nlen, &svg_attr_buf, SVG_ATTR_MAX);
+    if l <= 0 { return defv; }
+    return fx_to_i(svg_parse_num(&svg_attr_buf, l, ref_dim));
+}
+
+# Render every child of `mask_node` into the active (buffer) render context.
+fn mask_render_contents(mask_node) {
+    let child = xml_first_child(mask_node);
+    while child >= 0 {
+        filter_render_subtree(child);
+        child = xml_next_sibling(child);
+    }
+}
+
+# Composite `node`'s masked subtree. `mask_node` is the resolved <mask>.
+# Returns 1 if the mask was applied (caller skips the normal render), 0 if
+# it bailed (caller renders unmasked).
+fn mask_apply(node, mask_node) {
+    if mask_node < 0 { return 0; }
+    if bbox_compute(node) == 0 { return 0; }
+    let bx = lw(&bbox_min_x);
+    let by = lw(&bbox_min_y);
+    let bw = lw(&bbox_max_x) - bx;
+    let bh = lw(&bbox_max_y) - by;
+    if bw < 1 { bw = 1; }
+    if bh < 1 { bh = 1; }
+    let rx = bx + mask_region_attr_obb(mask_node, "x", 1, bw, -10);
+    let ry = by + mask_region_attr_obb(mask_node, "y", 1, bh, -10);
+    let rw = mask_region_attr_obb(mask_node, "width", 5, bw, 120);
+    let rh = mask_region_attr_obb(mask_node, "height", 6, bh, 120);
+    if mask_units_user_space(mask_node) == 1 {
+        let ux = mask_region_attr_user(mask_node, "x", 1, lw(&svg_vb_w), 0 - lw(&svg_vb_w) / 10);
+        let uy = mask_region_attr_user(mask_node, "y", 1, lw(&svg_vb_h), 0 - lw(&svg_vb_h) / 10);
+        let uw = mask_region_attr_user(mask_node, "width", 5, lw(&svg_vb_w), lw(&svg_vb_w));
+        let uh = mask_region_attr_user(mask_node, "height", 6, lw(&svg_vb_h), lw(&svg_vb_h));
+        mat_apply(fx_from_i(ux), fx_from_i(uy));
+        rx = fx_to_i(lw(&mat_out_x));
+        ry = fx_to_i(lw(&mat_out_y));
+        let sx = (fx_abs(lw(&mat_cur_a)) + fx_abs(lw(&mat_cur_c))) / 2;
+        let sy = (fx_abs(lw(&mat_cur_b)) + fx_abs(lw(&mat_cur_d))) / 2;
+        if sx > 0 { rw = fx_to_i(fx_mul(fx_from_i(uw), sx)); }
+        if sy > 0 { rh = fx_to_i(fx_mul(fx_from_i(uh), sy)); }
+    }
+    rw = filter_arena_clamp(rw);
+    rh = filter_arena_clamp(rh);
+    sw(&mask_region_x, rx);
+    sw(&mask_region_y, ry);
+    sw(&mask_region_w, rw);
+    sw(&mask_region_h, rh);
+    let cbuf = filter_arena_argb(rw, rh);
+    if cbuf == 0 { return 0; }
+    let sbuf = filter_arena_argb(rw, rh);
+    if sbuf == 0 { return 0; }
+    sq(&mask_content_buf, cbuf);
+    sq(&mask_subject_buf, sbuf);
+
+    # 1. Rasterize the masked subtree into sbuf.
+    fctx_push_buffer(sbuf, rw * 4, rw, rh, rx, ry);
+    filter_render_subtree(node);
+    fctx_pop();
+
+    # 2. Rasterize the mask contents into cbuf.
+    fctx_push_buffer(cbuf, rw * 4, rw, rh, rx, ry);
+    mat_push();
+    if mask_content_is_obb(mask_node) == 1 {
+        # objectBoundingBox: mask coords 0..1 map onto the element bbox.
+        mat_translate(fx_from_i(bx), fx_from_i(by));
+        mat_scale(fx_from_i(bw), fx_from_i(bh));
+    }
+    mask_render_contents(mask_node);
+    mat_pop();
+    fctx_pop();
+
+    # 3. Per-pixel: multiply subject alpha by mask factor, composite back.
+    let mtype = mask_type_of(mask_node);
+    let total = rw * rh;
+    let i = 0;
+    while i < total {
+        let mp = lw(cbuf + i * 4);
+        let ma = (mp >> 24) & 0xFF;
+        let factor = ma;
+        if mtype == MASK_TYPE_LUMINANCE {
+            let mr = (mp >> 16) & 0xFF;
+            let mg = (mp >> 8) & 0xFF;
+            let mb = mp & 0xFF;
+            # luma = 0.2125 R + 0.7154 G + 0.0721 B, then * alpha.
+            let luma = (mr * 54 + mg * 183 + mb * 18) >> 8;
+            factor = (luma * ma) / 255;
+        }
+        let sp = lw(sbuf + i * 4);
+        let sa = (sp >> 24) & 0xFF;
+        let oa = (sa * factor) / 255;
+        let x = i % rw;
+        let y = i / rw;
+        if oa > 0 {
+            fctx_emit_pixel(lw(&mask_region_x) + x, lw(&mask_region_y) + y,
+                            (oa << 24) | (sp & 0xFFFFFF));
+        }
+        i = i + 1;
+    }
+    return 1;
+}

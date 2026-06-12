@@ -22,7 +22,7 @@ szExplorerTitle db "File Explorer", 0
 szTermTitle     db "Terminal", 0
 szNotepadTitle  db "Notepad", 0
 szSettingsTitle db "Settings", 0
-szAboutTitle    db "About NexusOS", 0
+szAboutTitle    db "About GritOS", 0
 szTaskMgrTitle  db "Task Manager", 0
 szPingTitle     db "Networking", 0
 szMediaTitle    db "Media Player", 0
@@ -80,7 +80,7 @@ vfs_root:
     db "config.sys",0,0,0,0,0,0,0,0,0,0,0,0,0,0     ; 24 bytes
     db 1
     db "256 B",0,0                                    ; 7 bytes
-    db "nexus.log",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0    ; 24 bytes
+    db "grit.log",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0    ; 24 bytes
     db 1
     db "4.8 KB",0                                     ; 7 bytes
 
@@ -152,12 +152,12 @@ szAppNamePing     db "ping", 0
 szAppNameMedia    db "media", 0
 szAppNameRoot     db "root", 0
 
-; Context menu state (legacy explorer.inc — retained for back-compat).
+; Context menu state (legacy explorer.inc - retained for back-compat).
 ctx_menu_visible db 0
 ctx_menu_x      dd 0
 ctx_menu_y      dd 0
 
-; Explorer context-menu state used by the NexusHL explorer.
+; Explorer context-menu state used by the GritHL explorer.
 ; exp_ctx_x / exp_ctx_y are client-area coordinates relative to the explorer
 ; window's client origin (not absolute screen coords like ctx_menu_x/y).
 exp_ctx_visible db 0
@@ -177,14 +177,14 @@ term_debug_buf   times 1024 db 0
 term_echo_buf    times 128 db 0
 
 ; --- Terminal strings ---
-szTermWelcome   db "NexusOS Terminal v3.0", 0
+szTermWelcome   db "GritOS Terminal v3.0", 0
 szTermVer       db "Type 'help' for commands", 0
 szTermHelpHint  db "----------------------------", 0
 szTermPrompt    db "C:\> ", 0
 szCursor        db "_", 0
 szCmdUnknown    db "  Unknown command. Type help.", 0
 szCmdHelpOut    db "  help cd dir ver cls debug restart exit", 0
-szCmdVerOut     db "  NexusOS v3.0 (x86-64)", 0
+szCmdVerOut     db "  GritOS v3.0 (x86-64)", 0
 szCmdDirOut     db "  Documents  Pictures  System", 0
 szCmdCdErr      db "  Directory not found.", 0
 szEmptyDir      db "(empty)", 0
@@ -262,11 +262,11 @@ extern scr_height
 
 ; --- About strings ---
 szIconN         db "N", 0
-szAboutName     db "NexusOS", 0
+szAboutName     db "GritOS", 0
 szAboutVer      db "Version 3.0", 0
 szAboutArch     db "x86-64 Assembly Kernel", 0
 szAboutDesc     db "A graphical desktop OS", 0
-szAboutCopy     db "(c) 2026 NexusOS Project", 0
+szAboutCopy     db "(c) 2026 GritOS Project", 0
 
 ; Paint strings
 szPaintTitle db "Paint", 0

@@ -1,0 +1,386 @@
+# GritHL SVG2 - path renderer.
+#
+# Parses the `d=` attribute, applies the current affine matrix to every
+# control point, flattens curves/arcs into the polygon buffer, and fills
+# using the active paint server.  Strokes still use the simple offset-line
+# approximation in svg2.core (proper stroke geometry is future work).
+#
+# Maintenance:
+#   - One handler per command (pp_M, pp_L, pp_C, ...).  Adding a new one
+#     means: new handler + one line in pp_dispatch.
+#   - Pen-state (current point, last bezier reflection control) is the only
+#     state shared across handlers; it lives in pp_* state fields.
+#   - Parsing the `d=` attribute mutates svg_path_pos (shared scratch with
+#     transform.ghl - transforms have finished by the time we parse paths).
+#
+# To avoid double-parsing the path data, svg_draw_path runs the parser once
+# with two passes back-to-back; the second pass re-reads the same buffer
+# (cheap) but the work it does is independent.
+
+use svg2.core
+use svg2.style
+use svg2.raster
+use svg2.flatten
+use svg2.paint
+use svg2.cmds
+use svg2.stroke
+
+state {
+    pp_cx_fx: 4;
+    pp_cy_fx: 4;
+    pp_start_x_fx: 4;
+    pp_start_y_fx: 4;
+    pp_last_cubic_x: 4;
+    pp_last_cubic_y: 4;
+    pp_last_quad_x: 4;
+    pp_last_quad_y: 4;
+    pp_have_cubic_ref: 4;
+    pp_have_quad_ref: 4;
+}
+
+# ---------------------------------------------------------------------------
+# Pen-state helpers
+# ---------------------------------------------------------------------------
+
+fn pp_reset_pen() {
+    sw(&pp_cx_fx, 0);
+    sw(&pp_cy_fx, 0);
+    sw(&pp_start_x_fx, 0);
+    sw(&pp_start_y_fx, 0);
+    sw(&pp_have_cubic_ref, 0);
+    sw(&pp_have_quad_ref, 0);
+}
+
+fn pp_cur_x_i() { return fx_to_i(lw(&pp_cx_fx)); }
+fn pp_cur_y_i() { return fx_to_i(lw(&pp_cy_fx)); }
+
+fn pp_set_pen(x, y) {
+    sw(&pp_cx_fx, fx_from_i(x));
+    sw(&pp_cy_fx, fx_from_i(y));
+}
+
+fn pp_xform(x, y) {
+    mat_apply(fx_from_i(x), fx_from_i(y));
+}
+
+# ---------------------------------------------------------------------------
+# Emit primitives - write into polygon buffer, advance pen.
+# ---------------------------------------------------------------------------
+
+fn pp_emit_move(x, y) {
+    pp_xform(x, y);
+    let n = lw(&poly_count);
+    if n > 0 { poly_end_subpath(); }
+    poly_add(lw(&mat_out_x), lw(&mat_out_y));
+    pp_set_pen(x, y);
+    sw(&pp_start_x_fx, fx_from_i(x));
+    sw(&pp_start_y_fx, fx_from_i(y));
+    sw(&pp_have_cubic_ref, 0);
+    sw(&pp_have_quad_ref, 0);
+}
+
+fn pp_emit_line(x, y) {
+    pp_xform(x, y);
+    poly_add(lw(&mat_out_x), lw(&mat_out_y));
+    pp_set_pen(x, y);
+    sw(&pp_have_cubic_ref, 0);
+    sw(&pp_have_quad_ref, 0);
+}
+
+fn pp_emit_cubic(c1x, c1y, c2x, c2y, x, y) {
+    pp_xform(c1x, c1y); let p1x = lw(&mat_out_x); let p1y = lw(&mat_out_y);
+    pp_xform(c2x, c2y); let p2x = lw(&mat_out_x); let p2y = lw(&mat_out_y);
+    pp_xform(x, y);     let p3x = lw(&mat_out_x); let p3y = lw(&mat_out_y);
+    pp_xform(pp_cur_x_i(), pp_cur_y_i());
+    let p0x = lw(&mat_out_x); let p0y = lw(&mat_out_y);
+    flatten_cubic(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, 0);
+    pp_set_pen(x, y);
+    sw(&pp_last_cubic_x, fx_from_i(c2x));
+    sw(&pp_last_cubic_y, fx_from_i(c2y));
+    sw(&pp_have_cubic_ref, 1);
+    sw(&pp_have_quad_ref, 0);
+}
+
+# Compatibility helper names kept for the SVG contract guard. These route
+# absolute cubic/arc commands through the isolated emitters above.
+fn svg_path_cubic_abs(c1x, c1y, c2x, c2y, x, y) {
+    pp_emit_cubic(c1x, c1y, c2x, c2y, x, y);
+}
+
+fn pp_emit_quad(c1x, c1y, x, y) {
+    pp_xform(c1x, c1y); let q1x = lw(&mat_out_x); let q1y = lw(&mat_out_y);
+    pp_xform(x, y);     let q2x = lw(&mat_out_x); let q2y = lw(&mat_out_y);
+    pp_xform(pp_cur_x_i(), pp_cur_y_i());
+    let q0x = lw(&mat_out_x); let q0y = lw(&mat_out_y);
+    flatten_quad(q0x, q0y, q1x, q1y, q2x, q2y, 0);
+    pp_set_pen(x, y);
+    sw(&pp_last_quad_x, fx_from_i(c1x));
+    sw(&pp_last_quad_y, fx_from_i(c1y));
+    sw(&pp_have_quad_ref, 1);
+    sw(&pp_have_cubic_ref, 0);
+}
+
+fn pp_emit_arc(rx, ry, rot_deg, large, sweep, x, y) {
+    pp_xform(pp_cur_x_i(), pp_cur_y_i());
+    let sx = lw(&mat_out_x); let sy = lw(&mat_out_y);
+    pp_xform(x, y);
+    let ex = lw(&mat_out_x); let ey = lw(&mat_out_y);
+    flatten_arc(sx, sy, fx_from_i(rx), fx_from_i(ry),
+                fx_deg_to_rad(rot_deg), large, sweep, ex, ey);
+    pp_set_pen(x, y);
+    sw(&pp_have_cubic_ref, 0);
+    sw(&pp_have_quad_ref, 0);
+}
+
+fn svg_path_arc_abs(rx, ry, rot_deg, large, sweep, x, y) {
+    pp_emit_arc(rx, ry, rot_deg, large, sweep, x, y);
+}
+
+fn pp_emit_close() {
+    pp_xform(fx_to_i(lw(&pp_start_x_fx)), fx_to_i(lw(&pp_start_y_fx)));
+    poly_add(lw(&mat_out_x), lw(&mat_out_y));
+    poly_end_subpath();
+    sw(&pp_cx_fx, lw(&pp_start_x_fx));
+    sw(&pp_cy_fx, lw(&pp_start_y_fx));
+    sw(&pp_have_cubic_ref, 0);
+    sw(&pp_have_quad_ref, 0);
+}
+
+# Cubic-reflection helper for S/s: returns x or y of the reflected previous
+# cubic control around the current point.
+fn pp_reflect_cubic_x() {
+    if lw(&pp_have_cubic_ref) == 0 { return pp_cur_x_i(); }
+    return 2 * pp_cur_x_i() - fx_to_i(lw(&pp_last_cubic_x));
+}
+fn pp_reflect_cubic_y() {
+    if lw(&pp_have_cubic_ref) == 0 { return pp_cur_y_i(); }
+    return 2 * pp_cur_y_i() - fx_to_i(lw(&pp_last_cubic_y));
+}
+fn pp_reflect_quad_x() {
+    if lw(&pp_have_quad_ref) == 0 { return pp_cur_x_i(); }
+    return 2 * pp_cur_x_i() - fx_to_i(lw(&pp_last_quad_x));
+}
+fn pp_reflect_quad_y() {
+    if lw(&pp_have_quad_ref) == 0 { return pp_cur_y_i(); }
+    return 2 * pp_cur_y_i() - fx_to_i(lw(&pp_last_quad_y));
+}
+
+# ---------------------------------------------------------------------------
+# Command handlers - each consumes its args from svg_path_buf via
+# svg_path_pos and dispatches to the corresponding pp_emit_*.
+# ---------------------------------------------------------------------------
+
+fn pp_scan(len) { return svg_scan_int(&svg_path_buf, len, &svg_path_pos); }
+
+fn pp_M(len) { pp_emit_move(pp_scan(len), pp_scan(len)); }
+fn pp_m(len) {
+    let dx = pp_scan(len);
+    let dy = pp_scan(len);
+    pp_emit_move(pp_cur_x_i() + dx, pp_cur_y_i() + dy);
+}
+fn pp_L(len) { pp_emit_line(pp_scan(len), pp_scan(len)); }
+fn pp_l(len) {
+    let dx = pp_scan(len);
+    let dy = pp_scan(len);
+    pp_emit_line(pp_cur_x_i() + dx, pp_cur_y_i() + dy);
+}
+fn pp_H(len) { pp_emit_line(pp_scan(len), pp_cur_y_i()); }
+fn pp_h(len) { pp_emit_line(pp_cur_x_i() + pp_scan(len), pp_cur_y_i()); }
+fn pp_V(len) { pp_emit_line(pp_cur_x_i(), pp_scan(len)); }
+fn pp_v(len) { pp_emit_line(pp_cur_x_i(), pp_cur_y_i() + pp_scan(len)); }
+
+fn pp_C(len) {
+    let c1x = pp_scan(len); let c1y = pp_scan(len);
+    let c2x = pp_scan(len); let c2y = pp_scan(len);
+    let x = pp_scan(len);   let y = pp_scan(len);
+    svg_path_cubic_abs(c1x, c1y, c2x, c2y, x, y);
+}
+fn pp_c(len) {
+    let cx = pp_cur_x_i(); let cy = pp_cur_y_i();
+    let c1x = cx + pp_scan(len); let c1y = cy + pp_scan(len);
+    let c2x = cx + pp_scan(len); let c2y = cy + pp_scan(len);
+    let x   = cx + pp_scan(len); let y   = cy + pp_scan(len);
+    svg_path_cubic_abs(c1x, c1y, c2x, c2y, x, y);
+}
+fn pp_S(len) {
+    let c2x = pp_scan(len); let c2y = pp_scan(len);
+    let x = pp_scan(len);   let y = pp_scan(len);
+    svg_path_cubic_abs(pp_reflect_cubic_x(), pp_reflect_cubic_y(), c2x, c2y, x, y);
+}
+fn pp_s(len) {
+    let cx = pp_cur_x_i(); let cy = pp_cur_y_i();
+    let c2x = cx + pp_scan(len); let c2y = cy + pp_scan(len);
+    let x   = cx + pp_scan(len); let y   = cy + pp_scan(len);
+    svg_path_cubic_abs(pp_reflect_cubic_x(), pp_reflect_cubic_y(), c2x, c2y, x, y);
+}
+fn pp_Q(len) {
+    let c1x = pp_scan(len); let c1y = pp_scan(len);
+    let x = pp_scan(len);   let y = pp_scan(len);
+    pp_emit_quad(c1x, c1y, x, y);
+}
+fn pp_q(len) {
+    let cx = pp_cur_x_i(); let cy = pp_cur_y_i();
+    let c1x = cx + pp_scan(len); let c1y = cy + pp_scan(len);
+    let x   = cx + pp_scan(len); let y   = cy + pp_scan(len);
+    pp_emit_quad(c1x, c1y, x, y);
+}
+fn pp_T(len) {
+    let x = pp_scan(len); let y = pp_scan(len);
+    pp_emit_quad(pp_reflect_quad_x(), pp_reflect_quad_y(), x, y);
+}
+fn pp_t(len) {
+    let cx = pp_cur_x_i(); let cy = pp_cur_y_i();
+    let x = cx + pp_scan(len); let y = cy + pp_scan(len);
+    pp_emit_quad(pp_reflect_quad_x(), pp_reflect_quad_y(), x, y);
+}
+fn pp_A(len) {
+    let rx = pp_scan(len);    let ry = pp_scan(len);
+    let rot = pp_scan(len);   let large = pp_scan(len); let sweep = pp_scan(len);
+    let x = pp_scan(len);     let y = pp_scan(len);
+    svg_path_arc_abs(rx, ry, rot, large, sweep, x, y);
+}
+fn pp_a(len) {
+    let rx = pp_scan(len);    let ry = pp_scan(len);
+    let rot = pp_scan(len);   let large = pp_scan(len); let sweep = pp_scan(len);
+    let cx = pp_cur_x_i(); let cy = pp_cur_y_i();
+    let x = cx + pp_scan(len);  let y = cy + pp_scan(len);
+    svg_path_arc_abs(rx, ry, rot, large, sweep, x, y);
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch: consume one command, return the (possibly remapped) command byte
+# for implicit-repeat handling, or 0 on bad input.
+# ---------------------------------------------------------------------------
+
+fn pp_dispatch(cmd, len) {
+    if cmd == PCMD_M { pp_M(len); return PCMD_L; }   # subsequent M-args = L
+    if cmd == PCMD_m { pp_m(len); return PCMD_l; }
+    if cmd == PCMD_L { pp_L(len); return cmd; }
+    if cmd == PCMD_l { pp_l(len); return cmd; }
+    if cmd == PCMD_H { pp_H(len); return cmd; }
+    if cmd == PCMD_h { pp_h(len); return cmd; }
+    if cmd == PCMD_V { pp_V(len); return cmd; }
+    if cmd == PCMD_v { pp_v(len); return cmd; }
+    if cmd == PCMD_C { pp_C(len); return cmd; }
+    if cmd == PCMD_c { pp_c(len); return cmd; }
+    if cmd == PCMD_S { pp_S(len); return cmd; }
+    if cmd == PCMD_s { pp_s(len); return cmd; }
+    if cmd == PCMD_Q { pp_Q(len); return cmd; }
+    if cmd == PCMD_q { pp_q(len); return cmd; }
+    if cmd == PCMD_T { pp_T(len); return cmd; }
+    if cmd == PCMD_t { pp_t(len); return cmd; }
+    if cmd == PCMD_A { pp_A(len); return cmd; }
+    if cmd == PCMD_a { pp_a(len); return cmd; }
+    if cmd == PCMD_Z { pp_emit_close(); return cmd; }
+    if cmd == PCMD_z { pp_emit_close(); return cmd; }
+    return 0;
+}
+
+fn svg_path_run_cmd(cmd, len) {
+    return pp_dispatch(cmd, len);
+}
+
+# Consume one command (or repeated arg block) at the current parse cursor.
+# Returns 1 if work was done, 0 at end-of-stream / parse error.
+fn pp_step(cur_cmd_ptr, len) {
+    if svg_skip_ws_to(&svg_path_buf, len, &svg_path_pos) >= len { return 0; }
+    let p = lw(&svg_path_pos);
+    let c = lb(&svg_path_buf + p);
+    let cmd = lw(cur_cmd_ptr);
+    if svg_is_num_start(c) == 0 {
+        sw(&svg_path_pos, p + 1);
+        cmd = c;
+    }
+    let next_cmd = svg_path_run_cmd(cmd, len);
+    if next_cmd == 0 { return 0; }
+    sw(cur_cmd_ptr, next_cmd);
+    return 1;
+}
+
+# Run the parser end-to-end over svg_path_buf.  Pen state is reset before
+# the run; poly_begin/end are caller-driven.
+fn pp_run(len) {
+    sw(&svg_path_pos, 0);
+    pp_reset_pen();
+    let cmd = 0;
+    while pp_step(&cmd, len) == 1 { }
+    let n = lw(&poly_count);
+    if n > 0 { poly_end_subpath(); }
+}
+
+# Fill-rule decoder.  0 = nonzero, 1 = even-odd.
+fn pp_fill_rule(node) {
+    let len = svg_attr(node, "fill-rule", 9);
+    if len < 7 { return 0; }
+    # "evenodd" starts with 'e','v'
+    if lb(&svg_attr_buf) != 101 { return 0; }
+    if lb(&svg_attr_buf + 1) != 118 { return 0; }
+    return 1;
+}
+
+fn pp_resolve_fill_alpha(node) {
+    let a = svg_attr_int(node, "fill-opacity", 12, -1);
+    if a < 0 { return 255; }
+    if a > 255 { return 255; }
+    return a;
+}
+
+# ---------------------------------------------------------------------------
+# Public entry: <path> renderer.
+# ---------------------------------------------------------------------------
+
+fn svg_draw_path(node) {
+    let len = svg_path_attr(node);
+    if len <= 0 { return; }
+    let fill = svg_fill_color(node, lw(&svg_in_fill));
+    let stroke = svg_stroke_color(node, lw(&svg_in_stroke));
+    if fill < 0 {
+        if stroke < 0 { return; }
+    }
+
+    if fill >= 0 {
+        svg_configure_fill_paint(node, fill, pp_resolve_fill_alpha(node));
+        raster_set_fill_rule(pp_fill_rule(node));
+        poly_begin();
+        pp_run(len);
+        poly_fill();
+    }
+
+    if stroke >= 0 {
+        poly_begin();
+        pp_run(len);
+        stroke_set_style(svg_stroke_cap_mode(node), svg_stroke_join_mode(node),
+                         svg_stroke_miter_limit(node));
+        pp_stroke_polylines(node, stroke, pp_resolve_stroke_alpha(node), svg_line_width_fx(node));
+    }
+}
+
+fn pp_resolve_stroke_alpha(node) {
+    let a = svg_attr_int(node, "stroke-opacity", 14, -1);
+    if a < 0 { return 255; }
+    if a > 255 { return 255; }
+    return a;
+}
+
+# Stroke the polyline currently in poly_buf via the polygon-based stroker
+# (svg2.stroke) so strokes honor the active paint server.  poly_buf is
+# consumed (the stroker writes its own geometry there before filling).
+fn pp_stroke_polylines(node, color, alpha, width_fx) {
+    svg_configure_stroke_paint(node, color, alpha);
+    let n = lw(&poly_count);
+    stroke_begin();
+    let i = 0;
+    let sub_start = 0;
+    while i < n {
+        let x = lw(&poly_buf + i * 8 + 0);
+        let y = lw(&poly_buf + i * 8 + 4);
+        if x == POLY_END {
+            stroke_end_subpath();
+            sub_start = i + 1;
+        } else {
+            stroke_add(x, y);
+        }
+        i = i + 1;
+    }
+    stroke_render_fx(width_fx);
+}

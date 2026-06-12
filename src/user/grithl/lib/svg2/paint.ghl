@@ -1,0 +1,253 @@
+# GritHL SVG2 - paint servers.
+#
+# Supports solid color, linearGradient, and radialGradient.  Gradients are
+# parsed once per <defs> resolution and cached in paint_def_buf; the active
+# server is set on the global "paint" before each shape's fill.  paint_eval
+# is called per output pixel (integer device coords) and returns 0xAARRGGBB.
+#
+# Solid:    type=0   r/g/b/a in [0,255], stored in p0_color
+# Linear:   type=1   p0=(x1,y1) p1=(x2,y2) in *device* fixed; stops in stop_buf
+# Radial:   type=1+1=2  p0=(cx,cy) p1=(fx,fy) r in fixed; stops in stop_buf
+#
+# spreadMethod: 0 pad, 1 reflect, 2 repeat.
+# gradientUnits: handled by callers (precomputes object-space matrix into
+# the px/py supplied here).
+
+use svg2.fixed
+use svg2.matrix
+
+const PAINT_TYPE_NONE   = -1
+const PAINT_TYPE_SOLID  = 0
+const PAINT_TYPE_LINEAR = 1
+const PAINT_TYPE_RADIAL = 2
+const PAINT_TYPE_PATTERN = 3
+
+const PAINT_STOPS_MAX = 16
+# Per stop: offset_fx (0..FX_ONE), color_argb = 8 bytes
+const PAINT_STOP_STRIDE = 8
+
+state {
+    paint_type: 4;
+    paint_p0x: 4;
+    paint_p0y: 4;
+    paint_p1x: 4;
+    paint_p1y: 4;
+    paint_radius: 4;
+    paint_tile_w: 4;
+    paint_tile_h: 4;
+    paint_tile_buf: 8;
+    paint_spread: 4;
+    paint_solid_argb: 4;
+    paint_opacity: 4;        # 0..256, multiplied into per-eval alpha
+    paint_stops: 128;        # 16 * 8
+    paint_stop_count: 4;
+}
+
+fn paint_init() {
+    sw(&paint_type, PAINT_TYPE_NONE);
+    sw(&paint_solid_argb, 0xFF000000);
+    sw(&paint_opacity, 256);
+    sw(&paint_stop_count, 0);
+    sw(&paint_spread, 0);
+}
+
+# RGB (0xRRGGBB, no alpha bits) + alpha [0..255] -> 0xAARRGGBB
+fn pack_argb(rgb, alpha) {
+    let a = alpha;
+    if a < 0 { a = 0; }
+    if a > 255 { a = 255; }
+    return ((a & 0xFF) << 24) | (rgb & 0xFFFFFF);
+}
+
+fn paint_set_solid_rgb(rgb, alpha) {
+    sw(&paint_type, PAINT_TYPE_SOLID);
+    sw(&paint_solid_argb, pack_argb(rgb, alpha));
+}
+
+fn paint_set_none() {
+    sw(&paint_type, PAINT_TYPE_NONE);
+}
+
+fn paint_set_opacity_256(o) {
+    if o < 0 { o = 0; }
+    if o > 256 { o = 256; }
+    sw(&paint_opacity, o);
+}
+
+fn paint_clear_stops() {
+    sw(&paint_stop_count, 0);
+}
+
+fn paint_add_stop(offset_fx, argb) {
+    let n = lw(&paint_stop_count);
+    if n >= PAINT_STOPS_MAX { return; }
+    let base = &paint_stops + n * PAINT_STOP_STRIDE;
+    sw(base + 0, offset_fx);
+    sw(base + 4, argb);
+    sw(&paint_stop_count, n + 1);
+}
+
+fn paint_set_linear(x1_fx, y1_fx, x2_fx, y2_fx, spread) {
+    sw(&paint_type, PAINT_TYPE_LINEAR);
+    sw(&paint_p0x, x1_fx);
+    sw(&paint_p0y, y1_fx);
+    sw(&paint_p1x, x2_fx);
+    sw(&paint_p1y, y2_fx);
+    sw(&paint_spread, spread);
+}
+
+fn paint_set_radial(cx_fx, cy_fx, fx_fx, fy_fx, r_fx, spread) {
+    sw(&paint_type, PAINT_TYPE_RADIAL);
+    sw(&paint_p0x, cx_fx);
+    sw(&paint_p0y, cy_fx);
+    sw(&paint_p1x, fx_fx);
+    sw(&paint_p1y, fy_fx);
+    sw(&paint_radius, r_fx);
+    sw(&paint_spread, spread);
+}
+
+fn paint_set_pattern_solid(tile_w, tile_h, argb) {
+    sw(&paint_type, PAINT_TYPE_PATTERN);
+    if tile_w < 1 { tile_w = 1; }
+    if tile_h < 1 { tile_h = 1; }
+    sw(&paint_tile_w, tile_w);
+    sw(&paint_tile_h, tile_h);
+    sq(&paint_tile_buf, 0);
+    sw(&paint_solid_argb, argb);
+}
+
+fn paint_set_pattern_tile(tile_w, tile_h, buf) {
+    sw(&paint_type, PAINT_TYPE_PATTERN);
+    if tile_w < 1 { tile_w = 1; }
+    if tile_h < 1 { tile_h = 1; }
+    sw(&paint_tile_w, tile_w);
+    sw(&paint_tile_h, tile_h);
+    sq(&paint_tile_buf, buf);
+}
+
+# Apply spreadMethod to map an offset (16.16) to [0, FX_ONE].
+fn paint_apply_spread(t) {
+    let m = lw(&paint_spread);
+    if m == 0 {
+        # pad
+        if t < 0 { return 0; }
+        if t > FX_ONE { return FX_ONE; }
+        return t;
+    }
+    if m == 2 {
+        # repeat: t mod 1
+        let r = t % FX_ONE;
+        if r < 0 { r = r + FX_ONE; }
+        return r;
+    }
+    # reflect
+    let p = t % (2 * FX_ONE);
+    if p < 0 { p = p + 2 * FX_ONE; }
+    if p > FX_ONE { p = 2 * FX_ONE - p; }
+    return p;
+}
+
+# Interpolate stops at offset t (16.16, already in [0,FX_ONE]).
+fn paint_stops_eval(t) {
+    let n = lw(&paint_stop_count);
+    if n <= 0 { return 0xFF000000; }
+    let first = lw(&paint_stops + 0);
+    let firstc = lw(&paint_stops + 4);
+    if t <= first { return firstc; }
+    let last_off = lw(&paint_stops + (n - 1) * PAINT_STOP_STRIDE + 0);
+    let last_col = lw(&paint_stops + (n - 1) * PAINT_STOP_STRIDE + 4);
+    if t >= last_off { return last_col; }
+    let i = 1;
+    while i < n {
+        let o = lw(&paint_stops + i * PAINT_STOP_STRIDE + 0);
+        if t <= o {
+            let o0 = lw(&paint_stops + (i - 1) * PAINT_STOP_STRIDE + 0);
+            let c0 = lw(&paint_stops + (i - 1) * PAINT_STOP_STRIDE + 4);
+            let c1 = lw(&paint_stops + i * PAINT_STOP_STRIDE + 4);
+            let span = o - o0;
+            if span <= 0 { return c1; }
+            let f = fx_div(t - o0, span);
+            return color_lerp(c0, c1, f);
+        }
+        i = i + 1;
+    }
+    return last_col;
+}
+
+# Lerp two 0xAARRGGBB colors by f in [0, FX_ONE].
+fn color_lerp(c0, c1, f) {
+    let a0 = (c0 >> 24) & 0xFF;
+    let r0 = (c0 >> 16) & 0xFF;
+    let g0 = (c0 >> 8)  & 0xFF;
+    let b0 =  c0        & 0xFF;
+    let a1 = (c1 >> 24) & 0xFF;
+    let r1 = (c1 >> 16) & 0xFF;
+    let g1 = (c1 >> 8)  & 0xFF;
+    let b1 =  c1        & 0xFF;
+    let inv = FX_ONE - f;
+    let aa = (a0 * inv + a1 * f) / FX_ONE;
+    let rr = (r0 * inv + r1 * f) / FX_ONE;
+    let gg = (g0 * inv + g1 * f) / FX_ONE;
+    let bb = (b0 * inv + b1 * f) / FX_ONE;
+    return ((aa & 0xFF) << 24) | ((rr & 0xFF) << 16) | ((gg & 0xFF) << 8) | (bb & 0xFF);
+}
+
+# Apply paint_opacity to alpha channel of ARGB.
+fn paint_apply_opacity(argb) {
+    let o = lw(&paint_opacity);
+    if o >= 256 { return argb; }
+    let a = (argb >> 24) & 0xFF;
+    a = (a * o) / 256;
+    return ((a & 0xFF) << 24) | (argb & 0xFFFFFF);
+}
+
+# Evaluate the active paint server at integer device pixel (px, py).
+# Returns 0xAARRGGBB (already opacity-multiplied).
+fn paint_eval(px, py) {
+    let t = lw(&paint_type);
+    if t == PAINT_TYPE_NONE { return 0; }
+    if t == PAINT_TYPE_SOLID {
+        return paint_apply_opacity(lw(&paint_solid_argb));
+    }
+    if t == PAINT_TYPE_PATTERN {
+        let tbuf = lq(&paint_tile_buf);
+        if tbuf != 0 {
+            let tw = lw(&paint_tile_w);
+            let th = lw(&paint_tile_h);
+            let tx = px % tw;
+            let ty = py % th;
+            if tx < 0 { tx = tx + tw; }
+            if ty < 0 { ty = ty + th; }
+            return paint_apply_opacity(lw(tbuf + (ty * tw + tx) * 4));
+        }
+        return paint_apply_opacity(lw(&paint_solid_argb));
+    }
+    let xfx = px * FX_ONE + FX_HALF;
+    let yfx = py * FX_ONE + FX_HALF;
+    if t == PAINT_TYPE_LINEAR {
+        let x1 = lw(&paint_p0x);
+        let y1 = lw(&paint_p0y);
+        let x2 = lw(&paint_p1x);
+        let y2 = lw(&paint_p1y);
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let len2 = fx_mul(dx, dx) + fx_mul(dy, dy);
+        if len2 <= 0 { return paint_apply_opacity(paint_stops_eval(0)); }
+        let dot = fx_mul(xfx - x1, dx) + fx_mul(yfx - y1, dy);
+        let u = fx_div(dot, len2);
+        u = paint_apply_spread(u);
+        return paint_apply_opacity(paint_stops_eval(u));
+    }
+    # radial: focal-point variant; if focal == center we use simple distance.
+    let cx = lw(&paint_p0x);
+    let cy = lw(&paint_p0y);
+    let r  = lw(&paint_radius);
+    if r <= 0 { return paint_apply_opacity(paint_stops_eval(FX_ONE)); }
+    let dx2 = xfx - cx;
+    let dy2 = yfx - cy;
+    let d2 = fx_mul(dx2, dx2) + fx_mul(dy2, dy2);
+    let d  = fx_sqrt(d2);
+    let u2 = fx_div(d, r);
+    u2 = paint_apply_spread(u2);
+    return paint_apply_opacity(paint_stops_eval(u2));
+}

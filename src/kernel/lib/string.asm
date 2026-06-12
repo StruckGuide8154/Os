@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - String and Memory Utility Functions
+; GritOS v3.0 - String and Memory Utility Functions
 ; ============================================================================
 bits 64
 

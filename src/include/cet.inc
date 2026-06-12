@@ -4,13 +4,13 @@
 ; Intel CET (Control-flow Enforcement Technology): shadow stack (SHSTK) and
 ; indirect branch tracking (IBT) detection + enable plumbing.
 ;
-; security_todo.md §3 — "CET shadow stack + IBT on supported CPUs."
+; security_todo.md §3 - "CET shadow stack + IBT on supported CPUs."
 ;
 ; RELATIONSHIP TO THE EXISTING SOFTWARE SHADOW STACK
-;   NexusOS already ships a *software* kernel shadow stack on the syscall path
+;   GritOS already ships a *software* kernel shadow stack on the syscall path
 ;   (shadow_stack.inc: the KPROLOGUE/KEPILOGUE macros mirror each return
 ;   address into the per-slot +0x1000 shadow page and trap a mismatch in
-;   kernel_panic_shadow). That mitigation is portable — it works on every CPU
+;   kernel_panic_shadow). That mitigation is portable - it works on every CPU
 ;   and under QEMU TCG. This file COMPLEMENTS it: where the silicon supports
 ;   hardware CET shadow stacks, the +0x1000 shadow page is exactly the SSP
 ;   region the CPU would use, and a future migration deletes the macros and
@@ -29,7 +29,7 @@
 ;
 ;   * ENABLE SCAFFOLD (gated on -dENABLE_CET, OFF by default): cet_enable sets
 ;     CR4.CET (bit 23) and programs IA32_S_CET (MSR 0x6A2) for the supervisor
-;     side — but ONLY after cet_detect has confirmed SHSTK support, so it is a
+;     side - but ONLY after cet_detect has confirmed SHSTK support, so it is a
 ;     hard no-op on any CPU/VM without CET and under QEMU TCG (qemu64 reports
 ;     neither bit). Fail-closed ordering: if detection says "no", cet_enable
 ;     returns without touching CR4 or any MSR, so the default flat-model boot
@@ -41,7 +41,7 @@
 ;     also needs a valid supervisor SSP (IA32_PL0_SSP, MSR 0x6A4) pointing at a
 ;     shadow-stack-typed page seeded with a supervisor-shadow-stack token, the
 ;     PTEs for that page marked shadow-stack (Dirty=1, R/W=0) in the paging
-;     structures, and CR0.WP=1 — all of which must be wired through the per-slot
+;     structures, and CR0.WP=1 - all of which must be wired through the per-slot
 ;     syscall-stack PT setup in usermode.asm/l3_install_syscall_stack_pt. That
 ;     is the invasive part and is left for a follow-up; the +0x1000 shadow page
 ;     reserved by the software design is the natural home for it. Until then
@@ -50,7 +50,7 @@
 ;     and -dENABLE_CET_IBT is also given), so enabling CET cannot trap a kernel
 ;     RET against an unseeded SSP and brick the boot.
 ;
-;   * Full IBT (an endbr64 at every indirect-branch target). NexusOS has many
+;   * Full IBT (an endbr64 at every indirect-branch target). GritOS has many
 ;     indirect jumps/calls (the syscall dispatcher's jmp [r12+HANDLER], the
 ;     app-callback trampolines, etc.); landing endbr64 on every one is a broad,
 ;     cross-file change that would touch files owned by other concurrent
@@ -75,15 +75,15 @@
 ; ============================================================================
 
 ; CET-related MSRs.
-IA32_U_CET    equ 0x6A0     ; user-mode CET config (scoped out — see header)
+IA32_U_CET    equ 0x6A0     ; user-mode CET config (scoped out - see header)
 IA32_S_CET    equ 0x6A2     ; supervisor-mode CET config
 IA32_PL0_SSP  equ 0x6A4     ; ring-0 shadow stack pointer (follow-up)
 IA32_PL3_SSP  equ 0x6A7     ; ring-3 shadow stack pointer (follow-up)
 
 ; IA32_S_CET bit layout (subset we care about).
-S_CET_SH_STK_EN equ (1 << 0)   ; enable supervisor shadow stack (NOT set yet — see header)
+S_CET_SH_STK_EN equ (1 << 0)   ; enable supervisor shadow stack (NOT set yet - see header)
 S_CET_WR_SHSTK_EN equ (1 << 1) ; allow WRSS
-S_CET_ENDBR_EN  equ (1 << 2)   ; enable IBT (NOT set yet — needs endbr64 markers)
+S_CET_ENDBR_EN  equ (1 << 2)   ; enable IBT (NOT set yet - needs endbr64 markers)
 S_CET_NO_TRACK_EN equ (1 << 4) ; honor no-track prefix
 
 ; CR4.CET is bit 23.
@@ -98,7 +98,7 @@ CET_P_PRESENT      equ 0x001
 CET_P_DIRTY        equ 0x040
 
 ; ---------------------------------------------------------------------------
-; cet_detect — probe CPUID(7,0) for SHSTK/IBT and record the result.
+; cet_detect - probe CPUID(7,0) for SHSTK/IBT and record the result.
 ;   Always safe to call on any long-mode CPU. Clobbers rax/rbx/rcx/rdx
 ;   (caller-saved at the kmain init site). No CR4/MSR writes here.
 ;
@@ -166,13 +166,13 @@ extern nk_pt_window_begin
 extern nk_pt_window_end
 
 ; ---------------------------------------------------------------------------
-; cet_enable — turn on the hardware CET enable bits the part supports.
+; cet_enable - turn on the hardware CET enable bits the part supports.
 ;   PRECONDITION: cet_detect has run (kmain calls it first). If hardware SHSTK
 ;   is unavailable, the existing software kernel shadow stack remains the active
 ;   fallback and the serial state reports that explicitly.
 ;
 ;   Scoped (see header): sets CR4.CET and programs IA32_S_CET, but leaves the
-;   supervisor shadow-stack ENABLE bit (SH_STK_EN) CLEAR — activating it needs
+;   supervisor shadow-stack ENABLE bit (SH_STK_EN) CLEAR - activating it needs
 ;   a seeded PL0_SSP + shadow-stack PTEs, which is the documented follow-up. So
 ;   today this establishes the CET machine state (CR4.CET on, S_CET present)
 ;   without arming a RET-check against an unseeded SSP. The IBT enable bit is

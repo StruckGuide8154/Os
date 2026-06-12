@@ -1,0 +1,74 @@
+# THREAT: acceptance of a revoked key, signer, or artifact that should be refused fail-closed.
+# GHL-native revocation policy kernel.
+#
+# These predicates keep revocation decisions fail-closed: unknown record shapes,
+# stale epochs, inactive records, or revoked signer matches are rejected.
+
+module "security_revocation_check";
+
+global security_revocation_subject_known;
+global security_revocation_reason_known;
+global security_revocation_record_valid;
+global security_revocation_epoch_fresh;
+global security_revocation_rejects_signer;
+global security_revocation_allows_artifact;
+
+const REV_SCHEMA_VERSION = 1;
+const REV_SUBJECT_SIGNER_KEY = 1;
+const REV_SUBJECT_DOMAIN = 2;
+const REV_SUBJECT_ARTIFACT = 3;
+const REV_REASON_COMPROMISE = 1;
+const REV_REASON_ROTATION = 2;
+const REV_REASON_SUPERSEDED = 3;
+const REV_STATE_ACTIVE = 1;
+const REV_MIN_EPOCH = 1;
+
+fn security_revocation_subject_known(subject_kind) {
+    if subject_kind >= REV_SUBJECT_SIGNER_KEY {
+        if subject_kind <= REV_SUBJECT_ARTIFACT {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn security_revocation_reason_known(reason) {
+    if reason >= REV_REASON_COMPROMISE {
+        if reason <= REV_REASON_SUPERSEDED {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn security_revocation_record_valid(schema, subject_kind, reason, epoch, effective_at, subject_id) {
+    if schema != REV_SCHEMA_VERSION { return 0; }
+    if security_revocation_subject_known(subject_kind) == 0 { return 0; }
+    if security_revocation_reason_known(reason) == 0 { return 0; }
+    if epoch < REV_MIN_EPOCH { return 0; }
+    if effective_at < REV_MIN_EPOCH { return 0; }
+    if subject_id == 0 { return 0; }
+    return 1;
+}
+
+fn security_revocation_epoch_fresh(artifact_epoch, required_epoch) {
+    if artifact_epoch < REV_MIN_EPOCH { return 0; }
+    if artifact_epoch < required_epoch { return 0; }
+    return 1;
+}
+
+fn security_revocation_rejects_signer(signer_key_id, signer_epoch, record_subject, record_epoch, record_state, record_subject_kind) {
+    if record_state != REV_STATE_ACTIVE { return 0; }
+    if record_subject_kind != REV_SUBJECT_SIGNER_KEY { return 0; }
+    if signer_epoch < record_epoch { return 1; }
+    if signer_key_id == record_subject { return 1; }
+    return 0;
+}
+
+fn security_revocation_allows_artifact(artifact_epoch, required_epoch, signer_key_id, record_subject, record_epoch, record_state) {
+    if security_revocation_epoch_fresh(artifact_epoch, required_epoch) == 0 { return 0; }
+    if security_revocation_rejects_signer(signer_key_id, artifact_epoch, record_subject, record_epoch, record_state, REV_SUBJECT_SIGNER_KEY) {
+        return 0;
+    }
+    return 1;
+}

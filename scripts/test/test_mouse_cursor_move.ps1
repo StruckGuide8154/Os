@@ -57,7 +57,7 @@ if (-not (Test-Path $DumpA) -or -not (Test-Path $DumpB)) {
 # Parse the two binary P6 PPMs and count/locate changed pixels.
 function Read-Ppm([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
-    # Header: "P6\n<w> <h>\n255\n" — find the third newline.
+    # Header: "P6\n<w> <h>\n255\n" - find the third newline.
     $nl = 0; $i = 0
     while ($nl -lt 3 -and $i -lt 64) { if ($bytes[$i] -eq 10) { $nl++ }; $i++ }
     $hdr = [System.Text.Encoding]::ASCII.GetString($bytes, 0, $i)

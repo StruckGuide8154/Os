@@ -1,0 +1,101 @@
+# GritHL image dispatch standard.
+#
+# Single entry-point for "draw this image at (x,y,w,h)" regardless of the
+# encoding. Apps and the theme system call `image_render(...)` and never
+# care whether the bytes are SVG, BMP, or a future format. Adding a new
+# format means writing one decoder lib and adding one branch here - every
+# app and every theme pack picks the new format up at once.
+#
+# Decoder contract
+# ----------------
+# A decoder exposes one function:
+#
+#     fn <fmt>_render(buf, len, x, y, w, h)
+#
+# where (x, y, w, h) is the target rect in absolute screen coords and
+# (buf, len) point to the encoded bytes. The decoder writes pixels to the
+# framebuffer (via render_rect or a future blit syscall) and returns 0 on
+# success or non-zero on failure. No hidden allocation, no caller-visible
+# state.
+#
+# Format ids - stable. New formats append.
+
+use svg2
+
+const IMG_UNKNOWN = 0
+const IMG_SVG     = 1
+const IMG_BMP     = 2
+# Reserved for follow-ups. Adding support = drop the decoder lib in, add
+# one `if fmt == IMG_PNG` branch in `image_render`, and bump nothing else.
+const IMG_PNG     = 3
+const IMG_JPG     = 4
+
+# Sniff format from the last 3 bytes of a null-terminated path. Uppercase
+# and lowercase both accepted because FAT16 stores 8.3 in uppercase but
+# user-facing paths are mixed. Returns IMG_UNKNOWN if the extension does
+# not match a known format.
+fn image_ext_eq3(p, a, b, c) {
+    # Read three bytes with an early-out at null so we never overread a
+    # short path like "a.s\0". Also require that the byte AFTER the
+    # extension is the null terminator - otherwise "longer.svgish" would
+    # mis-match as SVG.
+    let c1 = lb(p);
+    if c1 == 0 { return 0; }
+    let c2 = lb(p + 1);
+    if c2 == 0 { return 0; }
+    let c3 = lb(p + 2);
+    if c3 == 0 { return 0; }
+    if lb(p + 3) != 0 { return 0; }
+    if c1 >= 97 { if c1 <= 122 { c1 = c1 - 32; } }
+    if c2 >= 97 { if c2 <= 122 { c2 = c2 - 32; } }
+    if c3 >= 97 { if c3 <= 122 { c3 = c3 - 32; } }
+    if c1 != a { return 0; }
+    if c2 != b { return 0; }
+    if c3 != c { return 0; }
+    return 1;
+}
+
+fn image_format_from_path(path) {
+    # Walk to the last '.' in the null-terminated path.
+    let p = path;
+    let dot = 0;
+    while 1 {
+        let c = lb(p);
+        if c == 0 { break; }
+        if c == 46 { dot = p + 1; }
+        p = p + 1;
+    }
+    if dot == 0 { return IMG_UNKNOWN; }
+    if image_ext_eq3(dot, 83, 86, 71) == 1 { return IMG_SVG; }
+    if image_ext_eq3(dot, 66, 77, 80) == 1 { return IMG_BMP; }
+    if image_ext_eq3(dot, 80, 78, 71) == 1 { return IMG_PNG; }
+    if image_ext_eq3(dot, 74, 80, 71) == 1 { return IMG_JPG; }
+    return IMG_UNKNOWN;
+}
+
+# Dispatch to the right decoder. `fmt` is one of IMG_*. Unsupported
+# formats return -1 so callers can choose between a fallback (e.g.
+# rendering an outline) and a hard error.
+fn image_render(buf, len, fmt, x, y, w, h) {
+    if fmt == IMG_SVG {
+        svg_render(buf, len, x, y, w, h);
+        return 0;
+    }
+    if fmt == IMG_BMP {
+        # bmp_render not yet implemented; see docs/theme-pack.md for the
+        # decoder contract. Until a decoder lands, BMP returns "unsupported"
+        # so theme packs that ship BMP assets fall through to icon_render's
+        # outline fallback rather than crashing.
+        return -1;
+    }
+    if fmt == IMG_PNG { return -1; }
+    if fmt == IMG_JPG { return -1; }
+    return -1;
+}
+
+# Convenience: dispatch by path. Equivalent to
+# `image_render(buf, len, image_format_from_path(path), x, y, w, h)`.
+fn image_render_path(path, buf, len, x, y, w, h) {
+    let fmt = image_format_from_path(path);
+    return image_render(buf, len, fmt, x, y, w, h);
+}

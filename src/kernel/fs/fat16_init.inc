@@ -18,7 +18,7 @@ FN_BEGIN fat16_init, 0, 0, FN_RET_SCALAR
     test eax, eax
     jnz .try_next_drive
 
-    ; Check partition signature and NexusOS FAT image marker. In UEFI QEMU the
+    ; Check partition signature and GritOS FAT image marker. In UEFI QEMU the
     ; ESP is also exposed as an ATA disk; it can contain a valid-looking boot
     ; sector at this LBA, so a signature-only probe can bind the file manager
     ; to the wrong disk.

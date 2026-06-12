@@ -1,6 +1,6 @@
 ---
 name: amd-dcn-probe-prereq
-description: "amd_dcn_probe is a prerequisite for gfx_bringup (PCI MEM-decode + BAR0 UC alias), not a diag — never gate it behind -DiagLegacy."
+description: "amd_dcn_probe is a prerequisite for gfx_bringup (PCI MEM-decode + BAR0 UC alias), not a diag - never gate it behind -DiagLegacy."
 metadata: 
   node_type: memory
   type: feedback
@@ -12,22 +12,22 @@ does TWO things the SMN proxy depends on, even though its name says "probe":
 
 1. **Enables PCI MEM-decode + bus-master** on the AMD display device's
    Command register. Without bit 1 set, the BAR0 register window is dead
-   — reads return `0xFFFFFFFF`, writes black-hole.
+   - reads return `0xFFFFFFFF`, writes black-hole.
 2. **Installs the UC alias** for BAR0 at `AMD_DCN_UC_VBASE` (covers 8 MiB
    including the NBIO INDEX2/DATA2 pair at `BAR0+0x38/0x3C`).
 
 `gfx_bringup` and everything downstream (`smn_r32/w32`, `smu_msg_send`,
 `gmc_init`, `cp_ring_alloc`) **cannot work without both**. The GFX MMIO
-helpers read raw `amd_display_bar0` — they do not set up decode or UC
+helpers read raw `amd_display_bar0` - they do not set up decode or UC
 themselves.
 
 ## The trap
 
 The 2026-05-25 DMUB-park commit wrapped the diag block (which contained
-the `call amd_dcn_probe` site) in `%ifdef NEXUS_DIAG_LEGACY`. With
+the `call amd_dcn_probe` site) in `%ifdef GRIT_DIAG_LEGACY`. With
 `-Gfx` alone, `amd_dcn_probe` then never ran, every SMN read returned
 `0xFFFFFFFF`, and stage H died with `smu=FFFFFFFF test=0`. Looked
-exactly like "NBIO proxy wedged" or "MP1 base wrong" — neither was true.
+exactly like "NBIO proxy wedged" or "MP1 base wrong" - neither was true.
 
 ## Symptom recognition
 
@@ -39,12 +39,12 @@ base or proxy logic.**
 ## Fix shape
 
 `main.asm` now calls `amd_dcn_probe` unconditionally inside the
-`%ifdef NEXUS_GFX_BRINGUP` block, right before `call gfx_bringup`.
+`%ifdef GRIT_GFX_BRINGUP` block, right before `call gfx_bringup`.
 Don't move it back into a diag-only gate. If the diag block gets
 refactored, the bring-up call site stays put.
 
 ## Related
 
-- [[feedback_mp1_base_verified]] — don't "fix" MP1 base from Linux headers.
-- [[amd_dcn_bar0_uc]] — the UC alias mechanism itself.
-- `docs/gpu-bringup-verified.md` — the canonical state=4 baseline.
+- [[feedback_mp1_base_verified]] - don't "fix" MP1 base from Linux headers.
+- [[amd_dcn_bar0_uc]] - the UC alias mechanism itself.
+- `docs/gpu-bringup-verified.md` - the canonical state=4 baseline.

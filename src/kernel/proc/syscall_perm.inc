@@ -5,16 +5,16 @@
 ; Extracted verbatim from syscall.asm (textual %include split, no logic change).
 ; Lines below remain in syscall_entry's local-label scope where applicable.
 ;
-; Stage 2b NHLK migration note (docs/nhlk-syscall-rearchitecture.md): the
-; HMAC/cap-mask leaf cluster moved to src/kernel/nexushlk/syscall_secure.nxh.
+; Stage 2b GHLK migration note (docs/ghlk-syscall-rearchitecture.md): the
+; HMAC/cap-mask leaf cluster moved to src/kernel/grithlk/syscall_secure.ghl.
 ; The helpers in THIS file (sc_build_allow_bitmap, sc_reset_allow_bitmap,
 ; sc_slot_perm_ensure/_generate/_apply_blob, kernel_apply_app_manifest) are
 ; INTENTIONALLY kept in asm: their loop bounds / row strides are
 ; syscall_table_count and SC_ALLOW_BYTES, which are NASM ASSEMBLE-TIME `equ`s
-; derived from the syscall table — not stable NHLK numeric literals. NHLK
+; derived from the syscall table - not stable GHLK numeric literals. GHLK
 ; `const`/`state`/bounds-check sizes must be literals, so a zero-asm port would
 ; have to hardcode the table count, a fragility/security regression if the
-; table ever grows. Revisit once nxhc.py can bind a NASM symbol as a count.
+; table ever grows. Revisit once gritc.py can bind a NASM symbol as a count.
 ; ============================================================================
 section .text
 ; ----------------------------------------------------------------------------
@@ -24,15 +24,15 @@ section .text
 ; per-app explicit deny list (security_todo.md §2, "Manifest declares syscall
 ; set, not just cap bits"). Two passes:
 ;   1. For each syscall table row i, set bit i iff the row's CAP tag is fully
-;      covered by cap_mask (row.cap & mask == row.cap) — i.e. the cap gate
+;      covered by cap_mask (row.cap & mask == row.cap) - i.e. the cap gate
 ;      would let this slot reach syscall i. This makes the bitmap the exact
 ;      cap-implied call set, no hand-authoring.
 ;   2. Walk the app's deny list (app_syscall_deny_table[app_id - APP_MIN_ID],
 ;      a run of syscall numbers ended by SC_DENY_LIST_END) and CLEAR each named
-;      bit — the finer-than-caps trim. Notepad denies SYS_FS_DELETE here.
+;      bit - the finer-than-caps trim. Notepad denies SYS_FS_DELETE here.
 ; app_id out of [APP_MIN_ID, APP_MAX_ID] skips pass 2 (cap-derived set only).
 ;
-; Internal helper (plain label, not global — so check_coverage.py doesn't
+; Internal helper (plain label, not global - so check_coverage.py doesn't
 ; require FN_BEGIN, matching sc_record_strike). Preserves all caller regs.
 ; ----------------------------------------------------------------------------
 sc_build_allow_bitmap:
@@ -123,7 +123,7 @@ sc_build_allow_bitmap:
     ret
 
 ; ----------------------------------------------------------------------------
-; sc_reset_allow_bitmap(rdi=slot) — set the slot's bitmap back to all-ones
+; sc_reset_allow_bitmap(rdi=slot) - set the slot's bitmap back to all-ones
 ; (unrestricted), the BSS default. Used on slot recycle so a recycled slot
 ; isn't stuck with the previous tenant's narrowed set before its manifest is
 ; re-applied. Preserves all caller regs.
@@ -151,12 +151,12 @@ sc_reset_allow_bitmap:
 
 %ifdef ENABLE_SYSCALL_PERM
 ; ----------------------------------------------------------------------------
-; Heterogeneous syscall numbering per slot — generation (security_todo.md §12).
+; Heterogeneous syscall numbering per slot - generation (security_todo.md §12).
 ;
 ; sc_slot_perm_ensure(edi=slot): if this slot's permutation has not been
 ; generated yet (sentinel sc_slot_perm_ready[slot]==0), generate it once. The
 ; lazy first-use trigger lives on the dispatch path so the gated build is
-; self-contained — it needs no edit to the contended usermode.asm slot-init
+; self-contained - it needs no edit to the contended usermode.asm slot-init
 ; path. THE LOADER HOOK (documented, scoped out) would instead call
 ; sc_slot_perm_generate from l3_copy_app_blob_to_slot, right after
 ; l3_derive_slot_key (usermode.asm), and ALSO rewrite the app's SYS_* constants
@@ -171,7 +171,7 @@ sc_reset_allow_bitmap:
 ; persisted artifact is the INVERSE: inv[app_visible]=real_row. Preserves all
 ; caller regs.
 ;
-; Internal plain-label helpers (no FN_BEGIN — matches sc_build_allow_bitmap),
+; Internal plain-label helpers (no FN_BEGIN - matches sc_build_allow_bitmap),
 ; so check_coverage.py doesn't require coverage and they carry no FN gate.
 ; ----------------------------------------------------------------------------
 extern l3_slot_key
@@ -295,7 +295,7 @@ sc_slot_perm_generate:
     jmp .spg_inv
 .spg_inv_done:
     ; Mark the tables BUILT (sc_slot_perm_ready) so a concurrent/later
-    ; sc_slot_perm_ensure does not re-shuffle this slot with a fresh seed —
+    ; sc_slot_perm_ensure does not re-shuffle this slot with a fresh seed -
     ; a second generation would no longer match the FORWARD numbers already
     ; baked into the running blob. Note: "tables built" is NOT "safe to apply".
     ; The dispatcher must not consume sc_slot_perm_inv[] until the blob has
@@ -344,7 +344,7 @@ sc_slot_perm_generate:
     ret
 
 ; ----------------------------------------------------------------------------
-; sc_slot_perm_apply_blob(edi=slot, rsi=blob_base) — rewrite this slot's copy
+; sc_slot_perm_apply_blob(edi=slot, rsi=blob_base) - rewrite this slot's copy
 ; of the app blob so every syscall-number immediate carries the slot's
 ; FORWARD-permuted number (real_row -> app_visible). The dispatcher's inverse
 ; map then recovers the real row. Called from l3_copy_app_blob_to_slot
@@ -365,7 +365,7 @@ sc_slot_perm_generate:
 ; Writes go through USER_ACCESS brackets because the slot arena is PTE.U=1.
 ; Preserves all caller regs.
 ;
-; Internal plain-label helper (no FN_BEGIN / not global — matches
+; Internal plain-label helper (no FN_BEGIN / not global - matches
 ; sc_slot_perm_generate/_ensure, so check_coverage.py requires no FN gate).
 ; ----------------------------------------------------------------------------
 sc_slot_perm_apply_blob:
@@ -432,7 +432,7 @@ sc_slot_perm_apply_blob:
 ; kernel_apply_app_manifest(rdi=slot, rsi=app_id)
 ;
 ; Kernel-only helper that sets slot_cap_mask[slot] = manifest(app_id).
-; Called from the user-side app_launch (which runs in CPL0 — see the SER
+; Called from the user-side app_launch (which runs in CPL0 - see the SER
 ; macros it uses) right after wm_create_window_ex returns a slot. This is
 ; the *required* enforcement point: every launch path the system supports
 ; ends up here, so apps can't run a single syscall outside their manifest.

@@ -7,8 +7,8 @@ BMP_MAGIC16     equ 0x4D42                  ; 'BM'
 XML_MAGIC16     equ 0x3F3C                  ; '<?'  catches <?xml ...?>
 SVG_MAGIC32     equ 0x67767321              ; '<svg' little-endian probe
 
-; Control bar layout. Kept in lockstep with media.nxh — change one, change
-; the other. Both files use these names so hit-test (nxh) and drawing
+; Control bar layout. Kept in lockstep with media.ghl - change one, change
+; the other. Both files use these names so hit-test (ghl) and drawing
 ; (here) cannot drift apart.
 MEDIA_BAR_H         equ 26
 MEDIA_BTN_W         equ 28
@@ -18,7 +18,7 @@ MEDIA_BTN_FWD_X     equ 56
 MEDIA_SCRUB_X       equ 88
 MEDIA_TIME_W        equ 56
 
-; Palette — centralised so a theme change touches one block.
+; Palette - centralised so a theme change touches one block.
 MEDIA_COL_BAR_BG    equ 0x00131620
 MEDIA_COL_BTN_BG    equ 0x002A6FFF
 MEDIA_COL_TRACK_BG  equ 0x004B5563
@@ -51,7 +51,7 @@ MEDIA_SVG_TWIST     equ 0x004F46E5  ; deep lower-right twist
 ; doubles as a CPU pointer) sized to the file. Indexed by window id; ptr 0 =
 ; none, in which case the renderer falls back to the slot buffer. `pages` is
 ; the run length kept for page_free_contig on window close.
-; (MEDIA_FULL_BUF_MAX_SZ lives in constants.inc — used by the loader.)
+; (MEDIA_FULL_BUF_MAX_SZ lives in constants.inc - used by the loader.)
 extern page_alloc_contig
 extern page_free_contig
 extern fat16_get_file_size
@@ -73,7 +73,7 @@ global nx_media_blit_scaled
 
 
 ; ---------------------------------------------------------------------------
-; §2  Codec dispatch — app_media_draw
+; §2  Codec dispatch - app_media_draw
 ;
 ; RDI = window struct ptr (kernel address).
 ; Probes the 32-bit magic at the start of the slot's media buffer and
@@ -98,7 +98,7 @@ app_media_draw:
     lea r12, [rax + APP_SLOT_BMP_FILE_OFF]   ; file buffer
 
     ; SMAP: app_media_draw runs in KERNEL context (registered as a window draw
-    ; fn — see header) yet reads the slot's media buffer (user, PTE.U=1) every
+    ; fn - see header) yet reads the slot's media buffer (user, PTE.U=1) every
     ; frame and the blitters below stream slot pixels in tight loops. Arm AC for
     ; the whole body; the blitters / advance_frame it calls never touch AC, so
     ; it propagates, and they also write the kernel back buffer (fine with AC).

@@ -20,7 +20,7 @@ extern scr_width
 extern scr_height
 extern scr_pitch_q
 
-; SMP work queue (proc/workqueue.asm) — the flip blit runs on an AP
+; SMP work queue (proc/workqueue.asm) - the flip blit runs on an AP
 extern workqueue_submit
 extern workqueue_wait_timeout
 
@@ -94,7 +94,7 @@ render_mark_full:
 ; frame's job is drained before the shadows are rewritten, so an AP never
 ; reads them mid-update. The AP blits from the live backbuffer, so a frame
 ; rendered concurrently can tear within a rect; the next flush repaints it.
-; Single-core builds degrade cleanly — workqueue_submit runs the job inline.
+; Single-core builds degrade cleanly - workqueue_submit runs the job inline.
 render_flush:
     push rax
     push rbx

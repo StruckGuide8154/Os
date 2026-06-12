@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Stage 2 Bootloader
+; GritOS v3.0 - Stage 2 Bootloader
 ; Loaded at 0x7E00 by MBR. Enters long mode and jumps to kernel at 0x100000.
 ; Flow: A20 -> E820 -> VESA -> Load Kernel -> Paging -> PM -> LM -> Kernel
 ; ============================================================================
@@ -7,7 +7,7 @@
 bits 16
 org 0x7E00
 %include "src/include/constants.inc"
-; BIOS firmware-interface magics (E820 / VBE / EFER) — named + spec-cited.
+; BIOS firmware-interface magics (E820 / VBE / EFER) - named + spec-cited.
 %include "src/include/bios_boot.inc"
 
 KERNEL_CHUNK_SEG     equ 0x1000
@@ -19,7 +19,7 @@ KERNEL_CHUNK_SECTORS equ 256        ; 128KB bounce buffer below 1MB
 STAGE2_LM_STACK_TOP  equ 0x200000
 
 stage2_start:
-    dw 0x4E58               ; 'NX' magic number (verified by MBR)
+    dw 0x4752               ; 'NX' magic number (verified by MBR)
 
 stage2_entry:
     ; Save boot drive (passed in DL by MBR)

@@ -1,0 +1,411 @@
+# GritHL SVG2 - filter graph evaluation.
+#
+# Companion to filter_graph.ghl: takes the parsed primitive list and runs it
+# top-to-bottom over arena ARGB buffers, then composites the last primitive's
+# output back into the device-space filter region.
+#
+# Every primitive writes one arena buffer of (fg_region_w x fg_region_h)
+# pixels; pixel (0,0) maps to device (fg_region_x, fg_region_y). Inputs are
+# resolved through fg_in1/fg_in2 (see filter_graph.ghl input-id encoding).
+#
+# Primitive math here: feFlood, feMerge, feBlend, feComposite. feOffset /
+# feGaussianBlur / feColorMatrix delegate to their own modules.
+
+use svg2.core
+use svg2.fixed
+use svg2.matrix
+use svg2.render_ctx
+use svg2.filter_arena
+use svg2.filter_blur
+use svg2.filter_color
+use svg2.filter_graph
+use svg2.filter_turbulence
+
+# Source-over composite of one src ARGB pixel onto one dst ARGB pixel.
+fn fe_over(src, dst) {
+    let sa = (src >> 24) & 0xFF;
+    if sa == 255 { return src; }
+    if sa == 0 { return dst; }
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let da = (dst >> 24) & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let inv = 255 - sa;
+    let oa = sa + (da * inv) / 255;
+    let orr = sr + (dr * inv) / 255;
+    let og = sg + (dg * inv) / 255;
+    let ob = sb + (db * inv) / 255;
+    if oa > 255 { oa = 255; }
+    if orr > 255 { orr = 255; }
+    if og > 255 { og = 255; }
+    if ob > 255 { ob = 255; }
+    return (oa << 24) | (orr << 16) | (og << 8) | ob;
+}
+
+# Resolve an input id to an arena buffer pointer. FG_IN_PRIOR uses
+# `prior` (the previous primitive's output, or SourceGraphic for prim 0).
+fn fg_input_buf(in_id, prior) {
+    if in_id == FG_IN_SOURCEGRAPHIC { return lq(&fg_src_buf); }
+    if in_id == FG_IN_SOURCEALPHA { return lq(&fg_alpha_buf); }
+    if in_id == FG_IN_PRIOR { return prior; }
+    if in_id == FG_IN_NONE { return 0; }
+    if in_id >= 0 { return fg_buf_get(in_id); }
+    return lq(&fg_src_buf);
+}
+
+# Copy `n` ARGB pixels src -> dst.
+fn fg_copy(src, dst, n) {
+    let i = 0;
+    while i < n {
+        sw(dst + i * 4, lw(src + i * 4));
+        i = i + 1;
+    }
+}
+
+# feOffset: shift src by (dx,dy) device pixels into a zeroed dst.
+fn fg_do_offset(src, dst, w, h, dx, dy) {
+    let total = w * h;
+    let i = 0;
+    while i < total { sw(dst + i * 4, 0); i = i + 1; }
+    let y = 0;
+    while y < h {
+        let sy = y - dy;
+        if sy >= 0 {
+            if sy < h {
+                let x = 0;
+                while x < w {
+                    let sx = x - dx;
+                    if sx >= 0 {
+                        if sx < w {
+                            sw(dst + (y * w + x) * 4, lw(src + (sy * w + sx) * 4));
+                        }
+                    }
+                    x = x + 1;
+                }
+            }
+        }
+        y = y + 1;
+    }
+}
+
+# feFlood: fill dst with a constant premultiplied-by-coverage ARGB.
+fn fg_do_flood(dst, w, h, argb) {
+    let total = w * h;
+    let i = 0;
+    while i < total { sw(dst + i * 4, argb); i = i + 1; }
+}
+
+# feMerge: stack each <feMergeNode in=""> source-over into a zeroed dst.
+fn fg_do_merge(node, idx, dst, w, h, prior) {
+    let total = w * h;
+    let i = 0;
+    while i < total { sw(dst + i * 4, 0); i = i + 1; }
+    let child = xml_first_child(node);
+    while child >= 0 {
+        if svg_tag_is(child, "feMergeNode", 11) == 1 {
+            let il = fg_read_attr(child, "in", 2);
+            let in_id = fg_resolve_input(il, idx);
+            let sbuf = fg_input_buf(in_id, prior);
+            if sbuf != 0 {
+                let k = 0;
+                while k < total {
+                    sw(dst + k * 4, fe_over(lw(sbuf + k * 4), lw(dst + k * 4)));
+                    k = k + 1;
+                }
+            }
+        }
+        child = xml_next_sibling(child);
+    }
+}
+
+# Separable-channel blend of one src/dst pair under FG_BLEND_*.
+fn fe_blend_chan(mode, cs, cd) {
+    if mode == 1 { return (cs * cd) / 255; }                 # multiply
+    if mode == 2 { return cs + cd - (cs * cd) / 255; }       # screen
+    if mode == 3 {                                           # darken
+        if cs < cd { return cs; }
+        return cd;
+    }
+    if mode == 4 {                                           # lighten
+        if cs > cd { return cs; }
+        return cd;
+    }
+    return cs;                                               # normal
+}
+
+# feBlend: SVG blend of src over dst. Alpha is always source-over.
+fn fg_do_blend(src, dst_in, out, w, h, mode) {
+    let total = w * h;
+    let i = 0;
+    while i < total {
+        let s = lw(src + i * 4);
+        let d = lw(dst_in + i * 4);
+        let sa = (s >> 24) & 0xFF;
+        let da = (d >> 24) & 0xFF;
+        let sr = (s >> 16) & 0xFF;
+        let sg = (s >> 8) & 0xFF;
+        let sb = s & 0xFF;
+        let dr = (d >> 16) & 0xFF;
+        let dg = (d >> 8) & 0xFF;
+        let db = d & 0xFF;
+        # SVG feBlend: cr = (1-da)*cs + (1-sa)*cd + sa*da*B(cs,cd)
+        let isa = 255 - sa;
+        let ida = 255 - da;
+        let br = fe_blend_chan(mode, sr, dr);
+        let bg = fe_blend_chan(mode, sg, dg);
+        let bb = fe_blend_chan(mode, sb, db);
+        let orr = (ida * sr) / 255 + (isa * dr) / 255 + ((sa * da) / 255 * br) / 255;
+        let og = (ida * sg) / 255 + (isa * dg) / 255 + ((sa * da) / 255 * bg) / 255;
+        let ob = (ida * sb) / 255 + (isa * db) / 255 + ((sa * da) / 255 * bb) / 255;
+        let oa = sa + (da * isa) / 255;
+        if oa > 255 { oa = 255; }
+        if orr > 255 { orr = 255; }
+        if og > 255 { og = 255; }
+        if ob > 255 { ob = 255; }
+        sw(out + i * 4, (oa << 24) | (orr << 16) | (og << 8) | ob);
+        i = i + 1;
+    }
+}
+
+# Porter-Duff Fa/Fb factor pick for FG_COMP_*. Returns Fa in the low 16
+# bits and Fb in the high 16 bits, both 0..255.
+fn fe_comp_factors(op, sa, da) {
+    let fa = 0;
+    let fb = 0;
+    if op == 0 { fa = 255;       fb = 255 - sa; }     # over
+    if op == 1 { fa = da;        fb = 0; }            # in
+    if op == 2 { fa = 255 - da;  fb = 0; }            # out
+    if op == 3 { fa = da;        fb = 255 - sa; }     # atop
+    if op == 4 { fa = 255 - da;  fb = 255 - sa; }     # xor
+    return (fb << 16) | (fa & 0xFFFF);
+}
+
+# feComposite: Porter-Duff (over/in/out/atop/xor) or arithmetic.
+fn fg_do_composite(src, dst_in, out, w, h, op, k1, k2, k3, k4) {
+    let total = w * h;
+    let i = 0;
+    while i < total {
+        let s = lw(src + i * 4);
+        let d = lw(dst_in + i * 4);
+        let sa = (s >> 24) & 0xFF;
+        let da = (d >> 24) & 0xFF;
+        let sr = (s >> 16) & 0xFF;
+        let sg = (s >> 8) & 0xFF;
+        let sb = s & 0xFF;
+        let dr = (d >> 16) & 0xFF;
+        let dg = (d >> 8) & 0xFF;
+        let db = d & 0xFF;
+        let oa = 0;
+        let orr = 0;
+        let og = 0;
+        let ob = 0;
+        if op == 5 {
+            # arithmetic: result = k1*s*d + k2*s + k3*d + k4
+            # k* are 16.16; channels 0..255; k1 term divides by 255.
+            let bias = (k4 * 255) / FX_ONE;
+            oa = (k1 * sa * da) / FX_ONE / 255 + (k2 * sa) / FX_ONE + (k3 * da) / FX_ONE + bias;
+            orr = (k1 * sr * dr) / FX_ONE / 255 + (k2 * sr) / FX_ONE + (k3 * dr) / FX_ONE + bias;
+            og = (k1 * sg * dg) / FX_ONE / 255 + (k2 * sg) / FX_ONE + (k3 * dg) / FX_ONE + bias;
+            ob = (k1 * sb * db) / FX_ONE / 255 + (k2 * sb) / FX_ONE + (k3 * db) / FX_ONE + bias;
+        } else {
+            let fac = fe_comp_factors(op, sa, da);
+            let fa = fac & 0xFFFF;
+            let fb = (fac >> 16) & 0xFFFF;
+            oa = (sa * fa) / 255 + (da * fb) / 255;
+            orr = (sr * fa) / 255 + (dr * fb) / 255;
+            og = (sg * fa) / 255 + (dg * fb) / 255;
+            ob = (sb * fa) / 255 + (db * fb) / 255;
+        }
+        if oa < 0 { oa = 0; } if oa > 255 { oa = 255; }
+        if orr < 0 { orr = 0; } if orr > 255 { orr = 255; }
+        if og < 0 { og = 0; } if og > 255 { og = 255; }
+        if ob < 0 { ob = 0; } if ob > 255 { ob = 255; }
+        sw(out + i * 4, (oa << 24) | (orr << 16) | (og << 8) | ob);
+        i = i + 1;
+    }
+}
+
+# feTurbulence: fill dst with fractal/turbulence noise. Each ARGB channel is
+# an independent noise channel. Sampled in device space - the user->device
+# scale is folded into the base frequency.
+fn fg_do_turbulence(dst, w, h, ox, oy, oct, fractal, bfx, bfy) {
+    let sxa = fx_abs(lw(&mat_cur_a));
+    let sya = fx_abs(lw(&mat_cur_d));
+    if sxa < 1 { sxa = FX_ONE; }
+    if sya < 1 { sya = FX_ONE; }
+    let dfx = fx_div(bfx, sxa);
+    let dfy = fx_div(bfy, sya);
+    turb_init(0 - bfx);
+    let y = 0;
+    while y < h {
+        let dy = fx_from_i(oy + y);
+        let x = 0;
+        while x < w {
+            let dx = fx_from_i(ox + x);
+            let vx = fx_mul(dx, dfx);
+            let vy = fx_mul(dy, dfy);
+            let nr = (turb_fractal(0, vx, vy, oct, fractal) * 255) / FX_ONE;
+            let ng = (turb_fractal(1, vx, vy, oct, fractal) * 255) / FX_ONE;
+            let nb = (turb_fractal(2, vx, vy, oct, fractal) * 255) / FX_ONE;
+            let na = (turb_fractal(3, vx, vy, oct, fractal) * 255) / FX_ONE;
+            sw(dst + (y * w + x) * 4, (na << 24) | (nr << 16) | (ng << 8) | nb);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+# feDropShadow: blurred, tinted, offset copy of the input alpha placed under
+# the input itself.
+fn fg_do_dropshadow(src, dst, w, h, sigma, flood, dx, dy) {
+    let total = w * h;
+    let i = 0;
+    while i < total { sw(dst + i * 4, 0); i = i + 1; }
+    let temp = filter_arena_argb(w, h);
+    if temp == 0 {
+        fg_copy(src, dst, total);
+        return;
+    }
+    let flood_a = (flood >> 24) & 0xFF;
+    let flood_rgb = flood & 0xFFFFFF;
+    let k = 0;
+    while k < total {
+        let sa = (lw(src + k * 4) >> 24) & 0xFF;
+        let ta = (sa * flood_a) / 255;
+        sw(temp + k * 4, (ta << 24) | flood_rgb);
+        k = k + 1;
+    }
+    blur_apply_buf(temp, lq(&fg_scratch), w, h, sigma);
+    fg_do_offset(temp, dst, w, h, dx, dy);
+    let m = 0;
+    while m < total {
+        sw(dst + m * 4, fe_over(lw(src + m * 4), lw(dst + m * 4)));
+        m = m + 1;
+    }
+}
+
+# Evaluate primitive `idx`; `prior` is the previous primitive's buffer.
+# Returns the buffer this primitive produced (0 on allocation failure).
+fn fg_eval_primitive(idx, prior) {
+    let w = lw(&fg_region_w);
+    let h = lw(&fg_region_h);
+    let op = fg_op_get(idx);
+    let node = lw(&fg_node + idx * 4);
+    let dst = filter_arena_argb(w, h);
+    if dst == 0 { return 0; }
+    fg_buf_set(idx, dst);
+
+    let in1 = lw(&fg_in1 + idx * 4);
+    let src = fg_input_buf(in1, prior);
+
+    if op == FG_OP_OFFSET {
+        if src == 0 { return dst; }
+        fg_do_offset(src, dst, w, h,
+                     lw(&fg_param_a + idx * 4), lw(&fg_param_b + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_BLUR {
+        if src == 0 { return dst; }
+        fg_copy(src, dst, w * h);
+        blur_apply_buf(dst, lq(&fg_scratch), w, h, lw(&fg_param_a + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_CMATRIX {
+        if src == 0 { return dst; }
+        fg_copy(src, dst, w * h);
+        cmat_parse(node);
+        cmat_apply_buf(dst, w, h);
+        return dst;
+    }
+    if op == FG_OP_FLOOD {
+        fg_do_flood(dst, w, h, lw(&fg_param_a + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_MERGE {
+        fg_do_merge(node, idx, dst, w, h, prior);
+        return dst;
+    }
+    if op == FG_OP_BLEND {
+        let in2 = lw(&fg_in2 + idx * 4);
+        let src2 = fg_input_buf(in2, prior);
+        if src == 0 { return dst; }
+        if src2 == 0 { fg_copy(src, dst, w * h); return dst; }
+        fg_do_blend(src, src2, dst, w, h, lw(&fg_param_a + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_COMPOSITE {
+        let in2c = lw(&fg_in2 + idx * 4);
+        let src2c = fg_input_buf(in2c, prior);
+        if src == 0 { return dst; }
+        if src2c == 0 { fg_copy(src, dst, w * h); return dst; }
+        fg_do_composite(src, src2c, dst, w, h,
+                        lw(&fg_param_b + idx * 4),
+                        lw(&fg_k1 + idx * 4), lw(&fg_k2 + idx * 4),
+                        lw(&fg_k3 + idx * 4), lw(&fg_k4 + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_TURBULENCE {
+        fg_do_turbulence(dst, w, h, lw(&fg_region_x), lw(&fg_region_y),
+                         lw(&fg_param_a + idx * 4), lw(&fg_param_b + idx * 4),
+                         lw(&fg_k1 + idx * 4), lw(&fg_k2 + idx * 4));
+        return dst;
+    }
+    if op == FG_OP_DROPSHADOW {
+        if src == 0 { return dst; }
+        fg_do_dropshadow(src, dst, w, h, lw(&fg_param_a + idx * 4),
+                         lw(&fg_param_b + idx * 4),
+                         lw(&fg_k1 + idx * 4), lw(&fg_k2 + idx * 4));
+        return dst;
+    }
+    # Unknown op: pass src through.
+    if src != 0 { fg_copy(src, dst, w * h); }
+    return dst;
+}
+
+# Build the SourceAlpha buffer from SourceGraphic (RGB cleared, A kept).
+fn fg_build_alpha() {
+    let src = lq(&fg_src_buf);
+    let dst = lq(&fg_alpha_buf);
+    if src == 0 { return; }
+    if dst == 0 { return; }
+    let total = lw(&fg_region_w) * lw(&fg_region_h);
+    let i = 0;
+    while i < total {
+        sw(dst + i * 4, lw(src + i * 4) & 0xFF000000);
+        i = i + 1;
+    }
+}
+
+# Run the whole parsed graph; returns the last primitive's output buffer
+# (or SourceGraphic if the graph is empty).
+fn fg_evaluate() {
+    let n = lw(&fg_count);
+    fg_build_alpha();
+    let prior = lq(&fg_src_buf);
+    let i = 0;
+    while i < n {
+        let produced = fg_eval_primitive(i, prior);
+        if produced != 0 { prior = produced; }
+        i = i + 1;
+    }
+    return prior;
+}
+
+# Run the whole parsed graph and composite the result back to the screen
+# through the active render context.
+fn fg_evaluate_and_blit() {
+    let prior = fg_evaluate();
+    # Composite `prior` back into the device-space filter region.
+    let w = lw(&fg_region_w);
+    let h = lw(&fg_region_h);
+    let ox = lw(&fg_region_x);
+    let oy = lw(&fg_region_y);
+    let y = 0;
+    while y < h {
+        fctx_emit_span_argb(ox, oy + y, w, prior + y * w * 4);
+        y = y + 1;
+    }
+}

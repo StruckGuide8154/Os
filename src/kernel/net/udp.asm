@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS UDP protocol module
+; GritOS UDP protocol module
 ; ----------------------------------------------------------------------------
 ; Generic IPv4/UDP transport above net_nic_tx_frame. Callers provide payloads
 ; and ports; this module handles next-hop ARP resolution and UDP framing.
@@ -48,7 +48,7 @@ net_udp_send_ipv4:
     mov edi, eax
     ; Non-blocking: if the next-hop MAC isn't cached yet this fires one ARP
     ; request and returns 0 (datagram not sent). The DNS FSM retries on a later
-    ; tick once the main loop's poll_rx has warmed the cache — no kernel freeze.
+    ; tick once the main loop's poll_rx has warmed the cache - no kernel freeze.
     call net_arp_resolve_ipv4_try
     test eax, eax
     jz .fail

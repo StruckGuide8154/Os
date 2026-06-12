@@ -32,7 +32,7 @@ from typing import Iterable, Sequence
 
 
 # ---------------------------------------------------------------------------
-# Opcode table — IT_* names mirror AMD/Linux for grep-ability.
+# Opcode table - IT_* names mirror AMD/Linux for grep-ability.
 # Source: drivers/gpu/drm/amd/amdgpu/soc15d.h, sid.h, pm4_header.h
 # ---------------------------------------------------------------------------
 
@@ -76,7 +76,7 @@ WAIT_FUNC_GT     = 6
 WAIT_SPACE_REG = 0
 WAIT_SPACE_MEM = 1
 
-# EVENT_WRITE "event_type" — small subset; extend as needed.
+# EVENT_WRITE "event_type" - small subset; extend as needed.
 EVENT_CACHE_FLUSH         = 0x04
 EVENT_CACHE_FLUSH_TS      = 0x14
 EVENT_VS_PARTIAL_FLUSH    = 0x0F
@@ -209,7 +209,7 @@ class PM4Builder:
 
     def draw_index_auto(self, index_count: int,
                         draw_initiator: int = 0) -> None:
-        """DRAW_INDEX_AUTO — non-indexed draw using auto-indices.
+        """DRAW_INDEX_AUTO - non-indexed draw using auto-indices.
 
         Body: index_count, draw_initiator (VGT_DRAW_INITIATOR).
         """
@@ -234,7 +234,7 @@ class PM4Builder:
                      poll_addr: int, reference: int, mask: int,
                      poll_interval: int = 4,
                      engine_sel: int = 0) -> None:
-        """WAIT_REG_MEM — poll a register or memory location.
+        """WAIT_REG_MEM - poll a register or memory location.
 
         Body layout (6 dwords):
           DW1: control = function[2:0] | mem_space[4] | engine[8]

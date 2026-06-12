@@ -170,7 +170,7 @@ _psp_load_one:
     ret
 
 ; ---------------------------------------------------------------------------
-; uint8 psp_load_rlc(void) — Task K
+; uint8 psp_load_rlc(void) - Task K
 ;   Preconditions: GPU_STATE_RING_ALLOCATED or later. psp_init advances to
 ;   GPU_STATE_PSP_READY before LOAD_IP_FW is submitted.
 ; ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ psp_load_rlc:
     ret
 
 ; ---------------------------------------------------------------------------
-; uint8 psp_load_cp(void) — Task L
+; uint8 psp_load_cp(void) - Task L
 ;   Load PFP, ME, MEC in that order. State advances to GPU_STATE_CP_LOADED on
 ;   success. CP halts are not touched here; that is cp_gfx_start_nop's job.
 ; ---------------------------------------------------------------------------

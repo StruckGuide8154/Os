@@ -1,6 +1,6 @@
 ; §7  Control bar UI
 ;
-; Layout (mirrored in media.nxh):
+; Layout (mirrored in media.ghl):
 ;
 ;   +-------+-------+-------+--------------------------------+--------+
 ;   | PLAY  | -10s  | +10s  |  scrub track                   |  MM:SS |
@@ -220,7 +220,7 @@ nx_media_format_mmss:
     pop rbx
     ret
 
-; Scratch text buffers for the time label. Single-tenant — the WM draws
+; Scratch text buffers for the time label. Single-tenant - the WM draws
 ; windows sequentially so two players don't overlap their formatting.
 nx_media_time_cur: times 8 db 0
 nx_media_time_dur: times 8 db 0
@@ -392,7 +392,7 @@ nx_media_draw_nba_controls:
 .ctl_no_progress:
 .ctl_no_scrub:
 
-    ; "MM:SS" current — drawn in the right-edge time area. We only show
+    ; "MM:SS" current - drawn in the right-edge time area. We only show
     ; current (duration would overflow MEDIA_TIME_W with default font).
     mov ecx, [rsp + 12]                      ; fps
     test ecx, ecx
@@ -430,8 +430,8 @@ nx_media_draw_nba_controls:
 ; §8  Future-work notes (kept here so the work surface stays discoverable)
 ;
 ;   STATUS: SYS_MEDIA_BLIT_SCALED (syscall #66) is live. The scaler in
-;   §3 is now reachable from user-mode NexusHL via the helper
-;   `media_blit_scaled(...)` in `src/user/nexushl/lib/media.nxh`. The
+;   §3 is now reachable from user-mode GritHL via the helper
+;   `media_blit_scaled(...)` in `src/user/grithl/lib/media.ghl`. The
 ;   kernel-side validation lives in `syscall.asm → .sc_media_blit_scaled`
 ;   and covers: buffer range, dim bounds, byte-count cap, window id,
 ;   reserve-bottom clamp, alpha-key normalisation. Future apps should
@@ -440,7 +440,7 @@ nx_media_draw_nba_controls:
 ;   * SIMD scaler. The §3 inner loop is scalar. An SSE2 form that
 ;     advances `u` by 4*step per iteration and writes a 16-byte chunk
 ;     would roughly double throughput on real HW. Blocked on the WM
-;     adding xmm save/restore around draw callbacks — none of the other
+;     adding xmm save/restore around draw callbacks - none of the other
 ;     codecs need xmm today and the WM doesn't preserve it.
 ;
 ;   * Dirty-rect awareness. We redraw the whole client area each tick.
@@ -455,7 +455,7 @@ nx_media_draw_nba_controls:
 ;   * SVG subset rasteriser. Walk the file once; for each <rect>,
 ;     <circle>, <line> with a recognised fill/stroke attribute, draw
 ;     scaled by the same fit transform we use for bitmaps. Strict
-;     subset only — no transforms, no gradients, no text, no CSS.
+;     subset only - no transforms, no gradients, no text, no CSS.
 ;
 ;   * Audio. Out of scope until the kernel has an audio mixer.
 ; ---------------------------------------------------------------------------

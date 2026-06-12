@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Cache32Max CPU/cache/frequency diagnostics
+; GritOS v3.0 - Cache32Max CPU/cache/frequency diagnostics
 ; ============================================================================
 bits 64
 
@@ -146,7 +146,7 @@ perfdiag_print_memory:
     push rdi
     lea rdi, [rel msg_memcap]
     call serial_puts
-%ifdef NEXUS_CACHE32_MAX
+%ifdef GRIT_CACHE32_MAX
     mov rdi, CACHE32_RAM_LIMIT
 %else
     xor rdi, rdi
@@ -176,7 +176,7 @@ perfdiag_print_smp:
     mov eax, [madt_enabled_cpu_count]
     test eax, eax
     jnz .have_madt
-%ifdef NEXUS_CACHE32_MAX
+%ifdef GRIT_CACHE32_MAX
     mov eax, [cpuid_logical_count]
     cmp eax, 2
     jb .have_madt
@@ -364,7 +364,7 @@ measure_tsc_tick:
     ;
     ; Old design used a fixed iteration count (5M) as the "PIT didn't fire"
     ; bailout, but on fast real hardware (e.g. Zen 5 at ~5 GHz) that loop
-    ; completes in ~3 ms — less than one PIT tick — so we'd time out before
+    ; completes in ~3 ms - less than one PIT tick - so we'd time out before
     ; ever seeing a tick edge and return 0. cpu_tsc_per_tick then stayed 0
     ; and every per-core MHz computation produced 0. Use a TSC-based real-
     ; time deadline (~250 ms) so the bailout is independent of CPU speed.
@@ -380,7 +380,7 @@ measure_tsc_tick:
     jz .no_if
 
     ; Build a TSC-based real-time deadline. We don't know the TSC rate yet,
-    ; but +500M cycles is 500 ms at 1 GHz and ~100 ms at 5 GHz — both far
+    ; but +500M cycles is 500 ms at 1 GHz and ~100 ms at 5 GHz - both far
     ; longer than the 10 ms PIT tick. If a tick hasn't fired by then, the
     ; PIT is broken and bailing is correct.
     call rdtsc64

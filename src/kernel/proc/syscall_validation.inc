@@ -4,20 +4,20 @@
 %include "smap.inc"
 
 ; ----------------------------------------------------------------------------
-; MIGRATED to NexusHLK (Stage 2a): the following LEAF validators are now emitted
-; from src/kernel/nexushlk/syscall_validate.nxh as structured zero-asm fns with
+; MIGRATED to GritHLK (Stage 2a): the following LEAF validators are now emitted
+; from src/kernel/grithlk/syscall_validate.ghl as structured zero-asm fns with
 ; the SAME global symbol names and the SAME register ABI:
 ;     sc_get_slot_bounds, sc_range_in_bounds, sc_validate_user_range,
 ;     sc_validate_user_io_range, sc_validate_callback_target
-; The generated build/nxh/syscall_validate.asm is %include'd by kernel_build.asm
+; The generated build/ghl/syscall_validate.asm is %include'd by kernel_build.asm
 ; before syscall.asm, so callers here and in the handler .inc files still link.
 ; (sc_range_in_bounds/sc_validate_user_range now use signed compares for the
 ;  bounds tests; equivalent for the low-half user VAs these ever see.)
 ;
 ; The two helpers below STAY in assembly: they read USER memory byte-by-byte
-; inside USER_ACCESS_BEGIN/END (stac/clac only under ENABLE_SMAP); the NHLK
+; inside USER_ACCESS_BEGIN/END (stac/clac only under ENABLE_SMAP); the GHLK
 ; smap_open/close intrinsics emit UNCONDITIONAL stac/clac, which would #UD on a
-; non-SMAP build — so porting them would not be behavior-preserving.
+; non-SMAP build - so porting them would not be behavior-preserving.
 ; ----------------------------------------------------------------------------
 
 ; RDI=ptr, RSI=max_len -> EAX=1 if a NUL-terminated string lives entirely in
@@ -131,8 +131,8 @@ sc_validate_path_canonical:
     movzx r8d, byte [rdi]
     USER_ACCESS_END
     cmp r8b, '.'
-    jne .spc_after_dot                      ; ".x" — not a traversal; reprocess r8
-    ; we have ".." — check the byte after it terminates the component
+    jne .spc_after_dot                      ; ".x" - not a traversal; reprocess r8
+    ; we have ".." - check the byte after it terminates the component
     inc rcx
     cmp rcx, r11
     jae .spc_reject                         ; ".." flush against the bound -> reject
@@ -202,6 +202,6 @@ sc_validate_path_canonical:
 ; SYS_FS_ENTRY_INFO. Slot 0x1D1000..0x1D5000 is currently unused and is
 ; reserved for future per-slot caches.
 
-; sc_validate_callback_target — MIGRATED to NexusHLK (Stage 2a). See
-; src/kernel/nexushlk/syscall_validate.nxh (RDI=callback target -> EAX=1 if null
+; sc_validate_callback_target - MIGRATED to GritHLK (Stage 2a). See
+; src/kernel/grithlk/syscall_validate.ghl (RDI=callback target -> EAX=1 if null
 ; or 64 mapped bytes inside user-owned memory).

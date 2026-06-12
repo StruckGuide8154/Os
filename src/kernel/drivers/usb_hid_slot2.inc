@@ -373,7 +373,7 @@ usb_wait_completion:
     ret
 
 ; usb_find_endpoint and usb_try_known_mouse_endpoint were migrated to zero-asm
-; NexusHLK — see src/kernel/nexushlk/usb_hid_helpers.nxh. Same global names +
+; GritHLK - see src/kernel/grithlk/usb_hid_helpers.ghl. Same global names +
 ; ABI (config-descriptor walk at XHCI_CTRL_BUF_ADDR -> EAX=1/0, fills
 ; usb_ep_addr / usb_ep_mps / usb_ep_interval / usb_hid_protocol /
 ; usb_interface_num). The structured port keeps the EXACT original bounds

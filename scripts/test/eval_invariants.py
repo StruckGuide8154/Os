@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Track-3 (seL4 validity) invariant evaluator / bounded checker.
 #
-# This does NOT re-implement the invariant predicates. It parses the REAL NHL
-# source `src/tools/security/invariant_check.nxh` using the production
-# compiler's own lexer/parser (nxhc.lex / nxhc.parse), then interprets each `fn`
+# This does NOT re-implement the invariant predicates. It parses the REAL GHL
+# source `src/tools/security/invariant_check.ghl` using the production
+# compiler's own lexer/parser (gritc.lex / gritc.parse), then interprets each `fn`
 # body as a pure integer function.
 #
 # Default mode runs the vector suite that promotes invariants from `modeled` to
@@ -27,15 +27,15 @@ import os
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'nexushl', 'compiler')
-MODULE = os.path.join(ROOT, 'src', 'tools', 'security', 'invariant_check.nxh')
+COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'grithl', 'compiler')
+MODULE = os.path.join(ROOT, 'src', 'tools', 'security', 'invariant_check.ghl')
 INVARIANT_DIR = os.path.join(ROOT, 'tests', 'security', 'invariants')
 VECTOR_DIR = os.path.join(ROOT, 'tests', 'security', 'invariants', 'vectors')
 AUTH_SPACE = tuple(range(128))
 BOOL_SPACE = (0, 1)
 
 sys.path.insert(0, COMPILER_DIR)
-import nxhc  # noqa: E402  (the production NHL compiler — source of truth)
+import gritc  # noqa: E402  (the production GHL compiler - source of truth)
 
 
 class EvalError(Exception):
@@ -43,12 +43,12 @@ class EvalError(Exception):
 
 
 class Module:
-    """The real predicate module, loaded from NHL source via the compiler."""
+    """The real predicate module, loaded from GHL source via the compiler."""
 
     def __init__(self, path):
         with open(path, 'r', encoding='utf-8') as fh:
             src = fh.read()
-        decls = nxhc.parse(nxhc.lex(src, path), path)
+        decls = gritc.parse(gritc.lex(src, path), path)
         self.consts = {}
         self.fns = {}
         for d in decls:
@@ -75,7 +75,7 @@ class Module:
         env = dict(zip(params, args))
         ret = self._exec_block(fn['body'], env)
         if ret is None:
-            # An NHL fn with no explicit return leaves rax = last value; the
+            # An GHL fn with no explicit return leaves rax = last value; the
             # predicate module always returns explicitly, so treat a fall-through
             # as a hard error rather than guessing.
             raise EvalError("%s fell through without returning" % name)
@@ -514,7 +514,7 @@ def run_vectors(mod):
           % (len(files), total_accept, total_reject))
 
     if failures:
-        sys.stderr.write("[eval] FAIL — %d problem(s):\n" % len(failures))
+        sys.stderr.write("[eval] FAIL - %d problem(s):\n" % len(failures))
         for f in failures:
             sys.stderr.write("  - %s\n" % f)
         return 1

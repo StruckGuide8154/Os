@@ -456,8 +456,8 @@ xhci_read_caps:
     add rax, rsi
     mov [xhci_rt_base], rax
 
-    ; Register the xHCI BAR in the MMIO bounds registry NOW, at probe-commit —
-    ; the moment op_base/rt_base/db_base are resolved — not deferred to the
+    ; Register the xHCI BAR in the MMIO bounds registry NOW, at probe-commit -
+    ; the moment op_base/rt_base/db_base are resolved - not deferred to the
     ; kmain-level mmio_drv_caps_init. usb_hid_init's own port pokes, i2c_hid,
     ; and rtl8156_init all touch this BAR (through XHCI_MMIO_ASSERT) BEFORE that
     ; late call runs, so without registering here the very first assert finds no

@@ -1,4 +1,4 @@
-# Track 6 — Compartmentalized "-1" Separation Monitor (least-authority monitor tier)
+# Track 6 - Compartmentalized "-1" Separation Monitor (least-authority monitor tier)
 
 Goal: implement the monitor of `docs/The final goal after the rest.txt` **not as
 one monolithic TCB, but as a set of minimal, mutually-isolated single-purpose
@@ -11,19 +11,19 @@ The defining property:
 This is the stratified-enforcer rule of `architecture-defense-in-depth.md` applied
 **recursively to the monitor itself**: even the thing that protects ring-0 is
 split so no single compromise yields total authority. It is the
-software-floor-first realization of the final goal — **everything here is
+software-floor-first realization of the final goal - **everything here is
 enforceable without hardware virtualization and verifiable under QEMU-TCG**
 (built on paging + `CR0.WP`, the same basis as [[nested_kernel_monitor]]). Track 5
 later makes these compartments *un-disableable* and adds device-DMA confinement,
 but Track 6 stands on its own.
 
-Maps to `docs/nhl-beyond-zero-trust-todo.md` → "P0: Compromised Kernel And
+Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P0: Compromised Kernel And
 Hypervisor Containment" + Kill-Chain "split kernel partitions". Depends on Track 2
 (verify-before-map-exec) and feeds Track 3 (the isolation invariants become
 machine-checkable). Track 5 is the hardware hardening of this tier.
 
 ## Honesty rule
-Maturity tags: `modeled` → `tested-tcg` (real enforcement here — WP/NX faults DO
+Maturity tags: `modeled` → `tested-tcg` (real enforcement here - WP/NX faults DO
 fire under TCG, unlike Track 5) → `tested-hw`. The one thing TCG cannot show is
 that a same-privilege ring-0 cannot *disable* the floor (that is Track 5 G1); name
 that residual, do not hide it.
@@ -39,10 +39,10 @@ that residual, do not hide it.
 |---|---|---|
 | **PT-MON** | page-table permissions / mapping authority (W^X, who-maps-what) | `nk_monitor` (narrow it down to just this) |
 | **HASH-MON** | code-hash registry + page measurement | partial (measured boot) |
-| **KEY-MON** | signing pubkeys + per-boot HMAC keys — **verify-only oracle, never releases a key** | keys currently kernel-global |
+| **KEY-MON** | signing pubkeys + per-boot HMAC keys - **verify-only oracle, never releases a key** | keys currently kernel-global |
 | **CAP-MON** | the capability / handle table | partial (handle table + cap-mask HMAC) |
 | **DMA-MON** | DMA-grant policy (software: descriptor validation; Track 5 G2 backs it with the IOMMU) | none |
-| **LOAD-MON** | orchestrates verify→hash→map; **holds NO standing authority** — must request each step from the owner above | none |
+| **LOAD-MON** | orchestrates verify→hash→map; **holds NO standing authority** - must request each step from the owner above | none |
 
 Design rules for the set:
 - **One authority per compartment.** No compartment can perform another's
@@ -55,13 +55,13 @@ Design rules for the set:
 - **No compartment can map or write another compartment's memory.** This is the
   load-bearing isolation invariant (below).
 - **LOAD-MON is authority-less glue:** compromising the orchestrator yields the
-  ability to *ask*, not to *do* — each owner still independently checks.
+  ability to *ask*, not to *do* - each owner still independently checks.
 
 ---
 
-## Phase C0 — split today's monolith into compartments (software floor)
+## Phase C0 - split today's monolith into compartments (software floor)
 
-- [ ] Define the compartment model in NHL: each compartment = its own code region
+- [ ] Define the compartment model in GHL: each compartment = its own code region
       (R+X, hashed), its own data region (R/W, NX), and an entry trampoline; all
       regions live in a page-table sub-tree only that compartment's window can
       write. `modeled`
@@ -79,7 +79,7 @@ Design rules for the set:
 - [ ] Stand up **LOAD-MON**: verify (KEY-MON) → hash (HASH-MON) → map RX / data NX
       (PT-MON), holding no authority of its own. `modeled` → `tested-tcg`
 
-## Phase C1 — enforce mutual isolation (the core invariant)
+## Phase C1 - enforce mutual isolation (the core invariant)
 
 - [ ] Lay out each compartment's pages so no compartment's page-table window can
       reach another's: per-compartment PTE sub-tree, each marked RO to everyone
@@ -90,13 +90,13 @@ Design rules for the set:
 - [ ] **Negative test (compromise containment):** simulate a compromised
       compartment (a build flag, like `-ProbeNkPt`) that tries to (a) write another
       compartment's data, (b) read KEY-MON's keys, (c) map a page on PT-MON's
-      behalf, (d) record a hash in HASH-MON, (e) widen its own caps via CAP-MON —
+      behalf, (d) record a hash in HASH-MON, (e) widen its own caps via CAP-MON -
       each must `#PF` / be rejected, proving compromise of one ≠ compromise of
       another. `tested-tcg`
 - [ ] Serial markers per compartment bring-up + a single "COMP+" all-isolated
       marker; "COMP!" on any isolation failure. `tested-tcg`
 
-## Phase C2 — wire to the rest of the system
+## Phase C2 - wire to the rest of the system
 
 - [ ] LOAD-MON becomes the only path that maps executable pages; the legacy
       permissive map path (and the v0 W+X blob hole, see Track 4 follow-up) is
@@ -106,17 +106,17 @@ Design rules for the set:
 - [ ] All DMA descriptor programming routes through DMA-MON (software validation
       now; Track 5 G2 IOMMU later). `modeled`
 
-## Phase C3 — make isolation machine-checkable (feeds Track 3)
+## Phase C3 - make isolation machine-checkable (feeds Track 3)
 
-- [x] Add invariants to `invariant_check.nxh`:
+- [x] Add invariants to `invariant_check.ghl`:
       `INV-COMPARTMENT-ONE-AUTHORITY` (a compartment's authority bitmask is a
       singleton), `INV-COMPARTMENT-NO-CROSS-MAP` (no compartment holds map
       authority over another's region), `INV-COMPARTMENT-NO-AUTH-LAUNDER`
-      (trampoline transfers no caller authority). **LANDED 2026-06-10** — three
-      `fn`s in `invariant_check.nxh`, compiles `--target kernel --forbid-asm
+      (trampoline transfers no caller authority). **LANDED 2026-06-10** - three
+      `fn`s in `invariant_check.ghl`, compiles `--target kernel --forbid-asm
       --deny-unsafe`. `proven`
 - [x] Positive/negative vectors + exhaustive bounded check over the compartment
-      authority space (same vehicle as the existing 12 invariants). **LANDED** —
+      authority space (same vehicle as the existing 12 invariants). **LANDED** -
       `.invariant` + `.vectors` files under `tests/security/invariants/`;
       `eval_invariants.py` exhaustive specs prove all three over their full
       bounded spaces (one-authority 128, no-cross-map 32,768, no-auth-launder
@@ -130,7 +130,7 @@ Design rules for the set:
 ## What Track 6 gives you WITHOUT hardware (and the one residual)
 
 Achieved on the software floor, `tested-tcg`:
-- monitor owns page perms / code hashes / keys / cap table — split so no single
+- monitor owns page perms / code hashes / keys / cap table - split so no single
   compromise yields all of them
 - monitor + each compartment never mapped writable to the kernel or to peers
 - verify→hash→map-RX / data-NX; no raw unmapped writes; MMIO outside grant denied

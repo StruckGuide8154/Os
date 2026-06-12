@@ -1,38 +1,38 @@
-# NexusOS
+# GritOS
 
 A hobbyist 64-bit x86-64 operating system with a graphical desktop, a ring-3
 app runtime, and a security architecture that aims past conventional zero
 trust. The kernel began as pure assembly and is being migrated module-by-module
-to **NexusHL** (`.nxh`), a zero-asm high-level kernel language compiled by
-`tools/nxhc.py` with bounds-checked state access, source-line traceability,
+to **GritHL** (`.ghl`), a zero-asm high-level kernel language compiled by
+`src/user/grithl/compiler/gritc.py` with bounds-checked state access, source-line traceability,
 and a lossless function-level optimizer.
 
 ## Highlights
 
-- **UEFI GOP framebuffer** (plus a legacy BIOS path) — no per-vendor GPU
+- **UEFI GOP framebuffer** (plus a legacy BIOS path) - no per-vendor GPU
   bring-up; widely compatible interfaces only.
-- **Hardened syscall boundary** — per-app capability manifests, validator
+- **Hardened syscall boundary** - per-app capability manifests, validator
   descriptors, kernel shadow stack, kernel-stack-first entry, CPI-signed
   callbacks, W^X / NX / SMAP enforcement, KASLR.
-- **Nested-kernel monitor** — portable MMU+WP page-table protection; PTE
+- **Nested-kernel monitor** - portable MMU+WP page-table protection; PTE
   writers must go through an explicit write window.
-- **Signed-everything (Track 2)** — in-kernel signed-artifact envelope reader
+- **Signed-everything (Track 2)** - in-kernel signed-artifact envelope reader
   with real Ed25519 threshold/quorum verification, a 25-case executable reject
   matrix, fuzz + differential decoder suites, and dual-approval quorum
   ratcheting.
-- **Proven invariants (Track 3)** — 12 seL4-style security invariants backed
+- **Proven invariants (Track 3)** - 12 seL4-style security invariants backed
   by exhaustive vector checks (`scripts/test/eval_invariants.py`).
-- **RAM-only / anti-forensic memory (Track 4)** — volatile-by-default RAM with
+- **RAM-only / anti-forensic memory (Track 4)** - volatile-by-default RAM with
   secure zeroize on shutdown/panic/tamper, plus a data-egress vs. elevation
   barrier matrix.
-- **Defense-in-depth roadmap (Tracks 5–6)** — hardware-residual hypervisor
+- **Defense-in-depth roadmap (Tracks 5-6)** - hardware-residual hypervisor
   monitor and a compartmentalized software "-1" monitor
   (see `docs/architecture-defense-in-depth.md`).
 
 One verification entry point runs the security guard suite:
 
 ```powershell
-.\scripts\test\test_nhl_security_guards.ps1
+.\scripts\test\test_ghl_security_guards.ps1
 ```
 
 ## Prerequisites
@@ -68,7 +68,7 @@ Outputs:
 - `build\mbr.bin`
 - `build\stage2.bin`
 - `build\kernel.bin`
-- `build\NexusOS.img`
+- `build\GritOS.img`
 
 ## Verification
 
@@ -169,7 +169,7 @@ scripts\test\test_verify_all.ps1
 
 The repo now has a small userland-facing include surface:
 
-- `src/user/lib/nexus_app.inc`
+- `src/user/lib/grit_app.inc`
 - `src/user/templates/hello_callback.asm`
 
 For the current syscall and callback ABI, see:
@@ -189,7 +189,7 @@ For the current syscall and callback ABI, see:
 
 ## Notes
 
-- All userspace apps are NexusHL (`.nxh`); the raw-asm app migration is
+- All userspace apps are GritHL (`.ghl`); the raw-asm app migration is
   complete. `security_probe` intentionally stays raw asm as a fault-injection
   regression harness.
 - `docs/TODO-INDEX.md` is the single entry point for the spec/TODO doc set;

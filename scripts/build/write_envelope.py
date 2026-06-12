@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Track-2 (signed everything) — build-time host envelope writer.
+Track-2 (signed everything) - build-time host envelope writer.
 
 Produces a valid v1 signed-artifact envelope
 (docs/signed-artifact-envelope.md) for a payload file and writes it to
@@ -64,7 +64,7 @@ import sys
 
 
 # ---------------------------------------------------------------------------
-# Artifact type and domain name maps (kept in sync with signed_envelope.nxh)
+# Artifact type and domain name maps (kept in sync with signed_envelope.ghl)
 # ---------------------------------------------------------------------------
 ART = {
     'boot': 1, 'kernel': 2, 'hypervisor': 3, 'driver': 4, 'app': 5,
@@ -84,7 +84,7 @@ ROLE = {
 }
 ROLE_INV = {v: k for k, v in ROLE.items()}
 
-# Default signer role per artifact type (must match signed_artifact_check.nxh).
+# Default signer role per artifact type (must match signed_artifact_check.ghl).
 DEFAULT_ROLE = {1: 1, 2: 2, 3: 2, 4: 3, 5: 4, 6: 5, 7: 5, 8: 6, 9: 7}
 
 # Default domain per artifact type.
@@ -94,7 +94,7 @@ DEFAULT_DOMAIN = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 6, 8: 1, 9: 7}
 RUNNABLE_TYPES = {1, 2, 3, 4, 5}
 
 # Per-class threshold policy (mirrors security_threshold_class_* in
-# threshold_check.nxh).  Keys are ART_* int values.
+# threshold_check.ghl).  Keys are ART_* int values.
 CLASS_MIN_COUNT = {1: 3, 2: 3, 3: 3, 4: 2, 5: 2, 6: 2, 7: 2, 8: 3, 9: 3}
 CLASS_REQUIRED_MASK = {
     1: 0x03, 2: 0x03, 3: 0x03, 4: 0x04, 5: 0x04,
@@ -156,7 +156,7 @@ def build_envelope(payload, kind, domain, role,
     # COSIGNER_ROLES: u16 min_count + u16 allowed_mask + u16 required_mask
     cosigner_bytes = struct.pack('<HHH', min_cosigners, allowed_mask, required_mask)
 
-    # Field ids (1-based, strictly ascending order — must match FIELD_ID_* in reader).
+    # Field ids (1-based, strictly ascending order - must match FIELD_ID_* in reader).
     fields = [
         (1,  struct.pack('<H', kind)),           # FIELD_ID_TYPE
         (2,  struct.pack('<H', domain)),         # FIELD_ID_DOMAIN
@@ -180,7 +180,7 @@ def build_envelope(payload, kind, domain, role,
     header_len = 18 + len(tlv_bytes)
     payload_len = len(payload)
 
-    header = (b'NXSE'
+    header = (b'GRSE'
               + struct.pack('<HHHHH', 1, kind, domain, field_count, header_len)
               + struct.pack('<I', payload_len))
 

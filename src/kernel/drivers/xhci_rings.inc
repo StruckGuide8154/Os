@@ -12,10 +12,10 @@ xhci_setup_scratchpad:
     ; XHCI region 0x1740000..0x17F0000 = 0xB0000 (720 KB). First page holds
     ; the pointer array (max 512 entries fits in 4 KB); buffers start at
     ; +0x1000. That leaves 0xAF000/0x1000 = 175 4K-buffer slots. Cap at 64
-    ; — way above what any real controller asks for (typical: 8-32) and
+    ; - way above what any real controller asks for (typical: 8-32) and
     ; far enough below the limit to be safe. Real AMD FCH/Promontory
     ; report >4 here, and silently dropping them gives undefined DMA
-    ; targets on first device address — a likely "QEMU works, HW fails"
+    ; targets on first device address - a likely "QEMU works, HW fails"
     ; failure mode.
     cmp ecx, 128
     jle .scratch_ok
@@ -267,9 +267,9 @@ xhci_poll_event:
     push rsi
     push rdi
 
-    ; Serialize access to the event ring. NEXUS_ENABLE_RING3_AP can have CPU0
+    ; Serialize access to the event ring. GRIT_ENABLE_RING3_AP can have CPU0
     ; in rtl8156_rx_once polling for a DHCP OFFER while CPU N is in
-    ; usb_poll_mouse polling for HID reports — both call this function and
+    ; usb_poll_mouse polling for HID reports - both call this function and
     ; race on xhci_evt_dequeue. Without this lock, one CPU reads a TRB whose
     ; cycle bit was JUST flipped by the other's dequeue advance, treats the
     ; old contents as a fresh event, and dispatches off a stale slot/type →

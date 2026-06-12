@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - PS/2 Keyboard Driver
+; GritOS v3.0 - PS/2 Keyboard Driver
 ; IRQ1 handler, scancode set 1 -> ASCII translation, circular buffer
 ; ============================================================================
 bits 64
@@ -264,7 +264,7 @@ keyboard_repeat_tick:
     ; Software autorepeat is a PS/2-only model. On USB-HID-active boxes the
     ; BIOS legacy USB->PS/2 SMM emulation can inject stray scancodes (with no
     ; matching release) that arm kb_repeat_* and then spam the buffer
-    ; forever — surfaces as e.g. a stuck '7' once a text-input UI gets focus.
+    ; forever - surfaces as e.g. a stuck '7' once a text-input UI gets focus.
     ; If HID is driving the keyboard, ignore any stale repeat arm and clear it.
     cmp byte [usb_hid_protocol], 0
     jne .rep_disable

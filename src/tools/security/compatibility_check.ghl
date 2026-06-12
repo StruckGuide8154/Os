@@ -1,0 +1,107 @@
+# THREAT: a binary built for the wrong platform/feature target being admitted, or a downgrade that silently disables a required capability.
+# GHL-native app compatibility checker kernel.
+#
+# Security internals may change, but app-facing service ABI decisions must be
+# stable, bounded, and reviewable in GHL. The caller supplies parsed manifest
+# values; this module decides whether a request is safely compatible.
+
+module "security_compatibility_check";
+
+global security_compat_is_known_service;
+global security_compat_is_known_capability;
+global security_compat_abi_range_accepts;
+global security_compat_capability_allowed;
+global security_compat_request_is_supported;
+
+const SERVICE_IDENTITY = 1;
+const SERVICE_FILES = 2;
+const SERVICE_NETWORK = 3;
+const SERVICE_WINDOW = 4;
+const SERVICE_MEDIA = 5;
+const SERVICE_POLICY = 6;
+
+const APP_CAP_IDENTITY = 1;
+const APP_CAP_FILE_READ = 2;
+const APP_CAP_FILE_WRITE = 3;
+const APP_CAP_NETWORK = 4;
+const APP_CAP_WINDOW = 5;
+const APP_CAP_MEDIA = 6;
+const APP_CAP_POLICY_READ = 7;
+
+const MIN_APP_ABI = 1;
+const MAX_APP_ABI = 3;
+
+fn security_compat_is_known_service(service_id) {
+    if service_id >= SERVICE_IDENTITY {
+        if service_id <= SERVICE_POLICY {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn security_compat_is_known_capability(capability) {
+    if capability >= APP_CAP_IDENTITY {
+        if capability <= APP_CAP_POLICY_READ {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn security_compat_abi_range_accepts(app_min_abi, app_max_abi, service_abi) {
+    if app_min_abi < MIN_APP_ABI { return 0; }
+    if app_max_abi > MAX_APP_ABI { return 0; }
+    if app_min_abi > app_max_abi { return 0; }
+    if service_abi < app_min_abi { return 0; }
+    if service_abi > app_max_abi { return 0; }
+    return 1;
+}
+
+fn security_compat_capability_allowed(requested_capability, granted_capability) {
+    if security_compat_is_known_capability(requested_capability) == 0 { return 0; }
+    if security_compat_is_known_capability(granted_capability) == 0 { return 0; }
+    if requested_capability == granted_capability { return 1; }
+    if requested_capability == APP_CAP_FILE_READ {
+        if granted_capability == APP_CAP_FILE_WRITE {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn security_compat_service_matches_capability(service_id, capability) {
+    if service_id == SERVICE_IDENTITY {
+        if capability == APP_CAP_IDENTITY { return 1; }
+    }
+    if service_id == SERVICE_FILES {
+        if capability == APP_CAP_FILE_READ { return 1; }
+        if capability == APP_CAP_FILE_WRITE { return 1; }
+    }
+    if service_id == SERVICE_NETWORK {
+        if capability == APP_CAP_NETWORK { return 1; }
+    }
+    if service_id == SERVICE_WINDOW {
+        if capability == APP_CAP_WINDOW { return 1; }
+    }
+    if service_id == SERVICE_MEDIA {
+        if capability == APP_CAP_MEDIA { return 1; }
+    }
+    if service_id == SERVICE_POLICY {
+        if capability == APP_CAP_POLICY_READ { return 1; }
+    }
+    return 0;
+}
+
+fn security_compat_request_is_supported(service_id, app_min_abi, app_max_abi, service_abi, requested_capability, granted_capability, deprecated, adapter_present) {
+    if security_compat_is_known_service(service_id) == 0 { return 0; }
+    if security_compat_abi_range_accepts(app_min_abi, app_max_abi, service_abi) == 0 { return 0; }
+    if security_compat_capability_allowed(requested_capability, granted_capability) == 0 { return 0; }
+    if security_compat_service_matches_capability(service_id, requested_capability) == 0 { return 0; }
+    if deprecated != 0 {
+        if adapter_present == 0 {
+            return 0;
+        }
+    }
+    return 1;
+}

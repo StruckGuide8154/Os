@@ -132,7 +132,7 @@ try {
     Assert-Text 'F3 FAT16 write pads final partial cluster' 'src\kernel\fs\fat16.asm' 'wf_write_partial_cluster:[\s\S]*?mov\s+rdi,\s*FAT16_FILE_BUF[\s\S]*?rep\s+stosb[\s\S]*?rep\s+movsb[\s\S]*?call\s+ata_write_sectors'
     Assert-Text 'F4 HID parser guards multi-byte item reads' 'src\kernel\drivers\hid_parser.asm' 'lea\s+rax,\s*\[rsi \+ 4\][\s\S]*?cmp\s+rax,\s*rbp[\s\S]*?movzx\s+eax,\s*byte\s+\[rsi \+ 3\][\s\S]*?lea\s+rax,\s*\[rsi \+ 2\][\s\S]*?\.skip_long_item:'
     Assert-Text 'F5 HID extraction enforces report length' 'src\kernel\drivers\hid_parser.asm' '(hid_extract_field_checked:|FN_BEGIN\s+hid_extract_field_checked)[\s\S]*?cmp\s+r8d,\s*1[\s\S]*?cmp\s+r8d,\s*32[\s\S]*?cmp\s+edx,\s*eax[\s\S]*?(hid_process_touchpad_report:|FN_BEGIN\s+hid_process_touchpad_report)[\s\S]*?mov\s+r13d,\s*ecx[\s\S]*?call\s+hid_extract_field_checked'
-    Assert-TextSequence 'F6 USB descriptor parser validates lengths' 'src\kernel\nexushlk\usb_hid_helpers.nxh' @(
+    Assert-TextSequence 'F6 USB descriptor parser validates lengths' 'src\kernel\grithlk\usb_hid_helpers.ghl' @(
         @{ Step = 'wTotalLength has the 512-byte upper clamp'; Pattern = 'const\s+CFG_DESC_MAX\s*=\s*512' },
         @{ Step = 'zero-asm endpoint parser exists'; Pattern = 'fn\s+usb_find_endpoint' },
         @{ Step = 'configuration header length is checked before wTotalLength'; Pattern = 'Config header must include[\s\S]*?if\s+lb\(base\)\s+<\s+4\s*\{' },

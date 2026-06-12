@@ -1,7 +1,7 @@
-# NexusOS App Authoring
+# GritOS App Authoring
 
 This repo still ships built-in apps inside the monolithic kernel image, but
-NexusHL is now the supported SDK path for app code that should be maintained
+GritHL is now the supported SDK path for app code that should be maintained
 above raw assembly. The source tree treats user-facing code as a separate layer
 under `C:\Users\user\Documents\new\src\user`.
 
@@ -16,36 +16,36 @@ under `C:\Users\user\Documents\new\src\user`.
 
 For new SDK-authored apps, start from:
 
-- `C:\Users\user\Documents\new\src\user\nexushl\lib\core.nxh`
-- `C:\Users\user\Documents\new\src\user\nexushl\apps\hello.nxh`
-- `C:\Users\user\Documents\new\src\user\templates\hello_callback.nxh`
-- `C:\Users\user\Documents\new\scripts\build\build_nxh.ps1`
+- `C:\Users\user\Documents\new\src\user\grithl\lib\core.ghl`
+- `C:\Users\user\Documents\new\src\user\grithl\apps\hello.ghl`
+- `C:\Users\user\Documents\new\src\user\templates\hello_callback.ghl`
+- `C:\Users\user\Documents\new\scripts\build\build_ghl.ps1`
 
-`scripts/build/build_nxh.ps1` compiles all `.nxh` apps and generates
-`C:\Users\user\Documents\new\build\nxh\generated_apps.inc`, which is included
+`scripts/build/build_ghl.ps1` compiles all `.ghl` apps and generates
+`C:\Users\user\Documents\new\build\ghl\generated_apps.inc`, which is included
 by `src/user/apps.asm`.
 
 For legacy raw assembly app work, start from:
 
-- `C:\Users\user\Documents\new\src\user\lib\nexus_app.inc`
-- `C:\Users\user\Documents\new\src\user\lib\nexus_fs.inc`
-- `C:\Users\user\Documents\new\src\user\lib\nexus_window.inc`
+- `C:\Users\user\Documents\new\src\user\lib\grit_app.inc`
+- `C:\Users\user\Documents\new\src\user\lib\grit_fs.inc`
+- `C:\Users\user\Documents\new\src\user\lib\grit_window.inc`
 - `C:\Users\user\Documents\new\src\user\templates\hello_callback.asm`
 
-`nexus_app.inc` gives you:
+`grit_app.inc` gives you:
 
 - shared constants
 - syscall wrapper macros
 - filesystem helper wiring
 - the callback ABI notes in one place
 
-`nexus_fs.inc` gives you:
+`grit_fs.inc` gives you:
 
 - FAT16 directory-entry offsets safe for user apps to inspect
 - `NFS_NAME83` / `nfs_name83` for converting typed names into the 11-byte,
   space-padded FAT 8.3 format used by create, rename, and mkdir syscalls
 
-`nexus_window.inc` gives you:
+`grit_window.inc` gives you:
 
 - window-struct offsets used by current callbacks
 - built-in app ids
@@ -98,7 +98,7 @@ metadata changes must go through `SYS_FS_DELETE`, `SYS_FS_RENAME`, or
 `SYS_FS_MKDIR` so the kernel updates the real current-directory cache and disk
 state.
 
-NexusHL apps that need mutable private data should declare it with a top-level
+GritHL apps that need mutable private data should declare it with a top-level
 `state {}` block. Each field becomes a zeroed label inside the copied app blob,
 so `&field` points at storage private to the active app slot. This is the
 preferred replacement for app code reaching into kernel globals.
@@ -129,7 +129,7 @@ Display settings are exposed through syscalls, not kernel externs:
 
 ## Launching apps with parameters
 
-Any app can spawn another app — and pass it a string — through `SYS_APP_OPEN`
+Any app can spawn another app - and pass it a string - through `SYS_APP_OPEN`
 (syscall 23). The command line is parsed as `"<app> <params>"`:
 
 - `<app>` is matched (case-insensitive) against the name table in
@@ -146,11 +146,11 @@ path and the file is loaded. Every other app receives the raw string.
 The terminal accepts an optional `open ` prefix, so `open ping 8.8.8.8` and
 `ping 8.8.8.8` are equivalent at the shell.
 
-### Reading params from a NexusHL app
+### Reading params from a GritHL app
 
 The launched window's `WIN_APPDATA` pointer gives you the slot base; params
 live 0x17C000 bytes in. Seed your input field once, on first init only, so
-later user edits aren't clobbered. Example from `ping.nxh`:
+later user edits aren't clobbered. Example from `ping.ghl`:
 
 ```
 fn seed_ip_from_launch_params(win) {
@@ -163,7 +163,7 @@ fn seed_ip_from_launch_params(win) {
 ```
 
 Gate the seed behind an `ip_init` flag (or equivalent) in your `state {}`
-block — `draw()` and `key()` fire many times per second; you only want to
+block - `draw()` and `key()` fire many times per second; you only want to
 consume the param once.
 
 ## Recommended workflow

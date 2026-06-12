@@ -4,17 +4,17 @@ Hardware: Acer Nitro V16 AI (ANV16-42), Strix Point, Radeon 890M.
 AMD display device: PCI bus 0x64 dev 0 fn 0, ID 1002:1900, class 0x030000.
 Framebuffer aperture (GOP): phys 0xF800000000, 1920×1200×32, pitch 8192.
 DCN register BAR0: **phys 0xFA10000000** (separate from FB aperture).
-PCI Command (live): 0x00100006 — MEM (bit1) + BM (bit2) already on, no enable needed.
+PCI Command (live): 0x00100006 - MEM (bit1) + BM (bit2) already on, no enable needed.
 
 ## What landed in code
 
 All read-only; safe to ship; lazy-evaluated when user presses `=`.
 
 ### Files added/modified
-- **NEW** `src/kernel/drivers/amd_dcn.asm` — full DCN probe + private UC alias mapping.
-- Modified `src/kernel/drivers/acpi_ec.asm` — added `acpi_ec_dump_zone` reading
+- **NEW** `src/kernel/drivers/amd_dcn.asm` - full DCN probe + private UC alias mapping.
+- Modified `src/kernel/drivers/acpi_ec.asm` - added `acpi_ec_dump_zone` reading
   EC RAM 0x00..0x1F and 0x70..0x8F into static buffers.
-- Modified `src/kernel/kernel_build.asm` — `%include` for `amd_dcn.asm`.
+- Modified `src/kernel/kernel_build.asm` - `%include` for `amd_dcn.asm`.
 - Modified `src/kernel/core/main.asm`:
   - `real_boot_diag_dump` (the `=` handler) extended with DCN + EC sections.
   - Helper `diag_emit_hexbytes` added (writes ECX bytes from [RBX] as 2-char hex into [RDI]).
@@ -24,11 +24,11 @@ All read-only; safe to ship; lazy-evaluated when user presses `=`.
 ### Private UC alias (the key piece)
 `amd_dcn_probe` (called from `=`) installs its own PT chain so we can read BAR0
 through a known-UC mapping. The kernel's "normal" page tables for the BAR
-region are **broken** — different boots show pte = `0x100023`, `0x63`, etc.
+region are **broken** - different boots show pte = `0x100023`, `0x63`, etc.
 mapping virt `0xFA10000000` to nonsense phys (0x100000, 0x0, ...). Don't rely
 on them.
 
-- PML4 slot: **0x180** (virt base `0xFFFFC00000000000`) — confirmed unused by
+- PML4 slot: **0x180** (virt base `0xFFFFC00000000000`) - confirmed unused by
   kernel (memory note: only PML4[1] used for 512GB lower-half identity).
 - Three 4KB pages in `.data`, page-aligned: `amd_dcn_uc_pdpt`, `amd_dcn_uc_pd`,
   `amd_dcn_uc_pt`.
@@ -51,8 +51,8 @@ amd_dcn_cmd_pre/post   d  PCI Command before/after MEM|BM enable
 amd_dcn_uc_ok          b  1 if UC-alias reads completed
 amd_dcn_uc_r0000       d  MMIO read at BAR0+0x0000 via UC alias
 amd_dcn_uc_r0004       d  MMIO read at BAR0+0x0004 via UC alias
-amd_dcn_uc_r0008       d  Labeled "r1000" in diag — actual offset BAR0+0x1000
-amd_dcn_uc_r000C       d  Labeled "r3000" in diag — actual offset BAR0+0x3000
+amd_dcn_uc_r0008       d  Labeled "r1000" in diag - actual offset BAR0+0x1000
+amd_dcn_uc_r000C       d  Labeled "r3000" in diag - actual offset BAR0+0x3000
 amd_dcn_uc_walk_pte/lvl q,d  Walker result for UC virt addr (sanity check)
 acpi_ec_dump_ok        b  1 if first EC read succeeded
 acpi_ec_dump_low       32 bytes EC[0x00..0x1F]
@@ -82,12 +82,12 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
 - **EC offset 0x00 byte = AC adapter present** (`0x01`=plugged, `0x00`=battery).
   Clean 1-bit signal.
 - Bytes 0x14..0x17 are two little-endian 16-bit values that drift over time
-  (`5E0A`/`C00A` → `760A`/`D90A`) — likely temps×10 (26.5°C-ish range) or
+  (`5E0A`/`C00A` → `760A`/`D90A`) - likely temps×10 (26.5°C-ish range) or
   fan tachs. Some boots show them 0 (sensors gated in low-power state?).
 - 0x70..0x8F mostly zeros, trailing `005C1E2D41` static (board identifier?).
 
 ### Things to NOT redo
-- PCI Command write: `cmdPre==cmdPost==0x00100006` — MEM+BM already on.
+- PCI Command write: `cmdPre==cmdPost==0x00100006` - MEM+BM already on.
   My `amd_dcn_probe` does an idempotent enable but it's a no-op.
 - Walking PTEs via the existing kernel mapping for BAR0: results are random
   garbage across boots. **Always use the UC alias.**
@@ -96,28 +96,28 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
 
 ## Status update 2026-05-25 (post-implementation)
 
-- **Task A: DONE — VERIFIED ON HARDWARE.** `battery.asm` gained Layout D,
+- **Task A: DONE - VERIFIED ON HARDWARE.** `battery.asm` gained Layout D,
   signature-gated on EC[0x07]==0x41 && EC[0x04]==0x06, reads AC from
   EC[0x00] bit0. Drives existing `battery_state` so the taskbar plug/
   battery icon flips live on plug/unplug. Battery percent unknown on this
   EC, pinned to 100. **CRITICAL BUG FOUND ALONGSIDE:** `battery_init`
-  was declared `extern` in main.asm but never called — entire battery
+  was declared `extern` in main.asm but never called - entire battery
   driver had been silently uninitialized since it was written. Now called
   from kmain right after `mouse_init` (`call battery_init`). First boot
   with both fixes showed plug icon correctly.
 
-- **DCN 3.5 brightness — strategic pivot.** AMDGPU
+- **DCN 3.5 brightness - strategic pivot.** AMDGPU
   `drm/amd/display/dc/resource/dcn35/dcn35_resource.c` uses
   `dcn31_panel_cntl_create`, and `dcn31_panel_cntl.c` sends
   `cmd.panel_cntl` to DMUB firmware. There is NO CPU-accessible
-  BL_PWM_CNTL register on DCN 3.1+/3.5 — backlight is owned by the DMUB
+  BL_PWM_CNTL register on DCN 3.1+/3.5 - backlight is owned by the DMUB
   microcontroller. The 1MB BAR0 sweep (BL hunt) was therefore futile and
   is now disabled (`amd_dcn.asm` still maps 1MB UC for IP enumeration
   but BL_hunt loop is dead-coded by leaving the table populated; the
   diag emit path is commented out in main.asm `real_boot_diag_dump`).
   Without DMUB, the screen sits at UEFI default (max) regardless of
-  what Windows had set — confirmed empirically: setting min in Windows
-  shows min in Windows after reboot, but max in NexusOS, then still min
+  what Windows had set - confirmed empirically: setting min in Windows
+  shows min in Windows after reboot, but max in GritOS, then still min
   back in Windows. Preference is stored somewhere persistent, but
   application of it requires DMUB or an EC PWM path.
 
@@ -126,9 +126,9 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
   surfaced in `=` overlay as `EC[20..6F]=` line. Diffed across
   Windows-min vs Windows-max boots: only EC[0x2E] shifted (0x02 vs
   0x00) and EC[0x34] drifted thermally (varied 0x3A/0x3C/0x42). Four
-  constant 0xFF bytes at 0x3E/0x41/0x44/0x47 are NOT brightness — they
+  constant 0xFF bytes at 0x3E/0x41/0x44/0x47 are NOT brightness - they
   are stable across slider position. EC[0x2E] is a weak candidate;
-  values too small to be a 0..100 brightness scalar — possibly an
+  values too small to be a 0..100 brightness scalar - possibly an
   event flag or step counter. Next step: write-probe EC[0x2E] from a
   keybinding, OR dump+parse DSDT to find the firmware's _BCM path.
 
@@ -137,11 +137,11 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
   value `0x40003071` → DCN 3.0.71 encoding consistent with DCN 3.5.
   Most other pages are pattern `0x4000_X001` SOC15 IP headers. Five
   high-entropy values at 0x4B000..0x4F000 (FD9E25F3 etc) likely
-  encrypted/scratch — ignore. Full table preserved in
+  encrypted/scratch - ignore. Full table preserved in
   `amd_dcn_ip_table` (256 dwords, 1KB).
 - **Task B: instrumentation in.** `amd_dcn.asm` UC mapping bumped from 4 to
   256 pages (1MB at BAR0). After existing reads, fills `amd_dcn_ip_table`
-  (256 dwords — one per 4KB page). `=` overlay emits non-zero entries as
+  (256 dwords - one per 4KB page). `=` overlay emits non-zero entries as
   `IP+xxxxx=hhhhhhhh`, 4/line, via serial. One boot → full IP map.
 - **Task C: instrumentation in (same boot).** Also fills `amd_dcn_bl_table`:
   4096 dwords (16KB) at BAR0+0x40000 stride 4. Overlay emits entries in
@@ -153,24 +153,24 @@ plugged   : 0100000106001E410F1E010000000000020000000000000000000000000000000F
   `IP+...` lines (cross-ref soc15_ip_offset.h to find DCN aperture) and
   `BL+...` lines (any near-mid value is a PWM candidate to write next).
 
-## What's next — Tasks A / B / C (everything needed to act fresh)
+## What's next - Tasks A / B / C (everything needed to act fresh)
 
-### Task A — Plumb EC AC-present bit into WM/taskbar
+### Task A - Plumb EC AC-present bit into WM/taskbar
 **Goal:** taskbar shows live AC status, updates within ~1 second of plug change.
-**Risk:** very low — read-only EC polling, already proven safe.
+**Risk:** very low - read-only EC polling, already proven safe.
 
 Steps:
 1. Add a periodic poller. Easiest hook: existing main loop tick in
-   `src/kernel/core/main.asm` already does per-tick work — add a 50-tick
+   `src/kernel/core/main.asm` already does per-tick work - add a 50-tick
    (500ms) modulo branch calling a new `acpi_ec_poll_status` function.
 2. In `src/kernel/drivers/acpi_ec.asm`, add `acpi_ec_poll_status`:
    - `mov cl, 0x00` ; `call acpi_ec_read` ; write to `byte [system_ac_present]`
-   - Also try `mov cl, 0x10` for lid (untested — confirm by reading then
+   - Also try `mov cl, 0x10` for lid (untested - confirm by reading then
      closing lid briefly while watching the value)
    - Export `system_ac_present`, `system_lid_closed` as globals.
 3. Hook display: in `src/kernel/gui/taskbar.asm` find the clock-rendering area,
    draw a tiny plug-icon if `system_ac_present` else battery-icon. Use existing
-   `draw_string` for an initial text indicator (`[AC]`/`[BAT]`) — easier than
+   `draw_string` for an initial text indicator (`[AC]`/`[BAT]`) - easier than
    bitmap art.
 4. Optional: post a WM event (find existing event-post helper, e.g. how
    keyboard events get posted) when the bit changes, so apps can react.
@@ -178,20 +178,20 @@ Steps:
 Files: `acpi_ec.asm` (+~30 lines), `main.asm` (+~10 lines tick hook),
 `taskbar.asm` (+~20 lines drawing). No new kernel modules needed.
 
-### Task B — Fingerprint DCN HW version
+### Task B - Fingerprint DCN HW version
 **Goal:** know exactly which DCN revision this is (DCN 3.5 expected for Strix
 Point) so Task C can pick the right brightness register offset without guessing.
-**Risk:** low — more MMIO reads through the existing UC alias, no writes.
+**Risk:** low - more MMIO reads through the existing UC alias, no writes.
 
 Useful reads (offsets are AMDGPU public, won't fault on Strix):
-- `mmRCC_DEV0_EPF0_STRAP0` — strap register, contains chip ID.
+- `mmRCC_DEV0_EPF0_STRAP0` - strap register, contains chip ID.
 - DCN IP-block headers at the apertures already partially sampled:
   - `r0000` = first block (NBIO usually)
   - `r1000` = second block
   - `r3000` = fourth block
   - Need to also read 0x2000, 0x4000..0x10000 in 0x1000 steps to enumerate
     all IP blocks. Each non-zero `0x4000_X001` is an IP block.
-- `mmDCEFCLK_CNTL` and `mmDC_VERSION` registers — DCN-specific but offset
+- `mmDCEFCLK_CNTL` and `mmDC_VERSION` registers - DCN-specific but offset
   varies. Easier: just enumerate IP headers.
 
 Steps:
@@ -210,9 +210,9 @@ Steps:
 
 No writes anywhere.
 
-### Task C — Brightness control via DCN PWM
+### Task C - Brightness control via DCN PWM
 **Goal:** brightness up/down keys actually dim/brighten the eDP backlight.
-**Risk:** **medium** — first write to GPU MMIO. Wrong offset = display can
+**Risk:** **medium** - first write to GPU MMIO. Wrong offset = display can
 blank, gpu_hang, or stuck-on. Recovery = reboot.
 
 Strategy (only attempt after B confirms DCN version):
@@ -225,7 +225,7 @@ Strategy (only attempt after B confirms DCN version):
 4. Write a fractionally-changed value (e.g. current ± 10%). User reports
    whether screen brightness changed. If yes, scale to 100% steps from
    keyboard shortcut.
-5. Wire a keyboard shortcut in `src/kernel/core/main.asm` `process_key` —
+5. Wire a keyboard shortcut in `src/kernel/core/main.asm` `process_key` -
    e.g. F1/F2 for brightness down/up, OR re-purpose the unused brightness
    scancodes (0xE0,0x6A/0x6B on Acer).
 

@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Docs = Join-Path $Root 'docs'
 $Index = Join-Path $Docs 'reference-index.md'
-$ProposalDocs = @('app-loader-format.md', 'nexushl.md')
+$ProposalDocs = @('app-loader-format.md', 'grithl.md')
 
 function Assert-Text {
     param([string]$Path, [string]$Pattern, [string]$Message)

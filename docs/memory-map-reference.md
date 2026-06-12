@@ -1,4 +1,4 @@
-# NexusOS Memory Map Reference
+# GritOS Memory Map Reference
 
 This document collects the fixed-address regions and major in-memory ownership
 rules used across boot, kernel, drivers, GUI, and ring 3.
@@ -103,7 +103,7 @@ and `src/kernel/drivers/hid_parser.asm`.
 
 These addresses are owned by `src/kernel/fs/fat16.asm`.
 
-Under `NEXUS_CACHE32_MAX`, these cold buffers move to the `0x1A00000` region.
+Under `GRIT_CACHE32_MAX`, these cold buffers move to the `0x1A00000` region.
 
 | Address | Meaning |
 |---|---|
@@ -115,7 +115,7 @@ Under `NEXUS_CACHE32_MAX`, these cold buffers move to the `0x1A00000` region.
 
 ## Shared Scratch Buffers Used By Built-in Apps
 
-These constants are exposed in `src/user/lib/nexus_window.inc` and are
+These constants are exposed in `src/user/lib/grit_window.inc` and are
 currently allowed by syscall validation because the built-in apps use them.
 
 | Address | Meaning | Current use |
@@ -143,7 +143,7 @@ Important global geometry constants:
 - If an address is in a fixed reserved region, treat the owning subsystem as
   authoritative.
 - Do not add new fixed buffers casually; prefer extending the owning
-  subsystem’s documented region or moving data into per-slot/per-object storage.
+  subsystem's documented region or moving data into per-slot/per-object storage.
 - When moving any fixed address, update:
   - `constants.inc`
   - subsystem code

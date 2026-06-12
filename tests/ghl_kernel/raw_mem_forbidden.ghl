@@ -1,0 +1,20 @@
+module "raw_mem_forbidden";
+
+# Negative fixture (ghl-beyond-zero-trust-todo.md "compiler tests proving raw
+# memory access is unavailable without an explicit capability"). In kernel/boot
+# targets the raw load/store builtins (lb/lw/lq/sb/sw/sq) touch unchecked
+# physical addresses, so they are gated behind `unsafe raw_mem`. This module
+# deliberately omits that declaration: the store below MUST fail to compile.
+# Compile error expected: "raw memory builtin sq() requires `unsafe raw_mem;`".
+# The positive companion (same store WITH `unsafe raw_mem`) is asserted to
+# compile by the guard, proving it is the capability - not the builtin - that
+# gates raw memory.
+
+global ghl_test_raw_mem_forbidden;
+
+data scratch: 8 = 0;
+
+fn ghl_test_raw_mem_forbidden() {
+    sq(&scratch, 1);   # raw store -> rejected without unsafe raw_mem
+    return 0;
+}

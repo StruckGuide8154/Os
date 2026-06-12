@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - System Constants
+; GritOS v3.0 - System Constants
 ; ============================================================================
 
 %include "boot_memory.inc"
@@ -19,7 +19,7 @@
 ; If Stack starts at 0x200000, a push writes to 0x1FFFF8.
 ; So they don't overlap. This is safe.
 
-%ifdef NEXUS_CACHE32_MAX
+%ifdef GRIT_CACHE32_MAX
 CACHE32_RAM_LIMIT   equ 0x2000000    ; 32MB strict profile cap
 SYSTEM_RESERVED_END equ (BOOT_ANIM_BUF_ADDR + BOOT_ANIM_BUF_SIZE)
 SMP_CORE_STATE_ADDR equ 0xC40000     ; Cacheline-aligned per-core records
@@ -27,7 +27,7 @@ SMP_CORE_STACK_BASE equ 0xC50000     ; AP stacks grow down from here
 SMP_MAX_CORES       equ 8
 SMP_CORE_STATE_SIZE equ 128
 SMP_CORE_STACK_SIZE equ 0x4000
-%elifdef NEXUS_SMP
+%elifdef GRIT_SMP
 SMP_CORE_STATE_ADDR equ 0xC40000
 SMP_CORE_STACK_BASE equ 0xC50000
 SMP_MAX_CORES       equ 8
@@ -77,7 +77,7 @@ FRAMEBUFFER_SIZE    equ (SCREEN_WIDTH * SCREEN_HEIGHT * 4)  ; 3145728 = ~3MB
 ; VBE info offsets live in boot_memory.inc.
 
 ; --- Colors (32-bit 0x00RRGGBB, stored as BGRX in memory) ---
-; NexusOS design-system light palette semantic tokens.
+; GritOS design-system light palette semantic tokens.
 COLOR_BG_BASE       equ 0x00F5F6FA   ; #F5F6FA
 COLOR_SURFACE_1     equ 0x00FFFFFF   ; #FFFFFF
 COLOR_SURFACE_2     equ 0x00ECEFF4   ; #ECEFF4
@@ -125,7 +125,7 @@ COLOR_START_HOVER    equ COLOR_SURFACE_2
 ; --- Syscall rate limiting (security_todo.md §2) ---
 ; Per-slot token bucket size, refilled by pit_handler every timer tick. At the
 ; PIT tick rate this caps a slot to SC_BUDGET_PER_TICK * tick_rate syscalls/sec
-; — far below the millions a fuzzer/side-channel oracle needs, yet generous for
+; - far below the millions a fuzzer/side-channel oracle needs, yet generous for
 ; legitimate GUI apps. Stored as a word per slot (slot_sc_budget in syscall.asm)
 ; so values up to 65535 are valid. 4096/tick @100Hz ~= 409600 calls/s ceiling.
 SC_BUDGET_PER_TICK  equ 4096
@@ -146,13 +146,13 @@ SC_STRIKE_LIMIT     equ 16
 ; --- Behavioral anomaly detector (security_todo.md §11) ---
 ; The dispatcher keeps an always-on per-slot syscall histogram (syscall_trace.inc);
 ; sc_anomaly_scan_all walks it on a coarse pit cadence and flags a slot whose
-; syscall MIX deviates from its app-class profile — e.g. a Notepad slot suddenly
+; syscall MIX deviates from its app-class profile - e.g. a Notepad slot suddenly
 ; hammering the W^X / JIT-alias surface. Because the histogram is bumped at
 ; dispatch entry (before the cap gate), it counts *attempts*, so a sandboxed app
 ; probing a forbidden high-risk syscall shows up even though every call is
 ; cap-rejected. On a flag the detector drives the slot through the existing
 ; §12 strike path (sc_record_strike), so repeated/excessive high-risk behaviour
-; throttles toward the same SC_STRIKE_LIMIT slot-kill — no new teardown path.
+; throttles toward the same SC_STRIKE_LIMIT slot-kill - no new teardown path.
 ;
 ; ANOMALY_SCAN_PERIOD: scan cadence in PIT ticks (power of two so pit_handler
 ; masks it with AND, like CODE_HASH_VERIFY_PERIOD). Coarser than the rate-limit
@@ -181,7 +181,7 @@ L3_SYSCALL_STACK_SIZE equ 4096       ; 4 KB usable syscall stack per L3 context
 ;   +0x3000  syscall stack   (4 KiB usable; RSP_top = base + (i+1)*STRIDE)
 ; Both guards are punched by l3_install_syscall_stack_pt. The syscall stack
 ; occupies the top 4 KiB; an overflow off its bottom faults into the +0x2000
-; guard. The shadow address for any syscall-stack slot is (rsp ^ 0x2000) —
+; guard. The shadow address for any syscall-stack slot is (rsp ^ 0x2000) -
 ; the stride is 16 KiB-aligned so that XOR maps the live stack page to its
 ; mirror page without leaving the slot.
 L3_SYSCALL_STACK_STRIDE equ 16384

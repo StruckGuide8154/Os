@@ -1,0 +1,202 @@
+# ============================================================================
+# net_dhcp_dispatch.ghl  -  GritHLK (zero-asm) NIC-agnostic DHCP dispatch.
+#
+# Ports net_dhcp_configure (sync) and net_dhcp_start (async kick) out of
+# src/kernel/net/nic.asm. These pick the active backend (rtl8156 preferred,
+# rtl8139 fallback) and route to the per-driver DHCP entry points. The driver
+# primitives (rtl8156_dhcp_configure/_start, rtl8139_init/_dhcp_configure,
+# rtl8156_init) stay in their owning units; this module only dispatches.
+#
+# WHY (the freeze):
+#   Clicking "Renew DHCP" froze the whole UI. Two causes, both fixed here:
+#     (1) The renew syscall called the SYNCHRONOUS net_dhcp_configure, which
+#         busy-waits (rtl8156_dhcp_configure spins on rx_once for up to ~3x300
+#         + 300 ticks) inside the syscall - the kernel main loop (render, mouse,
+#         dhcp pump) cannot run until it returns. Renew now routes through the
+#         async net_dhcp_start kick + main-loop rtl8156_dhcp_pump, returning
+#         immediately. NO synchronous wait on the renew/start path.
+#     (2) BUG: the old net_dhcp_start .r8156_start short-circuited when
+#         rtl8156_dhcp_bound == 1 - it just re-stamped state=BOUND and returned
+#         WITHOUT re-DISCOVERing, so an explicit renew/start on a bound lease did
+#         nothing. net_dhcp_start now ALWAYS forces a fresh transaction: clear
+#         bound + reset the FSM to IDLE, then kick rtl8156_dhcp_start (which
+#         sends a fresh DISCOVER and arms the async deadline).
+#
+# net_dhcp_configure stays synchronous on purpose: it is the boot-path /
+# dispatch-table bring-up entry (called before the main loop pumps), not the
+# interactive renew button. Returns EAX = 1 bound / 0 failed.
+#
+# net_dhcp_start returns EAX = 1 if a backend accepted the kick, 0 if no NIC.
+# It never blocks on the rtl8156 path. rtl8139 has no async pump yet, so it
+# falls back to its synchronous configure (bounded; legacy behavior preserved).
+#
+# Calls into code that stays put (driver primitives - stable externs, owned by
+# rtl8156.asm / rtl8139.asm / the rtl8156_dhcp_sm GHLK module):
+#   rtl8156_init, rtl8156_dhcp_configure, rtl8156_dhcp_start,
+#   rtl8139_init, rtl8139_dhcp_configure. No assembly in this module.
+# ============================================================================
+
+module "net_dhcp_dispatch";
+
+unsafe raw_mem;          # lb/sb over the *_active / dhcp_state / dhcp_bound bytes
+unsafe implicit_extern;  # &<symbol> + call into the driver primitives
+
+global net_dhcp_configure;
+global net_dhcp_start;
+global rtl8139_dhcp_start;
+global rtl8139_dhcp_pump;
+
+# ---------------------------------------------------------------------------
+# net_dhcp_configure - synchronous bring-up used by the NIC dispatch table and
+# the boot path. Selects the active backend (init-ing one if neither is up yet)
+# and runs its synchronous DHCP configure. Returns EAX = 1 bound / 0 failed.
+# Mirrors the asm: rtl8156 preferred, rtl8139 fallback. Output in rax; the
+# original clobbered nothing of note (leaf-ish dispatch) so preserve all but rax.
+# ---------------------------------------------------------------------------
+fn net_dhcp_configure(rax result)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if lb(&rtl8156_active) == 1 {
+        result = rtl8156_dhcp_configure();
+        return;
+    }
+    if lb(&rtl_active) == 1 {
+        result = rtl8139_dhcp_configure();
+        return;
+    }
+
+    # Neither backend up yet - try rtl8156 first, then rtl8139.
+    if rtl8156_init() != 0 {
+        result = rtl8156_dhcp_configure();
+        return;
+    }
+    if rtl8139_init() != 0 {
+        result = rtl8139_dhcp_configure();
+        return;
+    }
+    result = 0;
+}
+
+# ---------------------------------------------------------------------------
+# net_dhcp_start - ASYNC kick (non-blocking on the rtl8156 path). Forces a fresh
+# DHCP transaction regardless of current lease state. Returns EAX = 1 if a
+# backend accepted the request, 0 if no NIC is active.
+#
+# rtl8156: clear the BOUND flag and reset the FSM to IDLE, THEN call the async
+# rtl8156_dhcp_start (which sends one DISCOVER, sets state=DISCOVER, arms the
+# deadline, re-primes the HID ring - all under a try-lock, never blocking the
+# main loop). The reset is the bug fix: without it, the old nic.asm path
+# short-circuited on a bound lease and never re-DISCOVERed; landing in IDLE here
+# guarantees the kick always starts a fresh transaction.
+#
+# rtl8139 has no async pump; keep its (bounded, synchronous) configure as the
+# legacy fallback until its DHCP pump is lifted. Output in rax; preserve the
+# rest (the asm net_dhcp_start clobbered only rax).
+# ---------------------------------------------------------------------------
+fn net_dhcp_start(rax result)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if lb(&rtl8156_active) == 1 {
+        # Force a fresh DISCOVER: drop any existing lease + reset the FSM so the
+        # async kick is never short-circuited by a prior BOUND state.
+        sb(&rtl8156_dhcp_bound, 0);
+        sb(&rtl8156_dhcp_state, 0);          # IDLE
+        call rtl8156_dhcp_start();           # non-blocking try-lock kick
+        result = 1;
+        return;
+    }
+    if lb(&rtl_active) == 1 {
+        # RTL8139 now has an async tick FSM too (rtl8139_dhcp_start + the
+        # main-loop rtl8139_dhcp_pump), so the renew/start kick no longer runs
+        # the synchronous rtl8139_dhcp_configure (which busy-waited up to ~5s on
+        # the syscall and froze the whole UI). Fire one DISCOVER and return.
+        call rtl8139_dhcp_start();
+        result = 1;
+        return;
+    }
+    result = 0;
+}
+
+# ===========================================================================
+# RTL8139 async DHCP (renew path). Mirrors the rtl8156 FSM: a non-blocking
+# DISCOVER kick + a main-loop pump that advances DISCOVER->REQUEST->BOUND off
+# the latched offer_seen/ack_seen flags (set by rtl8139_net_poll_rx, which the
+# main loop already calls every frame). State byte rtl_dhcp_state:
+#   0 IDLE, 1 DISCOVER, 2 REQUEST, 3 BOUND, 4 FAILED.
+# ===========================================================================
+const RTL8139_XID_FALLBACK = 0x47524448;   # "HDRG" if the xid wraps to 0
+
+# Promote the leased address to the live interface state the instant we bind,
+# matching the synchronous configure / ping paths (guest_ip <- dhcp_ip,
+# next_hop <- router, falling back to the DHCP server when no router was offered).
+fn rtl8139_dhcp_promote_lease() preserves(all) {
+    sw(&rtl_guest_ip, lw(&rtl_dhcp_ip));
+    let hop = lw(&rtl_dhcp_router);
+    if (hop & 0xFFFFFFFF) == 0 {
+        hop = lw(&rtl_dhcp_server);
+    }
+    sw(&rtl_next_hop_ip, hop);
+}
+
+# Non-blocking kick. No-ops if no NIC or a transaction is already in flight
+# (state DISCOVER/REQUEST), else resets the transaction, bumps the xid, sends one
+# DISCOVER and arms the deadline. Never waits.
+fn rtl8139_dhcp_start() preserves(all) {
+    if lb(&rtl_active) != 1 { return; }
+    let s = lb(&rtl_dhcp_state);
+    if s == 1 { return; }                    # DISCOVER already in flight
+    if s == 2 { return; }                    # REQUEST already in flight
+    sb(&rtl_dhcp_bound, 0);
+    sb(&rtl_dhcp_offer_seen, 0);
+    sb(&rtl_dhcp_ack_seen, 0);
+    sw(&rtl_dhcp_xid, lw(&rtl_dhcp_xid) + 1);
+    if (lw(&rtl_dhcp_xid) & 0xFFFFFFFF) == 0 {
+        sw(&rtl_dhcp_xid, RTL8139_XID_FALLBACK);
+    }
+    call rtl8139_send_dhcp_discover();
+    sb(&rtl_dhcp_state, 1);                   # DISCOVER
+    sq(&rtl8139_dhcp_deadline, lq(&tick_count) + 300);
+}
+
+# Called every main-loop tick. Fast-bails unless a transaction is in flight.
+# net_nic_poll_rx (also in the main loop) lands the OFFER/ACK frames and sets the
+# latched flags; this only advances the FSM off them and handles the deadline.
+fn rtl8139_dhcp_pump() preserves(all) {
+    let s0 = lb(&rtl_dhcp_state);
+    if s0 != 1 {
+        if s0 != 2 { return; }               # not in flight -> nothing to do
+    }
+
+    if s0 == 1 {
+        if lb(&rtl_dhcp_offer_seen) == 1 {
+            call rtl8139_send_dhcp_request();
+            sb(&rtl_dhcp_state, 2);          # REQUEST
+            sq(&rtl8139_dhcp_deadline, lq(&tick_count) + 200);
+            return;
+        }
+    } else {
+        if lb(&rtl_dhcp_ack_seen) == 1 {
+            sb(&rtl_dhcp_bound, 1);
+            sb(&rtl_dhcp_state, 3);          # BOUND
+            rtl8139_dhcp_promote_lease();
+            return;
+        }
+    }
+
+    if lq(&tick_count) >= lq(&rtl8139_dhcp_deadline) {
+        # Deadline. In REQUEST with an OFFER in hand -> bind via the OFFER
+        # fallback (QEMU slirp sometimes never ACKs); otherwise fail.
+        if lb(&rtl_dhcp_state) == 2 {
+            if lb(&rtl_dhcp_offer_seen) == 1 {
+                sb(&rtl_dhcp_bound, 1);
+                sb(&rtl_dhcp_state, 3);      # BOUND via OFFER
+                rtl8139_dhcp_promote_lease();
+            } else {
+                sb(&rtl_dhcp_state, 4);      # FAILED
+            }
+        } else {
+            sb(&rtl_dhcp_state, 4);          # DISCOVER timeout -> FAILED
+        }
+    }
+}
+
+align 8;
+data rtl8139_dhcp_deadline: 1 x 8 = 0;

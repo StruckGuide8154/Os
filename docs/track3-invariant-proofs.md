@@ -1,4 +1,4 @@
-# Track 3 — Invariant Proofs & Containment Claims
+# Track 3 - Invariant Proofs & Containment Claims
 
 Proof-oriented record for the seL4 validity track: one theorem per invariant
 with its exact bound and checked state count, the policy→authority derivation
@@ -6,20 +6,20 @@ that binds the model to the *real* system configuration, and the containment
 claim table. Companion to `docs/track3-sel4-validity-todo.md`.
 
 **Honesty statement (read first).** These are *exhaustive bounded checks* of
-NHL predicates over a finite authority model, plus a mechanical derivation of
+GHL predicates over a finite authority model, plus a mechanical derivation of
 the model's inputs from the real signed policy. They are real machine-checked
 results, but they are NOT a seL4-style refinement proof from implementation
 code to abstract spec: nothing here proves the kernel's machine code refines
 these predicates. The predicates are, however, the same source the enforcement
 call sites compile (`--forbid-asm --deny-unsafe`), evaluated through the
-production compiler's own parser — there is no second implementation to drift.
+production compiler's own parser - there is no second implementation to drift.
 Total hardware compromise (below-ring-0, DMA from outside the IOMMU scope,
 physical RAM capture) is explicitly out of scope here; see Track 4/5.
 
-Verification entry points (both run inside `test_nhl_security_guards.ps1`):
+Verification entry points (both run inside `test_ghl_security_guards.ps1`):
 
 ```
-scripts\test\test_nhl_invariants.ps1          # full Track-3 runner
+scripts\test\test_ghl_invariants.ps1          # full Track-3 runner
 python scripts\test\eval_invariants.py --exhaustive   # bounded proofs only
 python scripts\test\derive_authority.py       # policy-derived mapping checks
 ```
@@ -29,7 +29,7 @@ python scripts\test\derive_authority.py       # policy-derived mapping checks
 ## 1. Theorems (exhaustive bounded checks)
 
 Authority space `A` = all 7-bit masks 0..127 over the bits defined in
-`src/tools/security/invariant_check.nxh` (AUTH_MEMORY_GRANT=1,
+`src/tools/security/invariant_check.ghl` (AUTH_MEMORY_GRANT=1,
 AUTH_MINT_IDENTITY=2, AUTH_DMA_MAP=4, AUTH_PERSIST=8, AUTH_SIGN_MEASUREMENT=16,
 AUTH_INSTALL_POLICY=32, AUTH_GLOBAL=64). `B` = {0,1}. Every theorem below is
 checked for EVERY point of its bound by `eval_invariants.py --exhaustive`,
@@ -38,7 +38,7 @@ mismatch fails the suite. Checked counts are emitted by the run itself.
 
 | Invariant | Theorem (∀ over the bound) | Predicate | Bound | States checked | Status |
 |---|---|---|---|---|---|
-| INV-CAP-DERIVATION | child ⊆ parent accepted iff `(child & parent) == child` — derivation never amplifies authority | `inv_subset` | A × A | 16,384 | proven |
+| INV-CAP-DERIVATION | child ⊆ parent accepted iff `(child & parent) == child` - derivation never amplifies authority | `inv_subset` | A × A | 16,384 | proven |
 | INV-NO-GLOBAL-MINT | a domain holding AUTH_GLOBAL is accepted only with threshold approval | `inv_requires_threshold` | A × {G} × B | 256 | proven |
 | INV-SCHED-NO-MEMORY | accepted iff the scheduler mask lacks AUTH_MEMORY_GRANT | `inv_scheduler_no_memory_grant` | A | 128 | proven |
 | INV-IPC-NO-FORGE | accepted iff the IPC mask lacks AUTH_MINT_IDENTITY | `inv_ipc_no_identity_forge` | A | 128 | proven |
@@ -76,33 +76,33 @@ the Track-3 runner.
 | # | Real source | What is derived | How it is signed/enforced |
 |---|---|---|---|
 | S1 | `src/include/syscall_caps.inc` `MANIFEST_*` rows | per-app authority masks (CAP_FS_WRITE/CAP_FS_DELETE → AUTH_PERSIST; no syscall capability maps to any other authority) | manifests live inside KERNEL.BIN, admitted only under the 3-of KERNEL.ENV envelope (Track 2) |
-| S2 | `src/tools/security/policy_graph_check.nxh` | per-domain obtainable authority, enumerated through the real `security_policy_graph_edge_is_valid` predicate over all (src, dst, cap, threshold); CAP_MEMORY→AUTH_MEMORY_GRANT, CAP_DMA→AUTH_DMA_MAP, CAP_POLICY_WRITE→AUTH_INSTALL_POLICY, CAP_UPDATE/CAP_STORAGE→AUTH_PERSIST | the same module the trusted path compiles `--forbid-asm --deny-unsafe` |
+| S2 | `src/tools/security/policy_graph_check.ghl` | per-domain obtainable authority, enumerated through the real `security_policy_graph_edge_is_valid` predicate over all (src, dst, cap, threshold); CAP_MEMORY→AUTH_MEMORY_GRANT, CAP_DMA→AUTH_DMA_MAP, CAP_POLICY_WRITE→AUTH_INSTALL_POLICY, CAP_UPDATE/CAP_STORAGE→AUTH_PERSIST | the same module the trusted path compiles `--forbid-asm --deny-unsafe` |
 | S3 | `$KernelModules` build list + each module's `unsafe <cap>;` declarations + `nk_pt_window` bracketing | per-kernel-module authority: kernel_io → AUTH_DMA_MAP; PTE-writer (nk_pt_window) → AUTH_MEMORY_GRANT; raw_mem/kernel_priv/kernel_int/implicit_extern mint nothing cross-domain | compiler-enforced (`_require_cap`): an undeclared capability is a compile error; the build list is what ships in the signed image |
-| S4 | `src/tools/security/threshold_check.nxh` class tables | artifact-class → TCB authority (BOOT/KERNEL/HYPERVISOR/UPDATE/RECOVERY → AUTH_GLOBAL; POLICY/CONFIG → AUTH_INSTALL_POLICY; DRIVER → AUTH_DMA_MAP; APP → derived app max) and the quorum floor that gates it | enforced at runtime by `envelope_verify_signed` / `artifact_gate_admit` (Track 2, real Ed25519) |
+| S4 | `src/tools/security/threshold_check.ghl` class tables | artifact-class → TCB authority (BOOT/KERNEL/HYPERVISOR/UPDATE/RECOVERY → AUTH_GLOBAL; POLICY/CONFIG → AUTH_INSTALL_POLICY; DRIVER → AUTH_DMA_MAP; APP → derived app max) and the quorum floor that gates it | enforced at runtime by `envelope_verify_signed` / `artifact_gate_admit` (Track 2, real Ed25519) |
 
 Derived results re-proved through the real predicates, highlights:
 
 - No policy-graph domain can obtain AUTH_MINT_IDENTITY, AUTH_SIGN_MEASUREMENT,
-  or AUTH_GLOBAL through ANY edge — those authorities are not mintable in the
+  or AUTH_GLOBAL through ANY edge - those authorities are not mintable in the
   schema at all; AUTH_GLOBAL exists only as artifact-class admission under a
   ≥3-signature quorum.
 - Every threshold-gated capability (DMA, UPDATE, DIAGNOSTIC, POLICY_WRITE per
   the real `requires_threshold` predicate) is unobtainable by every domain when
-  threshold approval is absent (checked per capability — CAP_UPDATE and
+  threshold approval is absent (checked per capability - CAP_UPDATE and
   CAP_STORAGE share AUTH_PERSIST but differ in gating).
 - Unsigned endpoints form no valid edge anywhere in the schema (exhaustive over
   all domain pairs × capabilities × threshold states).
 - All 10 real app manifests lack all six non-app authorities; the widest app
   authority is AUTH_PERSIST (FS write), within the derived DOMAIN_APP bound.
-- Scheduler tier (`frame_pacing.nxh`, `cpu_acct.nxh`) derives authority 0x00 →
-  INV-SCHED-NO-MEMORY holds on real modules; IPC tier (`input_dispatch.nxh`,
-  `net_dhcp_dispatch.nxh`) derives 0x00 → INV-IPC-NO-FORGE holds. A binding
+- Scheduler tier (`frame_pacing.ghl`, `cpu_acct.ghl`) derives authority 0x00 →
+  INV-SCHED-NO-MEMORY holds on real modules; IPC tier (`input_dispatch.ghl`,
+  `net_dhcp_dispatch.ghl`) derives 0x00 → INV-IPC-NO-FORGE holds. A binding
   that names a module absent from the signed build list fails the suite.
-- The only PTE-writing NHL module (`ram_volatile.nxh`) and every kernel_io
+- The only PTE-writing GHL module (`ram_volatile.ghl`) and every kernel_io
   module are admissible solely inside the threshold-admitted image; the real
   predicates reject them with the grant/threshold absent.
-- The Track-3 enforcement modules themselves (`src/tools/security/*.nxh`)
-  declare zero compiler capabilities — the checker holds no authority.
+- The Track-3 enforcement modules themselves (`src/tools/security/*.ghl`)
+  declare zero compiler capabilities - the checker holds no authority.
 - Every artifact class requires a multi-party quorum (min_count ≥ 2; the
   global-authority classes require 3) and its rule is self-consistent per the
   real `security_threshold_class_quorum_ok`.
@@ -124,10 +124,10 @@ total hardware compromise.
 |---|---|---|---|---|
 | Any capability holder (derivation path) | more authority than its parent | INV-CAP-DERIVATION | proven (16,384) | S2 graph derivation |
 | Any single domain | AUTH_GLOBAL without quorum | INV-NO-GLOBAL-MINT | proven (256) | S4 class quorums (all ≥ 2) |
-| Scheduler (`frame_pacing.nxh`, `cpu_acct.nxh`) | AUTH_MEMORY_GRANT | INV-SCHED-NO-MEMORY | proven (128) | S3 derived mask 0x00 |
-| IPC/dispatch (`input_dispatch.nxh`, `net_dhcp_dispatch.nxh`) | AUTH_MINT_IDENTITY | INV-IPC-NO-FORGE | proven (128) | S3 derived mask 0x00 |
+| Scheduler (`frame_pacing.ghl`, `cpu_acct.ghl`) | AUTH_MEMORY_GRANT | INV-SCHED-NO-MEMORY | proven (128) | S3 derived mask 0x00 |
+| IPC/dispatch (`input_dispatch.ghl`, `net_dhcp_dispatch.ghl`) | AUTH_MINT_IDENTITY | INV-IPC-NO-FORGE | proven (128) | S3 derived mask 0x00 |
 | Any device driver module | self-minted DMA window | INV-DRIVER-NO-DMA-MINT | proven (256) | S3 kernel_io set, grant = signed-image admission |
-| Page-table manager (`ram_volatile.nxh` + nk-monitored PTE writers) | persistence without threshold | INV-PT-NO-PERSIST | proven (256) | S3 nk_pt_window set |
+| Page-table manager (`ram_volatile.ghl` + nk-monitored PTE writers) | persistence without threshold | INV-PT-NO-PERSIST | proven (256) | S3 nk_pt_window set |
 | Policy loader | installing unsigned policy | INV-POLICY-SIGNED-ONLY | proven (2) | S2: no unsigned edge is valid, exhaustive |
 | Hypervisor/monitor module | signing a foreign domain's measurement | INV-HV-NO-FOREIGN-MEASURE | proven (32,768) | model-level (monitor tier is Track 5/6 design) |
 | Release build | observing the user (telemetry) | INV-RELEASE-NO-OBSERVE | proven (2) | release_privacy_guard + release pipeline |
@@ -140,7 +140,7 @@ total hardware compromise.
 | RAM-dump replay of a per-boot secret (Track 4 barrier 1) | authenticating on a fresh boot | INV-EPHEMERAL-NO-REPLAY | proven (32,768) | per-boot RDTSC^RDRAND redraw |
 | RAM-dump replay of a per-slot key/slide (Track 4 barriers 2/4) | authenticating for another slot | INV-PER-SLOT-KEY-CONFINED | proven (32,768) | per-slot install diversification |
 | RAM-dump-built static syscall blob (Track 4 barrier 3) | dispatching under a fresh launch permutation | INV-SYSCALL-PERM-PER-LAUNCH | proven (32,768) | per-launch heterogeneous numbering |
-| Replay of a superseded signed artifact (Track 2) | admission below the persisted floor | INV-NO-ROLLBACK | proven (32,768) | floor_store.nxh FLOOR_LBA=2 |
+| Replay of a superseded signed artifact (Track 2) | admission below the persisted floor | INV-NO-ROLLBACK | proven (32,768) | floor_store.ghl FLOOR_LBA=2 |
 | A floor-rewind attempt (Track 2) | lowering the persisted anti-rollback floor | INV-FLOOR-RATCHET-MONOTONIC | proven (16,384) | floor_store ratchet + RTC forward-ratchet |
 
 ---
@@ -148,7 +148,7 @@ total hardware compromise.
 ## 4. Maintenance
 
 - Adding an invariant still follows the 4-artifact pattern (`.invariant` file,
-  `.vectors` file, predicate in `invariant_check.nxh`, exhaustive spec in
+  `.vectors` file, predicate in `invariant_check.ghl`, exhaustive spec in
   `eval_invariants.py`); if it claims a real component, add a binding in
   `derive_authority.py` and a row to the claim table here.
 - If the policy schema grows (e.g. Trust Partitioning adds domains), the S2

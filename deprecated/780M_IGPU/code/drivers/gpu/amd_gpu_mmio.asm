@@ -1,5 +1,5 @@
 ; ============================================================================
-; amd_gpu_mmio.asm — MMIO read/write helpers + state for GFX bring-up
+; amd_gpu_mmio.asm - MMIO read/write helpers + state for GFX bring-up
 ; ----------------------------------------------------------------------------
 ; Wave-1 primitive shared by SMU, GMC, CP-ring, and orchestrator modules.
 ; Reads/writes 32-bit MMIO using the BAR0 already mapped by amd_display.

@@ -58,7 +58,7 @@ global l3_slot_key
 l3_slot_key:        resq MAX_WINDOWS
 ; One-shot boot nonce mixed into every slot key, seeded once from RDTSC^RDRAND
 ; by l3_boot_nonce_ensure. Kernel-only; never exposed to ring 3.
-; Exported so the Track 4 volatile scrub (ram_volatile.nxh) can zero it on
+; Exported so the Track 4 volatile scrub (ram_volatile.ghl) can zero it on
 ; shutdown/panic/tamper.
 global l3_boot_nonce
 global l3_boot_nonce_done

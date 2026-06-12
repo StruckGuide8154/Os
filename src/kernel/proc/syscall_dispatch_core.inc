@@ -56,7 +56,7 @@
     ; selectors into ds/es/fs/gs so no user-controlled selector is in force
     ; while in ring 0; under -dENABLE_FSGS_MSR_SCRUB also zeroes the FS/GS base
     ; MSRs (no-op in the flat model, deterministic if FSGSBASE is ever enabled).
-    ; Clobbers ax only — rcx (user RIP) and the rest of the live state survive.
+    ; Clobbers ax only - rcx (user RIP) and the rest of the live state survive.
     SANITIZE_SEG_KERNEL_ENTRY
 
     ; Switch to syscall stack without calling out while we're still on the
@@ -120,9 +120,9 @@
     ; rdx/r8, all reloaded from the saved PUSH_ALL frame before the handler runs.
     SC_TRACE_APPEND
     ; SC_TRACE_APPEND leaves rax = the user RIP (its last write, for the ring's
-    ; forensic anchor). Everything below — the ENABLE_USER_DEBUG_SYSCALL 's'
+    ; forensic anchor). Everything below - the ENABLE_USER_DEBUG_SYSCALL 's'
     ; trace, the bounds check (cmp rax, syscall_table_count) and the per-slot
-    ; permutation — keys off rax as the SYSCALL NUMBER, so reload it from the
+    ; permutation - keys off rax as the SYSCALL NUMBER, so reload it from the
     ; saved frame now. Without this, every syscall's number is replaced by its
     ; return RIP -> always out-of-range -> -1, and no app syscall ever dispatches
     ; (blank windows). The macro's "reloaded before the handler" note referred to
@@ -175,7 +175,7 @@
     ; snapshot-valid flag at the start of every dispatch so only a fully
     ; validated syscall (which re-sets it after sc_validate_from_table passes)
     ; is rechecked at return. Reject and non-validated paths leave it cleared,
-    ; so .done skips them. rax holds the syscall number here — preserve it.
+    ; so .done skips them. rax holds the syscall number here - preserve it.
     push rax
     push rcx
     lea rcx, [rel sc_postcond_valid]
@@ -234,7 +234,7 @@
 %ifdef ENABLE_DEBUG_SERIAL
     ; DEBUG (click callback diagnosis): while a WM click callback is active,
     ; emit every syscall with the click context that caused it. This is aimed at
-    ; quickly separating "bad NexusHL callback/syscall args" from lower-level
+    ; quickly separating "bad GritHL callback/syscall args" from lower-level
     ; canary fallout without tracing the canary path itself.
     push rax
     push rcx
@@ -336,7 +336,7 @@
     ; kernel data; any kernel-write bug that flips a bit there would silently
     ; widen this slot's capabilities. Before trusting dx we recompute the
     ; per-slot HMAC (low8(kernel_canary ^ slot ^ fold(mask) ^ KDOM_CAP_MASK))
-    ; — folding high^low so a high-byte (CAP_FS_*) flip is caught — and compare
+    ; - folding high^low so a high-byte (CAP_FS_*) flip is caught - and compare
     ; it against the authenticator stamped alongside the mask. A mismatch means
     ; the mask was tampered with after the last legitimate write, so we panic on
     ; the same CANARY path as CPI corruption rather than dispatch on a forged
@@ -347,7 +347,7 @@
     mov r9d, edx
     shr r9d, 8
     and r9d, 0xFF                   ; mask high byte (avoid dh: no REX high-byte)
-    xor eax, r9d                    ; folded mask byte (HMAC in1) — matches cap_mask_sign
+    xor eax, r9d                    ; folded mask byte (HMAC in1) - matches cap_mask_sign
     KHMAC_TAG r9, r9d, r9b, r8, rax, KDOM_CAP_MASK
     lea r8, [rel slot_cap_hmac]
     movzx eax, r15b                 ; reload slot into a scratch index reg
@@ -363,7 +363,7 @@
     ; syscall set, not just cap bits"). The coarse cap mask above only proves
     ; this syscall's *domain* is granted; slot_syscall_allow[] is a finer
     ; per-slot bitmap (one bit per syscall number) so an app is confined to the
-    ; exact call set its manifest implies — e.g. Notepad keeps CAP_FS but its
+    ; exact call set its manifest implies - e.g. Notepad keeps CAP_FS but its
     ; bitmap clears SYS_FS_DELETE. Undeclared/legacy slots have an all-ones
     ; bitmap (BSS 0xFF fill), so this gate is a no-op until a manifest narrows
     ; it. Checked after the cap gate so a forbidden-domain call still rejects
@@ -611,7 +611,7 @@
 
 ; Cap-mask authenticator mismatch: slot_cap_mask[r15] no longer matches its
 ; HMAC, so the mask was corrupted after the last legitimate (re-stamped)
-; write. This is a security-fatal condition (a deny is not enough — the mask
+; write. This is a security-fatal condition (a deny is not enough - the mask
 ; the kernel can see is untrustworthy. This is ATTRIBUTABLE to the current slot
 ; (r15) on the syscall path, so instead of halting the whole machine via
 ; kernel_panic_canary (which would let one tenant DoS every tenant) we kill

@@ -6,17 +6,17 @@ Computes the kernel-verified HMAC-SHA256 over the built-in user blob and patches
 expected MAC + the KASLR sliding-offset exclusion table into the raw kernel
 image(s) at build time, BEFORE the KASLR diff. See:
   - src/include/app_blob_sig.inc          (shared key + marker + threat model)
-  - src/kernel/nexushlk/crypto.nxh        (runtime verifier)
+  - src/kernel/grithlk/crypto.ghl        (runtime verifier)
 
 THREAT MODEL (docs/STATUS.md): root of trust is measured boot + a kernel-held
 key, NOT silicon; a physical attacker with the boot medium is out of scope. A
-symmetric, kernel-held-key MAC is the right primitive — the key lives in the
+symmetric, kernel-held-key MAC is the right primitive - the key lives in the
 kernel and the verifier IS the kernel. We do NOT use Ed25519.
 
 KEY CONSISTENCY: APP_BLOB_SIG_KEY below MUST equal the value in
 app_blob_sig.inc. The key is a fixed constant compiled into the kernel, so the
 MAC computed here (build time) and by the kernel (runtime) use the same key by
-construction — they match iff the covered blob bytes match.
+construction - they match iff the covered blob bytes match.
 
 KASLR CANONICALIZATION: the default build is KASLR-on, so the embedded blob is
 relocated at boot and its absolute qwords slide. We derive those sliding offsets
@@ -27,7 +27,7 @@ skips the same windows. The MAC therefore covers every non-relocated blob byte
 and is slide-independent; the relocated address words are excluded by design.
 
 MAC = HMAC-SHA256(KEY8_LE, covered_blob), where covered_blob folds 0x00 for
-each KASLR-sliding qword. The runtime verifier in crypto.nxh performs the same
+each KASLR-sliding qword. The runtime verifier in crypto.ghl performs the same
 canonicalization before comparing the 32-byte digest patched here.
 
 The blob region is [start_marker, end_marker + len(end_marker)), i.e. exactly
@@ -43,8 +43,8 @@ import sys
 
 MASK64 = (1 << 64) - 1
 
-# MUST equal APP_BLOB_SIG_KEY in src/include/app_blob_sig.inc ("NXBLOBSI").
-APP_BLOB_SIG_KEY = 0x4E58424C4F425349
+# MUST equal APP_BLOB_SIG_KEY in src/include/app_blob_sig.inc ("GRBLOBSI").
+APP_BLOB_SIG_KEY = 0x4752424C4F425349
 # MUST equal APP_BLOB_SIG_MAX_FIXUPS in src/include/app_blob_sig.inc.
 MAX_FIXUPS = 128
 # KASLR slide between the two ORG passes (matches extract_kaslr_fixups SLIDE).
@@ -52,13 +52,13 @@ SLIDE = 0x100000
 
 # App-blob sentinels (match apps.asm / extract_apps.ps1). The MAC covers the
 # region [start, end + len(end_marker)) == embedded [app_blob_start, app_blob_end).
-APPS_START_MARKER = bytes((0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
+APPS_START_MARKER = bytes((0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
                            0x42, 0x53, 0x54, 0x52, 0x54, 0xDE, 0xAD, 0xBE))
-APPS_END_MARKER = bytes((0x4E, 0x58, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
+APPS_END_MARKER = bytes((0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F,
                          0x42, 0x45, 0x4E, 0x44, 0x21, 0xCA, 0xFE, 0xBE))
 
 # 16-byte locator preceding {MAC[32], count dword, offsets dword[MAX_FIXUPS]}
-# (match APP_BLOB_SIG_MARKER in app_blob_sig.inc: "NXBLOBSI"+"GMAC!"+0xDEC0DE).
+# (match APP_BLOB_SIG_MARKER in app_blob_sig.inc: "GRBLOBSI"+"GMAC!"+0xDEC0DE).
 SIG_MARKER = bytes((0x4E, 0x58, 0x42, 0x4C, 0x4F, 0x42, 0x53, 0x49,
                     0x47, 0x4D, 0x41, 0x43, 0x21, 0xDE, 0xC0, 0xDE))
 

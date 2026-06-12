@@ -1,17 +1,17 @@
 ; ============================================================================
-; NexusOS - Per-slot network destination policy (security_todo.md §7)
+; GritOS - Per-slot network destination policy (security_todo.md §7)
 ; ----------------------------------------------------------------------------
 ; CAP_NET is binary: a slot either may touch the network or may not. This
 ; module layers an OPT-IN, per-app destination allowlist on top of CAP_NET,
 ; modelled on iOS App Transport Security:
 ;
-;   * a DNS-suffix allowlist  — net_dns_query_a rejects a hostname whose suffix
+;   * a DNS-suffix allowlist  - net_dns_query_a rejects a hostname whose suffix
 ;                               is not the slot's allowed suffix
-;   * a port-range allowlist  — net_tcp_connect_ipv4 rejects a destination port
+;   * a port-range allowlist  - net_tcp_connect_ipv4 rejects a destination port
 ;                               outside the slot's allowed [lo, hi] range
 ;
 ; Storage model (mirrors slot_cap_mask[] / slot_handle_quota[]): parallel
-; per-slot arrays in KERNEL BSS — OUTSIDE the ring-3 app arena — so a slot
+; per-slot arrays in KERNEL BSS - OUTSIDE the ring-3 app arena - so a slot
 ; cannot widen its own destination policy with a slot-memory write bug. The
 ; arrays are indexed by slot id (0..APP_SLOT_COUNT-1).
 ;
@@ -19,7 +19,7 @@
 ; exactly as today: CAP_NET alone gates it. A manifest opts a slot IN to the
 ; tighter policy by setting the matching active bit via the setters below. This
 ; keeps the change non-breaking for the existing apps while making the tighter
-; policy available — "opt-in ATS". Within an active policy the enforcement is
+; policy available - "opt-in ATS". Within an active policy the enforcement is
 ; FAIL CLOSED: an active suffix/range that does not match the destination
 ; rejects the operation (return 0 / -1 as the surrounding net code does).
 ;
@@ -27,7 +27,7 @@
 ; CURRENT-SLOT CONTEXT (deferred dispatcher wiring)
 ; --------------------------------------------------------------------------
 ; Enforcement must know which slot is making the call. The syscall dispatcher
-; holds that in r15; the wiring is now LANDED — both enforced net paths publish
+; holds that in r15; the wiring is now LANDED - both enforced net paths publish
 ; the calling slot before invoking the gated function:
 ;
 ;       mov   [rel sec_net_active_slot], r15b
@@ -36,7 +36,7 @@
 ; .sc_net_dns_a (→ net_dns_query_a suffix check) in
 ; syscall_handlers_wx_net.inc. STILL DEFERRED: a manifest-setter syscall (e.g.
 ; SYS_NET_SET_POLICY) that calls sec_net_set_port_range / sec_net_set_suffix to
-; declare a slot's policy — until that lands, no slot has an active policy, so
+; declare a slot's policy - until that lands, no slot has an active policy, so
 ; sec_net_active_slot is now set correctly but every slot's policy is still the
 ; BSS-zero no-restriction default and the net paths behave exactly as before.
 ; The gate is wired and inert, ready to enforce the instant a policy is declared.
@@ -69,7 +69,7 @@ DNS_MAX_NAME    equ 253
 section .text
 
 ; ---------------------------------------------------------------------------
-; sec_net_active_slot_id — load the current slot id, clamped to a valid index.
+; sec_net_active_slot_id - load the current slot id, clamped to a valid index.
 ; Returns: EAX = slot id in [0, APP_SLOT_COUNT-1]. Clobbers EAX only.
 ; ---------------------------------------------------------------------------
 sec_net_active_slot_id:
@@ -81,14 +81,14 @@ sec_net_active_slot_id:
     ret
 
 ; ---------------------------------------------------------------------------
-; sec_net_set_port_range — opt a slot into the TCP destination port allowlist.
+; sec_net_set_port_range - opt a slot into the TCP destination port allowlist.
 ;   EDI = slot id
 ;   SI  = low port (inclusive)
 ;   DX  = high port (inclusive)
 ; A range with lo > hi is normalized (swapped). Stored in kernel BSS. Marks the
 ; SEC_NET_POLICY_PORTS bit. Out-of-range slot id is ignored. Clobbers RAX.
 ; Intended call site: a future manifest-apply / SYS_NET_SET_POLICY in the
-; (contended) dispatcher — see header note.
+; (contended) dispatcher - see header note.
 ; ---------------------------------------------------------------------------
 global sec_net_set_port_range
 sec_net_set_port_range:
@@ -106,7 +106,7 @@ sec_net_set_port_range:
     ret
 
 ; ---------------------------------------------------------------------------
-; sec_net_set_suffix — opt a slot into the DNS-suffix allowlist.
+; sec_net_set_suffix - opt a slot into the DNS-suffix allowlist.
 ;   EDI = slot id
 ;   RSI = pointer to an allowed-suffix C-string (e.g. "example.com")
 ; The suffix is copied (lowercased) into the slot's kernel-BSS slot, truncated
@@ -149,7 +149,7 @@ sec_net_set_suffix:
 .ssfx_terminate:
     mov byte [r8 + rcx], 0
     ; flags: set SUFFIX bit iff non-empty, else clear it.
-    mov eax, [rsp + 24]                ; saved EDI (slot id) — 4 pushes deep
+    mov eax, [rsp + 24]                ; saved EDI (slot id) - 4 pushes deep
     movzx eax, al
     test ecx, ecx
     jz .ssfx_clear
@@ -166,7 +166,7 @@ sec_net_set_suffix:
     ret
 
 ; ---------------------------------------------------------------------------
-; sec_net_check_port — enforce the port-range allowlist for the active slot.
+; sec_net_check_port - enforce the port-range allowlist for the active slot.
 ;   DX = destination port (host order)
 ; Returns: EAX = 1 if allowed (no active policy, or port within [lo,hi]),
 ;          EAX = 0 if an active range rejects the port. FAIL CLOSED.
@@ -193,7 +193,7 @@ sec_net_check_port:
     ret
 
 ; ---------------------------------------------------------------------------
-; sec_net_check_suffix — enforce the DNS-suffix allowlist for the active slot.
+; sec_net_check_suffix - enforce the DNS-suffix allowlist for the active slot.
 ;   RDI = hostname C-string (already validated LDH/length by the caller)
 ; Returns: EAX = 1 if allowed (no active policy, or hostname ends with the
 ;          slot's allowed suffix on a label boundary), EAX = 0 otherwise.
@@ -287,7 +287,7 @@ sec_net_check_suffix:
     ret
 
 ; ============================================================================
-; Per-slot policy storage — KERNEL BSS, OUTSIDE the ring-3 app arena.
+; Per-slot policy storage - KERNEL BSS, OUTSIDE the ring-3 app arena.
 ; BSS-zero => no policy active for any slot (the non-breaking default).
 ; ============================================================================
 section .bss

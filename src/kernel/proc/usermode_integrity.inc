@@ -140,7 +140,7 @@ FN_DECL l3_code_hash_verify_all, 0, 0, FN_RET_SCALAR
     call l3_code_hash_compute             ; rax = recomputed hash
     mov ecx, edx
     ; compute returns 0 for any slot that does NOT currently present a sane v1
-    ; manifest (ver!=1 or start>=end) — i.e. a slot that was recycled, is mid
+    ; manifest (ver!=1 or start>=end) - i.e. a slot that was recycled, is mid
     ; re-install, or never carried a real code range. The valid flag can still
     ; read nonzero across that window (TOCTOU vs l3_copy_app_blob_to_slot /
     ; SYS_WX_INSTALL_MANIFEST, or stale/garbage BSS for a never-installed slot),
@@ -209,7 +209,7 @@ FN_DECL l3_code_hash_verify_all, 0, 0, FN_RET_SCALAR
     ; bytes are attributable to slot ECX, so tear down ONLY that slot rather than
     ; halting every tenant. sc_slot_integrity_kill wants the faulting slot in r15
     ; and the reason code in edx; this is the PIT-cadence sweep (IRQ context), so
-    ; r15 here is NOT a syscall-entry slot id — load it from ECX and restore it
+    ; r15 here is NOT a syscall-entry slot id - load it from ECX and restore it
     ; after. The helper clobbers rax/rcx/rdx/rsi/rdi/r8 (all dead or stack-saved
     ; here); we reload ECX from the stack-saved copy (pushed rcx) afterward, drop
     ; this slot's now-untrusted baseline, and continue the sweep fail-closed.
@@ -223,8 +223,8 @@ FN_DECL l3_code_hash_verify_all, 0, 0, FN_RET_SCALAR
     mov byte [l3_code_hash_valid + rcx], 0  ; baseline untrusted -> stop re-checking
     jmp .va_next
 
-; l3_install_app_done_trampoline MIGRATED TO ZERO-ASM NexusHLK:
-; src/kernel/nexushlk/usermode_callbacks.nxh -> build/nxh/usermode_callbacks.asm
+; l3_install_app_done_trampoline MIGRATED TO ZERO-ASM GritHLK:
+; src/kernel/grithlk/usermode_callbacks.ghl -> build/ghl/usermode_callbacks.asm
 ; (%include'd by kernel_build.asm). It is part of the ring-3 callback/app-done
 ; trampoline path and was ported with that path; defining it here too would be a
 ; duplicate symbol. See feedback_no_asm_shims_full_zero_asm.

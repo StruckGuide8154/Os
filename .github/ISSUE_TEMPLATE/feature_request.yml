@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an idea or enhancement for NexusOS
+description: Suggest an idea or enhancement for GritOS
 labels: ["enhancement"]
 body:
   - type: textarea

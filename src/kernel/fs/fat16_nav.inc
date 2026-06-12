@@ -132,13 +132,13 @@ FN_BEGIN fat16_change_dir, 0, 0, FN_RET_SCALAR
     jmp .cd_done
 
 ; ----------------------------------------------------------------------------
-; fat16_switch_to — ensure FAT16_ROOT_CACHE holds the calling slot's (r15) cwd.
+; fat16_switch_to - ensure FAT16_ROOT_CACHE holds the calling slot's (r15) cwd.
 ; No-op when the slot already owns the live cache. Otherwise reloads the slot's
 ; recorded cwd cluster via fat16_change_dir and claims ownership. Preserves ALL
 ; caller registers (called as the first instruction of every FS syscall
 ; handler, where r15 = the calling slot).
 ;
-; Internal plain label (no FN_BEGIN / not global) — like the FS internal
+; Internal plain label (no FN_BEGIN / not global) - like the FS internal
 ; helpers, so check_coverage.py requires no FN gate.
 ; ----------------------------------------------------------------------------
 global fat16_switch_to
@@ -183,7 +183,7 @@ FN_BEGIN fat16_sync_root, 0, 0, FN_RET_SCALAR
     ret
 
 ; ============================================================================
-; Snapshot-on-open (security_todo.md §5) — TOCTOU elimination for the
+; Snapshot-on-open (security_todo.md §5) - TOCTOU elimination for the
 ; SYS_FS_ENTRY_INFO -> SYS_FS_READ sequence.
 ;
 ; SYS_FS_ENTRY_INFO resolves a per-slot dir-entry handle (carrying a
@@ -192,13 +192,13 @@ FN_BEGIN fat16_sync_root, 0, 0, FN_RET_SCALAR
 ; re-resolves the SAME index to whatever entry occupies that slot NOW. If a
 ; rename / resize / delete (or a directory change) altered the entry between
 ; the info call and the read, the index silently resolves to a DIFFERENT file
-; — a time-of-check/time-of-use window: the app validated file A, the kernel
+; - a time-of-check/time-of-use window: the app validated file A, the kernel
 ; reads file B.
 ;
 ; Defence: at SYS_FS_ENTRY_INFO, atomically capture the identifying fields
 ; (name+ext, first cluster, size) of the resolved entry into a per-slot,
 ; kernel-owned snapshot. At SYS_FS_READ, re-verify the live entry against that
-; snapshot; if it diverges, FAIL CLOSED (the read is rejected) — so a raced
+; snapshot; if it diverges, FAIL CLOSED (the read is rejected) - so a raced
 ; rename/resize can never feed the app bytes from an entry it never inspected.
 ;
 ; Storage model mirrors the §7 per-slot net policy and slot_handle_quota[]:
@@ -209,7 +209,7 @@ FN_BEGIN fat16_sync_root, 0, 0, FN_RET_SCALAR
 ; before (non-breaking). The 17-byte identity = name[11] | cluster[2] |
 ; size[4].
 ;
-; DISPATCHER WIRING (LANDED — now live):
+; DISPATCHER WIRING (LANDED - now live):
 ;   * .sc_fs_entry_info (syscall_handlers_sys_fs.inc) arms the snapshot AFTER
 ;     sc_resolve_dir_entry_arg succeeds: push rsi / mov esi,r15d /
 ;     call fat16_entry_info_snapshot / pop rsi (RDI = entry, preserved).
@@ -224,7 +224,7 @@ FN_BEGIN fat16_sync_root, 0, 0, FN_RET_SCALAR
 ;   never calls SYS_FS_ENTRY_INFO is never armed, so reads behave as before.
 ; ============================================================================
 
-; fat16_entry_info_snapshot — capture the identity of a resolved dir entry.
+; fat16_entry_info_snapshot - capture the identity of a resolved dir entry.
 ;   RDI = kernel FAT16 dir-entry pointer (32-byte entry)
 ;   ESI = slot id
 ; Stores name[0..10] | first_cluster_lo (u16 @26) | size (u32 @28) into the
@@ -269,14 +269,14 @@ FN_BEGIN fat16_entry_info_snapshot, 0, 0, FN_RET_SCALAR
     pop rdi
     ret
 
-; fat16_entry_snapshot_verify — verify a resolved dir entry against the slot's
+; fat16_entry_snapshot_verify - verify a resolved dir entry against the slot's
 ; armed snapshot before a read.
 ;   RDI = kernel FAT16 dir-entry pointer (32-byte entry)
 ;   ESI = slot id
 ; Returns:
 ;   EAX = 1 if the slot has NO armed snapshot (legacy/no-op), or the live entry
 ;         still matches the captured identity (name | cluster | size).
-;   EAX = 0 if an armed snapshot exists and the live entry DIVERGED — FAIL
+;   EAX = 0 if an armed snapshot exists and the live entry DIVERGED - FAIL
 ;         CLOSED, the caller must reject the read.
 ; Preserves RDI/RSI. Clobbers RAX, RCX, RDX.
 ; auto-wrapped (FN_BEGIN emits global): global fat16_entry_snapshot_verify
@@ -325,9 +325,9 @@ FN_BEGIN fat16_entry_snapshot_verify, 0, 0, FN_RET_SCALAR
     pop rdi
     ret
 
-; fat16_entry_snapshot_clear — disarm a slot's snapshot (e.g. on slot recycle
+; fat16_entry_snapshot_clear - disarm a slot's snapshot (e.g. on slot recycle
 ; or an explicit close). Out-of-range slot ignored. ESI = slot id. Clobbers
-; RAX. Preserves RSI. (Provided for the recycle path to call; not yet wired —
+; RAX. Preserves RSI. (Provided for the recycle path to call; not yet wired -
 ; the snapshot is also implicitly superseded the next time ENTRY_INFO arms it.)
 ; auto-wrapped (FN_BEGIN emits global): global fat16_entry_snapshot_clear
 FN_BEGIN fat16_entry_snapshot_clear, 0, 0, FN_RET_SCALAR

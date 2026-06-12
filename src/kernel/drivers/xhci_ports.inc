@@ -83,7 +83,7 @@ xhci_find_port:
     test ebx, XHCI_PORTSC_CCS
     jz .fp_next
 
-    ; Skip ports already owned by an active HID slot — resetting them here
+    ; Skip ports already owned by an active HID slot - resetting them here
     ; would detach the mouse/keyboard from its addressed slot.
     push rcx
     push rdx
@@ -99,7 +99,7 @@ xhci_find_port:
     test r11d, r11d
     jnz .fp_next
 
-    ; Also skip the rtl8156 NIC's port — re-addressing it would conflict
+    ; Also skip the rtl8156 NIC's port - re-addressing it would conflict
     ; with the active NIC slot. Without this, usb_hid_init re-running after
     ; rtl8156_selftest re-grabs port 1 (the NIC) and never reaches the mouse.
     extern rtl8156_active, rtl8156_port

@@ -1,9 +1,9 @@
 ; ============================================================================
-; NexusOS Diagnostic - UEFI Mouse Probe (BOOTX64.EFI)
+; GritOS Diagnostic - UEFI Mouse Probe (BOOTX64.EFI)
 ; ----------------------------------------------------------------------------
 ; Goal: find a UEFI pointer protocol path that actually delivers mouse and
 ; touchpad movement on the Acer Nitro V16 AI (AMD Ryzen AI 9 HX / Strix Point /
-; Radeon 890M). The current NexusOS kernel cannot drive xHCI input on that
+; Radeon 890M). The current GritOS kernel cannot drive xHCI input on that
 ; hardware. UEFI firmware drivers DO work (mouse + touchpad work in BIOS), so
 ; this probe stays inside UEFI Boot Services forever and tries every protocol
 ; UEFI exposes for pointer input.
@@ -90,7 +90,7 @@ default rel
 ; ----------------------------------------------------------------------------
 ; PE/COFF header fields
 PE_SIGNATURE          equ 0x00004550   ; "PE\0\0" optional-header signature
-SECCHAR_TEXT          equ 0xE0000060   ; .text  flags: CODE|EXEC|READ (+MEM_…)
+SECCHAR_TEXT          equ 0xE0000060   ; .text  flags: CODE|EXEC|READ (+MEM_...)
 SECCHAR_RELOC         equ 0x42000040   ; .reloc flags: INITDATA|DISCARDABLE|READ
 
 ; --- BGRA pixel colors (0x00RRGGBB / GOP BltPixel layout) ---

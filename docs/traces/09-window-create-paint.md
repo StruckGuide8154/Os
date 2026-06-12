@@ -1,8 +1,8 @@
-# Trace 09 — `SYS_WM_CREATE` → Window Pool Slot → First Paint
+# Trace 09 - `SYS_WM_CREATE` → Window Pool Slot → First Paint
 
 ## Entry
 
-User app calls `SYS_WM_CREATE(x, y, w, h, title_ptr)` — syscall rax=8, rdi=x, rsi=y, rdx=w, r10=h, r8=title.
+User app calls `SYS_WM_CREATE(x, y, w, h, title_ptr)` - syscall rax=8, rdi=x, rsi=y, rdx=w, r10=h, r8=title.
 
 ## Step-by-step
 
@@ -18,7 +18,7 @@ User app calls `SYS_WM_CREATE(x, y, w, h, title_ptr)` — syscall rax=8, rdi=x, 
 
 | # | Action |
 |---|---|
-| 4 | iterate `window_pool[0..MAX_WINDOWS]` — find first slot with `WIN_OFF_FLAGS & WF_ACTIVE == 0` |
+| 4 | iterate `window_pool[0..MAX_WINDOWS]` - find first slot with `WIN_OFF_FLAGS & WF_ACTIVE == 0` |
 | 5 | If none: return -1 (full) |
 | 6 | Slot pointer = `WINDOW_POOL_ADDR + slot_idx * WINDOW_STRUCT_SIZE` |
 | 7 | Write fields: WIN_OFF_X/Y/W/H, WIN_OFF_TITLE (memcpy 32 bytes from r8), WIN_OFF_OWNER_PID = current process, WIN_OFF_FLAGS = WF_ACTIVE \| WF_VISIBLE |
@@ -29,7 +29,7 @@ User app calls `SYS_WM_CREATE(x, y, w, h, title_ptr)` — syscall rax=8, rdi=x, 
 
 ### Phase 3: app installs handlers
 
-App calls `SYS_WM_HANDLERS(window_idx, click_fn, key_fn, draw_fn)` — syscall validation rejects out-of-range idx (kernel-write-primitive guard, syscall.asm:480). Each callback validated via `sc_validate_callback_target` (must be in app's L3 code arena). Stored to `WIN_OFF_CLICKFN/KEYFN/DRAWFN`.
+App calls `SYS_WM_HANDLERS(window_idx, click_fn, key_fn, draw_fn)` - syscall validation rejects out-of-range idx (kernel-write-primitive guard, syscall.asm:480). Each callback validated via `sc_validate_callback_target` (must be in app's L3 code arena). Stored to `WIN_OFF_CLICKFN/KEYFN/DRAWFN`.
 
 ### Phase 4: render frame picks up window
 
@@ -39,9 +39,9 @@ App calls `SYS_WM_HANDLERS(window_idx, click_fn, key_fn, draw_fn)` — syscall v
 | 13 | window.asm | for each WF_ACTIVE slot ordered by Z: `call wm_draw_window(slot_ptr)` |
 | 14 | wm_draw_window | save r13/r14/r15 (MEMORY.md #7); compute titlebar rect; `fill_rect` titlebar color |
 | 15 | wm_draw_window | `draw_string` title with rdx=title_ptr, ecx=COLOR_TEXT_WHITE, r8d=titlebar_color (MEMORY.md #6 fix; Round 2 verified order correct) |
-| 16 | wm_draw_window | `draw_rect_outline(x, y, w, h, border_color)` — Round 2 fix made all 4 edges draw correctly |
+| 16 | wm_draw_window | `draw_rect_outline(x, y, w, h, border_color)` - Round 2 fix made all 4 edges draw correctly |
 | 17 | wm_draw_window | `fill_rect` content rect with COLOR_WINDOW_BG |
-| 18 | wm_draw_window | if WIN_OFF_DRAWFN ≠ 0: `call [WIN_OFF_DRAWFN]` — app draws inside content rect via syscalls |
+| 18 | wm_draw_window | if WIN_OFF_DRAWFN ≠ 0: `call [WIN_OFF_DRAWFN]` - app draws inside content rect via syscalls |
 
 ### Phase 5: cursor + flip
 

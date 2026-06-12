@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Application Framework + Built-in Apps
+; GritOS v3.0 - Application Framework + Built-in Apps
 ; Each app provides: draw_fn(rdi=window_ptr), click_fn(rdi=window_ptr,
 ;   rsi=client_x, rdx=client_y), key_fn(rdi=window_ptr, esi=key_event)
 ; Window struct offsets (from window.asm):
@@ -10,8 +10,8 @@ default rel
 
 section .text
 
-%include "nexus_app.inc"
-%include "nexus_window.inc"
+%include "grit_app.inc"
+%include "grit_window.inc"
 %include "macros.inc"
 
 ; Ring 3 apps must not touch COM directly.
@@ -167,5 +167,5 @@ app_sys_cursor_init:
 global app_l3_test_draw
 global app_l3_test_click
 global app_l3_test_key
-; app_terminal_kernel_draw/key removed — Terminal migrated to NexusHL.
+; app_terminal_kernel_draw/key removed - Terminal migrated to GritHL.
 

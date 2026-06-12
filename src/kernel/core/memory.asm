@@ -1,13 +1,13 @@
 ; ============================================================================
-; NexusOS v3.0 - Physical Page Allocator
+; GritOS v3.0 - Physical Page Allocator
 ; Bitmap-based, 4KB pages, initialized from E820 memory map
 ; ============================================================================
 bits 64
 
 %include "constants.inc"
 ; Driver capability gates + MMIO bounds policy (security_todo.md §8). Pulled in
-; here — early in the monolithic build, right after the page allocator it sits
-; next to — so the registry + mmio_bounds_assert are defined before any driver
+; here - early in the monolithic build, right after the page allocator it sits
+; next to - so the registry + mmio_bounds_assert are defined before any driver
 ; (apic.asm, xhci.asm, rtl8156.asm) references them. Include-guarded.
 %include "mmio_bounds.inc"
 

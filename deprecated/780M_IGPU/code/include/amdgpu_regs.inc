@@ -1,5 +1,5 @@
 ; ============================================================================
-; amdgpu_regs.inc — AMD GFX11 (GC 11.0/11.5, Strix Point gfx1150) register map
+; amdgpu_regs.inc - AMD GFX11 (GC 11.0/11.5, Strix Point gfx1150) register map
 ; ----------------------------------------------------------------------------
 ; Pure data. Mirrors the dword offsets from Linux kernel headers:
 ;
@@ -14,7 +14,7 @@
 ;   * All values are DWORD offsets within their IP block's MMIO window.
 ;     Multiply by 4 for byte offsets relative to the block base.
 ;     PM4 SET_*_REG packets want the dword form directly (after
-;     subtracting the appropriate window base — see tools/gpu/pm4.py).
+;     subtracting the appropriate window base - see tools/gpu/pm4.py).
 ;   * Block bases live below. They are absolute byte offsets within
 ;     BAR0 / MMIO space; combine with the per-IP dword offset to get
 ;     the final MMIO address for direct register pokes.
@@ -42,7 +42,7 @@ MP1_BASE        equ 0x00016A00 * 4          ; SMU (Microcontroller Processor 1)
 
 ; ----------------------------------------------------------------------------
 ; PM4 register-window dword bases (see tools/gpu/pm4.py).
-; These are NOT byte offsets — they are subtracted from a target dword
+; These are NOT byte offsets - they are subtracted from a target dword
 ; offset to form the index payload of SET_*_REG packets.
 ; ----------------------------------------------------------------------------
 PM4_BASE_CONTEXT  equ 0x0000A000
@@ -51,7 +51,7 @@ PM4_BASE_UCONFIG  equ 0x0000C000
 PM4_BASE_CONFIG   equ 0x00002000
 
 ; ============================================================================
-; GC 11.0 — graphics & compute
+; GC 11.0 - graphics & compute
 ; Source: gc/gc_11_0_0_offset.h
 ; ============================================================================
 
@@ -91,7 +91,7 @@ mmRLC_GPU_CLOCK_COUNT_MSB           equ 0x4C05
 mmRLC_SAFE_MODE                     equ 0x4C13
 mmRLC_PG_CNTL                       equ 0x4C43
 
-; --- GFXHUB (GCVM) — GFX-block-resident VM hub. CP/MEC/shaders translate
+; --- GFXHUB (GCVM) - GFX-block-resident VM hub. CP/MEC/shaders translate
 ;     through this. Offsets are GC-block-relative dwords.
 ; Source: gc/gc_11_0_0_offset.h (regGCVM_*)
 mmGCVM_CONTEXT0_CNTL                          equ 0x0BF0
@@ -121,7 +121,7 @@ mmSCRATCH_REG1                      equ 0x2041
 mmSCRATCH_UMSK                      equ 0x2050
 mmSCRATCH_ADDR                      equ 0x2051
 
-; --- SPI (Shader Processor Interpolator) — shader programming -------------
+; --- SPI (Shader Processor Interpolator) - shader programming -------------
 mmSPI_SHADER_PGM_LO_VS              equ 0x2C4C
 mmSPI_SHADER_PGM_HI_VS              equ 0x2C4D
 mmSPI_SHADER_PGM_RSRC1_VS           equ 0x2C4E
@@ -171,7 +171,7 @@ mmDB_RENDER_CONTROL                 equ 0xA000
 mmDB_Z_INFO                         equ 0xA010
 
 ; ============================================================================
-; MMHUB 3.0 — memory hub (GPU MMU / page tables / VMIDs)
+; MMHUB 3.0 - memory hub (GPU MMU / page tables / VMIDs)
 ; Source: mmhub/mmhub_3_0_0_offset.h
 ; ============================================================================
 mmMMHUB_CONTROL                                 equ 0x0068
@@ -190,7 +190,7 @@ mmMMVM_L2_PROTECTION_FAULT_ADDR_HI32            equ 0x0645
 mmMMVM_L2_CNTL                                  equ 0x0500          ; (block-relative form)
 
 ; ============================================================================
-; MP 13.0 — PSP / SMU mailbox
+; MP 13.0 - PSP / SMU mailbox
 ; Source: mp/mp_13_0_0_offset.h
 ; ============================================================================
 
@@ -216,14 +216,14 @@ mmMP1_SMN_C2PMSG_90                 equ 0x029A
 ; ============================================================================
 ; IMU + RLC autoload + CP RS64/F32 ucode-load registers (Phoenix gfx_11_0_3)
 ; ----------------------------------------------------------------------------
-; PROVISIONAL — values lifted from gc_11_0_0_offset.h (Phoenix uses the same
+; PROVISIONAL - values lifted from gc_11_0_0_offset.h (Phoenix uses the same
 ; GC11.0 base map). Verify against an authoritative dump of the running
 ; Linux box before flipping any of these on. See docs/gpu-bringup.md.
 ;
 ; All offsets are DWORDs within the GC block (BASE_IDX 0 = GC_BASE).
 ; ============================================================================
 
-; --- IMU (Integrated Microcontroller) — gfx_v11_0 -------------------------
+; --- IMU (Integrated Microcontroller) - gfx_v11_0 -------------------------
 ; The IMU owns RLC backdoor autoload on APUs. It is the firmware that reads
 ; the autoload TOC out of DRAM (pointed at by GFX_IMU_FW_GTS_*) and pushes
 ; each blob into its destination SRAM (CP IRAM, RLC GPM/SRM, etc.).
@@ -233,12 +233,12 @@ mmGFX_IMU_CORE_CTRL                 equ 0x40B6      ; bit 0 = CORE_RESET_N
 mmGFX_IMU_C2PMSG_0                  equ 0x40B0      ; IMU mailbox response
 mmGFX_IMU_C2PMSG_15                 equ 0x40BF      ; IMU mailbox status
 
-; --- RLC autoload status — gfx_v11_0_rlc_backdoor_autoload_check_complete -
+; --- RLC autoload status - gfx_v11_0_rlc_backdoor_autoload_check_complete -
 ; BOOTLOAD_STATUS bit 31 (BOOTLOAD_COMPLETE) flips when IMU has finished
 ; staging every TOC entry. Driver polls this register, not C2PMSG.
 mmRLC_RLCS_BOOTLOAD_STATUS          equ 0x4E03
 
-; --- CP IC (Instruction Cache) base — F32 ucode load --------------------
+; --- CP IC (Instruction Cache) base - F32 ucode load --------------------
 ; Phoenix CP is F32, not RS64. Linux gfx_v11_0_cp_gfx_load_pfp_microcode
 ; programs IC_BASE_LO/HI/CNTL then writes the ucode block via the IC_DATA
 ; window (CP_PFP_UCODE_ADDR/DATA pair already in the header above).
@@ -260,7 +260,7 @@ mmRLC_AUTOLOAD_SIZE                 equ 0x4C9E      ; PROVISIONAL
 mmRLC_BACKDOOR_AUTOLOAD_CONTROL     equ 0x4C9F      ; PROVISIONAL
 
 ; ============================================================================
-; PSP (MP0) — Phoenix mp_13_0_5 BAR0-MMIO path
+; PSP (MP0) - Phoenix mp_13_0_5 BAR0-MMIO path
 ; ----------------------------------------------------------------------------
 ; On Phoenix APU, amdgpu reaches MP0 via DIRECT BAR0 MMIO (not the SMN proxy).
 ; The dword address is `MP0_BASE/4 + regMP0_SMN_C2PMSG_xx`. With MP0_BASE

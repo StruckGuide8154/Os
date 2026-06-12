@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - System Call Handler (64-bit Long Mode)
+; GritOS v3.0 - System Call Handler (64-bit Long Mode)
 ; Clean L3 syscall path. Saves user state before any helper calls.
 ; ============================================================================
 bits 64
@@ -27,7 +27,7 @@ WIN_OFF_APPDATA     equ 136
 WIN_OFF_DRAGFN      equ 144
 WIN_OFF_RCLICKFN    equ 152
 DIR_ENTRY_SIZE      equ 32
-%ifdef NEXUS_CACHE32_MAX
+%ifdef GRIT_CACHE32_MAX
 FAT16_ROOT_CACHE    equ 0x1A11000
 %else
 FAT16_ROOT_CACHE    equ 0xD11000
@@ -64,12 +64,12 @@ SC_FLAG_STRICT      equ 0x01
 ; nibble N != 0 means "byte length of this PTR arg lives in scalar arg
 ; (nibble - 1)". The validator pulls that sibling and uses it as the real
 ; range length, instead of the 1-byte probe. The "one missed handler is a
-; bug" pattern goes away — the dispatcher always range-validates, even when
+; bug" pattern goes away - the dispatcher always range-validates, even when
 ; the handler forgets. Reserved bits stay zero for future alignment/NUL-cap
 ; descriptors. Encode with SC_DESC_LEN / SC_DESC macros below.
 SYSCALL_ARG_DESC_OFF equ 16
 
-; Slot-internal layout — duplicate of usermode.asm's locals; see
+; Slot-internal layout - duplicate of usermode.asm's locals; see
 ; boot_memory.inc for the canonical definition. NASM `equ` cannot be
 ; %ifndef-guarded, so syscall.asm declares them locally instead of
 ; including a shared header.
@@ -88,7 +88,7 @@ extern debug_print
 extern scene_dirty
 ; Nested-kernel monitor (nk_monitor.asm): the WX page-flip syscalls edit
 ; APP_ARENA_PT_BASE PTEs, which live in the page-table region locked read-only
-; in Phase 2 — bracket those writes in a WP-off window.
+; in Phase 2 - bracket those writes in a WP-off window.
 extern nk_pt_window_begin
 extern nk_pt_window_end
 extern fat16_file_count

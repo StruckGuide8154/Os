@@ -1,17 +1,17 @@
 ; ============================================================
-;  parser_example.asm — NexusOS resource format parsers
+;  parser_example.asm - GritOS resource format parsers
 ;  ------------------------------------------------------------
 ;  Reference NASM implementation:
-;    nx_palette_load       — validate and locate a .NPL palette
-;    nx_palette_to_bgra    — index -> 32-bit BGRA dword
-;    nx_palette_gradient   — fill a row range with a vertical gradient
-;    nx_icon_blit_32       — 32bpp BGRA icon blit with binary alpha
-;    nx_icon_blit_4        — 4bpp indexed icon blit (legacy)
-;    nx_font_draw_char     — draw a glyph from any .NFT font
-;    nx_font_draw_string   — NUL-terminated string
+;    nx_palette_load       - validate and locate a .NPL palette
+;    nx_palette_to_bgra    - index -> 32-bit BGRA dword
+;    nx_palette_gradient   - fill a row range with a vertical gradient
+;    nx_icon_blit_32       - 32bpp BGRA icon blit with binary alpha
+;    nx_icon_blit_4        - 4bpp indexed icon blit (legacy)
+;    nx_font_draw_char     - draw a glyph from any .NFT font
+;    nx_font_draw_string   - NUL-terminated string
 ;
 ;  Assumes a 32bpp BGRA linear framebuffer.
-;  Bounds checking is the CALLER's job — these routines stay tight.
+;  Bounds checking is the CALLER's job - these routines stay tight.
 ;
 ;  Magic (LE):  NPL1 = 0x314C504E   NIC1 = 0x3143494E   NFT1 = 0x3154464E
 ; ============================================================
@@ -154,7 +154,7 @@ nx_palette_gradient:
         ret
 
 ; ============================================================
-;  ICON — 32bpp BGRA blit with binary alpha
+;  ICON - 32bpp BGRA blit with binary alpha
 ; ------------------------------------------------------------
 ;  nx_icon_blit_32(
 ;       rdi = .NIC buffer, rsi = fb pixel ptr (dst_x,dst_y),
@@ -206,7 +206,7 @@ nx_icon_blit_32:
         ret
 
 ; ============================================================
-;  ICON — 4bpp indexed (legacy / themed)
+;  ICON - 4bpp indexed (legacy / themed)
 ; ------------------------------------------------------------
 ;  nx_icon_blit_4(
 ;       rdi = .NIC buffer, rsi = palette body ptr,
@@ -321,7 +321,7 @@ nx_icon_blit_4:
         ret
 
 ; ============================================================
-;  FONT — variable-width glyph draw
+;  FONT - variable-width glyph draw
 ; ------------------------------------------------------------
 ;  nx_font_draw_char(
 ;       rdi = .NFT buffer, al = ascii char,
@@ -414,14 +414,14 @@ nx_font_draw_char:
         ret
 
 ; ============================================================
-;  nx_font_draw_string — walk chars until NUL
+;  nx_font_draw_string - walk chars until NUL
 ; ============================================================
         global nx_font_draw_string
 nx_font_draw_string:
         push    rbx
         mov     rbx, rsi                     ; string (caller had string in rsi)
         ; (production callers should use a calling-convention shim;
-        ; treat this as a sketch — the loop body is the point.)
+        ; treat this as a sketch - the loop body is the point.)
 .snext:
         movzx   eax, byte [rbx]
         test    eax, eax

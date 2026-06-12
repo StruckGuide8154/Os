@@ -1,10 +1,10 @@
 ; ============================================================================
-; NexusOS - Per-app integrity manifest (FORMAT CONTRACT)
+; GritOS - Per-app integrity manifest (FORMAT CONTRACT)
 ; docs/per-app-integrity-manifest.md
 ; ----------------------------------------------------------------------------
 ; This file is the SHARED format contract between the build side
 ; (tools/build/gen_app_manifest.py, emitted into the kernel image via
-; src/user/apps.asm) and the kernel side (src/kernel/nexushlk/crypto.nxh runtime
+; src/user/apps.asm) and the kernel side (src/kernel/grithlk/crypto.ghl runtime
 ; verifier). BOTH agents reference these constants; do not change one side
 ; without the other.
 ;
@@ -12,7 +12,7 @@
 ; the single whole-blob HMAC for boot verification (sub-ms) and enables per-app
 ; verification at launch (fail-closed). See the design doc for phasing.
 ;
-; THREAT MODEL: identical to app_blob_sig.inc — root of trust is measured boot +
+; THREAT MODEL: identical to app_blob_sig.inc - root of trust is measured boot +
 ; a kernel-held key, NOT silicon. A symmetric kernel-held-key MAC (HMAC-SHA256)
 ; over the table is the right primitive; the build tool and kernel share the same
 ; key constant by construction.
@@ -34,16 +34,16 @@ APP_MANIFEST_MAX equ 32
 ; --- HMAC key -------------------------------------------------------------
 ; Fixed 8-byte build-time/runtime MAC key for the manifest table. Distinct from
 ; APP_BLOB_SIG_KEY. gen_app_manifest.py hard-codes the IDENTICAL value.
-; Bytes "NXMANIK!" little-endian.
-APP_MANIFEST_KEY equ 0x214B494E414D584E   ; "NXMANIK!" (LE)
+; Bytes "GRMANIK!" little-endian.
+APP_MANIFEST_KEY equ 0x214B494E414D5247   ; "GRMANIK!" (LE)
 
 ; --- Locator marker -------------------------------------------------------
 ; 16-byte sentinel the build tool scans for to find the table in the kernel
-; image. MUST be distinct from SIG_MARKER ("NXBLOBSIGMAC!..") and the app-blob
-; start/end sentinels ("NXAPPBLO..").
-; Bytes: "NXMANIFEST" + "TBL" + 0xC0 0xDE 0x01.
+; image. MUST be distinct from SIG_MARKER ("GRBLOBSIGMAC!..") and the app-blob
+; start/end sentinels ("GRAPPBLO..").
+; Bytes: "GRMANIFEST" + "TBL" + 0xC0 0xDE 0x01.
 %macro APP_MANIFEST_MARKER 0
-    db 0x4E, 0x58, 0x4D, 0x41, 0x4E, 0x49, 0x46, 0x45   ; "NXMANIFE"
+    db 0x47, 0x52, 0x4D, 0x41, 0x4E, 0x49, 0x46, 0x45   ; "GRMANIFE"
     db 0x53, 0x54, 0x54, 0x42, 0x4C, 0xC0, 0xDE, 0x01   ; "STTBL" + 0xC0DE01
 %endmacro
 
@@ -75,7 +75,7 @@ APP_MANIFEST_TABLE_BYTES equ 4 + (APP_MANIFEST_ENTRY_SIZE * APP_MANIFEST_MAX) + 
 %endmacro
 
 ; --- Canonical app_id assignment -----------------------------------------
-; Glue + synthetic ids (real app ids 2..11 come from nexus_window.inc).
+; Glue + synthetic ids (real app ids 2..11 come from grit_window.inc).
 APP_SEG_COMMON  equ 0                     ; boot trampoline + common/state/launch glue
 APP_SEG_HELLO   equ 100
 APP_SEG_WALLPAPER equ 101

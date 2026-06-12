@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - AML Bytecode Interpreter
+; GritOS v3.0 - AML Bytecode Interpreter
 ; Evaluates basic ACPI Machine Language objects like _HID, _CRS
 ; ============================================================================
 bits 64

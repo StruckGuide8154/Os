@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS v3.0 - Local APIC Driver
+; GritOS v3.0 - Local APIC Driver
 ; Used for handling hardware interrupts on modern systems
 ; ============================================================================
 bits 64
@@ -127,7 +127,7 @@ apic_wake_workers:
     pop rax
     ret
 
-%ifdef NEXUS_CACHE32_AP_STARTUP
+%ifdef GRIT_CACHE32_AP_STARTUP
 FN_BEGIN smp_ap_startup, 0, 0, FN_RET_SCALAR
     push rbx
     push rcx
@@ -380,7 +380,7 @@ ap_tramp_end:
 ; ap_long_mode_init - one-time per-AP ring-3 enablement (Stage 2b)
 ; ----------------------------------------------------------------------------
 ; Called from the AP trampoline once this CPU is in long mode with paging.
-; EDI = this AP's core index (>= 1). NEVER call from the BSP — the BSP runs
+; EDI = this AP's core index (>= 1). NEVER call from the BSP - the BSP runs
 ; gdt64_init / idt_init / tss_init / syscall_init explicitly during kmain.
 ;
 ; Steps:
@@ -395,7 +395,7 @@ ap_tramp_end:
 ;      so a CPU exception in ring 3 (e.g. #PF from a buggy callback) lands
 ;      in the kernel handler instead of triple-faulting.
 ;   4. Set up this AP's TSS via tss_init_for_core(idx). Each AP needs its
-;      own TSS so its TSS.RSP0 is a private kernel stack — without that,
+;      own TSS so its TSS.RSP0 is a private kernel stack - without that,
 ;      two cores taking exceptions simultaneously would clobber each other.
 ;   5. Program the SYSCALL MSRs (EFER.SCE, STAR, LSTAR, FMASK) on this CPU
 ;      via syscall_init_this_cpu. Each core has its own copy of these MSRs.
@@ -403,7 +403,7 @@ ap_tramp_end:
 ; Preserves no caller-visible registers; the trampoline saves/restores its
 ; bookkeeping (RDI = per-core state ptr) around the call.
 ; ----------------------------------------------------------------------------
-%ifdef NEXUS_CACHE32_AP_STARTUP
+%ifdef GRIT_CACHE32_AP_STARTUP
 extern gdt64_ptr
 extern idt_ptr
 extern tss_init_for_core

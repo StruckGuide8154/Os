@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a NexusOS function signature registry from NASM sources.
+"""Build a GritOS function signature registry from NASM sources.
 
 The kernel currently builds as one flat NASM translation unit, so there are no
 object files to scrape in the normal build. This pass reads FN_BEGIN/FN_ARG
@@ -62,7 +62,7 @@ def fnv1a64(text: str) -> int:
 
 
 def iter_asm_files(root: Path):
-    for base in (root / "src", root / "build" / "nxh"):
+    for base in (root / "src", root / "build" / "ghl"):
         if base.exists():
             yield from sorted(base.rglob("*.asm"))
             yield from sorted(base.rglob("*.inc"))

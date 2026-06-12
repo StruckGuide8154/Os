@@ -1,5 +1,5 @@
 ; rtl8156_dhcp_configure / rtl8156_dhcp_start / rtl8156_dhcp_pump moved to
-; zero-asm NexusHLK: src/kernel/nexushlk/rtl8156_dhcp_sm.nxh (state machine +
+; zero-asm GritHLK: src/kernel/grithlk/rtl8156_dhcp_sm.ghl (state machine +
 ; xchg spinlock + anti-reentrancy guard). %included via kernel_build.asm
 ; before this file. Globals (dhcp_start/dhcp_pump/dhcp_configure) now live there.
 
@@ -46,7 +46,7 @@ rtl8156_init:
     mov word [rtl8156_last_pid], 0
     mov dword [rtl8156_last_portsc], 0
     ; xhci_init wipes the entire XHCI memory region and resets the
-    ; controller — that would destroy live HID slot contexts. Only call it
+    ; controller - that would destroy live HID slot contexts. Only call it
     ; if the controller hasn't been brought up yet.
     cmp byte [xhci_active], 1
     je .xhci_ready
@@ -82,7 +82,7 @@ rtl8156_init:
     cmp eax, ecx
     ja .walk_exhausted
     ; (Previously skipped slot1/slot2_port here, but usb_hid_init records
-    ; ports for every device it probed — including the NIC. We instead
+    ; ports for every device it probed - including the NIC. We instead
     ; gate by VID/PID after the device descriptor read.)
     ; Read PORTSC; skip if no device connected (CCS=0) or if port is
     ; already enabled (PED=1 means another driver addressed it).
@@ -98,7 +98,7 @@ rtl8156_init:
     test ebx, XHCI_PORTSC_CCS
     jz .walk_advance
     ; Skip ports already owned by an active HID slot. Port reset would knock
-    ; the mouse/keyboard back to default state and break it until reboot —
+    ; the mouse/keyboard back to default state and break it until reboot -
     ; that's the "mouse stopped working after ethernet works" regression.
     ; Slot1/slot2_port get recorded for every probed port (incl. the NIC), but
     ; usb_hid_port_owned additionally requires usb_mouse_active / slot2_active,
@@ -135,7 +135,7 @@ rtl8156_init:
     cmp rdx, rbx
     jl .walk_rst_wait
 .walk_rst_done:
-    ; Clear PRC, leave PED alone (PED is RW1C — writing 1 disables).
+    ; Clear PRC, leave PED alone (PED is RW1C - writing 1 disables).
     and ecx, ~XHCI_PORTSC_CHANGE_BITS
     and ecx, ~XHCI_PORTSC_PED
     or  ecx, XHCI_PORTSC_PRC
@@ -154,7 +154,7 @@ rtl8156_init:
     call rtl8156_diag_char
     movzx eax, byte [xhci_port_num]
     call rtl8156_ser_phex8
-    ; Don't gate on usb_hid_port_owned here — if the device on this port
+    ; Don't gate on usb_hid_port_owned here - if the device on this port
     ; turns out to be a Realtek NIC, we want to address it on a fresh slot
     ; regardless of who else claimed the port. The VID/PID check below
     ; (line ~360) is the real filter: non-Realtek devices skip via
@@ -363,21 +363,21 @@ rtl8156_init:
     mov byte [rtl8156_dbg_stage], 0x70
 
     call rtl8156_wait_link
-    ; do not abort if link does not come up in time — driver still usable
+    ; do not abort if link does not come up in time - driver still usable
     ; once cable is plugged in later; subsequent ping/DHCP will retry.
 
     mov byte [rtl8156_active], 1
     mov byte [rtl8156_dbg_stage], 0x80
     ; Remember which xHCI slot the NIC ended up on. xhci_slot_id is a shared
     ; global that subsequent enable_slot calls (e.g. HID slot2) overwrite, so
-    ; we can't read it later — snapshot it now while it's still ours.
+    ; we can't read it later - snapshot it now while it's still ours.
     mov al, [xhci_slot_id]
     mov [rtl8156_slot_id], al
     ; Make sure a bulk-IN TRB is always armed so the main-loop USB poller
     ; (usb_poll_mouse) has something to consume when a frame arrives.
     call rtl8156_arm_rx
     ; Snapshot the xHCI port too so other drivers (usb_hid re-init) know not
-    ; to re-grab it — without this the next usb_hid_init scan picks the NIC's
+    ; to re-grab it - without this the next usb_hid_init scan picks the NIC's
     ; port and tries to re-address it, which fails since it's already linked.
     mov al, [xhci_port_num]
     mov [rtl8156_port], al

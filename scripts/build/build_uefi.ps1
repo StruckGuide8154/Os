@@ -10,16 +10,16 @@ param(
     [switch]$ProbeNkPt,      # Nested-kernel monitor negative test (debug only). After nk_protect_page_tables runs, kmain does ONE un-bracketed write to the now-read-only PML4; expect a ring-0 #PF caught by isr_common_stub (proves page-table self-protection is live). Never ship.
     [switch]$SecurityRegression, # Security PoC regression suite (debug only). Compile-gates every ring-3 PoC harness in src/user/poc/ (catches mitigation-ABI drift at build time) AND builds the kernel shadow-stack trip into the image (asserted at boot by scripts/test/test_security_regression.ps1). Never ship.
     [switch]$NoSmap,         # Disable CR4.SMEP/SMAP enforcement. SMAP is ON by default (CPUID-gated at runtime); pass -NoSmap only for CPUs/emulators that lack SMAP and where the run target can't expose +smap.
-    [switch]$Cet,            # Enable the hardware CET scaffold (CR4.CET + IA32_S_CET). CPUID-gated at runtime (no-op on CPUs/VMs without SHSTK, incl. QEMU TCG); complements the always-on software kernel shadow stack. SHSTK/IBT *detection* is always compiled regardless of this flag. The supervisor shadow-stack RET-check itself is NOT armed yet (needs a seeded PL0_SSP — documented follow-up in src/include/cet.inc).
+    [switch]$Cet,            # Enable the hardware CET scaffold (CR4.CET + IA32_S_CET). CPUID-gated at runtime (no-op on CPUs/VMs without SHSTK, incl. QEMU TCG); complements the always-on software kernel shadow stack. SHSTK/IBT *detection* is always compiled regardless of this flag. The supervisor shadow-stack RET-check itself is NOT armed yet (needs a seeded PL0_SSP - documented follow-up in src/include/cet.inc).
     # NOTE: -Cet is retained for old scripts only; CET protection is default-on.
     [switch]$NoCet,          # Disable CET SHSTK protection. Default ON: hardware SHSTK when CPUID exposes it, software shadow-stack fallback otherwise.
     [switch]$CetIbt,         # Additionally arm the IBT-side S_CET bits when IBT is present. Requires -Cet. OFF by default: endbr64 markers are not yet emitted at indirect-branch targets, so enabling ENDBR_EN would #CP. Plumbing only.
     [switch]$Kpti,           # Kernel Page-Table Isolation (security_todo.md §3). Compiles the user-view-PML4 builder + CR3-swap entry/exit macros (src/include/kpti.inc). OFF by default -> macros emit nothing, no kpti.inc code/data, default image byte-for-byte unchanged. Even with -Kpti the feature is a runtime no-op (kpti_active=0) until the SYSCALL (syscall.asm) + IRQ/exception (isr.asm) CR3-swap points and the kmain kpti_init flip are wired -- see the scoped-out note in kpti.inc. The usermode.asm iretq exits are already wired (inert until armed). Compile-gate verification only for now.
     [switch]$NoKpti,         # Disable KPTI. Default ON: user-view CR3 while ring 3 runs, full kernel CR3 on entry.
     [switch]$NoSyscallPerm,  # Disable heterogeneous syscall numbering per slot (security_todo.md §12). ON by default: per-launch keyed-random permutation of the syscall table; the loader rewrites each app's compiled SYS_* immediates (via the .scfix fixup table) to the slot's forward-permuted numbers, and the dispatcher applies the kernel-side inverse mapping on entry. Pass -NoSyscallPerm to fall back to identity numbering.
-    [switch]$AppO0,          # Compile NexusHL user apps with nxhc --O0 instead of the default lossless -O1 optimizer.
-    [switch]$AppO2,          # Compile NexusHL user apps with nxhc --O2 (lossless register allocator, implies O1).
-    [switch]$BootAnim,       # Play the pre-GUI /BOOTANIM.NBA splash at boot. OFF by default (deterministic boot). Defines NEXUS_BOOT_ANIM so the gated boot_anim_play() call site compiles in. The BOOTANIM.NBA asset is always built (Media Player demo content) regardless of this flag.
+    [switch]$AppO0,          # Compile GritHL user apps with gritc --O0 instead of the default lossless -O1 optimizer.
+    [switch]$AppO2,          # Compile GritHL user apps with gritc --O2 (lossless register allocator, implies O1).
+    [switch]$BootAnim,       # Play the pre-GUI /BOOTANIM.NBA splash at boot. OFF by default (deterministic boot). Defines GRIT_BOOT_ANIM so the gated boot_anim_play() call site compiles in. The BOOTANIM.NBA asset is always built (Media Player demo content) regardless of this flag.
     [switch]$SyscallTrace,   # Emit a per-syscall serial trace ('s'<num>...). OFF by default: it floods COM1 on syscall-heavy apps (e.g. Task Manager polls per-core util/mhz every frame) and serial-out is slow enough to make the app crawl. Pass -SyscallTrace only when debugging the dispatcher.
     [switch]$CopyToE         # Copy built ESP\EFI tree to E:\ for boot from removable media.
     # GFX/DCN bring-up flags (-Gfx, -GfxWave3, -GfxWave3L, -GfxImuKick,
@@ -40,7 +40,7 @@ $KernelDefines = @()
 $LoaderDefines = @()
 if (-not $Release) {
     $KernelDefines += '-dENABLE_DEBUG_SERIAL'
-    # Per-syscall serial trace is OFF by default — it floods COM1 and slows
+    # Per-syscall serial trace is OFF by default - it floods COM1 and slows
     # syscall-heavy apps to a crawl. Opt in with -SyscallTrace when needed.
     if ($SyscallTrace) { $KernelDefines += '-dENABLE_USER_DEBUG_SYSCALL' }
 }
@@ -48,20 +48,20 @@ else {
     $KernelDefines += '-dRELEASE_BUILD'
 }
 if ($BootAnim) {
-    $KernelDefines += '-dNEXUS_BOOT_ANIM'
+    $KernelDefines += '-dGRIT_BOOT_ANIM'
     Write-Host '  (BOOTANIM: pre-GUI splash ENABLED via -BootAnim)' -ForegroundColor Magenta
 }
 if ($PerfProfile -eq 'Cache32Max') {
-    $KernelDefines += '-dNEXUS_CACHE32_MAX'
-    $LoaderDefines += '-dNEXUS_CACHE32_MAX'
+    $KernelDefines += '-dGRIT_CACHE32_MAX'
+    $LoaderDefines += '-dGRIT_CACHE32_MAX'
 }
 if ($NoFbWc) {
     $KernelDefines += '-dFBPERF_NO_WC'
     Write-Host '  (FBPERF: WC activation DISABLED -- Phase A baseline build)' -ForegroundColor Magenta
 }
 if ($NoMemRandom) {
-    $KernelDefines += '-dNEXUS_NO_MEM_RANDOM'
-    $KernelDefines += '-dNEXUS_BOOT_DIAG_LOG'
+    $KernelDefines += '-dGRIT_NO_MEM_RANDOM'
+    $KernelDefines += '-dGRIT_BOOT_DIAG_LOG'
     Write-Host '  (MEMRND: DISABLED via -NoMemRandom -- KASLR, per-slot code slide, and user-stack top randomization forced deterministic)' -ForegroundColor Yellow
 }
 if ($SecurityRegression -and $Release) {
@@ -139,13 +139,13 @@ if (-not ($NoKaslr -or $NoMemRandom)) {
     # Loader-only switch: kernel assembles transparently at the chosen ORG;
     # only the loader's slide-picker is gated.
     $LoaderDefines += '-dENABLE_KASLR'
-    Write-Host '  (KASLR: enabled — kernel will load at a random base each boot)' -ForegroundColor Magenta
+    Write-Host '  (KASLR: enabled - kernel will load at a random base each boot)' -ForegroundColor Magenta
 } else {
     Write-Host '  (KASLR: DISABLED -- slide forced to 0)' -ForegroundColor Yellow
 }
-$KernelDefines += '-dNEXUS_SMP'
-$KernelDefines += '-dNEXUS_CACHE32_AP_STARTUP'
-$KernelDefines += '-dNEXUS_ENABLE_RING3_AP'
+$KernelDefines += '-dGRIT_SMP'
+$KernelDefines += '-dGRIT_CACHE32_AP_STARTUP'
+$KernelDefines += '-dGRIT_ENABLE_RING3_AP'
 # UEFI starts AP workers in both profiles. Keep ring-3 callback routing
 # enabled with AP startup so app work runs on each process home_core instead
 # of falling through dispatch_app_callback's BSP-only fallback.
@@ -155,7 +155,7 @@ if ($Trace) {
 }
 
 Write-Host ''
-Write-Host '  NexusOS UEFI Build System' -ForegroundColor Cyan
+Write-Host '  GritOS UEFI Build System' -ForegroundColor Cyan
 Write-Host '  =========================' -ForegroundColor Cyan
 Write-Host ("  Mode: " + ($(if ($Release) { 'release' } else { 'debug' }))) -ForegroundColor DarkGray
 Write-Host "  Perf: $PerfProfile" -ForegroundColor DarkGray
@@ -164,7 +164,7 @@ Write-Host ''
 
 New-Item -Path $ESP -ItemType Directory -Force | Out-Null
 
-# 0. Embed SVG wallpaper sources into wallpaper.nxh so the native NexusHL
+# 0. Embed SVG wallpaper sources into wallpaper.ghl so the native GritHL
 # renderer (svg_render) has the current SVG strings. Run on every build so
 # edits to src/resources/wallpapers/*.svg are picked up automatically.
 $WallpaperTool = Join-Path $Root 'tools\gen_wallpaper_strings.py'
@@ -173,83 +173,83 @@ if (Test-Path $WallpaperTool) {
     if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED wallpaper string gen' -ForegroundColor Red; exit 1 }
 }
 
-# 0b. Compile NexusHL apps -> build/nxh/*.asm (included by src/user/apps.asm)
+# 0b. Compile GritHL apps -> build/ghl/*.asm (included by src/user/apps.asm)
 $NxhBuildArgs = @()
 if ($Release) { $NxhBuildArgs += '-Release' }
 if ($AppO0) { $NxhBuildArgs += '-O0' }
 if ($AppO2) { $NxhBuildArgs += '-O2' }
-& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_nxh.ps1') @NxhBuildArgs
-if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED NexusHL compile' -ForegroundColor Red; exit 1 }
+& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
 
-# 0b2. Compile NexusHLK kernel modules -> build/nxh/*.asm (%include'd by
-# kernel_build.asm). These use nxhc.py's kernel emit mode (--target kernel):
+# 0b2. Compile GritHLK kernel modules -> build/ghl/*.asm (%include'd by
+# kernel_build.asm). These use gritc.py's kernel emit mode (--target kernel):
 # plain NASM, bare labels, direct in-unit calls, no app-blob framing. Currently
 # the serial-diagnostic leaf cluster (PoC). Regenerated every build so the
-# .nxh source stays the source of truth for the generated .asm.
-$NxhcPy   = Join-Path $Root 'src\user\nexushl\compiler\nxhc.py'
-$NxhLibDir = Join-Path $Root 'src\user\nexushl\lib'
-$NxhkOutDir = Join-Path $Root 'build\nxh'
+# .ghl source stays the source of truth for the generated .asm.
+$GritcPy   = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
+$NxhLibDir = Join-Path $Root 'src\user\grithl\lib'
+$NxhkOutDir = Join-Path $Root 'build\ghl'
 New-Item -Path $NxhkOutDir -ItemType Directory -Force | Out-Null
 $KernelModules = @(
-    @{ src = 'src\kernel\nexushlk\kernel_console.nxh'; out = 'build\nxh\kernel_console.asm' },
-    @{ src = 'src\kernel\nexushlk\context_menu.nxh'; out = 'build\nxh\context_menu.asm' },
-    @{ src = 'src\kernel\nexushlk\kernel_lifecycle.nxh'; out = 'build\nxh\kernel_lifecycle.asm' },
-    @{ src = 'src\kernel\nexushlk\serial_poll.nxh'; out = 'build\nxh\serial_poll.asm' },
-    @{ src = 'src\kernel\nexushlk\input_dispatch.nxh'; out = 'build\nxh\input_dispatch.asm' },
-    @{ src = 'src\kernel\nexushlk\frame_present.nxh'; out = 'build\nxh\frame_present.asm' },
-    @{ src = 'src\kernel\nexushlk\frame_pacing.nxh'; out = 'build\nxh\frame_pacing.asm' },
-    @{ src = 'src\kernel\nexushlk\boot_anim.nxh'; out = 'build\nxh\boot_anim.asm' },
-    @{ src = 'src\kernel\nexushlk\serial_diag.nxh'; out = 'build\nxh\serial_diag.asm' },
-    @{ src = 'src\kernel\nexushlk\syscall_data.nxh'; out = 'build\nxh\syscall_data.asm' },
-    @{ src = 'src\kernel\nexushlk\boot_diag.nxh';   out = 'build\nxh\boot_diag.asm' },
-    @{ src = 'src\kernel\nexushlk\boot_timing.nxh'; out = 'build\nxh\boot_timing.asm' },
-    @{ src = 'src\kernel\nexushlk\debug_overlay.nxh'; out = 'build\nxh\debug_overlay.asm' },
-    @{ src = 'src\kernel\nexushlk\cpu_acct.nxh';    out = 'build\nxh\cpu_acct.asm' },
-    @{ src = 'src\kernel\nexushlk\serial_console.nxh'; out = 'build\nxh\serial_console.asm' },
-    @{ src = 'src\kernel\nexushlk\crypto.nxh'; out = 'build\nxh\crypto.asm' },
-    @{ src = 'src\kernel\nexushlk\ram_volatile.nxh'; out = 'build\nxh\ram_volatile.asm' },
-    @{ src = 'src\kernel\nexushlk\ram_atrest.nxh'; out = 'build\nxh\ram_atrest.asm' },
-    @{ src = 'src\kernel\nexushlk\syscall_validate.nxh'; out = 'build\nxh\syscall_validate.asm' },
-    @{ src = 'src\kernel\nexushlk\syscall_secure.nxh'; out = 'build\nxh\syscall_secure.asm' },
-    @{ src = 'src\kernel\nexushlk\wm_helpers.nxh'; out = 'build\nxh\wm_helpers.asm' },
-    @{ src = 'src\kernel\nexushlk\usb_hid_helpers.nxh'; out = 'build\nxh\usb_hid_helpers.asm' },
-    @{ src = 'src\kernel\nexushlk\usermode_callbacks.nxh'; out = 'build\nxh\usermode_callbacks.asm' },
-    @{ src = 'src\kernel\nexushlk\rtl8156_dhcp_build.nxh'; out = 'build\nxh\rtl8156_dhcp_build.asm' },
-    @{ src = 'src\kernel\nexushlk\rtl8156_arp.nxh'; out = 'build\nxh\rtl8156_arp.asm' },
-    @{ src = 'src\kernel\nexushlk\rtl8156_dhcp_parse.nxh'; out = 'build\nxh\rtl8156_dhcp_parse.asm' },
-    @{ src = 'src\kernel\nexushlk\rtl8156_dhcp_sm.nxh'; out = 'build\nxh\rtl8156_dhcp_sm.asm' },
-    @{ src = 'src\kernel\nexushlk\dns.nxh'; out = 'build\nxh\dns.asm' },
-    @{ src = 'src\kernel\nexushlk\net_dhcp_dispatch.nxh'; out = 'build\nxh\net_dhcp_dispatch.asm' },
-    @{ src = 'src\kernel\nexushlk\boot_features.nxh'; out = 'build\nxh\boot_features.asm' },
-    @{ src = 'src\kernel\nexushlk\cursor.nxh'; out = 'build\nxh\cursor.asm' },
-    @{ src = 'src\kernel\nexushlk\eth.nxh'; out = 'build\nxh\eth.asm' },
+    @{ src = 'src\kernel\grithlk\kernel_console.ghl'; out = 'build\ghl\kernel_console.asm' },
+    @{ src = 'src\kernel\grithlk\context_menu.ghl'; out = 'build\ghl\context_menu.asm' },
+    @{ src = 'src\kernel\grithlk\kernel_lifecycle.ghl'; out = 'build\ghl\kernel_lifecycle.asm' },
+    @{ src = 'src\kernel\grithlk\serial_poll.ghl'; out = 'build\ghl\serial_poll.asm' },
+    @{ src = 'src\kernel\grithlk\input_dispatch.ghl'; out = 'build\ghl\input_dispatch.asm' },
+    @{ src = 'src\kernel\grithlk\frame_present.ghl'; out = 'build\ghl\frame_present.asm' },
+    @{ src = 'src\kernel\grithlk\frame_pacing.ghl'; out = 'build\ghl\frame_pacing.asm' },
+    @{ src = 'src\kernel\grithlk\boot_anim.ghl'; out = 'build\ghl\boot_anim.asm' },
+    @{ src = 'src\kernel\grithlk\serial_diag.ghl'; out = 'build\ghl\serial_diag.asm' },
+    @{ src = 'src\kernel\grithlk\syscall_data.ghl'; out = 'build\ghl\syscall_data.asm' },
+    @{ src = 'src\kernel\grithlk\boot_diag.ghl';   out = 'build\ghl\boot_diag.asm' },
+    @{ src = 'src\kernel\grithlk\boot_timing.ghl'; out = 'build\ghl\boot_timing.asm' },
+    @{ src = 'src\kernel\grithlk\debug_overlay.ghl'; out = 'build\ghl\debug_overlay.asm' },
+    @{ src = 'src\kernel\grithlk\cpu_acct.ghl';    out = 'build\ghl\cpu_acct.asm' },
+    @{ src = 'src\kernel\grithlk\serial_console.ghl'; out = 'build\ghl\serial_console.asm' },
+    @{ src = 'src\kernel\grithlk\crypto.ghl'; out = 'build\ghl\crypto.asm' },
+    @{ src = 'src\kernel\grithlk\ram_volatile.ghl'; out = 'build\ghl\ram_volatile.asm' },
+    @{ src = 'src\kernel\grithlk\ram_atrest.ghl'; out = 'build\ghl\ram_atrest.asm' },
+    @{ src = 'src\kernel\grithlk\syscall_validate.ghl'; out = 'build\ghl\syscall_validate.asm' },
+    @{ src = 'src\kernel\grithlk\syscall_secure.ghl'; out = 'build\ghl\syscall_secure.asm' },
+    @{ src = 'src\kernel\grithlk\wm_helpers.ghl'; out = 'build\ghl\wm_helpers.asm' },
+    @{ src = 'src\kernel\grithlk\usb_hid_helpers.ghl'; out = 'build\ghl\usb_hid_helpers.asm' },
+    @{ src = 'src\kernel\grithlk\usermode_callbacks.ghl'; out = 'build\ghl\usermode_callbacks.asm' },
+    @{ src = 'src\kernel\grithlk\rtl8156_dhcp_build.ghl'; out = 'build\ghl\rtl8156_dhcp_build.asm' },
+    @{ src = 'src\kernel\grithlk\rtl8156_arp.ghl'; out = 'build\ghl\rtl8156_arp.asm' },
+    @{ src = 'src\kernel\grithlk\rtl8156_dhcp_parse.ghl'; out = 'build\ghl\rtl8156_dhcp_parse.asm' },
+    @{ src = 'src\kernel\grithlk\rtl8156_dhcp_sm.ghl'; out = 'build\ghl\rtl8156_dhcp_sm.asm' },
+    @{ src = 'src\kernel\grithlk\dns.ghl'; out = 'build\ghl\dns.asm' },
+    @{ src = 'src\kernel\grithlk\net_dhcp_dispatch.ghl'; out = 'build\ghl\net_dhcp_dispatch.asm' },
+    @{ src = 'src\kernel\grithlk\boot_features.ghl'; out = 'build\ghl\boot_features.asm' },
+    @{ src = 'src\kernel\grithlk\cursor.ghl'; out = 'build\ghl\cursor.asm' },
+    @{ src = 'src\kernel\grithlk\eth.ghl'; out = 'build\ghl\eth.asm' },
     # Track 2 signed-envelope enforcement: the structural + semantic policy
     # kernels (shared with the host checker fixtures) and the in-kernel reader
     # that walks envelope bytes and calls them (envelope_verify).
-    @{ src = 'src\tools\security\signed_envelope.nxh'; out = 'build\nxh\signed_envelope.asm' },
-    @{ src = 'src\tools\security\signed_artifact_check.nxh'; out = 'build\nxh\signed_artifact_check.asm' },
-    @{ src = 'src\tools\security\threshold_check.nxh'; out = 'build\nxh\threshold_check.asm' },
-    @{ src = 'src\kernel\nexushlk\envelope_reader.nxh'; out = 'build\nxh\envelope_reader.asm' },
+    @{ src = 'src\tools\security\signed_envelope.ghl'; out = 'build\ghl\signed_envelope.asm' },
+    @{ src = 'src\tools\security\signed_artifact_check.ghl'; out = 'build\ghl\signed_artifact_check.asm' },
+    @{ src = 'src\tools\security\threshold_check.ghl'; out = 'build\ghl\threshold_check.asm' },
+    @{ src = 'src\kernel\grithlk\envelope_reader.ghl'; out = 'build\ghl\envelope_reader.asm' },
     # Real Ed25519 threshold-signature crypto for the envelope
     # (envelope_verify_signed = structure + semantics + signatures).
-    @{ src = 'src\kernel\nexushlk\ed25519_check.nxh'; out = 'build\nxh\ed25519_check.asm' },
+    @{ src = 'src\kernel\grithlk\ed25519_check.ghl'; out = 'build\ghl\ed25519_check.asm' },
     # CMOS RTC wallclock (unix seconds) for the gate's verifier context.
-    @{ src = 'src\kernel\nexushlk\rtc_time.nxh'; out = 'build\nxh\rtc_time.asm' },
+    @{ src = 'src\kernel\grithlk\rtc_time.ghl'; out = 'build\ghl\rtc_time.asm' },
     # Persistent anti-rollback floors (data.img FLOOR_LBA sector, fail-soft).
-    @{ src = 'src\kernel\nexushlk\floor_store.nxh'; out = 'build\nxh\floor_store.asm' },
+    @{ src = 'src\kernel\grithlk\floor_store.ghl'; out = 'build\ghl\floor_store.asm' },
     # Track 2 artifact admission gate: binds envelope_verify_signed into the
     # boot-chain (SYSSIG.ENV) + update-path (KUPDATE.ENV) call sites, with the
     # verified-artifact hash cache in front of the Ed25519 crypto.
-    @{ src = 'src\kernel\nexushlk\envelope_gate.nxh'; out = 'build\nxh\envelope_gate.asm' }
+    @{ src = 'src\kernel\grithlk\envelope_gate.ghl'; out = 'build\ghl\envelope_gate.asm' }
 )
 foreach ($m in $KernelModules) {
     $mSrc = Join-Path $Root $m.src
     $mOut = Join-Path $Root $m.out
     Write-Host "  compile (kernel) $($m.src)" -ForegroundColor Yellow
-    # --forbid-asm enforces the zero-asm invariant: every NexusHLK kernel module
+    # --forbid-asm enforces the zero-asm invariant: every GritHLK kernel module
     # is fully structured. A reintroduced `asm`/`asm{}` escape fails the build.
-    & python $NxhcPy $mSrc -o $mOut -L $NxhLibDir --embed --target kernel --forbid-asm
-    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED NexusHLK kernel-module compile' -ForegroundColor Red; exit 1 }
+    & python $GritcPy $mSrc -o $mOut -L $NxhLibDir --embed --target kernel --forbid-asm
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHLK kernel-module compile' -ForegroundColor Red; exit 1 }
 }
 $CoverageTool = Join-Path $Root 'tools\check_coverage.py'
 if (Test-Path $CoverageTool) {
@@ -414,7 +414,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - app manifest patch' -Foregroun
 
 # 2a3. Track 2 (signed everything): wrap the integrity table in a quorum-signed
 # v1 envelope -> ESP\SYSSIG.ENV. The kernel's boot-chain call site
-# (envelope_gate.nxh syssig_verify_boot, kmain K5) verifies it fail-closed via
+# (envelope_gate.ghl syssig_verify_boot, kmain K5) verifies it fail-closed via
 # envelope_verify_signed and requires the payload to be byte-identical to the
 # in-image app_integrity_table. DEV role keys sign here; production signing
 # replaces this step with the HSM signer.
@@ -465,7 +465,7 @@ Write-Host "  OK - KERNEL.ENV ($sz bytes)" -ForegroundColor Green
 # 3. Create data disk image with FAT16 filesystem (for ATA PIO access by kernel)
 Write-Host '[3/3] Creating FAT16 data disk (data.img)...' -ForegroundColor Yellow
 $dataImgPath = Join-Path $BUILD_DIR 'data.img'
-$targetSize = 24 * 1024 * 1024   # 24MB — Phoenix GFX firmware set (~2.5MB) + DCN/RLC blobs + BOOTANIM
+$targetSize = 24 * 1024 * 1024   # 24MB - Phoenix GFX firmware set (~2.5MB) + DCN/RLC blobs + BOOTANIM
 $imgBytes = New-Object byte[] $targetSize
 
 # FAT16 partition starts where the kernel's FAT16_PART_LBA points. Keep this
@@ -488,7 +488,7 @@ $totalClusters = [int]($dataSectors / $sectPerClus)
 # Write BPB
 $bpbOff = $fatPartStart
 $imgBytes[$bpbOff + 0] = 0xEB; $imgBytes[$bpbOff + 1] = 0x3C; $imgBytes[$bpbOff + 2] = 0x90
-$oem = [System.Text.Encoding]::ASCII.GetBytes("NEXUSOS ")
+$oem = [System.Text.Encoding]::ASCII.GetBytes("GRITOS  ")
 [Array]::Copy($oem, 0, $imgBytes, $bpbOff + 3, 8)
 $imgBytes[$bpbOff + 11] = [byte]($bytesPerSect -band 0xFF)
 $imgBytes[$bpbOff + 12] = [byte](($bytesPerSect -shr 8) -band 0xFF)
@@ -560,16 +560,16 @@ function Write-FileData($data) {
 }
 
 $entryIdx = 0
-Write-DirEntry ($rootDirOff + $entryIdx * 32) "NEXUSOS" "   " 0x08 0 0
+Write-DirEntry ($rootDirOff + $entryIdx * 32) "GRITOS" "   " 0x08 0 0
 $entryIdx++
 
-$readmeText = "Welcome to NexusOS v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
+$readmeText = "Welcome to GritOS v3.0!`r`nThis is a 64-bit operating system written entirely in x86-64 assembly.`r`n`r`nFeatures:`r`n- Graphical desktop environment`r`n- Window manager with drag support`r`n- File explorer with real FAT16 filesystem`r`n- Built-in text editor (Notepad)`r`n- Terminal with basic commands`r`n`r`nEnjoy exploring!`r`n"
 $readmeData = [System.Text.Encoding]::ASCII.GetBytes($readmeText)
 $readmeCluster = Write-FileData $readmeData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "README" "TXT" 0x20 $readmeCluster $readmeData.Length
 $entryIdx++
 
-$helloText = "Hello from NexusOS!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
+$helloText = "Hello from GritOS!`r`nThis file is stored on a real FAT16 filesystem.`r`nYou can edit this in Notepad and save it back.`r`n"
 $helloData = [System.Text.Encoding]::ASCII.GetBytes($helloText)
 $helloCluster = Write-FileData $helloData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "HELLO" "TXT" 0x20 $helloCluster $helloData.Length
@@ -581,7 +581,7 @@ $notesCluster = Write-FileData $notesData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "NOTES" "TXT" 0x20 $notesCluster $notesData.Length
 $entryIdx++
 
-$sysText = "NexusOS System Information`r`n==========================`r`nKernel: NexusOS v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
+$sysText = "GritOS System Information`r`n==========================`r`nKernel: GritOS v3.0`r`nArch: x86-64`r`nDisplay: 1024x768 32bpp`r`nFS: FAT16`r`n"
 $sysData = [System.Text.Encoding]::ASCII.GetBytes($sysText)
 $sysCluster = Write-FileData $sysData
 Write-DirEntry ($rootDirOff + $entryIdx * 32) "SYSTEM" "TXT" 0x20 $sysCluster $sysData.Length
@@ -689,8 +689,8 @@ Write-Host '  BUILD SUCCESSFUL' -ForegroundColor Green
 Write-Host ''
 Write-Host "  Output: $ESP\" -ForegroundColor White
 Write-Host '    BOOTX64.EFI  (UEFI bootloader)' -ForegroundColor Gray
-Write-Host '    KERNEL.BIN   (NexusOS kernel)' -ForegroundColor Gray
-Write-Host '    APPS.BIN     (NexusHL app blob)' -ForegroundColor Gray
+Write-Host '    KERNEL.BIN   (GritOS kernel)' -ForegroundColor Gray
+Write-Host '    APPS.BIN     (GritHL app blob)' -ForegroundColor Gray
 Write-Host '    DATA.IMG     (FAT16 ramdisk for real hardware)' -ForegroundColor Gray
 Write-Host "    $dataImgPath  (FAT16 data disk for QEMU IDE)" -ForegroundColor Gray
 Write-Host ''
@@ -716,6 +716,6 @@ if ($CopyToE -or -not $PSBoundParameters.ContainsKey('CopyToE')) {
             Write-Host "  WARN - copy to E:\ failed: $_" -ForegroundColor Yellow
         }
     } else {
-        Write-Host '  (skip E:\ copy — drive not mounted)' -ForegroundColor DarkGray
+        Write-Host '  (skip E:\ copy - drive not mounted)' -ForegroundColor DarkGray
     }
 }

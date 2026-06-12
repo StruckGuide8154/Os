@@ -5,4 +5,4 @@ contact_links:
     about: "Do NOT open a public issue for security bugs. Use Private Vulnerability Reporting so the report stays private until a fix is ready. See SECURITY.md."
   - name: Questions & Discussions
     url: https://github.com/StruckGuide8154/Os/discussions
-    about: Ask usage/design questions and discuss NexusOS development here.
+    about: Ask usage/design questions and discuss GritOS development here.

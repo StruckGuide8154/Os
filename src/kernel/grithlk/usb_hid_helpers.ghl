@@ -1,0 +1,321 @@
+# ============================================================================
+# usb_hid_helpers.ghl  -  GritHLK (zero-asm) USB HID LEAF helpers.
+#
+# Migrates the genuinely-leaf helpers of src/kernel/drivers/usb_hid.asm (the
+# USB HID / xHCI mouse driver) into STRUCTURED GritHLK fns, with the EXACT same
+# global symbol names and the EXACT same custom register ABI the rest of
+# usb_hid.asm binds to. There is NO assembly in this module - every helper is a
+# structured `fn` over byte/qword memory accessors (lb/sb/lq) and explicit,
+# original-form bounds checks. Continues the GHLK pattern established by the
+# syscall path (src/kernel/grithlk/syscall_validate.ghl / syscall_secure.ghl,
+# commit 98ad132; docs/ghlk-syscall-rearchitecture.md).
+#
+# Compile (kernel emit mode) with:
+#   python src/user/grithl/compiler/gritc.py \
+#       src/kernel/grithlk/usb_hid_helpers.ghl -o build/ghl/usb_hid_helpers.asm \
+#       -L src/user/grithl/lib --embed --target kernel
+# and %include the generated build/ghl/usb_hid_helpers.asm into kernel_build.asm
+# (section .text) BEFORE the usb_hid.asm include so the kernel (one NASM
+# translation unit) resolves these labels with no extern wiring. The data
+# symbols this module reads/writes (usb_log_len, usb_log_buf, usb_log_name,
+# usb_ep_addr, usb_ep_mps, usb_ep_interval, usb_hid_protocol, usb_interface_num,
+# usb_accept_keyboard, usb_find_report_hid, usb_device_vid, usb_device_pid)
+# are still DEFINED in usb_hid.asm's `section .data` and resolve as forward
+# references; fat16_write_file is an extern kernel routine.
+#
+# ---------------------------------------------------------------------------
+# WHAT IS PORTED HERE (verified leaf):
+#   * Serial/probe LOG leaves: usb_log_ch, usb_log_str, usb_log_crlf,
+#     usb_log_hex_nib, usb_hid_flush_log. (These append to the in-RAM probe
+#     buffer usb_log_buf and, on flush, hand it to fat16_write_file - no xHCI
+#     MMIO, no TRB ring, no timing.) Note: the *serial-port* `out dx,al` debug
+#     emits in this driver live INSIDE usb_hid_init / usb_poll_mouse, which are
+#     DO-NOT-TOUCH; the log helpers themselves write memory, not the COM port.
+#   * Descriptor parsing: usb_find_endpoint, usb_try_known_mouse_endpoint
+#     (walk the config descriptor in the fixed control buffer with the original
+#     bounds checks - the security win and cleanest port).
+#
+# WHAT STAYS IN usb_hid.asm (left with a comment pointer, NOT ported):
+#   * usb_delay - left in asm. It is NOT a simple PIT-tick loop: it computes a
+#     PIT target AND a bounded `imul`-derived spin fallback (rdx = 50000*ecx) for
+#     the pre-STI window where tick_count has not started advancing. Re-expressing
+#     the dual PIT/spin bound (a 64-bit imul iteration counter) zero-asm is not
+#     behavior-preserving for the early-boot timing it guards, so it is preserved
+#     verbatim per the project "timeouts must be PIT-tick based" invariant.
+#   * All usb_hid_init* / usb_poll_mouse / usb_control_transfer_* /
+#     usb_wait_completion / usb_queue_mouse_read* / usb_hid_requeue_slot1_* /
+#     usb_recover_stall_slot1 - xHCI MMIO / TRB ring / doorbell / STALL recovery,
+#     MMIO + PIT-timeout sensitive. Explicitly out of scope.
+#   * The intermediate hex/kv log formatters (usb_log_hex8/16/32, usb_log_kv8/16)
+#     stay in asm - they are thin chains over the ported leaves and were not in
+#     scope; they call the ported globals by name (one translation unit).
+# ============================================================================
+
+module "usb_hid_helpers";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over USB-HID log + descriptor scratch
+unsafe implicit_extern;  # &fn / &data resolved as same-unit kernel labels (-f bin)
+
+global usb_log_ch;
+global usb_log_str;
+global usb_log_crlf;
+global usb_log_hex_nib;
+global usb_hid_flush_log;
+global usb_find_endpoint;
+global usb_try_known_mouse_endpoint;
+
+extern fat16_write_file;
+
+# --- Mirror of the NASM equ constants this module depends on (values must stay
+# in lockstep with their definitions) ---
+#   USB_LOG_BUF_SIZE  src/kernel/drivers/usb_hid.asm  (4096)
+#   XHCI_CTRL_BUF_ADDR src/include/constants.inc       (0x1990000)
+#   USB_DESC_INTERFACE / USB_DESC_ENDPOINT / USB_EP_INTERRUPT  constants.inc
+const USB_LOG_BUF_SIZE    = 4096;
+const XHCI_CTRL_BUF_ADDR  = 0x1990000;
+const USB_DESC_INTERFACE  = 0x04;
+const USB_DESC_ENDPOINT   = 0x05;
+const USB_EP_INTERRUPT    = 3;
+const CFG_DESC_MAX        = 512;   # wTotalLength upper clamp (anti-runaway walk)
+
+# ---------------------------------------------------------------------------
+# usb_log_ch - append AL to the in-RAM probe log buffer.
+#   In:  AL = byte to append.  Out: none.  Preserves ALL registers (the asm
+#   push/pop'd rbx,rcx and used ebx as scratch only).
+#   Drops the byte if the buffer is within 2 of full (cmp >= SIZE-2), exactly as
+#   the original `cmp ebx, USB_LOG_BUF_SIZE-2 / jae .done`. usb_log_len is a
+#   dword counter; usb_log_buf the SIZE-byte ring. `al` is in preserves(all) so
+#   it is an INPUT (saved on entry, restored on exit) - no write-back.
+# ---------------------------------------------------------------------------
+fn usb_log_ch(al ch) preserves(all) {
+    let n = lq(&usb_log_len) & 0xFFFFFFFF;   # dword counter (zero-extended)
+    if n < USB_LOG_BUF_SIZE - 2 {
+        sb(&usb_log_buf + n, ch);
+        sb(&usb_log_len, (n + 1) & 0xFF);    # low byte
+        sb(&usb_log_len + 1, ((n + 1) >> 8) & 0xFF);
+        sb(&usb_log_len + 2, ((n + 1) >> 16) & 0xFF);
+        sb(&usb_log_len + 3, ((n + 1) >> 24) & 0xFF);
+    }
+}
+
+# ---------------------------------------------------------------------------
+# usb_log_str - append the NUL-terminated string at RSI to the probe log.
+#   In:  RSI = ptr.  Out: none.  Preserves ALL registers (asm push/pop'd rax,rsi;
+#   the lodsb cursor advance is undone by the rsi pop, so RSI is INPUT-only).
+#   Walks byte-by-byte until the NUL, calling usb_log_ch per char.
+# ---------------------------------------------------------------------------
+fn usb_log_str(rsi sptr) preserves(all) {
+    let p = sptr;
+    let c = lb(p);
+    while c != 0 {
+        call usb_log_ch(al: c);
+        p = p + 1;
+        c = lb(p);
+    }
+}
+
+# ---------------------------------------------------------------------------
+# usb_log_crlf - append CR,LF to the probe log. Preserves ALL (asm push/pop'd
+# rax). Net effect: two usb_log_ch calls (13 then 10).
+# ---------------------------------------------------------------------------
+fn usb_log_crlf() preserves(all) {
+    call usb_log_ch(al: 13);
+    call usb_log_ch(al: 10);
+}
+
+# ---------------------------------------------------------------------------
+# usb_log_hex_nib - append the hex digit for AL's low nibble.
+#   In:  AL = value (only low nibble used).  Preserves every register EXCEPT
+#   rax: the original masked AL to the nibble, converted to its hex char, and
+#   tail-jmp'd into usb_log_ch (which preserves AL) - so on return AL holds the
+#   emitted hex char and all other regs are unchanged. We reproduce that exact
+#   register footprint: `al` is the lone OUTPUT (not in preserves -> the mutated
+#   slot value, the hex char, is written back to al on exit). 48='0', 55='A'-10.
+# ---------------------------------------------------------------------------
+fn usb_log_hex_nib(al n)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let v = n & 0x0F;
+    if v < 10 {
+        v = v + 48;
+    } else {
+        v = v + 55;
+    }
+    n = v;                    # export the hex char in al (matches asm)
+    call usb_log_ch(al: v);
+}
+
+# ---------------------------------------------------------------------------
+# usb_hid_flush_log - persist the accumulated probe log to USBLOG.TXT.
+#   In:  none.  Out: none.  Preserves rbx/rdx/rdi/rsi (the asm push/pop set);
+#   we keep preserves(all) which is strictly a superset and behavior-preserving
+#   (fat16_write_file is the only callee, a System-V routine). If the buffer is
+#   empty (len==0) it is a no-op. Otherwise NUL-terminate at buf[len] when len
+#   fits (len < SIZE), then write `len` bytes (the ORIGINAL, un-capped len, as in
+#   the asm: edx = [usb_log_len]) via fat16_write_file(rdi=&name, rsi=&buf,
+#   edx=len).
+# ---------------------------------------------------------------------------
+fn usb_hid_flush_log() preserves(all) {
+    cfg !"RELEASE_BUILD" {
+        let n = lq(&usb_log_len) & 0xFFFFFFFF;
+        if n != 0 {
+            if n < USB_LOG_BUF_SIZE {
+                sb(&usb_log_buf + n, 0);
+            }
+            call fat16_write_file(rdi: &usb_log_name, rsi: &usb_log_buf, rdx: n);
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# usb_find_endpoint - parse the Config Descriptor at XHCI_CTRL_BUF_ADDR and, if
+# a usable HID interrupt-IN endpoint is found, fill usb_ep_addr / usb_ep_mps /
+# usb_ep_interval / usb_hid_protocol / usb_interface_num.
+#   In:  (reads usb_accept_keyboard, usb_find_report_hid).  Out: EAX = 1 found,
+#   0 not found.  Preserves nothing beyond the result convention (the asm
+#   returned only EAX; rbx/rcx/rdx/r8/rsi were scratch). rax is the OUTPUT.
+#
+# Bounds discipline (the security win - reproduced EXACTLY from the asm):
+#   * require the config header to have >= 4 bytes before reading wTotalLength;
+#   * clamp wTotalLength to [4, 512]; a walk can never exceed the controller buf;
+#   * each descriptor's bLength must be >= 2 and (off+bLength) must fit within
+#     wTotalLength, else abort (prevents zero-length infinite loop / overrun);
+#   * interface/endpoint descriptors are size-checked (>=8 / >=7) before their
+#     fields are read.
+# All reads use lb() on the fixed control buffer; the manual guards keep every
+# access inside [base, base+wTotalLength) which itself is inside the buffer.
+# ---------------------------------------------------------------------------
+fn usb_find_endpoint(rax result)
+        preserves(rbx, rcx, rdx, rsi, rdi, r9, r10, r11, r12, r13, r14, r15) {
+    let base = XHCI_CTRL_BUF_ADDR;
+    # Config header must include bLength, bDescriptorType, wTotalLength.
+    if lb(base) < 4 {
+        result = 0;
+        return 0;
+    }
+    let total = lb(base + 2) | (lb(base + 3) << 8);    # wTotalLength (LE word)
+    if total < 4 {
+        result = 0;
+        return 0;
+    }
+    if total > CFG_DESC_MAX {
+        result = 0;
+        return 0;
+    }
+
+    let off = 0;
+    let in_iface = 0;     # 1 = currently inside a usable HID interface
+
+    while off < total {
+        let blen = lb(base + off);              # bLength
+        if blen < 2 {
+            result = 0;                          # zero/short descriptor -> abort
+            return 0;
+        }
+        let dend = off + blen;
+        if dend > total {
+            result = 0;                          # descriptor must fit in wTotalLength
+            return 0;
+        }
+        let dtype = lb(base + off + 1);          # bDescriptorType
+
+        if dtype == USB_DESC_INTERFACE {
+            if blen < 8 {
+                result = 0;
+                return 0;
+            }
+            if lb(base + off + 5) == 3 {         # bInterfaceClass == HID?
+                let proto = lb(base + off + 7);  # bInterfaceProtocol
+                let accept = 0;
+                if proto == 2 {                  # boot mouse
+                    accept = 1;
+                } else {
+                    if proto == 1 {              # boot keyboard (slot2 only)
+                        if lb(&usb_accept_keyboard) == 1 {
+                            accept = 1;
+                        }
+                    } else {
+                        # report-protocol / vendor HID (proto == 0)
+                        if proto == 0 {
+                            if lb(&usb_find_report_hid) == 1 {
+                                accept = 1;
+                            }
+                        }
+                    }
+                }
+                if accept == 1 {
+                    sb(&usb_hid_protocol, proto);
+                    sb(&usb_interface_num, lb(base + off + 2));  # bInterfaceNumber
+                    in_iface = 1;
+                } else {
+                    in_iface = 0;
+                }
+            } else {
+                in_iface = 0;
+            }
+        } else {
+            if dtype == USB_DESC_ENDPOINT {
+                if blen < 7 {
+                    result = 0;
+                    return 0;
+                }
+                if in_iface == 1 {
+                    let attr = lb(base + off + 3) & 0x03;        # transfer type
+                    if attr == USB_EP_INTERRUPT {
+                        let epaddr = lb(base + off + 2);         # bEndpointAddress
+                        if (epaddr & 0x80) != 0 {                # direction IN?
+                            # Found the interrupt-IN endpoint.
+                            sb(&usb_ep_addr, epaddr);
+                            # wMaxPacketSize (LE word), bits 10:0; 0 -> 8 fallback.
+                            let mps = (lb(base + off + 4) | (lb(base + off + 5) << 8)) & 0x07FF;
+                            if mps == 0 {
+                                mps = 8;
+                            }
+                            sb(&usb_ep_mps, mps & 0xFF);          # 16-bit store as
+                            sb(&usb_ep_mps + 1, (mps >> 8) & 0xFF);  # two bytes
+                            sb(&usb_ep_interval, lb(base + off + 6)); # bInterval
+                            result = 1;
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+        off = off + blen;     # advance by bLength
+    }
+    result = 0;
+}
+
+# ---------------------------------------------------------------------------
+# usb_try_known_mouse_endpoint - fallback for a known simple boot mouse
+# (VID 0x17EF / PID 0x602E "USB Optical Mouse") whose config walk failed.
+#   In:  reads usb_device_vid / usb_device_pid / usb_accept_keyboard.
+#   Out: EAX = 1 if the endpoint globals were filled, else 0. rax is the OUTPUT
+#   (not preserved); the asm clobbered nothing else.
+#   Only applies when NOT in keyboard-accept mode (the asm's `cmp
+#   usb_accept_keyboard,1 / je .no`). Fills protocol=2 (boot mouse), iface 0,
+#   ep 0x81, mps 4, interval 10.
+# ---------------------------------------------------------------------------
+fn usb_try_known_mouse_endpoint(rax result)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let vid = lb(&usb_device_vid) | (lb(&usb_device_vid + 1) << 8);
+    let pid = lb(&usb_device_pid) | (lb(&usb_device_pid + 1) << 8);
+    if vid != 0x17EF {
+        result = 0;
+        return 0;
+    }
+    if pid != 0x602E {
+        result = 0;
+        return 0;
+    }
+    if lb(&usb_accept_keyboard) == 1 {
+        result = 0;
+        return 0;
+    }
+    sb(&usb_hid_protocol, 2);
+    sb(&usb_interface_num, 0);
+    sb(&usb_ep_addr, 0x81);
+    sb(&usb_ep_mps, 4);
+    sb(&usb_ep_mps + 1, 0);
+    sb(&usb_ep_interval, 10);
+    result = 1;
+}

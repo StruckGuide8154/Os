@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Embed src/resources/wallpapers/*.svg into wallpaper.nxh as escaped strings.
+"""Embed src/resources/wallpapers/*.svg into wallpaper.ghl as escaped strings.
 
 Updates the three (str <name> = "..."; const <NAME>_LEN = N) declarations in
-src/user/nexushl/apps/wallpaper.nxh so the native NexusHL SVG renderer has the
-current SVG source. If wallpaper.nxh uses the lightweight procedural renderer,
+src/user/grithl/apps/wallpaper.ghl so the native GritHL SVG renderer has the
+current SVG source. If wallpaper.ghl uses the lightweight procedural renderer,
 the declarations are absent and this tool exits cleanly without changing it.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-NXH = ROOT / "src" / "user" / "nexushl" / "apps" / "wallpaper.nxh"
+GHL = ROOT / "src" / "user" / "grithl" / "apps" / "wallpaper.ghl"
 
 WALLPAPERS = (
     ("liquid_svg", "LIQUID_SVG_LEN", "liquid-metal.svg"),
@@ -26,7 +26,7 @@ def escape(raw: str) -> str:
 
 
 def main() -> int:
-    text = NXH.read_text(encoding="utf-8")
+    text = GHL.read_text(encoding="utf-8")
     if "LIQUID_SVG_LEN" not in text:
         print("[wallpaper-strings] SVG wallpaper strings not present; skipping")
         return 0
@@ -44,7 +44,7 @@ def main() -> int:
             raise SystemExit(f"failed to find const {length_const} declaration")
         text = new_text
         print(f"[wallpaper-strings] {svg_name} -> {var} ({byte_len} bytes)")
-    NXH.write_text(text, encoding="utf-8")
+    GHL.write_text(text, encoding="utf-8")
     return 0
 
 

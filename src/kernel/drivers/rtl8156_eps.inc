@@ -65,7 +65,7 @@ rtl8156_find_bulk_eps:
     mov [rtl8156_bulk_in_mps], ax
     ; Peek at the descriptor immediately after this EP descriptor. If it is
     ; a SuperSpeed Endpoint Companion (type 0x30, length 6) grab bMaxBurst
-    ; (offset 2). Required by xHCI for SS bulk endpoints — without it the
+    ; (offset 2). Required by xHCI for SS bulk endpoints - without it the
     ; chip's burst attempts are dropped and IN tokens return zero bytes
     ; forever.
     movzx eax, byte [rsi + rdx]           ; EP desc length (usually 7)

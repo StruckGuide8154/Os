@@ -1,4 +1,4 @@
-# NexusOS Architecture
+# GritOS Architecture
 
 This is the current high-level flow through the OS, written for maintainers who
 need to change code without losing track of responsibility boundaries.
@@ -42,7 +42,7 @@ Networking is split so new cards do not need protocol code:
   `dhcp.asm`, and `icmp.asm` own packet formats and transport/application
   protocols.
 
-DNS resolution is exposed through `SYS_NET_DNS_A` and the NexusHL
+DNS resolution is exposed through `SYS_NET_DNS_A` and the GritHL
 `net_dns_a()` wrapper. DHCP records option 6 as the resolver address; the
 resolver falls back to the DHCP server identifier only when option 6 is absent.
 DNS itself does not call NIC drivers directly: it builds DNS messages, sends

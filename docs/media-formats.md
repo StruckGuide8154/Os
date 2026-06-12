@@ -1,13 +1,13 @@
-# NexusOS Media Formats and Player Architecture
+# GritOS Media Formats and Player Architecture
 
 This document defines the native image and video container formats used
-by NexusOS, the dispatch model the Media Player uses to render them, and
+by GritOS, the dispatch model the Media Player uses to render them, and
 the layered library structure that lets future apps reuse the timeline
 widget without rewriting any pixel-pushing code.
 
 ## Scope and explicit non-goals
 
-NexusOS targets widely-compatible interfaces. The Media Player follows
+GritOS targets widely-compatible interfaces. The Media Player follows
 the same rule:
 
 - **Framebuffer only.** All blitting goes through the UEFI GOP linear
@@ -23,13 +23,13 @@ the same rule:
   the window's draw callback. There is no decode-ahead worker pool;
   there is also no kernel scheduler primitive user apps can spawn
   against. The current path keeps idle CPU low because the per-frame
-  work is just a single nearest-neighbor pass — well under a millisecond
-  on the machines NexusOS boots on.
+  work is just a single nearest-neighbor pass - well under a millisecond
+  on the machines GritOS boots on.
 - **No audio.** Out of scope until the kernel has a mixer.
 
 ## Container formats
 
-### NIC1 — NexusOS Image (static)
+### NIC1 - GritOS Image (static)
 
 Used by `src/resources/design-system/icons/*.nic` and by Media Player
 for any single-frame image.
@@ -43,7 +43,7 @@ for any single-frame image.
 | 9      | 7     | reserved | zero-filled                              |
 | 16     | w·h·4 | pixels   | row-major top-down BGRA, alpha 0 = skip  |
 
-### NBA1 — NexusOS Animation (video)
+### NBA1 - GritOS Animation (video)
 
 Used by `/BOOTANIM.NBA`. Frame sequence, no audio. Frames are top-down
 BGRA, identical pitch to NIC1.
@@ -58,9 +58,9 @@ BGRA, identical pitch to NIC1.
 | 20     | w·h·4·N | frames      | concatenated BGRA frames             |
 
 Playback is driven by the 100 Hz PIT `tick_count`. The renderer keeps
-per-window state — current frame, pause flag, last-tick snapshot,
-pending seek, loop mode — in the app slot via the NexusHL `state { }`
-block declared in `src/user/nexushl/apps/media.nxh`.
+per-window state - current frame, pause flag, last-tick snapshot,
+pending seek, loop mode - in the app slot via the GritHL `state { }`
+block declared in `src/user/grithl/apps/media.ghl`.
 
 ### BMP (24/32bpp)
 
@@ -82,7 +82,7 @@ work is in §6 of `media_viewer.inc` and the planned subset is:
 - `<circle cx cy r fill="#rrggbb">`
 - `<line x1 y1 x2 y2 stroke="#rrggbb">`
 - `viewBox="x y w h"` *or* `width`/`height` attrs
-- Solid fills only — no gradients, filters, text, transforms, CSS.
+- Solid fills only - no gradients, filters, text, transforms, CSS.
 
 This subset is the "fast rasterised low-res SVG" appropriate for icons
 and simple diagrams. Full SVG is intentionally out of scope.
@@ -92,7 +92,7 @@ and simple diagrams. Full SVG is intentionally out of scope.
 Any file beginning with '<?' that isn't recognised as SVG is shown as
 plain top-aligned text. Useful as a quick viewer for config files and
 manifests without launching Notepad. Keyboard scrolling is scaffolded
-through the NexusHL Media Player state (`mp_text_scroll_line`) and
+through the GritHL Media Player state (`mp_text_scroll_line`) and
 Up/Down/PageUp/PageDown update that requested first visible line for
 XML/text previews. The current kernel-side XML renderer still owns the
 line walk and draw origin; the remaining renderer step is to consume that
@@ -102,13 +102,13 @@ state while drawing.
 
 ```
 +--------------------------------------------------------------+
-|  src/user/nexushl/apps/media.nxh                             |
+|  src/user/grithl/apps/media.ghl                             |
 |  Thin app shell. State block + click/key delegate to lib.    |
 +----+-----------------+--------------------------------------+
      |                 |
      v                 v
 +---------+   +-----------------------+
-| media   |   | media_player          |   src/user/nexushl/lib/
+| media   |   | media_player          |   src/user/grithl/lib/
 | (lib)   |   | (lib)                 |
 +---------+   +-----------------------+
 | codec   |   | layout consts         |
@@ -132,24 +132,24 @@ state while drawing.
 Drawing currently happens kernel-side because it needs `bb_addr` and
 `tick_count`. The control-bar drawing also lives kernel-side so the two
 redraw paths can't drift. The lib `media_player` is therefore render-
-free today — it owns layout constants, hit-testing, and the state
+free today - it owns layout constants, hit-testing, and the state
 machine. A future `SYS_MEDIA_BLIT_SCALED` syscall would let the lib
 take over drawing too; the public function names will not change.
 
-## Adding a new codec — checklist
+## Adding a new codec - checklist
 
 1. **Pick a magic.** 4 ASCII bytes, suffix the format version (`NIM2`,
-   `NRI1`, …) for fixed-header binary formats; a recognisable byte
+   `NRI1`, ...) for fixed-header binary formats; a recognisable byte
    prefix for text-based formats.
 2. **Document the layout** in a new heading above.
 3. **Add the kernel blitter.** Write `nx_media_blit_<fmt>(rdi=file,
-   rsi=window)` in `src/user/apps/media_viewer.inc` §4–§6.
+   rsi=window)` in `src/user/apps/media_viewer.inc` §4-§6.
 4. **Register dispatch.** Add one `cmp eax, <MAGIC> / je .blit_<fmt>`
    row in §2 and the `.blit_<fmt>:` thunk.
 5. **Route the extension.** Add a 3-byte compare in `app_open_file`
    (`src/user/apps/launch.inc`) that jumps to `app_open_file_in_media`.
 6. **(Optional) Header readers.** Add a row to the user-mode table in
-   `src/user/nexushl/lib/media.nxh` so explorer thumbnails and property
+   `src/user/grithl/lib/media.ghl` so explorer thumbnails and property
    dialogs can read header fields without involving the kernel.
 
 No other file should need editing.
@@ -189,7 +189,7 @@ to its own handling.
 
 ## Roadmap (recorded in `media_viewer.inc` §8)
 
-- **SIMD scaler.** Inner-loop SSE2 form — needs WM xmm save/restore.
+- **SIMD scaler.** Inner-loop SSE2 form - needs WM xmm save/restore.
 - **Dirty-rect awareness.** Skip the blit on no-frame-change ticks.
 - ~~**BMP through the shared scaler.**~~ **Landed.** Media Player now
   decodes uncompressed 24/32bpp BI_RGB BMP rows into slot-local BGRA
@@ -199,7 +199,7 @@ to its own handling.
   kernel-side stub in `syscall.asm → .sc_media_blit_scaled` validates
   the source buffer range, both dimensions, the (w·h·4) byte count
   against an explicit cap, the window id, and the reserve-bottom /
-  alpha-key inputs. Exposed to NexusHL as `media_blit_scaled(...)` in
-  `lib/media.nxh`. The remaining step is moving codec dispatch out of
-  `app_media_draw` (kernel asm) into user-mode nxh and retiring the
+  alpha-key inputs. Exposed to GritHL as `media_blit_scaled(...)` in
+  `lib/media.ghl`. The remaining step is moving codec dispatch out of
+  `app_media_draw` (kernel asm) into user-mode ghl and retiring the
   asm guard in `window.asm`.

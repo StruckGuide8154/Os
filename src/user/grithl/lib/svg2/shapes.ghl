@@ -1,0 +1,325 @@
+use svg2.transform
+use svg2.raster
+use svg2.paint
+use svg2.fixed
+use svg2.stroke
+
+# Circle / ellipse approximation: 48 verts → < 0.3% perimeter error at
+# any reasonable icon scale, still cheap for the rasterizer.
+const SVG_CIRCLE_SEGS = 48
+const SVG_RECT_ARC_SEGS = 12
+
+fn svg_xform_to_poly(x_i, y_i) {
+    mat_apply(fx_from_i(x_i), fx_from_i(y_i));
+    poly_add(lw(&mat_out_x), lw(&mat_out_y));
+}
+
+fn svg_xform_to_stroke(x_i, y_i) {
+    mat_apply(fx_from_i(x_i), fx_from_i(y_i));
+    stroke_add(lw(&mat_out_x), lw(&mat_out_y));
+}
+
+fn svg_stroke_add_dashed_fx(x0, y0, x1, y1, dash_i, gap_i) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = fx_sqrt(fx_mul(dx, dx) + fx_mul(dy, dy));
+    if len <= 0 { return; }
+    let dash = fx_from_i(dash_i);
+    let gap = fx_from_i(gap_i);
+    if dash <= 0 { stroke_add(x0, y0); stroke_add(x1, y1); return; }
+    if gap <= 0 { gap = dash; }
+    let pos = 0;
+    let draw = 1;
+    while pos < len {
+        let span = dash;
+        if draw == 0 { span = gap; }
+        let next = pos + span;
+        if next > len { next = len; }
+        if draw == 1 {
+            let t0 = fx_div(pos, len);
+            let t1 = fx_div(next, len);
+            stroke_add(x0 + fx_mul(dx, t0), y0 + fx_mul(dy, t0));
+            stroke_add(x0 + fx_mul(dx, t1), y0 + fx_mul(dy, t1));
+            stroke_end_subpath();
+        }
+        pos = next;
+        if draw == 1 { draw = 0; } else { draw = 1; }
+    }
+}
+
+fn svg_fill_alpha(node) {
+    let a = svg_attr_int(node, "fill-opacity", 12, -1);
+    if a < 0 { return 255; }
+    if a > 255 { return 255; }
+    return a;
+}
+
+fn svg_stroke_alpha(node) {
+    let a = svg_attr_int(node, "stroke-opacity", 14, -1);
+    if a < 0 { return 255; }
+    if a > 255 { return 255; }
+    return a;
+}
+
+# Re-emit the first two stroke verts to close an N-gon stroke without a
+# visible start/end butt-cap seam.  The trailing duplicate of vertex 1
+# becomes an end butt cap that's covered by the duplicate's own segment
+# geometry; the original vertex 0's butt cap is covered by the same.
+fn stroke_close_loop() {
+    let n = lw(&stroke_in_count);
+    if n < 2 { return; }
+    let v0x = lw(&stroke_in_buf + 0);
+    let v0y = lw(&stroke_in_buf + 4);
+    let v1x = lw(&stroke_in_buf + 8);
+    let v1y = lw(&stroke_in_buf + 12);
+    stroke_add(v0x, v0y);
+    stroke_add(v1x, v1y);
+}
+
+fn svg_draw_rect(node) {
+    let x = svg_attr_int(node, "x", 1, 0);
+    let y = svg_attr_int(node, "y", 1, 0);
+    let w = svg_attr_int(node, "width", 5, 0);
+    let h = svg_attr_int(node, "height", 6, 0);
+    if w <= 0 { return; }
+    if h <= 0 { return; }
+    let rx = svg_attr_int(node, "rx", 2, -1);
+    let ry = svg_attr_int(node, "ry", 2, -1);
+    if rx < 0 { rx = ry; }
+    if ry < 0 { ry = rx; }
+    if rx < 0 { rx = 0; }
+    if ry < 0 { ry = 0; }
+    if rx > w / 2 { rx = w / 2; }
+    if ry > h / 2 { ry = h / 2; }
+    let fill = svg_fill_color(node, lw(&svg_in_fill));
+    if fill >= 0 {
+        svg_configure_fill_paint(node, fill, svg_fill_alpha(node));
+        raster_set_fill_rule(0);
+        poly_begin();
+        if rx > 0 {
+            if ry > 0 { svg_emit_round_rect_poly(x, y, w, h, rx, ry); }
+            else {
+                svg_xform_to_poly(x, y);
+                svg_xform_to_poly(x + w, y);
+                svg_xform_to_poly(x + w, y + h);
+                svg_xform_to_poly(x, y + h);
+                poly_end_subpath();
+            }
+        } else {
+            svg_xform_to_poly(x, y);
+            svg_xform_to_poly(x + w, y);
+            svg_xform_to_poly(x + w, y + h);
+            svg_xform_to_poly(x, y + h);
+            poly_end_subpath();
+        }
+        poly_fill();
+    }
+    let stroke = svg_stroke_color(node, lw(&svg_in_stroke));
+    if stroke >= 0 {
+        svg_configure_stroke_paint(node, stroke, svg_stroke_alpha(node));
+        stroke_set_style(svg_stroke_cap_mode(node), svg_stroke_join_mode(node),
+                         svg_stroke_miter_limit(node));
+        stroke_begin();
+        if rx > 0 {
+            if ry > 0 { svg_emit_round_rect_stroke(x, y, w, h, rx, ry); }
+            else {
+                svg_xform_to_stroke(x, y);
+                svg_xform_to_stroke(x + w, y);
+                svg_xform_to_stroke(x + w, y + h);
+                svg_xform_to_stroke(x, y + h);
+            }
+        } else {
+            svg_xform_to_stroke(x, y);
+            svg_xform_to_stroke(x + w, y);
+            svg_xform_to_stroke(x + w, y + h);
+            svg_xform_to_stroke(x, y + h);
+        }
+        stroke_close_loop();
+        stroke_render(svg_line_width(node));
+    }
+}
+
+fn svg_round_rect_corner_poly(cx, cy, rx, ry, a0, a1) {
+    let i = 0;
+    while i <= SVG_RECT_ARC_SEGS {
+        let ang = a0 + ((a1 - a0) * i) / SVG_RECT_ARC_SEGS;
+        let pxfx = fx_from_i(cx) + fx_mul(fx_from_i(rx), fx_cos(ang));
+        let pyfx = fx_from_i(cy) + fx_mul(fx_from_i(ry), fx_sin(ang));
+        mat_apply(pxfx, pyfx);
+        poly_add(lw(&mat_out_x), lw(&mat_out_y));
+        i = i + 1;
+    }
+}
+
+fn svg_round_rect_corner_stroke(cx, cy, rx, ry, a0, a1) {
+    let i = 0;
+    while i <= SVG_RECT_ARC_SEGS {
+        let ang = a0 + ((a1 - a0) * i) / SVG_RECT_ARC_SEGS;
+        let pxfx = fx_from_i(cx) + fx_mul(fx_from_i(rx), fx_cos(ang));
+        let pyfx = fx_from_i(cy) + fx_mul(fx_from_i(ry), fx_sin(ang));
+        mat_apply(pxfx, pyfx);
+        stroke_add(lw(&mat_out_x), lw(&mat_out_y));
+        i = i + 1;
+    }
+}
+
+fn svg_emit_round_rect_poly(x, y, w, h, rx, ry) {
+    svg_round_rect_corner_poly(x + w - rx, y + ry,     rx, ry, 0 - FX_HALF_PI, 0);
+    svg_round_rect_corner_poly(x + w - rx, y + h - ry, rx, ry, 0, FX_HALF_PI);
+    svg_round_rect_corner_poly(x + rx,     y + h - ry, rx, ry, FX_HALF_PI, FX_PI);
+    svg_round_rect_corner_poly(x + rx,     y + ry,     rx, ry, FX_PI, FX_PI + FX_HALF_PI);
+    poly_end_subpath();
+}
+
+fn svg_emit_round_rect_stroke(x, y, w, h, rx, ry) {
+    svg_round_rect_corner_stroke(x + w - rx, y + ry,     rx, ry, 0 - FX_HALF_PI, 0);
+    svg_round_rect_corner_stroke(x + w - rx, y + h - ry, rx, ry, 0, FX_HALF_PI);
+    svg_round_rect_corner_stroke(x + rx,     y + h - ry, rx, ry, FX_HALF_PI, FX_PI);
+    svg_round_rect_corner_stroke(x + rx,     y + ry,     rx, ry, FX_PI, FX_PI + FX_HALF_PI);
+}
+
+fn svg_emit_ellipse_poly(cx, cy, rx, ry) {
+    let n = SVG_CIRCLE_SEGS;
+    let cxfx = fx_from_i(cx);
+    let cyfx = fx_from_i(cy);
+    let rxfx = fx_from_i(rx);
+    let ryfx = fx_from_i(ry);
+    let i = 0;
+    while i < n {
+        let ang = (i * FX_TWO_PI) / n;
+        let csv = fx_cos(ang);
+        let snv = fx_sin(ang);
+        let pxfx = cxfx + fx_mul(rxfx, csv);
+        let pyfx = cyfx + fx_mul(ryfx, snv);
+        mat_apply(pxfx, pyfx);
+        poly_add(lw(&mat_out_x), lw(&mat_out_y));
+        i = i + 1;
+    }
+    poly_end_subpath();
+}
+
+fn svg_emit_ellipse_stroke(cx, cy, rx, ry) {
+    let n = SVG_CIRCLE_SEGS;
+    let cxfx = fx_from_i(cx);
+    let cyfx = fx_from_i(cy);
+    let rxfx = fx_from_i(rx);
+    let ryfx = fx_from_i(ry);
+    let i = 0;
+    while i < n {
+        let ang = (i * FX_TWO_PI) / n;
+        let csv = fx_cos(ang);
+        let snv = fx_sin(ang);
+        let pxfx = cxfx + fx_mul(rxfx, csv);
+        let pyfx = cyfx + fx_mul(ryfx, snv);
+        mat_apply(pxfx, pyfx);
+        stroke_add(lw(&mat_out_x), lw(&mat_out_y));
+        i = i + 1;
+    }
+}
+
+fn svg_draw_ellipse_xy(node, cx, cy, rx, ry) {
+    let fill = svg_fill_color(node, lw(&svg_in_fill));
+    if fill >= 0 {
+        svg_configure_fill_paint(node, fill, svg_fill_alpha(node));
+        raster_set_fill_rule(0);
+        poly_begin();
+        svg_emit_ellipse_poly(cx, cy, rx, ry);
+        poly_fill();
+    }
+    let stroke = svg_stroke_color(node, lw(&svg_in_stroke));
+    if stroke >= 0 {
+        svg_configure_stroke_paint(node, stroke, svg_stroke_alpha(node));
+        stroke_set_style(svg_stroke_cap_mode(node), svg_stroke_join_mode(node),
+                         svg_stroke_miter_limit(node));
+        stroke_begin();
+        svg_emit_ellipse_stroke(cx, cy, rx, ry);
+        stroke_close_loop();
+        stroke_render(svg_line_width(node));
+    }
+}
+
+fn svg_draw_circle(node) {
+    let cx = svg_attr_int(node, "cx", 2, 0);
+    let cy = svg_attr_int(node, "cy", 2, 0);
+    let r = svg_attr_int(node, "r", 1, 0);
+    if r <= 0 { return; }
+    svg_draw_ellipse_xy(node, cx, cy, r, r);
+}
+
+fn svg_draw_ellipse(node) {
+    let cx = svg_attr_int(node, "cx", 2, 0);
+    let cy = svg_attr_int(node, "cy", 2, 0);
+    let rx = svg_attr_int(node, "rx", 2, 0);
+    let ry = svg_attr_int(node, "ry", 2, 0);
+    if rx <= 0 { return; }
+    if ry <= 0 { return; }
+    svg_draw_ellipse_xy(node, cx, cy, rx, ry);
+}
+
+fn svg_draw_line(node) {
+    let color = svg_stroke_color(node, lw(&svg_in_stroke));
+    if color < 0 { return; }
+    let x1 = svg_attr_int(node, "x1", 2, 0);
+    let y1 = svg_attr_int(node, "y1", 2, 0);
+    let x2 = svg_attr_int(node, "x2", 2, 0);
+    let y2 = svg_attr_int(node, "y2", 2, 0);
+    svg_configure_stroke_paint(node, color, svg_stroke_alpha(node));
+    stroke_set_style(svg_stroke_cap_mode(node), svg_stroke_join_mode(node),
+                     svg_stroke_miter_limit(node));
+    stroke_begin();
+    let dash = svg_stroke_dash_len(node);
+    if dash > 0 {
+        let gap = svg_stroke_gap_len(node);
+        mat_apply(fx_from_i(x1), fx_from_i(y1));
+        let ax = lw(&mat_out_x); let ay = lw(&mat_out_y);
+        mat_apply(fx_from_i(x2), fx_from_i(y2));
+        svg_stroke_add_dashed_fx(ax, ay, lw(&mat_out_x), lw(&mat_out_y), dash, gap);
+    } else {
+        svg_xform_to_stroke(x1, y1);
+        svg_xform_to_stroke(x2, y2);
+    }
+    stroke_render(svg_line_width(node));
+}
+
+fn svg_draw_text(node) {
+    # Kept only for older callers; svg2.ghl dispatches <text> through
+    # text_layout.ghl so glyphs use polygon rasterization, scaling, rotation,
+    # and kerning instead of the fixed kernel text syscall.
+}
+
+fn svg_draw_poly(node, close_shape) {
+    let fill = svg_fill_color(node, lw(&svg_in_fill));
+    let stroke = svg_stroke_color(node, lw(&svg_in_stroke));
+    let len = svg_points_attr(node);
+    if len <= 0 { return; }
+
+    if close_shape == 1 {
+        if fill >= 0 {
+            svg_configure_fill_paint(node, fill, svg_fill_alpha(node));
+            raster_set_fill_rule(0);
+            poly_begin();
+            sw(&svg_path_pos, 0);
+            while svg_scan_has_more(&svg_points_buf, len, &svg_path_pos) == 1 {
+                let px = svg_scan_int(&svg_points_buf, len, &svg_path_pos);
+                let py = svg_scan_int(&svg_points_buf, len, &svg_path_pos);
+                svg_xform_to_poly(px, py);
+            }
+            poly_end_subpath();
+            poly_fill();
+        }
+    }
+    if stroke >= 0 {
+        svg_configure_stroke_paint(node, stroke, svg_stroke_alpha(node));
+        stroke_set_style(svg_stroke_cap_mode(node), svg_stroke_join_mode(node),
+                         svg_stroke_miter_limit(node));
+        stroke_begin();
+        sw(&svg_path_pos, 0);
+        while svg_scan_has_more(&svg_points_buf, len, &svg_path_pos) == 1 {
+            let px = svg_scan_int(&svg_points_buf, len, &svg_path_pos);
+            let py = svg_scan_int(&svg_points_buf, len, &svg_path_pos);
+            svg_xform_to_stroke(px, py);
+        }
+        if close_shape == 1 { stroke_close_loop(); }
+        stroke_render(svg_line_width(node));
+    }
+}

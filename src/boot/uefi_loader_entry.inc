@@ -70,14 +70,14 @@ _start:
 
     ; === S2b2b: Load OPTIONAL BOOTCFG.TXT (runtime feature-toggle config) ===
     ; Read \EFI\BOOT\BOOTCFG.TXT into firmware RAM and publish (base,size) in
-    ; VBE_INFO. The kernel's boot_features.nxh parses it into the feat_mask
+    ; VBE_INFO. The kernel's boot_features.ghl parses it into the feat_mask
     ; that gates subsystem init / per-frame work / individual syscalls. Absent
     ; file leaves the fields zero -> kernel defaults everything ON (byte-compat).
     call load_bootcfg
 
     ; === S2b2c: Load Track-2 signed-envelope files (SYSSIG.ENV required by
     ; the kernel fail-closed; KUPDATE.ENV optional staged update). Publishes
-    ; (base,size) pairs in VBE_INFO for envelope_gate.nxh. ===
+    ; (base,size) pairs in VBE_INFO for envelope_gate.ghl. ===
     call load_envelopes
 
     ; === S2b3: Phase 1b - resolve DATA.IMG physical LBA extents on the ESP
@@ -173,7 +173,7 @@ _start:
     ; === KASLR: parse container header, pick slide, set up trampoline args ===
     ;
     ; Container layout (see tools/build/extract_kaslr_fixups.py):
-    ;   0x00 8  magic "NXKASLR0"
+    ;   0x00 8  magic "GRKASLR0"
     ;   0x08 4  payload_size
     ;   0x0C 4  entry_offset
     ;   0x10 4  fixup_count
@@ -188,12 +188,12 @@ _start:
     ;   Floor-aligned to 4 KiB. 256 KiB stack reserve keeps the kernel stack
     ;   (grows down from 0xC00000) clear of slid kernel text.
     ;
-    ; Without ENABLE_KASLR the slide is forced to 0 — runtime layout must
+    ; Without ENABLE_KASLR the slide is forced to 0 - runtime layout must
     ; reproduce the legacy "kernel at 0x100000" behavior byte-for-byte.
     mov rsi, [v_kernel_addr]
 
     mov rax, [rsi]
-    mov rbx, KASLR_MAGIC_QWORD        ; "NXKASLR0" little-endian
+    mov rbx, KASLR_MAGIC_QWORD        ; "GRKASLR0" little-endian
     cmp rax, rbx
     jne .kaslr_bad_magic
 

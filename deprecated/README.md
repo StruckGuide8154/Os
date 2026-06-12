@@ -1,7 +1,7 @@
 # Deprecated Subsystems
 
 This folder preserves source code, documentation, firmware, and research notes
-for NexusOS subsystems that have been retired from the active build.
+for GritOS subsystems that have been retired from the active build.
 
 The goals are:
 
@@ -27,7 +27,7 @@ A deprecation folder MUST contain:
 
 ```
 deprecated/<name>/
-├── README.md           # mandatory — see template below
+├── README.md           # mandatory - see template below
 ├── code/               # source files exactly as they were (preserve subtree shape)
 ├── docs/               # design notes, status docs, resume notes
 ├── memory/             # any auto-memory entries from .claude/projects/...
@@ -63,12 +63,12 @@ One paragraph: what hardware/feature this targeted and what problem it solved.
 - Was it ever shipped in a working build? yes/no
 
 ## Why retired
-Plain reason. Examples: "Too platform-specific — only worked on AMD Phoenix
+Plain reason. Examples: "Too platform-specific - only worked on AMD Phoenix
 780M and we are switching to widely compatible interfaces only."
 "Replaced by <new subsystem>." "Vendor stopped supporting the API."
 
 ## What replaced it (if anything)
-Pointer to the active subsystem, or "(nothing — feature dropped)".
+Pointer to the active subsystem, or "(nothing - feature dropped)".
 
 ## Files preserved
 Bullet list mapping new paths to original paths. Same info as the directory
@@ -90,7 +90,7 @@ What hurt the most, what to avoid, what worked. Honest postmortem.
 4. Move any related memory files out of the active `memory/` folder into
    `deprecated/<name>/memory/`. Update the active `MEMORY.md` index.
 5. Write the README.md from the template above. Be honest in the "why" and
-   "notes" sections — future-you will thank present-you.
+   "notes" sections - future-you will thank present-you.
 6. Build once with no flags. The default build must succeed without any of
    the deprecated symbols.
 7. Commit as a single change with message `deprecate: <name>`.
@@ -99,5 +99,5 @@ What hurt the most, what to avoid, what worked. Honest postmortem.
 
 ## Current deprecations
 
-- [`780M_IGPU/`](780M_IGPU/) — AMD Phoenix 780M iGPU bring-up
+- [`780M_IGPU/`](780M_IGPU/) - AMD Phoenix 780M iGPU bring-up
   (DCN 3.5 / DMUB / GFX11 / IMU / PSP). Retired 2026-05-26.

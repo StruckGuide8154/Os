@@ -2,11 +2,11 @@
 # Track-2 (signed everything) P1 parser-safety suite: fuzz + differential +
 # canonical round-trip property tests over the REAL in-kernel envelope reader.
 #
-# Builds on eval_envelope.py's interpreter, which executes the production NHL
-# sources (envelope_reader.nxh + policy kernels) via the production compiler's
+# Builds on eval_envelope.py's interpreter, which executes the production GHL
+# sources (envelope_reader.ghl + policy kernels) via the production compiler's
 # lexer/parser. Three Track-2 P1 requirements are covered:
 #
-#   1. FUZZ — structure-aware mutations (malformed TLV, length overflow,
+#   1. FUZZ - structure-aware mutations (malformed TLV, length overflow,
 #      duplicate fields, unknown critical ids, width games, truncation,
 #      splices) plus raw random blobs are fed to the interpreted
 #      `envelope_verify`. Safety invariants per input:
@@ -15,11 +15,11 @@
 #          interpreter address space, so ANY overread raises),
 #        - the bounded-loop cap is never hit (no unbounded walk),
 #        - the result is a defined ENVR_* code.
-#   2. DIFFERENTIAL — an independent clean-room Python verifier (`ref_verify`,
+#   2. DIFFERENTIAL - an independent clean-room Python verifier (`ref_verify`,
 #      written from docs/signed-artifact-envelope.md + the policy tables, NOT
 #      from the reader's control flow) must agree accept/reject with the
 #      kernel reader on every input.
-#   3. PROPERTY — for every ACCEPTED envelope x:
+#   3. PROPERTY - for every ACCEPTED envelope x:
 #      canonicalize(decode(x)) == x  (decode to fields, re-emit the canonical
 #      wire encoding, byte-identical).
 #
@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eval_envelope as ev  # the reject-matrix evaluator: real-source interpreter
 
 # ---------------------------------------------------------------------------
-# Kernel-side execution (the real NHL reader, interpreted)
+# Kernel-side execution (the real GHL reader, interpreted)
 # ---------------------------------------------------------------------------
 
 DIGEST_AT = 0x100          # caller-computed payload hash lives BELOW the blob
@@ -90,7 +90,7 @@ def ref_decode(blob):
     n = len(blob)
     if n < 18 or n > MAX_TOTAL:
         return None
-    if blob[0:4] != b'NXSE':
+    if blob[0:4] != b'GRSE':
         return None
     schema, kind, domain, field_count, header_len = struct.unpack_from('<HHHHH', blob, 4)
     payload_len = struct.unpack_from('<I', blob, 14)[0]
@@ -208,7 +208,7 @@ def canonicalize(blob):
         return None
     (schema, kind, domain, field_count, _hl, payload_len), fields, payload, sigs = dec
     tlv = b''.join(ev.enc_tlv(fid, val) for fid, val in fields)
-    return (b'NXSE'
+    return (b'GRSE'
             + struct.pack('<HHHHH', schema, kind, domain, field_count, 18 + len(tlv))
             + struct.pack('<I', payload_len)
             + tlv + payload + sigs)
@@ -218,7 +218,7 @@ def canonicalize(blob):
 # Corpus: valid envelopes across every artifact class
 # ---------------------------------------------------------------------------
 
-PAYLOADS = [b'', b'A', b'NexusOS fuzz corpus payload ' * 3, bytes(range(256))]
+PAYLOADS = [b'', b'A', b'GritOS fuzz corpus payload ' * 3, bytes(range(256))]
 
 
 def corpus_fields(unit, kind, domain, payload, target_kind):
@@ -342,7 +342,7 @@ def random_blob(rng):
     n = rng.randrange(0, 600)
     b = bytes(rng.randrange(256) for _ in range(n))
     if rng.random() < 0.5 and n >= 4:   # half get the magic so they go deeper
-        b = b'NXSE' + b[4:]
+        b = b'GRSE' + b[4:]
     return b
 
 
@@ -390,7 +390,7 @@ def main():
         accepted = (code == unit.consts['ENVR_OK'])
         ref = ref_verify(blob, digest, ev.CTX)
         if accepted != ref:
-            failures.append('%s: DIFFERENTIAL split — kernel=%s(code %d) ref=%s '
+            failures.append('%s: DIFFERENTIAL split - kernel=%s(code %d) ref=%s '
                             '(blob %d bytes: %s...)'
                             % (label, 'accept' if accepted else 'reject', code,
                                'accept' if ref else 'reject', len(blob),
@@ -424,7 +424,7 @@ def main():
     print('[envelope-fuzz] %d corpus + %d fuzz inputs: %d accepted, %d rejected '
           '(seed %d)' % (len(corpus), args.iters, accepts, rejects, args.seed))
     if failures:
-        sys.stderr.write('[envelope-fuzz] FAIL — %d problem(s):\n' % len(failures))
+        sys.stderr.write('[envelope-fuzz] FAIL - %d problem(s):\n' % len(failures))
         for f in failures[:25]:
             sys.stderr.write('  - %s\n' % f)
         return 1

@@ -1,8 +1,8 @@
 # Boot the already-built UEFI image headless, capture serial, and check for the
 # late boot markers (CPU:/CACHE:/MEMCAP: + the M12K*F! main-loop heartbeat).
 # Retries past the known intermittent early-boot CANARY panic (~1-in-3, PIT-IRQ
-# race in the boot_anim/fat16 phase — pre-existing). Behavior-parity gate for the
-# NHLK de-shim work: a clean boot must still reach these markers.
+# race in the boot_anim/fat16 phase - pre-existing). Behavior-parity gate for the
+# GHLK de-shim work: a clean boot must still reach these markers.
 param(
     [int]$Retries = 6,
     [int]$CaptureMs = 18000

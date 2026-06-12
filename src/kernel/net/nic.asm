@@ -1,5 +1,5 @@
 ; ============================================================================
-; NexusOS active NIC dispatcher
+; GritOS active NIC dispatcher
 ; ----------------------------------------------------------------------------
 ; Stable kernel-facing network surface used by syscalls/apps and protocol
 ; modules. Backends register a small ops record, and the dispatcher picks the
@@ -357,10 +357,10 @@ net_info:
 
 ; net_dhcp_configure (synchronous lease acquisition, EAX=1 when bound) and
 ; net_dhcp_start (async kick, EAX=1 if a backend accepted) were ported to the
-; zero-asm NHLK module src/kernel/nexushlk/net_dhcp_dispatch.nxh. net_dhcp_start
+; zero-asm GHLK module src/kernel/grithlk/net_dhcp_dispatch.ghl. net_dhcp_start
 ; there is fully non-blocking (the renew button no longer freezes the UI) and
 ; forces a fresh DISCOVER even on an already-bound lease. Both remain externs
-; here; the symbols resolve at link/include time from the NHLK module.
+; here; the symbols resolve at link/include time from the GHLK module.
 
 ; EDI = IPv4 address in A.B.C.D packed order, e.g. 8.8.8.8 = 0x08080808.
 ; Returns RAX = approximate RTT in microseconds, or -1 on timeout/failure.
@@ -420,7 +420,7 @@ net_ping4_tick:
 ; RAX = end TSC, RBX = start TSC. Returns RAX = elapsed microseconds. Used by the
 ; ping path so the RTT is measured against the TSC captured WHEN the ICMP reply was
 ; parsed (rtl8156_ping_reply_tsc), not the rdtsc at the moment userspace happens to
-; poll net_ping4_tick — otherwise the reported time tracks the app's frame/poll
+; poll net_ping4_tick - otherwise the reported time tracks the app's frame/poll
 ; cadence instead of the actual round-trip.
 global net_tsc_span_to_us
 net_tsc_span_to_us:

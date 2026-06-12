@@ -197,8 +197,8 @@ FN_BEGIN wm_draw_window, 1, 0, FN_RET_VOID
     pop rbx
     ret
 
-; wm_handle_mouse_event migrated to src/kernel/nexushlk/wm_helpers.nxh.
-; Keep click/drag callback routing in NexusHLK so the event path cannot dispatch
+; wm_handle_mouse_event migrated to src/kernel/grithlk/wm_helpers.ghl.
+; Keep click/drag callback routing in GritHLK so the event path cannot dispatch
 ; a tagged/stale window-struct pointer directly into ring 3.
 ; Draw drag outline (called from main loop when dragging)
 ; Uses wm_drag_preview_x/y/w/h to draw a 2px rectangle outline
@@ -263,14 +263,14 @@ FN_BEGIN wm_draw_drag_outline, 0, 0, FN_RET_VOID
     FN_END wm_draw_drag_outline
     ret
 
-; wm_mark_outline_dirty migrated to src/kernel/nexushlk/wm_helpers.nxh
+; wm_mark_outline_dirty migrated to src/kernel/grithlk/wm_helpers.ghl
 ; (R8=x R9=y R10=w R11=h; four render_mark_dirty edge calls).
 
-; wm_get_window_at migrated to src/kernel/nexushlk/wm_helpers.nxh
+; wm_get_window_at migrated to src/kernel/grithlk/wm_helpers.ghl
 ; (RDI=x RSI=y -> RAX=window ID or -1; pure geometry hit-test).
 
 ; ============================================================================
-; §6 — Kernel-owned per-slot callback trampoline
+; §6 - Kernel-owned per-slot callback trampoline
 ;
 ; Threat: today the WM invokes app callbacks by reading a RAW function pointer
 ; straight out of the window struct (WIN_OFF_CLICKFN/KEYFN/DRAGFN/RCLICKFN) and
@@ -278,9 +278,9 @@ FN_BEGIN wm_draw_drag_outline, 0, 0, FN_RET_VOID
 ;
 ; This adds a kernel-owned indirection so the WM's invocation no longer trusts
 ; the window-struct qword as the call target. Each (slot, field) callback is
-; INTERNED — the pointer is copied into a per-slot callback table that lives in
+; INTERNED - the pointer is copied into a per-slot callback table that lives in
 ; KERNEL BSS, OUTSIDE the ring-3 app arena (so an app's own slot-memory write
-; bug can't forge an entry) — and the WM then dispatches by ID through
+; bug can't forge an entry) - and the WM then dispatches by ID through
 ; wm_cb_resolve/wm_cb_trampoline, which read the target from the kernel table.
 ; The window struct's qword is reduced to "intern input", not "the address we
 ; jump to". Same per-slot-array + index discipline as the handle table
@@ -294,14 +294,14 @@ FN_BEGIN wm_draw_drag_outline, 0, 0, FN_RET_VOID
 ;     window struct.
 ;   - REGISTRATION (apps installing a callback) lives in syscall.asm
 ;     (.sc_wm_handlers, CLICKFN/KEYFN) and src/user/apps/launch.inc (KEYFN
-;     direct write) — NOT owned here. The full ABI cutover (app registers a
+;     direct write) - NOT owned here. The full ABI cutover (app registers a
 ;     slot-local ID instead of a raw pointer; the kernel interns at
 ;     registration time via wm_cb_intern) requires those owners to call
 ;     wm_cb_intern at the store site and have apps pass an ID. Until then we
 ;     intern lazily at dispatch, which still removes the raw pointer from the
 ;     WM's call target and gives the table a single trusted fill point.
 ;   - KEYFN INVOCATION lives in main.asm (the two WIN_OFF_KEYFN dispatch
-;     sites) — NOT owned here. That owner should swap
+;     sites) - NOT owned here. That owner should swap
 ;     `mov rdi,[win+KEYFN]; call dispatch_app_callback` for the same
 ;     intern+`call wm_cb_trampoline` shape used below (field id
 ;     WM_CB_FIELD_KEY reserved for it).
@@ -310,7 +310,7 @@ FN_BEGIN wm_draw_drag_outline, 0, 0, FN_RET_VOID
 ;     verify first, then pass the cleaned pointer to wm_cb_intern.
 ; ============================================================================
 
-; Per-(slot,field) callback target table — kernel BSS, indexed
+; Per-(slot,field) callback target table - kernel BSS, indexed
 ; [slot * WM_CB_FIELDS + field]. Holds the trusted kernel-image VA the WM will
 ; actually jump to. A zero entry means "no callback interned".
 WM_CB_FIELD_CLICK   equ 0
@@ -319,13 +319,13 @@ WM_CB_FIELD_DRAG    equ 2
 WM_CB_FIELD_RCLICK  equ 3
 WM_CB_FIELDS        equ 4
 
-; wm_cb_intern and wm_cb_resolve migrated to src/kernel/nexushlk/wm_helpers.nxh
+; wm_cb_intern and wm_cb_resolve migrated to src/kernel/grithlk/wm_helpers.ghl
 ; (bounded callback-table fill/lookup with #UD-on-OOB indexing). WM_CB_FIELDS /
 ; WM_CB_FIELD_* equs above stay here (used by the mouse handler + trampoline);
 ; the wm_cb_table BSS array is defined below. wm_cb_trampoline (CPI-adjacent
 ; dispatch) stays in asm and calls wm_cb_resolve cross-module within this unit.
 
-; wm_cb_trampoline — the kernel-owned invoker. Resolve a slot-local callback id
+; wm_cb_trampoline - the kernel-owned invoker. Resolve a slot-local callback id
 ; against the table and dispatch the stored TRUSTED target.
 ;   EDI = slot-local callback id (0 = none)
 ;   RSI = window ptr (arg0); RDX = arg1; RCX = arg2

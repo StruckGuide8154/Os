@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a non-security bug in NexusOS
+description: Report a non-security bug in GritOS
 labels: ["bug"]
 body:
   - type: markdown

@@ -8,7 +8,7 @@
 .sc_gui_rect:
     ; rdi=x, rsi=y, rdx=w, r10=h, r8=color.  User syscalls must not feed
     ; out-of-range low 32-bit values into the renderer's clipping arithmetic.
-    ; NexusHL callers sometimes leave stale high halves in argument registers;
+    ; GritHL callers sometimes leave stale high halves in argument registers;
     ; the renderer consumes edi/esi/edx/ecx, so validate those exact values.
     cmp edi, [scr_width]
     ja .sc_gui_rect_reject
@@ -83,7 +83,7 @@
     jae .sc_fs_entry_done
     push rdi                              ; preserve index
     call fat16_get_entry                  ; confirms the index resolves; we
-    test rax, rax                         ; don't keep the pointer — handlers
+    test rax, rax                         ; don't keep the pointer - handlers
     pop rdi                               ; re-resolve fresh each call.
     jz .sc_fs_entry_fail
     ; rdi still = valid-entry index (the handle payload).
@@ -165,7 +165,7 @@
     ; validation above reads ALL_RDX as width / ALL_R10 as height, so the
     ; user-facing order must keep dimensions in slots 2-3; title sits at
     ; slot 4 (FN_KIND_CSTRING in the syscall table). Before this remap, w
-    ; was being passed as title and h as width — every call failed the
+    ; was being passed as title and h as width - every call failed the
     ; min-width check inside wm_create_window_ex.
     mov rdi, [rsp + ALL_R8]      ; title
     mov rsi, [rsp + ALL_RDI]     ; x
@@ -240,7 +240,7 @@
     jz .sc_wm_handlers_reject
     ; Ownership check: caller's slot must own the target window. Without
     ; this, any app can install callbacks into any other app's window, which
-    ; — combined with l3_translate_target's blob-region remapping — turns
+    ; - combined with l3_translate_target's blob-region remapping - turns
     ; into cross-slot code execution at attacker-chosen offsets.
     mov rcx, r15
     imul rcx, APP_SLOT_SIZE
@@ -250,7 +250,7 @@
     ; CPI-lite: stamp the per-window tag onto both callback fields before
     ; commit. Sign each handler against (&window, field_offset) so a tag
     ; valid for CLICKFN can't be replayed in KEYFN or another window.
-    ; Stash the raw key_fn and the window ptr first — both helper calls
+    ; Stash the raw key_fn and the window ptr first - both helper calls
     ; below clobber rdx/rsi/rdi.
     push rax                          ; [rsp+8] = &window
     push rdx                          ; [rsp+0] = raw key_fn
@@ -303,7 +303,7 @@
     jne .sc_wm_set_user_arg_reject
     ; Preserve the "zero == no selection" sentinel: don't stamp a tag onto
     ; a zero value, otherwise readers couldn't distinguish "never set" from
-    ; "explicitly set to zero" — and the tag verifier would reject 0 too.
+    ; "explicitly set to zero" - and the tag verifier would reject 0 too.
     test rsi, rsi
     jz .sc_wm_set_user_arg_store
     ; tag = low16(kernel_canary ^ &window); KDOM_USER_ARG is 0 so this is
@@ -454,13 +454,13 @@
     cmp [rax + WIN_OFF_APPDATA], rdx
     jne .sc_wm_close_reject
     call wm_close_window
-    ; Slot is being recycled — restore an unsandboxed cap mask so the next
+    ; Slot is being recycled - restore an unsandboxed cap mask so the next
     ; app that lands here isn't accidentally constrained by the prior
     ; tenant's manifest. The new tenant re-narrows via its own declare call.
     ; Re-stamp the authenticator alongside the mask (cap_mask_store) so the
     ; reset mask is recognised as legitimate, not as tampering, at the next
     ; dispatch for this slot. Default-deny (security_todo.md §4): a recycled
-    ; slot drops to CAP_CORE, not CAP_ALL — the next tenant re-narrows to its
+    ; slot drops to CAP_CORE, not CAP_ALL - the next tenant re-narrows to its
     ; own manifest via kernel_apply_app_manifest at launch (APPLY_MANIFEST).
     ; Audit the transition first (cap_audit_log preserves all caller regs).
     lea rcx, [rel slot_cap_mask]
@@ -483,7 +483,7 @@
     jmp .done
 
 .sc_display_set_mode:
-    ; Runtime feature gate (boot_features.nxh): if FEAT_SYSCALL_SET_MODE is
+    ; Runtime feature gate (boot_features.ghl): if FEAT_SYSCALL_SET_MODE is
     ; disabled via BOOTCFG (disable=setmode), reject the mode-set outright. This
     ; is the representative per-syscall gate AND a hard lock against ring-3
     ; mode-set as a secure-boot profile. Save the geometry args around the call
@@ -578,7 +578,7 @@
     mov qword [rsp + ALL_RAX], -1
     jmp .done
 
-; SYS_MOUSE_SENSE — return packed per-axis pointer sensitivity (tenths):
+; SYS_MOUSE_SENSE - return packed per-axis pointer sensitivity (tenths):
 ; x in bits [15:0], y in bits [31:16].
 .sc_mouse_sense:
     movzx eax, word [mouse_sense_x]
@@ -588,7 +588,7 @@
     mov [rsp + ALL_RAX], rax
     jmp .done
 
-; SYS_SET_MOUSE_SENSE(packed) — x in [15:0], y in [31:16], each clamped to
+; SYS_SET_MOUSE_SENSE(packed) - x in [15:0], y in [31:16], each clamped to
 ; [1,50] = 0.1x..5.0x. Out-of-range bits above 32 are rejected.
 .sc_set_mouse_sense:
     mov rax, rdi
@@ -620,7 +620,7 @@
 .clamp_sense_hi_ok:
     ret
 
-; SYS_DISPLAY_NATIVE — return the monitor's native (boot-time) framebuffer
+; SYS_DISPLAY_NATIVE - return the monitor's native (boot-time) framebuffer
 ; size as a packed qword: width in bits [31:0], height in bits [63:32].
 ; Apps use this to surface a "Use native resolution" choice that survives
 ; mode changes (scr_width/scr_height can drift away from the native size
@@ -633,7 +633,7 @@
     mov [rsp + ALL_RAX], rax
     jmp .done
 
-; SYS_DISPLAY_SIZE — return the *current* logical desktop size packed the
+; SYS_DISPLAY_SIZE - return the *current* logical desktop size packed the
 ; same way as SYS_DISPLAY_NATIVE. This drifts whenever display_set_mode
 ; succeeds, so apps that want to show "current resolution" read this on
 ; every draw rather than caching it.

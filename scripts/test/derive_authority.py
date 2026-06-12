@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # Track-3 P3 mapping: derive domain authority bitmasks from the REAL signed
-# policy sources and prove the Track-3 invariants against them — the bitmasks
+# policy sources and prove the Track-3 invariants against them - the bitmasks
 # are GENERATED, never hand-asserted.
 #
 # Real sources (none of these are test fixtures):
-#   S1  src/include/syscall_caps.inc          — per-app MANIFEST_* capability
+#   S1  src/include/syscall_caps.inc          - per-app MANIFEST_* capability
 #       masks. These live inside KERNEL.BIN, which is admitted only under the
 #       KERNEL.ENV 3-of threshold envelope, so they ARE signed policy.
-#   S2  src/tools/security/policy_graph_check.nxh — the actual capability/
+#   S2  src/tools/security/policy_graph_check.ghl - the actual capability/
 #       policy schema (8 domains x 8 capabilities) and the edge-validity +
-#       threshold predicates, interpreted from the production NHL source.
+#       threshold predicates, interpreted from the production GHL source.
 #   S3  scripts/build/build_uefi.ps1 $KernelModules + each module's
-#       `unsafe <cap>;` declarations + nk_pt_window bracketing — the compiler-
-#       enforced authority a kernel NHL module can actually exercise.
-#   S4  src/tools/security/threshold_check.nxh — the per-artifact-class quorum
+#       `unsafe <cap>;` declarations + nk_pt_window bracketing - the compiler-
+#       enforced authority a kernel GHL module can actually exercise.
+#   S4  src/tools/security/threshold_check.ghl - the per-artifact-class quorum
 #       policy: which signatures can change the TCB, and how many are needed.
 #
 # Mapping (documented in docs/track3-invariant-proofs.md):
@@ -34,7 +34,7 @@
 #                       DRIVER -> AUTH_DMA_MAP, APP -> derived app-domain max
 #
 # Every check below evaluates the REAL invariant predicates from
-# invariant_check.nxh (via the eval_invariants interpreter over the production
+# invariant_check.ghl (via the eval_invariants interpreter over the production
 # compiler's parse) against the DERIVED masks. Any violation exits 1.
 
 import os
@@ -46,8 +46,8 @@ import eval_invariants  # noqa: E402  (reuses the production-compiler-backed int
 
 ROOT = eval_invariants.ROOT
 SYSCALL_CAPS = os.path.join(ROOT, 'src', 'include', 'syscall_caps.inc')
-POLICY_GRAPH = os.path.join(ROOT, 'src', 'tools', 'security', 'policy_graph_check.nxh')
-THRESHOLD = os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.nxh')
+POLICY_GRAPH = os.path.join(ROOT, 'src', 'tools', 'security', 'policy_graph_check.ghl')
+THRESHOLD = os.path.join(ROOT, 'src', 'tools', 'security', 'threshold_check.ghl')
 BUILD_SCRIPT = os.path.join(ROOT, 'scripts', 'build', 'build_uefi.ps1')
 POLICY_MODULE_DIR = os.path.join(ROOT, 'src', 'tools', 'security')
 
@@ -105,7 +105,7 @@ def parse_nasm_equs(path):
 
 def kernel_module_list():
     mods = []
-    pat = re.compile(r"@\{ src = 'src\\kernel\\nexushlk\\([A-Za-z0-9_]+\.nxh)'")
+    pat = re.compile(r"@\{ src = 'src\\kernel\\grithlk\\([A-Za-z0-9_]+\.ghl)'")
     with open(BUILD_SCRIPT, 'r', encoding='utf-8') as fh:
         for line in fh:
             m = pat.search(line)
@@ -190,7 +190,7 @@ def main():
 
     # Threshold-gated capabilities (per the REAL requires_threshold predicate)
     # must be unobtainable through any edge when threshold approval is absent.
-    # Checked per capability — two capabilities may map to the same authority
+    # Checked per capability - two capabilities may map to the same authority
     # bit (CAP_UPDATE vs CAP_STORAGE -> AUTH_PERSIST) with different gating.
     for c in caps:
         if graph.call('security_policy_graph_requires_threshold', [c]) == 1:
@@ -248,10 +248,10 @@ def main():
 
     # ----- S3: derive kernel-module authority from compiler capabilities ----
     mods = kernel_module_list()
-    print("[derive] S3 kernel NHL modules (%d in the signed image):" % len(mods))
+    print("[derive] S3 kernel GHL modules (%d in the signed image):" % len(mods))
     mod_auth = {}
     for mod in mods:
-        path = os.path.join(ROOT, 'src', 'kernel', 'nexushlk', mod)
+        path = os.path.join(ROOT, 'src', 'kernel', 'grithlk', mod)
         if not os.path.isfile(path):
             failures.append("build-list module missing on disk: %s" % mod)
             continue
@@ -272,10 +272,10 @@ def main():
     # build list is itself a failure (bindings cannot go stale).
     bindings = {
         'scheduler (INV-SCHED-NO-MEMORY)':
-            (('frame_pacing.nxh', 'cpu_acct.nxh'),
+            (('frame_pacing.ghl', 'cpu_acct.ghl'),
              lambda a: inv.call('inv_scheduler_no_memory_grant', [a]) == 1),
         'ipc/dispatch (INV-IPC-NO-FORGE)':
-            (('input_dispatch.nxh', 'net_dhcp_dispatch.nxh'),
+            (('input_dispatch.ghl', 'net_dhcp_dispatch.ghl'),
              lambda a: inv.call('inv_ipc_no_identity_forge', [a]) == 1),
     }
     for label, (members, pred) in bindings.items():
@@ -308,7 +308,7 @@ def main():
     # The Track-3 enforcement modules themselves must hold ZERO compiler
     # authority (they compile --deny-unsafe; verify at the source level too).
     for fname in sorted(os.listdir(POLICY_MODULE_DIR)):
-        if not fname.endswith('.nxh'):
+        if not fname.endswith('.ghl'):
             continue
         ucaps, pte = module_signals(os.path.join(POLICY_MODULE_DIR, fname))
         check("policy module %s holds no unsafe capability" % fname,
@@ -357,14 +357,14 @@ def main():
 
     # ----- verdict -----------------------------------------------------------
     if failures:
-        sys.stderr.write("[derive] FAIL — %d problem(s) of %d checks:\n"
+        sys.stderr.write("[derive] FAIL - %d problem(s) of %d checks:\n"
                          % (len(failures), checks))
         for f in failures:
             sys.stderr.write("  - %s\n" % f)
         return 1
     print("[derive] all %d policy-derived authority checks passed "
           "(masks generated from real signed policy, evaluated against the "
-          "real NHL invariant predicates)" % checks)
+          "real GHL invariant predicates)" % checks)
     return 0
 
 

@@ -1,6 +1,6 @@
 bits 64
 
-%include "nexus_app.inc"
+%include "grit_app.inc"
 
 global hello_draw
 global hello_click
@@ -25,6 +25,6 @@ hello_key:
     ret
 
 section .rodata
-.title:   db "Hello from a NexusOS ring-3 callback", 0
+.title:   db "Hello from a GritOS ring-3 callback", 0
 .clicked: db "hello_callback: click", 0
 .bye:     db "hello_callback: escape pressed", 0
