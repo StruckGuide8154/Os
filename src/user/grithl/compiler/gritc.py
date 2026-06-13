@@ -1909,6 +1909,11 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     cg.embed=embed
     cg.src=src
     cg.target=target
+    # --O3 also unlocks register-targeted expression-tree codegen: side-effect-free
+    # leaf operands/args are evaluated directly into their destination register,
+    # skipping the stack-machine `push rax`/`pop REG` staging. Gated so O0/O1/O2
+    # emitted bytes are untouched (O0 stays the byte-identity reference).
+    cg.o3=bool(o3)
     # Source-line provenance is kernel-only: it is pure NASM comments (zero
     # machine-code cost), but gating it to kernel mode guarantees the ring-3
     # app blobs + their MAC signatures stay byte-identical and keeps the
@@ -3020,6 +3025,75 @@ def _gen_state_index_store(st,lhs,rhs):
     cg.emit("    mov [rcx], al")
     cg.emit("    xor rax, rax")
 
+# -------------------- register-targeted leaf codegen (O3) --------------------
+# A "direct leaf" is a side-effect-free expression whose value can be produced
+# with a SINGLE instruction writing an arbitrary destination register (no use of
+# rax/rcx as scratch, no clobber of any other register, no flags dependency that
+# matters to a caller marshaling args). For such leaves we can evaluate straight
+# into the ABI/target register, skipping the stack-machine `push rax`/`pop REG`
+# round-trip. Anything not handled here returns False and the caller falls back
+# to the safe stack-staged path. Used ONLY under --O3 (cg.o3); O0/O1/O2 codegen
+# is byte-for-byte unchanged.
+def _emit_leaf_into(st, e, reg):
+    cg=st.cg; k=e.get("k")
+    if k=="int":
+        cg.emit(f"    mov {reg}, {e['val']}"); return True
+    if k=="strlit":
+        lbl=cg.str_label(e["val"]); cg.emit(f"    lea {reg}, [rel {lbl}]"); return True
+    if k=="ident":
+        n=e["name"]
+        if n in st.scope:
+            w=getattr(st,"regparam_width",{}).get(n)
+            off=rbpoff(st.scope[n])
+            r32={"rax":"eax","rcx":"ecx","rdx":"edx","rbx":"ebx","rsi":"esi",
+                 "rdi":"edi","rbp":"ebp","rsp":"esp","r8":"r8d","r9":"r9d",
+                 "r10":"r10d","r11":"r11d","r12":"r12d","r13":"r13d",
+                 "r14":"r14d","r15":"r15d"}.get(reg, reg)
+            if w==8:
+                cg.emit(f"    movzx {reg}, byte [rbp{off}]")
+            elif w==16:
+                cg.emit(f"    movzx {reg}, word [rbp{off}]")
+            elif w==32:
+                cg.emit(f"    mov {r32}, dword [rbp{off}]")
+            else:
+                cg.emit(f"    mov {reg}, [rbp{rbpoff(st.scope[n])}]")
+            return True
+        if n in cg.consts:
+            cg.emit(f"    mov {reg}, {cg.consts[n]}"); return True
+        if n in getattr(cg,"symconsts",set()):
+            cg.emit(f"    mov {reg}, {n}"); return True
+        if n in cg.str_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.str_defs[n]}]"); return True
+        if n in cg.state_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.state_defs[n]}]"); return True
+        return False
+    if k=="addr":
+        n=e["name"]
+        if n in st.scope:
+            cg.emit(f"    lea {reg}, [rbp{rbpoff(st.scope[n])}]"); return True
+        if n in cg.str_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.str_defs[n]}]"); return True
+        if n in cg.state_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.state_defs[n]}]"); return True
+        if n in cg.externs:
+            cg.emit(f"    lea {reg}, [rel {n}]"); return True
+        return False
+    return False
+
+def _is_direct_leaf(st, e):
+    # Predicate-only check (no emission) mirroring _emit_leaf_into's coverage.
+    k=e.get("k")
+    if k in ("int","strlit"): return True
+    cg=st.cg
+    if k=="ident":
+        n=e["name"]
+        return (n in st.scope or n in cg.consts or n in getattr(cg,"symconsts",set())
+                or n in cg.str_defs or n in cg.state_defs)
+    if k=="addr":
+        n=e["name"]
+        return (n in st.scope or n in cg.str_defs or n in cg.state_defs or n in cg.externs)
+    return False
+
 def gen_expr(st,e):
     cg=st.cg; k=e["k"]
     if k=="int":
@@ -3118,8 +3192,14 @@ def gen_expr(st,e):
                         cg.emit(f"    and rax, {cv-1}")
                         cg.emit("    sub rax, rcx")
                 return
-        gen_expr(st,e["lhs"]); cg.emit("    push rax")
-        gen_expr(st,e["rhs"]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
+        if getattr(cg,"o3",False) and _is_direct_leaf(st,e["rhs"]):
+            # rhs is side-effect-free: evaluate lhs into rax, then load rhs
+            # directly into rcx. No stack staging needed (rhs read of mem/imm
+            # cannot disturb rax). Same final rax/rcx as the staged path.
+            gen_expr(st,e["lhs"]); _emit_leaf_into(st,e["rhs"],"rcx")
+        else:
+            gen_expr(st,e["lhs"]); cg.emit("    push rax")
+            gen_expr(st,e["rhs"]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
         if op=="+": cg.emit("    add rax, rcx")
         elif op=="-": cg.emit("    sub rax, rcx")
         elif op=="*": cg.emit("    imul rax, rcx")
@@ -3153,10 +3233,20 @@ def gen_expr(st,e):
         args=e["args"]
         if len(args)>6: raise SyntaxError("syscall has max 6 args")
         # evaluate to stack first (left-to-right), then pop in reverse
-        for a in args:
-            gen_expr(st,a); cg.emit("    push rax")
-        for reg in reversed(ARG_REGS[:len(args)]):
-            cg.emit(f"    pop {reg}")
+        if getattr(cg,"o3",False):
+            complex_idx=[i for i,a in enumerate(args) if not _is_direct_leaf(st,a)]
+            leaf_idx   =[i for i,a in enumerate(args) if _is_direct_leaf(st,a)]
+            for i in complex_idx:
+                gen_expr(st,args[i]); cg.emit("    push rax")
+            for i in reversed(complex_idx):
+                cg.emit(f"    pop {ARG_REGS[i]}")
+            for i in leaf_idx:
+                _emit_leaf_into(st, args[i], ARG_REGS[i])
+        else:
+            for a in args:
+                gen_expr(st,a); cg.emit("    push rax")
+            for reg in reversed(ARG_REGS[:len(args)]):
+                cg.emit(f"    pop {reg}")
         # Heterogeneous syscall numbering (security_todo.md §12): if the syscall
         # number is a compile-time constant (it always is for the SYS_* consts),
         # emit it through APP_SYSNO so the build records a fixup for the loader to
@@ -3621,12 +3711,29 @@ def gen_expr(st,e):
         # System V: push stack args 7+ right-to-left so arg6 lands at [rsp].
         for a in reversed(stack_args):
             gen_expr(st,a); cg.emit("    push rax")
-        # Evaluate register args, stage on the stack, then pop into regs so
-        # earlier args' evaluation can't clobber a register already loaded.
-        for a in reg_args:
-            gen_expr(st,a); cg.emit("    push rax")
-        for reg in reversed(CALL_REGS[:len(reg_args)]):
-            cg.emit(f"    pop {reg}")
+        if getattr(cg,"o3",False):
+            # Register-targeted marshaling: complex (side-effecting / rax-clobbering)
+            # args still stage through the stack, but side-effect-free LEAF args go
+            # straight into their ABI register. Leaves are emitted AFTER all complex
+            # args are popped into their regs, so a complex pop can't clobber a leaf
+            # already placed, and a leaf (memory/immediate read) can't disturb a
+            # staged complex value. Stack balance and final register contents are
+            # identical to the all-staged path -> semantics-preserving.
+            complex_idx=[i for i,a in enumerate(reg_args) if not _is_direct_leaf(st,a)]
+            leaf_idx   =[i for i,a in enumerate(reg_args) if _is_direct_leaf(st,a)]
+            for i in complex_idx:
+                gen_expr(st,reg_args[i]); cg.emit("    push rax")
+            for i in reversed(complex_idx):
+                cg.emit(f"    pop {CALL_REGS[i]}")
+            for i in leaf_idx:
+                _emit_leaf_into(st, reg_args[i], CALL_REGS[i])
+        else:
+            # Evaluate register args, stage on the stack, then pop into regs so
+            # earlier args' evaluation can't clobber a register already loaded.
+            for a in reg_args:
+                gen_expr(st,a); cg.emit("    push rax")
+            for reg in reversed(CALL_REGS[:len(reg_args)]):
+                cg.emit(f"    pop {reg}")
         if getattr(cg,"kernel",False):
             # Kernel mode: direct call to an in-unit label (the kernel is one
             # NASM translation unit, so every label resolves without extern
