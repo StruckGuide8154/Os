@@ -46,6 +46,7 @@ global ramdisk_intercept_write
 global ramdisk_mark_dirty
 global ramdisk_flush
 global ramdisk_storage_class
+global blk_write_sectors
 
 ; ----------------------------------------------------------------------------
 ; ramdisk_init - Read VBE_INFO ramdisk fields written by the UEFI loader and
@@ -336,6 +337,18 @@ ramdisk_flush:
     ;   3. on success, clear the bit.
     ; Returns 0 when no dirty pages remain.
     xor eax, eax
+    ret
+
+; ----------------------------------------------------------------------------
+; blk_write_sectors(rdi=LBA, rsi=buf, edx=count) -> rax: 0 ok, -1 BLK_ENODEV
+; Phase-4 raw block write-back to the boot medium (NVMe / USB-MSC), used by
+; floor_store.ghl to persist the anti-rollback floor sector on NVMe/USB-boot
+; hardware where the legacy ATA PIO path is absent (issue #21). The backing
+; driver dispatch is NOT yet implemented, so this STUB fail-closes with
+; BLK_ENODEV; floor_store then fails soft. Wiring the real dispatch is Phase-4.
+; ----------------------------------------------------------------------------
+blk_write_sectors:
+    mov eax, -1                     ; BLK_ENODEV: no backing block driver yet
     ret
 
 section .data

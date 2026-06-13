@@ -96,6 +96,9 @@ s_syssig_path:  ustr "\EFI\BOOT\SYSSIG.ENV"
 s_kupdate_path: ustr "\EFI\BOOT\KUPDATE.ENV"
 s_kquorum_path: ustr "\EFI\BOOT\KQUORUM.ENV"
 s_kernenv_path: ustr "\EFI\BOOT\KERNEL.ENV"
+s_drvenv_path:  ustr "\EFI\BOOT\DRIVER.ENV"
+s_cfgenv_path:  ustr "\EFI\BOOT\CONFIG.ENV"
+s_polenv_path:  ustr "\EFI\BOOT\POLICY.ENV"
 s_klog_path:    ustr "\KLOG.TXT"
 
 ; FAT32 8.3 path components for \EFI\BOOT\DATA.IMG extent resolution.

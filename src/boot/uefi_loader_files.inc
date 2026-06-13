@@ -493,6 +493,19 @@ load_envelopes:
     mov edi, VBE_KERNENV_BASE_OFF
     mov ebp, KERNENV_MAX_SIZE
     call load_opt_file
+    ; Optional staged per-class artifacts (driver / config / policy).
+    lea rsi, [s_drvenv_path]
+    mov edi, VBE_DRVENV_BASE_OFF
+    mov ebp, CLASSENV_MAX_SIZE
+    call load_opt_file
+    lea rsi, [s_cfgenv_path]
+    mov edi, VBE_CFGENV_BASE_OFF
+    mov ebp, CLASSENV_MAX_SIZE
+    call load_opt_file
+    lea rsi, [s_polenv_path]
+    mov edi, VBE_POLENV_BASE_OFF
+    mov ebp, CLASSENV_MAX_SIZE
+    call load_opt_file
     ; Publish the PRISTINE KERNEL.BIN container bytes (read by load_kernel
     ; into firmware pages; the trampoline copies the payload OUT of this
     ; buffer, so it stays byte-identical to the at-rest file) for

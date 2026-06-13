@@ -290,6 +290,8 @@ fn kmain() {
     # verified above must ALSO arrive inside a threshold-Ed25519-signed
     # envelope (SYSSIG.ENV, fail-closed panic), and any staged update artifact
     # (KUPDATE.ENV) is admitted/rejected only through the same signed gate.
+    gate_device_id_init();        # REAL per-machine device id (CPUID-derived),
+                                  # bound before any TARGET_DEVICE admission
     floor_store_load();           # persistent anti-rollback floors (fail-soft
                                   # to the build-time floors without media)
     gate_time_set(floor_time_high()); # cross-boot clock high-water first, so a
@@ -299,6 +301,7 @@ fn kmain() {
     kernel_env_verify_boot();     # loader-side KERNEL.BIN envelope (fail-closed)
     boot_update_check();
     boot_quorum_check();              # staged KQUORUM.ENV: dual-quorum ratchet
+    boot_artifact_class_check();      # staged DRIVER/CONFIG/POLICY.ENV (optional)
     floor_persist(gate_time_now());   # write ratcheted floors + clock high-water
                                       # back the same boot they advanced
     bootlog2(TAG_K, D0 + 5);          # K5: app integrity manifest ready

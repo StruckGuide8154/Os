@@ -268,6 +268,18 @@ VBE_KIMG_BASE_OFF       equ 0xC0   ; u64 base of pristine KERNEL.BIN file bytes
 VBE_KIMG_SIZE_OFF       equ 0xC8   ; u64 byte length actually read
 KERNENV_MAX_SIZE        equ 0x2000 ; 8 KiB cap (header + 32B payload + sigs)
 
+; --- Track 2 staged per-class artifact envelopes ---------------------------
+; OPTIONAL loader-staged envelopes exercising driver / config / policy classes.
+; Admitted through artifact_gate_admit by boot_artifact_class_check
+; (envelope_gate.ghl, kmain K5). Missing file -> base/size 0. Verdict latched.
+VBE_DRVENV_BASE_OFF     equ 0xD0   ; u64 base of loaded DRIVER.ENV (0 = none)
+VBE_DRVENV_SIZE_OFF     equ 0xD8
+VBE_CFGENV_BASE_OFF     equ 0xE0   ; u64 base of loaded CONFIG.ENV (0 = none)
+VBE_CFGENV_SIZE_OFF     equ 0xE8
+VBE_POLENV_BASE_OFF     equ 0xF0   ; u64 base of loaded POLICY.ENV (0 = none)
+VBE_POLENV_SIZE_OFF     equ 0xF8
+CLASSENV_MAX_SIZE       equ 0x100000 ; 1 MiB cap (driver/config/policy payload)
+
 ; Feature bits - MUST stay in lockstep with src/kernel/grithlk/boot_features.ghl.
 ; (asm callers - e.g. the SYS_DISPLAY_SET_MODE gate - use these names.)
 FEAT_CURSOR_DRAW           equ 1
