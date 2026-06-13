@@ -1620,6 +1620,53 @@ def _regalloc_one_fn(seg, safe_callees=None):
     body=body[:pops_at]+pop_lines+body[pops_at:]
     return frame+push_lines+spills+body
 
+# -------------------- QUBO export hook (advisory, quantum-ready) --------------
+# Register allocation = graph coloring; block/function layout = partition. These
+# are clean QUBO/Max-Cut instances. When GRITC_QUBO_OUT is set, we EXPORT the
+# per-function register-allocation instance (promotable slots, candidate
+# callee-saved colors, and the body-blocked colors that act as the interference
+# constraints) as JSON, so an external solver (e.g. QAOA) can later propose an
+# assignment. This is ADVISORY ONLY: the classical greedy allocator below is the
+# default and the sole producer of emitted code, and remains the verifiable
+# baseline. No quantum dependency enters the build. A solver's proposal would be
+# replayed through the exact same lossless gates before it could affect output.
+def _qubo_export_regalloc(segs):
+    out_path=os.environ.get("GRITC_QUBO_OUT")
+    if not out_path:
+        return
+    instances=[]
+    for is_fn,chunk in segs:
+        if not is_fn: continue
+        name=_o2_fn_name(chunk)
+        if not name: continue
+        codes=[_code(l).strip() for l in chunk]
+        body=_body_codes(codes)
+        if body is None: continue
+        lo,hi=body
+        slots=sorted(_o2_collect_neg_slots(" ".join(codes)),
+                     key=lambda s:int(re.search(r"-(\d+)",s).group(1)))
+        if not slots: continue
+        # candidate colors = callee-saved regs free in the body (interference);
+        # a slot may take any free color, distinct colors per simultaneously-live
+        # slot (whole-fn promotion => all promoted slots are mutually exclusive
+        # over the register file).
+        free=[r for r in _O2_CALLEE_SAVED if _o2_reg_free_in_body(r, codes, lo, hi)]
+        instances.append({
+            "fn": name,
+            "variables": slots,            # one var per promotable slot
+            "colors": free,                # callee-saved registers available
+            "mutual_exclusion": True,      # distinct color per slot (whole-fn live)
+            "note": "graph-coloring QUBO: minimize unassigned slots s.t. distinct "
+                    "colors; advisory, classical greedy is the verified baseline",
+        })
+    try:
+        with open(out_path,"w",encoding="utf-8",newline="\n") as f:
+            json.dump({"problem":"register_allocation_coloring",
+                       "instances":instances}, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
+
 def _regalloc_functions(lines, target):
     if target!="user":
         return lines
@@ -1629,6 +1676,7 @@ def _regalloc_functions(lines, target):
     segs=[]
     for is_fn,chunk in _fn_segments(lines):
         segs.append((is_fn, _regalloc_one_fn(chunk) if is_fn else chunk))
+    _qubo_export_regalloc(segs)
     safe_callees={}
     for is_fn,chunk in segs:
         if not is_fn: continue
@@ -1651,6 +1699,133 @@ def _regalloc_functions(lines, target):
             if body is not None and not _o2_is_leaf(codes,*body):
                 chunk=_regalloc_one_fn(chunk, safe_callees)
         out.extend(chunk)
+    return out
+
+# -------------------- Phase 3: O3 density passes (--O3, lossless) -------------
+# O3 runs strictly AFTER the O0/O1 cleanup and the O2 register allocator, on the
+# already-allocated instruction stream. It is opt-in (--O3) and never alters the
+# O0/O1/O2 outputs, so KERNEL.BIN byte-identity (which expects --O0) and the
+# existing O2 builds are unaffected.
+#
+# Every O3 rewrite is the SAME class of provably-semantics-preserving local
+# transformation the Phase-1 passes already use - it just removes the deliberate
+# O0/O1 conservatism that left two large, fully-dead idioms standing in
+# syscall-wrapper bodies (the dominant shape in real apps):
+#
+#   (A) cross-register store-forward + dead-store elimination
+#         mov [rbp-K], Rsrc      ; param spill
+#         ...                     ; Rsrc and slot both unchanged
+#         mov Rdst, [rbp-K]       ; reload into a DIFFERENT reg
+#       -> the reload becomes  mov Rdst, Rsrc , and if the slot is then never
+#          read again the spill store is dead and is removed. _p_value_forward
+#          only forwarded reloads into the *same* register; this generalizes it
+#          to any destination, which is what unlocks the spill removal.
+#
+#   (B) dead callee-save elision
+#         push rbx / push r12 ... pop r12 / pop rbx
+#       removed when the body provably never names that register at any width.
+#       (_p_dead_callee_save already proves this; O0/O1 keep the pair as a
+#       compatibility bracket - O3 drops it once it is shown genuinely dead.)
+#
+# After (A)+(B) the frame is usually empty, so the existing _p_frame level-2
+# elision collapses `push rbp / mov rbp,rsp / sub rsp,N` too. The passes are run
+# to a fixpoint per function. NOTE on 16-byte alignment: dropping a *balanced*
+# even-count push set (B removes pairs; A removes no pushes) preserves rsp parity
+# at every body call/syscall, and _p_frame only fully elides the frame when the
+# body has no call/push/pop at all, so alignment obligations are never broken.
+
+def _o3_store_forward(seg, codes):
+    # Generalized store-forward: track, per slot, the register that last stored
+    # into it (reg currently equal to slot's memory). Rewrite a reload
+    # `mov Rdst, [slot]` into `mov Rdst, Rsrc` when Rsrc still holds the value.
+    # Invalidate a slot's tracked source when that source reg is written, when
+    # the slot is overwritten by a non-reg value, or at any control-flow break.
+    slot_src={}      # slot -> canon reg that currently equals it (and its spelling)
+    rewrites={}      # idx -> new line text
+    for idx,c in enumerate(codes):
+        m=_MOV2_RE.match(c)
+        if m:
+            dest=m.group(1).strip(); src=m.group(2).strip()
+            d_can=_canon(dest); s_can=_canon(src)
+            # store: mov [slot], R64
+            if _RBP_SLOT_ONLY_RE.match(dest) and s_can:
+                slot=dest
+                # storing into slot: slot now equals src reg (record its spelling)
+                slot_src[slot]=(s_can, src)
+                # any slot previously sourced from this same reg is unaffected
+                # (the reg's value is what we just stored); but a write to the reg
+                # later will invalidate via _writes handling below.
+                continue
+            # reload: mov R64, [slot]
+            if d_can and _RBP_SLOT_ONLY_RE.match(src):
+                slot=src
+                rec=slot_src.get(slot)
+                if rec is not None:
+                    s_can2,s_spell=rec
+                    if s_can2==d_can:
+                        pass  # mov R, [slot] where R already == slot's reg; leave
+                              # to _p_value_forward / harmless. Still: rewrite to
+                              # self-mov would be dropped; keep simple, skip.
+                    else:
+                        cmt=_comment(seg[idx])
+                        rewrites[idx]=f"    mov {dest}, {s_spell}{cmt}"
+                    # after the reload, d_can also equals this slot
+                    slot_src[slot]=(d_can, dest) if False else rec
+                    # invalidate: d_can is now written, drop slots it sourced
+                    for sl in [s for s,(rc,_sp) in slot_src.items() if rc==d_can]:
+                        if sl!=slot: slot_src.pop(sl,None)
+                    continue
+                # unknown slot: writing d_can, fall through to invalidation
+            # plain reg<-x move into a reg: that reg is written -> invalidate
+            if d_can:
+                for sl in [s for s,(rc,_sp) in slot_src.items() if rc==d_can]:
+                    slot_src.pop(sl,None)
+                continue
+            # store of non-reg into a slot (imm/mem): slot no longer tracks a reg
+            if _RBP_SLOT_ONLY_RE.match(dest):
+                slot_src.pop(dest,None)
+                continue
+        w=_writes_reg_canons(c)
+        if w is None:
+            slot_src.clear()                     # label / unknown: clear
+        else:
+            for r in w:
+                if not r: continue
+                for sl in [s for s,(rc,_sp) in slot_src.items() if rc==r]:
+                    slot_src.pop(sl,None)
+    if not rewrites:
+        return seg, codes
+    seg2=[rewrites.get(k,ln) for k,ln in enumerate(seg)]
+    codes2=[(_code(rewrites[k]).strip() if k in rewrites else c)
+            for k,c in enumerate(codes)]
+    return seg2, codes2
+
+def _o3_one_fn(seg):
+    codes=[_code(l).strip() for l in seg]
+    addr_of_frame=_opt_fn_uses_addr_of_frame(codes)
+    if addr_of_frame:
+        return seg                               # never touch address-taken frames
+    # Iterate the local rewrites to a fixpoint: store-forward exposes dead
+    # stores, dead-store removal can leave a callee-save dead, dead-callee-save
+    # removal can leave the frame dead, etc.
+    for _ in range(8):
+        before=tuple(codes)
+        seg,codes=_o3_store_forward(seg,codes)
+        seg,codes=_p_value_forward(seg,codes)
+        seg,codes=_p_dead_store(seg,codes)
+        seg,codes=_p_dead_callee_save(seg,codes)
+        seg,codes=_p_frame(seg,codes,addr_of_frame)
+        seg,codes=_p_jmp_to_next(seg,codes)
+        if tuple(codes)==before:
+            break
+    return seg
+
+def _o3_optimize_functions(lines, target):
+    if target!="user":
+        return lines
+    out=[]
+    for is_fn,chunk in _fn_segments(lines):
+        out.extend(_o3_one_fn(chunk) if is_fn else chunk)
     return out
 
 def _contains_asm_stmt(stmts):
@@ -1715,7 +1890,7 @@ def _require_cap(cg, cap, what):
         return
     raise SyntaxError(f"{what} requires `unsafe {cap};`")
 
-def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False):
+def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False,o3=False):
     global LAST_SIGS
     if forbid_asm:
         _enforce_no_asm(decls, "--forbid-asm")
@@ -1942,6 +2117,10 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # Implies Phase 1 (it runs on the Phase-1-cleaned stream). USER target only.
     if regalloc and optimize:
         body=_regalloc_functions(body, target)
+    # Phase 3 (--O3): density passes on the allocated stream. Implies O2.
+    # USER target only; opt-in, leaves O0/O1/O2 outputs untouched.
+    if o3 and optimize:
+        body=_o3_optimize_functions(body, target)
     out.extend(body)
     # Strings: emit as inert bytes in current section. In standalone mode put
     # them in .rodata; in embed mode keep them in .text (safe - no code falls
@@ -3472,7 +3651,7 @@ def resolve_use(name, lib_dir):
 
 def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False,
                  kernel=False, target="user", forbid_asm=False, deny_unsafe=False,
-                 optimize=True, regalloc=False):
+                 optimize=True, regalloc=False, o3=False):
     with open(path,"r",encoding="utf-8") as f: src=f.read()
     toks=lex(src,path); decls=parse(toks,path)
     # expand uses: prepend decls from lib files
@@ -3505,7 +3684,7 @@ def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False,
     asm=compile_unit(expanded, unit_prefix, embed=embed, kernel=kernel,
                      src=os.path.basename(path), target=target,
                      forbid_asm=forbid_asm, deny_unsafe=deny_unsafe,
-                     optimize=optimize, regalloc=regalloc)
+                     optimize=optimize, regalloc=regalloc, o3=o3)
     if return_sigs:
         return asm, LAST_SIGS
     return asm
@@ -3541,24 +3720,33 @@ def main():
                          "live range so values stay in registers instead of round-tripping "
                          "through memory. Implies -O1. OFF by default; conservative and "
                          "signature-preserving (only .text changes).")
+    ap.add_argument("--O3",dest="o3",action="store_true",
+                    help="enable the Phase-3 density passes (USER target only): on top of "
+                         "the O2-allocated stream, cross-register store-forward + dead-store "
+                         "elimination, dead callee-save elision, and frame collapse, iterated "
+                         "to a fixpoint. Implies -O2/-O1. OFF by default; every rewrite is the "
+                         "same provably semantics-preserving local class as O0/O1, and only "
+                         ".text changes. Use for smallest emitted code; O0 remains the "
+                         "byte-identity reference.")
     args=ap.parse_args()
     optimize=not args.no_opt
     # --O2 is the explicit opt-in for the function optimizer + register allocator.
     # It no longer depends on the global default switch (which gates -O1 builds);
-    # passing --O2 turns the passes on for that compile.
-    regalloc=args.o2 and optimize
+    # passing --O2 turns the passes on for that compile. --O3 implies --O2.
+    regalloc=(args.o2 or args.o3) and optimize
+    o3=args.o3 and optimize
     kernel=(args.target in ("kernel","boot"))
     if args.emit_sigs:
         asm,sigs=compile_file(args.input, os.path.abspath(args.lib), args.prefix,
                               embed=args.embed, return_sigs=True, kernel=kernel,
                               target=args.target, forbid_asm=args.forbid_asm,
                               deny_unsafe=args.deny_unsafe, optimize=optimize,
-                              regalloc=regalloc)
+                              regalloc=regalloc, o3=o3)
     else:
         asm=compile_file(args.input, os.path.abspath(args.lib), args.prefix,
                          embed=args.embed, kernel=kernel, target=args.target,
                          forbid_asm=args.forbid_asm, deny_unsafe=args.deny_unsafe,
-                         optimize=optimize, regalloc=regalloc)
+                         optimize=optimize, regalloc=regalloc, o3=o3)
         sigs=[]
     with open(args.output,"w",encoding="utf-8",newline="\n") as f: f.write(asm)
     if args.emit_sigs:
