@@ -51,7 +51,10 @@ _start:
     ; table patches that copy along with the rest of the kernel payload; the
     ; standalone APPS.BIN is built at the unslid 0x100000 base and cannot be
     ; reused after a random slide without a second relocation pass.
-%ifndef ENABLE_KASLR
+%ifdef RELEASE_BUILD
+    ; Authenticate the external copy even when KASLR uses the embedded copy.
+    call load_apps
+%elifndef ENABLE_KASLR
     call load_apps
 %else
     mov qword [abs VBE_INFO + VBE_APPS_BASE_OFF], 0
@@ -73,12 +76,25 @@ _start:
     ; VBE_INFO. The kernel's boot_features.ghl parses it into the feat_mask
     ; that gates subsystem init / per-frame work / individual syscalls. Absent
     ; file leaves the fields zero -> kernel defaults everything ON (byte-compat).
+%ifndef RELEASE_BUILD
     call load_bootcfg
+%else
+    mov qword [abs VBE_INFO + VBE_BOOTCFG_BASE_OFF], 0
+    mov qword [abs VBE_INFO + VBE_BOOTCFG_SIZE_OFF], 0
+%endif
 
     ; === S2b2c: Load Track-2 signed-envelope files (SYSSIG.ENV required by
     ; the kernel fail-closed; KUPDATE.ENV optional staged update). Publishes
     ; (base,size) pairs in VBE_INFO for envelope_gate.ghl. ===
     call load_envelopes
+
+%ifdef RELEASE_BUILD
+    ; Fail before ExitBootServices and before any attacker-controlled artifact
+    ; can be relocated, parsed, or executed.
+    call verify_release_artifacts
+    test rax, rax
+    jnz .fail_integrity
+%endif
 
     ; === S2b3: Phase 1b - resolve DATA.IMG physical LBA extents on the ESP
     ; via EFI_BLOCK_IO_PROTOCOL while firmware services are still alive.
@@ -86,9 +102,17 @@ _start:
     ; kernel (Phase 5). Non-fatal: failure leaves contract zeroed.
     call resolve_data_img_extents
 
+    ; Capture KASLR entropy while UEFI protocols are still callable. The
+    ; post-ExitBootServices relocation path consumes only this saved state.
+    call collect_kaslr_entropy
+    test rax, rax
+    jnz .fail_entropy
+
     ; === S2c: If previous kernel left a klog flush request in RAM, write it
     ; out to \KLOG.TXT and clear the magic. Non-fatal on failure. ===
+%ifndef RELEASE_BUILD
     call flush_klog_if_pending
+%endif
 
     ; === S3: Build identity-mapped page tables ===
     call setup_paging
@@ -220,20 +244,21 @@ _start:
     jz  .slide_zero
     mov rbx, rax                     ; rbx = max_pages
 
-    push rbx
-    mov eax, 1
-    cpuid
-    bt  ecx, 30                      ; RDRAND support
-    pop rbx
-    jnc .slide_rdtsc
-    rdrand rax
-    jc  .slide_mix
-    rdrand rax
-    jc  .slide_mix
-.slide_rdtsc:
+    cmp byte [v_kaslr_entropy_valid], 1
+    jne .slide_untrusted
+    mov rax, [v_kaslr_entropy]
+    xor rax, [v_kaslr_entropy + 8]
+    xor rax, [v_kaslr_entropy + 16]
+    xor rax, [v_kaslr_entropy + 24]
+    jmp .slide_mix
+.slide_untrusted:
+%ifdef RELEASE_BUILD
+    jmp .halt                         ; release never accepts timing-only entropy
+%else
     rdtsc
     shl rdx, 32
     or  rax, rdx
+%endif
 .slide_mix:
     push rax
     rdtsc
@@ -310,7 +335,85 @@ _start:
     jmp .halt
 .fail_exit:
     SDBG 'EXIT-FAIL'
+.fail_entropy:
+    SDBG 'ENTROPY-FAIL'
+.fail_integrity:
+    SDBG 'INTEGRITY-FAIL'
 .halt:
     cli
     hlt
     jmp .halt
+
+; Capture 256 bits from EFI_RNG_PROTOCOL and mix in checked RDSEED/RDRAND when
+; available. At least one trusted source is mandatory in release builds.
+collect_kaslr_entropy:
+    push rbx
+    push r12
+    sub rsp, 40
+    mov byte [v_kaslr_entropy_valid], 0
+    lea rdi, [v_kaslr_entropy]
+    xor eax, eax
+    mov ecx, 32 / 8
+    rep stosq
+
+    mov rbx, [v_bs]
+    mov rax, [rbx + BS_LOCATE]
+    lea rcx, [guid_rng]
+    xor edx, edx
+    lea r8, [v_rng]
+    call rax
+    test rax, rax
+    jnz .cpu_entropy
+    mov rcx, [v_rng]
+    test rcx, rcx
+    jz .cpu_entropy
+    mov rax, [rcx + RNG_GET]
+    xor edx, edx                    ; default algorithm
+    mov r8d, 32
+    lea r9, [v_kaslr_entropy]
+    call rax
+    test rax, rax
+    jnz .cpu_entropy
+    mov byte [v_kaslr_entropy_valid], 1
+
+.cpu_entropy:
+    ; Prefer RDSEED. Eight bounded retries, then try RDRAND independently.
+    xor r12d, r12d
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    bt ebx, 18
+    jnc .try_rdrand
+    mov ecx, 8
+.rdseed_retry:
+    rdseed rax
+    jc .have_cpu_entropy
+    dec ecx
+    jnz .rdseed_retry
+.try_rdrand:
+    mov eax, 1
+    cpuid
+    bt ecx, 30
+    jnc .entropy_done
+    mov ecx, 8
+.rdrand_retry:
+    rdrand rax
+    jc .have_cpu_entropy
+    dec ecx
+    jnz .rdrand_retry
+    jmp .entropy_done
+.have_cpu_entropy:
+    xor [v_kaslr_entropy], rax
+    mov byte [v_kaslr_entropy_valid], 1
+.entropy_done:
+    xor eax, eax
+    cmp byte [v_kaslr_entropy_valid], 1
+    je .entropy_return
+%ifdef RELEASE_BUILD
+    mov eax, 1
+%endif
+.entropy_return:
+    add rsp, 40
+    pop r12
+    pop rbx
+    ret

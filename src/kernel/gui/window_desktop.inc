@@ -202,10 +202,11 @@ FN_BEGIN wm_poll_wallpaper_render, 0, 0, FN_RET_VOID
     FN_END wm_poll_wallpaper_render
     ret
 
-; Runs on an AP through process_submit_job. It renders the wallpaper app into
-; the selected wallpaper cache. SVG raster syscalls select that cache as their
-; destination, so this job never mutates bb_addr and the BSP can keep using the
-; real backbuffer.
+; Runs on an AP through process_submit_job. It renders the authored SVG into the
+; selected wallpaper cache at full quality. The callback lock is required while
+; shared ring-3 page-table isolation is active; dispatch_app_callback therefore
+; refuses to wait on this lock while wallpaper_render_active is set, keeping the
+; BSP compositor and input loop responsive during this long AP job.
 wallpaper_render_job:
     push rbx
     push r12
@@ -259,4 +260,4 @@ wm_wallpaper_cache_addr:
 ; to src/kernel/grithlk/wm_helpers.ghl (zero-asm; per-pixel dword loops replace
 ; the rep stosd/movsd with a byte-identical pixel stream). DESKTOP_SOLID_COLOR is
 ; mirrored as a const there.
-
+

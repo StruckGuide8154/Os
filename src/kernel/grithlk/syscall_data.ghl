@@ -61,8 +61,12 @@ data sc_net_ping_busy: 1 x 1 = 0;
 data sc_net_tcp_busy:  1 x 1 = 0;
 data sc_net_dns_busy:  1 x 1 = 0;
 
-# Ring-3 SYSCALL demo greeting (NUL-terminated).
+# Ring-3 SYSCALL demo greeting (NUL-terminated). Debug-only: contains the
+# "RING 3" marker the release-artifact scan forbids in a public image, so it is
+# gated out of a -Release build (no ENABLE_DEBUG_SERIAL).
+cfg "ENABLE_DEBUG_SERIAL" {
 data szHelloUser = "-> Hello from RING 3 (via SYSCALL)!";
+}
 
 # Per-slot effective capability mask LOW byte. Default-deny: every slot boots at
 # CAP_CORE. The mask widened to 16 bits (CAP_FS split into read/write/delete);

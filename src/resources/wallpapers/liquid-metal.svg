@@ -15,10 +15,6 @@
       <stop offset="50%" stop-color="#ffffff" stop-opacity="0.15"/>
       <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
     </linearGradient>
-    <filter id="grain">
-      <feTurbulence type="fractalNoise" baseFrequency="1.5" numOctaves="3" stitchTiles="stitch"/>
-      <feColorMatrix type="matrix" values="1 0 0 0 0, 0 1 0 0 0, 0 0 1 0 0, 0 0 0 0.03 0" />
-    </filter>
   </defs>
   <rect width="1920" height="1080" fill="#050505" />
   <g>
@@ -32,11 +28,10 @@
       <animate attributeName="d" values="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900 L 2000 1200 L -100 1200 Z; M -110 510 C 290 890, 810 410, 1390 890 C 1690 1160, 1990 910, 1990 910 L 1990 1200 L -110 1200 Z; M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900 L 2000 1200 L -100 1200 Z" dur="20s" repeatCount="indefinite" />
     </path>
   </g>
-  <path d="M 0 200 C 400 600, 900 100, 1500 600 C 1800 850, 1920 600, 1920 600" fill="none" stroke="url(#highlight)" stroke-width="4" style="filter: blur(2px);">
+  <path d="M 0 200 C 400 600, 900 100, 1500 600 C 1800 850, 1920 600, 1920 600" fill="none" stroke="url(#highlight)" stroke-width="4">
     <animate attributeName="d" values="M 0 200 C 400 600, 900 100, 1500 600 C 1800 850, 1920 600, 1920 600; M 0 210 C 390 590, 910 110, 1490 590 C 1790 860, 1910 590, 1910 590" dur="18s" repeatCount="indefinite" />
   </path>
-  <path d="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900" fill="none" stroke="url(#highlight)" stroke-width="6" style="filter: blur(3px);">
+  <path d="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900" fill="none" stroke="url(#highlight)" stroke-width="6">
     <animate attributeName="d" values="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900; M -110 510 C 290 890, 810 410, 1390 890 C 1690 1160, 1990 910, 1990 910" dur="20s" repeatCount="indefinite" />
   </path>
-  <rect width="100%" height="100%" filter="url(#grain)" style="pointer-events:none;" />
 </svg>

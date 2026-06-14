@@ -51,14 +51,17 @@ admin_*.rsc
 Grit Design System.zip
 dist/
 
-# Quantum entropy seed -- PRIVATE BUILD SECRET. The raw bytes must never be
-# committed or published: a canary-fold constant only helps if it stays off
-# the public record. tools/quantum/qrng_seed.py + requirements.txt ARE tracked
-# so anyone can regenerate their own; the bytes are not. build/qrng_seed.inc is
-# already covered by build/ above.
+# Quantum build-diversity seed. Do not commit the raw bytes or provenance.
+# Once compiled into a distributed kernel image the value is observable, so it
+# is not a runtime secret or a replacement for fresh per-boot entropy.
+# tools/quantum/qrng_seed.py + requirements.txt ARE tracked; generated outputs
+# are not. build/qrng_seed.inc is already covered by build/ above.
 tools/quantum/seed.bin
 tools/quantum/seed.inc
+tools/quantum/qrng_commitment.txt
 tools/quantum/qrng_manifest.txt
 src/include/qrng_seed.inc
+# Layer 1 advisory output is a regenerated proposal, never policy itself.
+tools/quantum/policy_advisory.json
 mitmdump-*.log
 station-zero/

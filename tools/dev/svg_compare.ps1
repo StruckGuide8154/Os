@@ -27,14 +27,14 @@
 #                      blue  = Edge painted, Grit did not (missing detail)
 #                      black = both background
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File tools/svg_compare.ps1 [-SkipBuild]
+# Usage:  powershell -ExecutionPolicy Bypass -File tools/dev/svg_compare.ps1 [-SkipBuild]
 
 param(
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
-$Root  = Split-Path -Parent $PSScriptRoot
+$Root  = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Build = Join-Path $Root 'build'
 $W = 160                                  # comparison raster width
 $H = 90                                   # comparison raster height

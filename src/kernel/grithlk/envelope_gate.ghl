@@ -223,9 +223,16 @@ data gate_now_unix: 1 x 8;
 # Real per-machine device identity (CPUID-derived; gate_device_id_init).
 data gate_dev_id: 1 x 4;
 data gate_dev_init: 1;
+cfg "ENABLE_DEBUG_SERIAL" {
 data s_devid: 13 = [91,68,69,86,73,68,93,32,105,100,61,0,0];
+}
 
-# Serial strings.
+# Serial strings. Debug-only: these carry bracketed diagnostic tags
+# ([SYSSIG]/[KERNSIG]/[UPDATE]/[QUORUM]/...) that the release-artifact scan
+# (tools/security/check_release_artifacts.py) forbids in a public image, so they
+# are gated out of a -Release build (no ENABLE_DEBUG_SERIAL). Every &s_* use site
+# below is wrapped in the same cfg guard.
+cfg "ENABLE_DEBUG_SERIAL" {
 data s_syssig_ok:   16 = [91,83,89,83,83,73,71,93,32,111,107,32,99,61,0];  # "[SYSSIG] ok c="
 data s_syssig_rc:   14 = [91,83,89,83,83,73,71,93,32,114,99,61,0];         # "[SYSSIG] rc="
 data s_upd_none:    15 = [91,85,80,68,65,84,69,93,32,110,111,110,101,0];   # "[UPDATE] none"
@@ -240,6 +247,7 @@ data s_class_accept: 22 = [91,67,76,65,83,83,93,32,97,99,99,101,112,116,101,100,
 data s_class_reject: 22 = [91,67,76,65,83,83,93,32,114,101,106,101,99,116,101,100,32,114,99,61,0,0];
 data s_kernsig_ok:  18 = [91,75,69,82,78,83,73,71,93,32,111,107,32,110,61,0];  # "[KERNSIG] ok n="
 data s_kernsig_rc:  15 = [91,75,69,82,78,83,73,71,93,32,114,99,61,0];          # "[KERNSIG] rc="
+}
 data kimg_digest:   32;          # SHA-256 of the pristine KERNEL.BIN bytes
 
 # Declared-field scratch (filled by gate_read_declared_quorum: the signed
@@ -316,9 +324,11 @@ fn gate_time_set(now) {
     let v = now;
     if v < GATE_TIME_FLOOR { v = GATE_TIME_FLOOR; }
     if v > lq(&gate_now_unix) { sq(&gate_now_unix, v); }
-    serial_puts(&s_rtcnow);
-    call ser_print_hex64(rdi: lq(&gate_now_unix));
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_rtcnow);
+        call ser_print_hex64(rdi: lq(&gate_now_unix));
+        serial_crlf();
+    }
     return 0;
 }
 
@@ -359,9 +369,11 @@ fn gate_device_id_init() {
     if acc == GATE_DEVICE_WILDCARD { acc = 0x9E3779B9; }
     sw(&gate_dev_id, acc);
     sb(&gate_dev_init, 1);
-    serial_puts(&s_devid);
-    call ser_print_hex64(rdi: acc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_devid);
+        call ser_print_hex64(rdi: acc);
+        serial_crlf();
+    }
     return acc;
 }
 
@@ -640,31 +652,39 @@ fn boot_quorum_check() {
     if base == 0 {
         sb(&kquorum_present, 0);
         sw(&kquorum_rc, 0);
-        serial_puts(&s_qch_none);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_qch_none);
+            serial_crlf();
+        }
         return;
     }
     sb(&kquorum_present, 1);
     let rc = quorum_change_admit(base, size);
     sw(&kquorum_rc, rc);
     if rc == 0 {
-        serial_puts(&s_qch_accept);
-        call ser_print_hex64(rdi: lw(&gate_quorum_changes));
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_qch_accept);
+            call ser_print_hex64(rdi: lw(&gate_quorum_changes));
+            serial_crlf();
+        }
         return;
     }
-    serial_puts(&s_qch_reject);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_qch_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
 # Boot-chain call site (kmain K5). FAIL-CLOSED.
 # ---------------------------------------------------------------------------
 fn syssig_panic(code, rc) {
-    serial_puts(&s_syssig_rc);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_syssig_rc);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
     kernel_panic_canary(code, &syssig_verify_boot, code);
 }
 
@@ -694,9 +714,11 @@ fn syssig_verify_boot() {
     if rc != 0 {
         syssig_panic(PANIC_SYSSIG_REJECTED, rc);
     }
-    serial_puts(&s_syssig_ok);
-    call ser_print_hex64(rdi: lw(&gate_stat_hits));
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_syssig_ok);
+        call ser_print_hex64(rdi: lw(&gate_stat_hits));
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -713,9 +735,11 @@ fn syssig_verify_boot() {
 # persistent floor) is a boot panic, not a boot.
 # ---------------------------------------------------------------------------
 fn kernsig_panic(code, rc) {
-    serial_puts(&s_kernsig_rc);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_kernsig_rc);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
     kernel_panic_canary(code, &kernel_env_verify_boot, code);
 }
 
@@ -746,9 +770,11 @@ fn kernel_env_verify_boot() {
     if gate_ct_memeq(base + header_len, &kimg_digest, KERNSIG_PAYLOAD_BYTES) == 0 {
         kernsig_panic(PANIC_KERNSIG_MISMATCH, 0);
     }
-    serial_puts(&s_kernsig_ok);
-    call ser_print_hex64(rdi: klen);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_kernsig_ok);
+        call ser_print_hex64(rdi: klen);
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -760,8 +786,10 @@ fn boot_update_check() {
     if base == 0 {
         sb(&kupdate_present, 0);
         sw(&kupdate_rc, 0);
-        serial_puts(&s_upd_none);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_upd_none);
+            serial_crlf();
+        }
         return;
     }
     sb(&kupdate_present, 1);
@@ -771,13 +799,17 @@ fn boot_update_check() {
         # Verdict only: staging/commit (write-back + reboot) is the next
         # Update System increment. Until then an accepted artifact is merely
         # latched; a rejected or unsigned one is unreachable by construction.
-        serial_puts(&s_upd_accept);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_upd_accept);
+            serial_crlf();
+        }
         return;
     }
-    serial_puts(&s_upd_reject);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_upd_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
 }
 
 # Staged per-class artifact call sites (kmain K5): exercise DRIVER/CONFIG/
@@ -788,23 +820,29 @@ fn boot_class_one(base, size, expected_type, present_p, rc_p) {
     if base == 0 {
         sb(present_p, 0);
         sw(rc_p, 0);
-        serial_puts(&s_class_none);
-        call ser_print_hex64(rdi: expected_type);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_class_none);
+            call ser_print_hex64(rdi: expected_type);
+            serial_crlf();
+        }
         return;
     }
     sb(present_p, 1);
     let rc = artifact_gate_admit(base, size, expected_type);
     sw(rc_p, rc);
     if rc == 0 {
-        serial_puts(&s_class_accept);
-        call ser_print_hex64(rdi: expected_type);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_class_accept);
+            call ser_print_hex64(rdi: expected_type);
+            serial_crlf();
+        }
         return;
     }
-    serial_puts(&s_class_reject);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_class_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
 }
 
 fn boot_artifact_class_check() {

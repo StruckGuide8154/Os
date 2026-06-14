@@ -149,20 +149,10 @@ fn rf_full_path() {
     if saved == 0 { sb(&scene_dirty, 1); }
 }
 
-# Compositor-only present while the wallpaper AP rasterizes (no app draw).
+# Keep the current front buffer stable while the wallpaper AP rasterizes. Mouse
+# input updates the front-buffer cursor directly, so repeatedly hiding it and
+# full-flushing the same saved frame only creates visible flicker.
 fn rf_wallpaper_busy_present() {
-    render_restore_backbuffer();
-    tb_draw();
-    tb_draw_submenu();
-    ctx_menu_draw();
-    if lq(&wm_drag_window_id) != NO_DRAG { wm_draw_drag_outline(); }
-    rf_update_fps();
-    rf_draw_fps_text();
-    cursor_hide();
-    render_mark_full();
-    render_flush();
-    cursor_draw(lw(&mouse_x), lw(&mouse_y));
-    rf_save_idle_keys();
     sb(&scene_dirty, 1);
 }
 
@@ -197,16 +187,21 @@ fn render_frame() {
     # with present=off the desktop is whatever display_init/display_flip left.
     if feat_on(FEAT_FRAME_PRESENT_REFRESH) == 0 { return; }
 
-    # F12 klog overlay owns the whole screen: draw it, full-flush, cursor, done.
-    if lb(&klog_visible) != 0 {
-        klog_render_overlay();
-        render_mark_full();
-        render_flush();
-        cursor_draw(lw(&mouse_x), lw(&mouse_y));
-        return;
+    cfg !"RELEASE_BUILD" {
+        if lb(&klog_visible) != 0 {
+            klog_render_overlay();
+            render_mark_full();
+            render_flush();
+            cursor_draw(lw(&mouse_x), lw(&mouse_y));
+            return;
+        }
     }
 
-    # Wallpaper AP active: pump it; if still busy, present compositor-only.
+    # Drag feedback is kernel-rendered and does not invoke app callbacks. Keep
+    # it ahead of the wallpaper gate so window movement remains interactive.
+    if lq(&wm_drag_window_id) != NO_DRAG { rf_draw_drag(); return; }
+
+    # Wallpaper AP active: pump it; if still busy, preserve the current frame.
     if lb(&wallpaper_render_active) != 0 {
         wm_poll_wallpaper_render();
         if lb(&wallpaper_render_active) != 0 {
@@ -222,7 +217,6 @@ fn render_frame() {
     # Track caret blink phase but do NOT dirty the scene (idle-CPU fix).
     sb(&ui_blink_phase, (lq(&tick_count) / BLINK_DIV) & 1);
 
-    if lq(&wm_drag_window_id) != NO_DRAG { rf_draw_drag(); return; }
     if lb(&scene_dirty) != 0 { rf_full_path(); return; }
 
     # Truly idle: skip everything unless the cursor moved or FPS changed.

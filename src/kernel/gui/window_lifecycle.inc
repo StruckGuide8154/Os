@@ -31,6 +31,13 @@ FN_BEGIN wm_init, 0, 0, FN_RET_VOID
     call l3_slot_base
     mov [rbx + WIN_OFF_APPDATA], rax
 
+    ; Slot 0 is a kernel-owned hidden app, so it never passes through the
+    ; normal launcher manifest path. Grant only the GUI authority its renderer
+    ; needs: display queries/background selection plus SVG raster syscalls.
+    xor edi, edi
+    mov esi, CAP_CORE | CAP_GUI
+    call cap_mask_store
+
     ; Give the hidden wallpaper renderer a PCB so expensive SVG callbacks can
     ; be pinned to an AP home_core instead of falling back to the BSP.
     lea rdi, [rel app_hl_wallpaper_draw]
@@ -263,4 +270,4 @@ wm_focus_top_active:
     pop rbx
     pop rax
     ret
-
+

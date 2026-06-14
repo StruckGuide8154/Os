@@ -141,7 +141,7 @@ str t_system      = "System";
 str t_appearance  = "Appearance";
 str t_resolution  = "Resolution";
 str t_displaysec  = "Display";
-str t_fbsec       = "Framebuffer (debug)";
+str t_fbsec       = "Framebuffer diagnostics";
 
 # Display tab strings.
 str label_vsync   = "VSync";
@@ -200,7 +200,7 @@ str sf11          = "Confidential guest";
 str sf_unknown    = "Feature";
 
 # Debug tab strings.
-str btn_dump_ser  = "Dump to serial";
+str btn_dump_ser  = "Export diagnostics";
 str fb_lbl_flips  = "flips t/f/r: ";
 str fb_lbl_tsc    = "tsc l/min/max: ";
 str fb_lbl_bytes  = "bytes total: ";

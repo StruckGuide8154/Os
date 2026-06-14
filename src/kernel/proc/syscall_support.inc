@@ -85,7 +85,18 @@ sc_validate_from_table:
     push r8                     ; save current arg index (loop state)
     mov r8d, edx
     dec r8d                     ; 0-based sibling index
-    call sc_load_arg_for_validation
+    ; Two saved qwords now sit below the validator, but this direct load has no
+    ; helper CALL return address. Relative to SC_VALIDATE_FRAME_OFF that makes
+    ; the required adjustment +8. Calling the helper
+    ; here with its normal SC_VALIDATE_FRAME_OFF would read two registers
+    ; early (arg1 became saved RBP), turning valid lengths into huge values.
+    mov eax, 5
+    cmp r8d, 5
+    cmova r8d, eax
+    lea rax, [rel sc_arg_off_table]
+    mov eax, [rax + r8*4]
+    add eax, SC_VALIDATE_FRAME_OFF + 8
+    mov rdi, [rsp + rax]
     mov rsi, rdi                ; rsi = sibling's value = byte length
     pop r8
     pop rdi
@@ -376,10 +387,10 @@ FN_BEGIN test_syscall_proc, 0, 0, FN_RET_VOID
     jmp .loop
 
 ; ----------------------------------------------------------------------------
-; kernel_canary_init - seed the global stack canary from RDTSC ^ RDRAND (when
-; available). Called once from kernel_main before syscall_init so every
-; SYSCALL pushes a unique value. RDRAND failure (older CPUs, QEMU TCG) falls
-; back to RDTSC alone; a final non-zero guard prevents an all-zero canary.
+; kernel_canary_init - seed the global stack canary from RDTSC ^ RDRAND and a
+; signed public QRNG commitment. Called once before syscall_init. Release builds
+; fail closed without a successful hardware draw; debug/QEMU may fall back to
+; timing only. A final non-zero guard prevents an all-zero canary.
 ; ----------------------------------------------------------------------------
 FN_BEGIN kernel_canary_init, 0, 0, FN_RET_VOID
     push rax
@@ -403,16 +414,22 @@ FN_BEGIN kernel_canary_init, 0, 0, FN_RET_VOID
     jmp .kc_no_rdrand
 .kc_have_rdrand:
     xor rbx, rax
+    jmp .kc_mix_commitment
 .kc_no_rdrand:
-    ; Fold the quantum entropy blob (IBM ibm_marrakesh, job d8cved7d0j8c73f3fjq0)
-    ; into the canary: XOR-compress all qrng_seed_len bytes so the canary depends
-    ; on every byte of certified-irreproducible randomness. Critically this makes
-    ; the RDRAND-absent fallback (QEMU TCG / old CPUs) unguessable instead of
-    ; RDTSC-only. Provenance: tools/quantum/qrng_manifest.txt.
+%ifdef RELEASE_BUILD
+    ; A public commitment cannot replace secret entropy. Release kernels refuse
+    ; to boot if RDRAND is unavailable or fails all retries. Debug/QEMU builds
+    ; retain the timing fallback strictly for testability.
+    ud2
+%endif
+.kc_mix_commitment:
+    ; Mix the signed PUBLIC QRNG commitment as a domain salt. KERNEL.ENV covers
+    ; these bytes, preventing substitution without invalidating the release
+    ; signature. Secrecy still comes from the per-boot hardware draw above.
     push rsi
     push rcx
-    lea rsi, [rel qrng_seed_blob]
-    mov ecx, qrng_seed_len / 8
+    lea rsi, [rel qrng_commitment]
+    mov ecx, qrng_commitment_len / 8
 .kc_qrng_fold:
     xor rbx, [rsi]
     add rsi, 8

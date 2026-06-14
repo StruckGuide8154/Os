@@ -12,11 +12,14 @@
     push rax
     KPTI_SWITCH_TO_KERNEL_CR3 rax
     pop rax
+    USER_ACCESS_END
     ; Save critical SYSCALL state into the active slot runtime before any
     ; helper calls.
+    USER_ACCESS_BEGIN
     push rbx
     push rdx
     push r10
+    USER_ACCESS_END
     mov rdx, rcx
     sub rdx, [rel l3_app_arena_base_v]
     jc .slot_from_global
@@ -48,6 +51,7 @@
     mov [rbx + L3_RT_USER_R9], r9
     mov rdx, [rsp]
     mov [rbx + L3_RT_USER_R10], rdx
+    USER_ACCESS_BEGIN
     pop r10
     pop rdx
     pop rbx
@@ -108,6 +112,15 @@
     
     cld
     PUSH_ALL
+
+    ; Caller provenance is authoritative. An RCX outside every app arena is
+    ; never mapped to slot/class 0: reject before tracing, permutation, cap
+    ; checks, or handler dispatch can consume a default slot identity.
+    mov rdx, rcx
+    sub rdx, [rel l3_app_arena_base_v]
+    jc .sc_invalid
+    cmp rdx, [rel l3_app_arena_size_v]
+    jae .sc_invalid
 
     ; Always-on per-syscall trace ring + per-slot histogram (security_todo.md
     ; §11). Promotes the old compile-gated ENABLE_TRACE serial logger to a cheap

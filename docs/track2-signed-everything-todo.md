@@ -227,10 +227,12 @@ evaluator's case table so they cannot drift.
       verifier runs in the kernel over loader-published pristine bytes; a
       pre-kernel root of trust for the loader binary itself remains UEFI
       Secure Boot's job.
-- [ ] Remaining residuals: the gate's verifier context still pins
-      device_id=1; driver/config/policy artifact classes have no loaded
-      artifacts yet; persistent floors on NVMe/USB-boot hardware need the
-      Phase-4 block write-back (#21).
+- [~] Remaining residuals: device_id is now REAL (CPUID-derived per-machine
+      id via `gate_device_id_init`, no longer pinned to 1); driver/config/policy
+      artifact classes are wired through the gate (no loaded artifacts yet, by
+      design - no such artifacts ship). Only HW-gated residual left: persistent
+      floors on NVMe/USB-boot hardware need the Phase-4 block write-back (#21),
+      which is untestable under QEMU TCG.
 
 ### Verification (call-site binding)
 

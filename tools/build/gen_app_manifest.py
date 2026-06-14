@@ -20,8 +20,11 @@ import sys
 MASK64 = (1 << 64) - 1
 SLIDE = 0x100000
 
-# MUST match APP_MANIFEST_KEY in src/include/app_manifest.inc ("GRMANIK!").
-APP_MANIFEST_KEY = 0x214B494E414D5247
+# Track 7: the per-app manifest table is no longer MAC'd with a shipped
+# symmetric key (the old APP_MANIFEST_KEY / "GRMANIK!" was a forgeable trust
+# secret that shipped in the image). The table's 32-byte trailer is now a
+# KEYLESS SHA-256 integrity checksum; authenticity comes solely from the
+# Ed25519 SYSSIG.ENV envelope that signs these exact bytes.
 APP_MANIFEST_MAX = 32
 APP_MANIFEST_ENTRY_SIZE = 44
 APP_MANIFEST_TABLE_BYTES = 4 + (APP_MANIFEST_ENTRY_SIZE * APP_MANIFEST_MAX) + 32
@@ -138,9 +141,11 @@ def segment_digest(blob, seg_off, seg_size, sliding_offsets):
 
 
 def compute_manifest_mac(table_without_marker):
-    key = APP_MANIFEST_KEY.to_bytes(8, "little")
+    # Keyless SHA-256 over the covered table bytes (count dword + 32 entries).
+    # No shipped secret: the kernel recomputes the same digest, and the whole
+    # table is authenticated by the Ed25519 envelope, not by this checksum.
     covered = table_without_marker[:4 + APP_MANIFEST_ENTRY_SIZE * APP_MANIFEST_MAX]
-    return hmac.new(key, covered, hashlib.sha256).digest()
+    return hashlib.sha256(covered).digest()
 
 
 def main():
@@ -152,6 +157,9 @@ def main():
     ap.add_argument("--export-table", default=None, metavar="FILE",
                     help="also write marker + patched table bytes (the "
                          "SYSSIG.ENV envelope payload) to FILE")
+    ap.add_argument("--verify-blob", default=None, metavar="FILE",
+                    help="verify an extracted APPS.BIN against every patched "
+                         "manifest digest and fail on any mismatch")
     args = ap.parse_args()
 
     a = read_file(args.a)
@@ -204,10 +212,25 @@ def main():
         # zero the sliding qwords). This is the Track-2 SYSSIG.ENV payload.
         write_file(args.export_table, MANIFEST_MARKER + bytes(patched_table))
 
+    if args.verify_blob:
+        verify_blob = bytes(read_file(args.verify_blob))
+        if len(verify_blob) != len(blob_a):
+            die(f"verify blob length 0x{len(verify_blob):X} differs from "
+                f"manifest blob length 0x{len(blob_a):X}")
+        for app_id, seg_off, seg_size, ref_entry_off in entries:
+            local = ref_entry_off - slot_a
+            expected = bytes(patched_table[local + 12:local + 44])
+            actual = segment_digest(verify_blob, seg_off, seg_size,
+                                    sliding_offsets)
+            if not hmac.compare_digest(actual, expected):
+                die(f"APPS.BIN digest mismatch for app_id {app_id}: "
+                    f"stored={expected.hex()} computed={actual.hex()}")
+        print(f"  app-manifest: verified {len(entries)} APPS.BIN segments")
+
     labels = ", ".join(str(app_id) for app_id, _off, _size, _entry_off in entries)
     print(f"  app-manifest: {len(entries)} segment digests patched "
           f"({len(sliding_offsets)} sliding qwords partitioned), "
-          f"HMAC-SHA256 {mac.hex()}, app_ids [{labels}]")
+          f"SHA-256 {mac.hex()}, app_ids [{labels}]")
 
 
 if __name__ == "__main__":

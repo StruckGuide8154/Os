@@ -1,3 +1,7 @@
+; L3 self-test window handlers. Debug-only: their strings (szL3*) carry markers
+; the release-artifact scan forbids in a public image, and no kernel code
+; references these handlers, so the whole self-test is gated out of -Release.
+%ifndef RELEASE_BUILD
 app_l3_test_draw:
     push rdi
     push r14
@@ -70,6 +74,7 @@ app_l3_test_key:
     SYS_PRINT rdi
     pop rdi
     ret
+%endif
 
 extern cpi_sign_callback
 

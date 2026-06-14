@@ -518,3 +518,128 @@ load_envelopes:
     pop rdi
     pop rsi
     ret
+
+%ifdef RELEASE_BUILD
+; Release artifact gate. EFI_HASH2_PROTOCOL runs while boot services are trusted.
+%define HASH2_HASH 8
+
+init_release_integrity:
+    sub rsp, 40
+    mov rcx, [v_bs]
+    mov rax, [rcx + BS_LOCATE]
+    lea rcx, [guid_hash2]
+    xor edx, edx
+    lea r8, [v_hash2]
+    call rax
+    add rsp, 40
+    test rax, rax
+    jnz .fail
+    cmp qword [v_hash2], 0
+    je .fail
+    xor eax, eax
+    ret
+.fail:
+    mov eax, 1
+    ret
+
+; RSI=buffer, RCX=size, RDI=expected SHA-256. Returns zero on exact match.
+verify_release_buffer:
+    push rbx
+    push r12
+    push r13
+    sub rsp, 48
+    mov r12, rsi
+    mov r13, rcx
+    mov rbx, rdi
+    test r12, r12
+    jz .fail
+    test r13, r13
+    jz .fail
+    mov rcx, [v_hash2]
+    lea rdx, [guid_hash_sha256]
+    mov r8, r12
+    mov r9, r13
+    lea rax, [v_hash_output]
+    mov [rsp + 32], rax
+    mov rax, [rcx + HASH2_HASH]
+    call rax
+    test rax, rax
+    jnz .fail
+    lea rsi, [v_hash_output]
+    mov rdi, rbx
+    mov ecx, 32
+    repe cmpsb
+    jne .fail
+    xor eax, eax
+    jmp .done
+.fail:
+    mov eax, 1
+.done:
+    add rsp, 48
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+verify_release_artifacts:
+    call init_release_integrity
+    test rax, rax
+    jnz .fail
+
+    mov rsi, [v_kernel_addr]
+    mov rcx, [v_ksize]
+    cmp rcx, loader_expected_kernel_size
+    jne .fail
+    lea rdi, [loader_expected_kernel_sha256]
+    call verify_release_buffer
+    test rax, rax
+    jnz .fail
+
+    mov rsi, [abs VBE_INFO + VBE_APPS_BASE_OFF]
+    mov rcx, [abs VBE_INFO + VBE_APPS_SIZE_OFF]
+    cmp rcx, loader_expected_apps_size
+    jne .fail
+    lea rdi, [loader_expected_apps_sha256]
+    call verify_release_buffer
+    test rax, rax
+    jnz .fail
+
+    mov rsi, [abs VBE_INFO + VBE_RAMDISK_BASE_OFF]
+    mov rcx, [abs VBE_INFO + VBE_RAMDISK_SIZE_OFF]
+    cmp rcx, loader_expected_data_size
+    jne .fail
+    lea rdi, [loader_expected_data_sha256]
+    call verify_release_buffer
+    test rax, rax
+    jnz .fail
+
+    mov rsi, [abs VBE_INFO + VBE_KERNENV_BASE_OFF]
+    mov rcx, [abs VBE_INFO + VBE_KERNENV_SIZE_OFF]
+    cmp rcx, loader_expected_kernenv_size
+    jne .fail
+    lea rdi, [loader_expected_kernenv_sha256]
+    call verify_release_buffer
+    test rax, rax
+    jnz .fail
+
+    mov rsi, [abs VBE_INFO + VBE_SYSSIG_BASE_OFF]
+    mov rcx, [abs VBE_INFO + VBE_SYSSIG_SIZE_OFF]
+    cmp rcx, loader_expected_syssig_size
+    jne .fail
+    lea rdi, [loader_expected_syssig_sha256]
+    call verify_release_buffer
+    test rax, rax
+    jnz .fail
+
+%ifdef ENABLE_KASLR
+    ; The signed kernel contains the canonical relocated app blob. The external
+    ; copy was loaded only to reject an inconsistent release set before handoff.
+    mov qword [abs VBE_INFO + VBE_APPS_BASE_OFF], 0
+    mov qword [abs VBE_INFO + VBE_APPS_SIZE_OFF], 0
+%endif
+    xor eax, eax
+    ret
+.fail:
+    mov eax, 1
+    ret
+%endif

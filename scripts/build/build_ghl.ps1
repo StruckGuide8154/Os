@@ -8,7 +8,8 @@ param(
     [switch]$Verify = $true,
     [switch]$O0,
     [switch]$O2,
-    [switch]$O3
+    [switch]$O3,
+    [switch]$O4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +53,7 @@ Get-ChildItem -Path $APP_DIR -Filter '*.ghl' | ForEach-Object {
     if ($O0) { $CompilerArgs += '--O0' }
     if ($O2) { $CompilerArgs += '--O2' }
     if ($O3) { $CompilerArgs += '--O3' }
+    if ($O4) { $CompilerArgs += '--O4' }
     & $PY $COMPILER @CompilerArgs
     if ($LASTEXITCODE -ne 0) { Write-Host '    FAILED compile' -ForegroundColor Red; exit 1 }
     $sz = (Get-Item $asm).Length

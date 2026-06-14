@@ -234,7 +234,13 @@ bmp_width       dd 0
 bmp_height      dd 0
 bmp_data_offset dd 0
 bmp_bpp         dd 0
+bmp_file_len    dd 0    ; actual bytes read for the loaded BMP (OOB-read guard)
 szSavedMsg      db "Saved!", 0
+; L3 self-test strings. Debug-only: "L3TEST"/"L3 key ok" are markers the
+; release-artifact scan (tools/security/check_release_artifacts.py) forbids in a
+; public image. Gated out of -Release together with the app_l3_test_* handlers
+; in launch_handlers.inc (no kernel code references them).
+%ifndef RELEASE_BUILD
 szL3DrawOk      db "L3 draw ok", 0
 szL3ClickOk     db "L3 click ok", 0
 szL3KeyOk       db "L3 key ok", 0
@@ -255,6 +261,7 @@ szL3T17         db "L3T17", 0
 szL3WndTitle    db "L3TEST", 0
 szL3Tmp83       db "L3TEST  TXT"
 szL3TmpData     db "L3OK"
+%endif
 
 extern scr_width
 extern scr_height
@@ -299,14 +306,18 @@ szCmdClear db "clear", 0
 szCmdExit db "exit", 0
 szCmdPwd  db "pwd", 0
 szCmdDate db "date", 0
+%ifndef RELEASE_BUILD
 szCmdDebug db "debug", 0
 szCmdXDebug db "xdebug", 0
+%endif
 szCmdRestart db "restart", 0
 szCmdReboot db "reboot", 0
+%ifndef RELEASE_BUILD
 szCmdUsb db "usb", 0
 szCmdMouse db "mouse", 0
 szCmdTouchpad db "touchpad", 0
 szCmdIdebug db "idebug", 0
+%endif
 
 align 8
 term_input:        times 64 db 0

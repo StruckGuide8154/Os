@@ -9,6 +9,7 @@ $PresubmitGuard = Join-Path $Root 'tools\security\check_ghl_presubmit.ps1'
 $FixtureGuard = Join-Path $Root 'scripts\test\test_ghl_security_fixtures.ps1'
 $InvariantGuard = Join-Path $Root 'scripts\test\test_ghl_invariants.ps1'
 $MetaTest = Join-Path $Root 'scripts\test\test_enforcement_meta.ps1'
+$NoShippedSecretsTest = Join-Path $Root 'scripts\test\test_no_shipped_secrets.ps1'
 $Compiler = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
 $LibDir = Join-Path $Root 'src\user\grithl\lib'
 $SecurityModuleDir = Join-Path $Root 'src\tools\security'
@@ -44,6 +45,9 @@ if (-not (Test-Path -LiteralPath $FixtureGuard)) {
 }
 if (-not (Test-Path -LiteralPath $MetaTest)) {
     throw "Missing enforcement meta-test: $MetaTest"
+}
+if (-not (Test-Path -LiteralPath $NoShippedSecretsTest)) {
+    throw "Missing no-shipped-secrets test: $NoShippedSecretsTest"
 }
 if (-not (Test-Path -LiteralPath $InvariantGuard)) {
     throw "Missing GHL invariant guard: $InvariantGuard"
@@ -173,6 +177,12 @@ Write-Host '[ghl-security] === Enforcement meta-tests (the guards have negative 
 & powershell -NoProfile -ExecutionPolicy Bypass -File $MetaTest
 if ($LASTEXITCODE -ne 0) {
     throw 'Enforcement meta-tests failed.'
+}
+
+Write-Host '[ghl-security] === No private QRNG bytes in release artifacts ===' -ForegroundColor Cyan
+& powershell -NoProfile -ExecutionPolicy Bypass -File $NoShippedSecretsTest
+if ($LASTEXITCODE -ne 0) {
+    throw 'No-shipped-secrets scanner test failed.'
 }
 
 Write-Host '[ghl-security] PASS' -ForegroundColor Green

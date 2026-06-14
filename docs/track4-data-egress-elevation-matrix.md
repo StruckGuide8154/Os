@@ -18,7 +18,7 @@ _Reconciled: 2026-06-09. Authority: this is a Track 4 doc, subordinate to
 
 A **one-shot snapshot attacker** (single `pmemsave` / cold-boot image / DMA
 capture) who then **fully reverses** the dump offline and recovers *every*
-secret in it: the certified qrng seed, `kernel_canary`, `l3_boot_nonce`,
+secret in it: per-boot `kernel_canary`, `l3_boot_nonce`,
 `l3_slot_key[]`, the build-time blob-signing/cap key, the per-slot code/stack
 ASLR slides, live CPI/cap-mask tags, the heterogeneous syscall permutation, and
 all file/blob bytes. The attacker then attempts to use that knowledge to elevate

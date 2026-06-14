@@ -12,7 +12,7 @@ bits 64
 %include "kdomain_hmac.inc"       ; one domain-separated HMAC primitive (§13)
 %include "shadow_stack.inc"
 %include "syscall_trace.inc"
-%include "qrng_seed.inc"          ; quantum entropy blob folded into the canary
+%include "qrng_commitment.inc"    ; signed public salt; raw QRNG seed stays off-image
 
 ; MSR Addresses for Syscall
 IA32_EFER           equ 0xC0000080
@@ -279,6 +279,7 @@ FN_DECL syscall_entry, 0, 0, FN_RET_SCALAR
 %include "src/kernel/proc/syscall_handlers_wx_net.inc"
 %include "src/kernel/proc/syscall_epilogue.inc"
 %include "src/kernel/proc/syscall_support.inc"
+%include "src/kernel/proc/syscall_xscc_selftest.inc"
 %include "src/kernel/proc/syscall_security.inc"
 %include "src/kernel/proc/syscall_data.inc"
 %include "src/kernel/proc/syscall_perm.inc"

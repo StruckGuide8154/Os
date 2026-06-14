@@ -97,7 +97,9 @@ $qemuArgs = @(
     # Expose SMEP/SMAP so the kernel's (default-on) stac/clac user-access
     # brackets are valid instructions under TCG; without this the default
     # qemu64 model lacks SMAP and the first bracketed user deref #UDs.
-    '-cpu', 'qemu64,+smep,+smap'
+    # Release KASLR and stack-canary setup fail closed without a trusted
+    # hardware entropy source.  qemu64 hides these features unless requested.
+    '-cpu', 'qemu64,+smep,+smap,+rdrand,+rdseed'
 )
 if ($FbWidth -gt 0 -and $FbHeight -gt 0) {
     # Real-HW geometry repro: std VGA device with an EDID preferred mode so

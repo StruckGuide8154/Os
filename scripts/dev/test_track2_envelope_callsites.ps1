@@ -42,8 +42,8 @@
 # disk and reboots a fresh VM. SYSSIG.ENV is restored afterwards.
 #
 # USAGE
-#   powershell scripts/test/test_track2_envelope_callsites.ps1            # build first
-#   powershell scripts/test/test_track2_envelope_callsites.ps1 -SkipBuild
+#   powershell scripts/dev/test_track2_envelope_callsites.ps1            # build first
+#   powershell scripts/dev/test_track2_envelope_callsites.ps1 -SkipBuild
 #
 # EXIT 0 = all four phases behaved; non-zero = a call site regressed.
 # ============================================================================

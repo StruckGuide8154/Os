@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-qrng_seed.py - Harvest non-replicable randomness from an IBM Quantum backend
-and distill it into a Grit boot entropy seed blob.
+qrng_seed.py - Harvest noisy quantum samples from an IBM Quantum backend and
+condition them into a Grit build-diversity seed blob.
 
 WHAT THIS IS
 ------------
-This runs DEEP RANDOM CIRCUITS across all qubits of an IBM Heron-class
-machine and collects the measured bitstrings. The whole point: the output
-distribution of a sufficiently deep random circuit is classically
-intractable to sample from (this is the random-circuit-sampling /
-"quantum supremacy" property). So the raw bits we pull down could not
-have been precomputed or reproduced by ANY classical adversary - not even
-one holding our full machine state, source, and seed.
+This runs random circuits across a connected set of qubits on an IBM
+Heron-class machine and collects measured bitstrings. Entangling layers are
+drawn from disjoint edges in the backend coupling map, avoiding an accidental
+linear-connectivity assumption and unnecessary routing SWAPs.
 
-Raw quantum samples are biased and noisy, so we DO NOT use them directly.
-We run a Toeplitz-hashing randomness extractor (with a von Neumann
-de-bias prepass) to squeeze the device + classical noise out and emit a
-clean, uniform seed. The extractor seed itself is public; security comes
-from the min-entropy of the quantum source, not from hiding the matrix.
+Raw samples are biased, noisy, and not device-independently certified. We do
+not use them directly. A von Neumann pass and Toeplitz universal hash provide
+conditioning, but the simple bias estimate in this tool is diagnostic rather
+than a cryptographic entropy proof. The private extracted seed is never compiled
+into a release. Grit ships only SHA-256(seed), a public commitment signed as part
+of KERNEL.BIN and mixed as a KDF salt/domain separator. Fresh hardware entropy
+remains the secret input.
 
 OUTPUT
 ------
-  seed.bin          raw extracted seed bytes (feed into the OS entropy pool)
-  seed.inc          NASM include: `qrng_seed_blob: db 0x..,..` for Grit
+  seed.bin          private extracted seed bytes (never ship or compile in)
+  qrng_commitment.txt  public SHA-256(seed), safe to sign and distribute
   qrng_manifest.txt provenance (backend, job ids, depth, shots, entropy est.)
 
 USAGE
 -----
   pip install -r requirements.txt
   export QISKIT_IBM_TOKEN=...           # or pass --token
-  python qrng_seed.py --backend ibm_fez --minutes 5 --out-bytes 256
+  python qrng_seed.py --backend ibm_fez --minutes 5 --out-bytes 1024
 
 You hand me the token / backend name when you're ready to connect.
 """
@@ -38,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import math
 import os
 import sys
@@ -49,28 +49,76 @@ import numpy as np
 # --------------------------------------------------------------------------
 # Circuit construction: deep, hardware-native random circuits
 # --------------------------------------------------------------------------
-def build_random_circuit(num_qubits: int, depth: int, rng: np.random.Generator):
-    """A brickwork random circuit: alternating layers of random single-qubit
-    rotations and a brick pattern of two-qubit entanglers, then measure all.
+def _canonical_edges(edges, allowed_qubits):
+    allowed = set(allowed_qubits)
+    return sorted({tuple(sorted((a, b))) for a, b in edges
+                   if a != b and a in allowed and b in allowed})
 
-    Depth is chosen so total runtime fits the coherence budget: with CNOT
-    ~235 ns and T2 ~220 us you can stack a few hundred entangling layers
-    before decoherence dominates. We stay conservative (the bits stay hard
-    to simulate well before they decohere)."""
+
+def select_connected_qubits(num_qubits: int, edges, count: int) -> list[int]:
+    """Select a deterministic connected physical-qubit subset."""
+    if count < 1 or count > num_qubits:
+        raise ValueError("qubit count must be between 1 and backend width")
+    if count == num_qubits:
+        return list(range(num_qubits))
+
+    adjacency = {q: set() for q in range(num_qubits)}
+    for a, b in _canonical_edges(edges, range(num_qubits)):
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+
+    for start in sorted(adjacency, key=lambda q: (-len(adjacency[q]), q)):
+        selected = []
+        seen = {start}
+        queue = [start]
+        while queue and len(selected) < count:
+            q = queue.pop(0)
+            selected.append(q)
+            for neighbor in sorted(adjacency[q],
+                                   key=lambda n: (-len(adjacency[n]), n)):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append(neighbor)
+        if len(selected) == count:
+            return sorted(selected)
+    raise ValueError(f"no connected {count}-qubit subset in coupling map")
+
+
+def _random_matching(edges, rng: np.random.Generator):
+    """Return a random maximal matching for one parallel CZ layer."""
+    order = rng.permutation(len(edges))
+    used = set()
+    matching = []
+    for i in order:
+        a, b = edges[int(i)]
+        if a in used or b in used:
+            continue
+        matching.append((a, b))
+        used.add(a)
+        used.add(b)
+    return matching
+
+
+def build_random_circuit(num_qubits: int, depth: int, rng: np.random.Generator,
+                         coupling_edges):
+    """Build native-shape random layers followed by full measurement."""
     from qiskit import QuantumCircuit
 
     qc = QuantumCircuit(num_qubits, num_qubits)
-    for layer in range(depth):
-        # single-qubit layer: random SU(2) via U(theta, phi, lam)
+    edges = _canonical_edges(coupling_edges, range(num_qubits))
+    if num_qubits > 1 and not edges:
+        raise ValueError("selected qubits contain no coupling-map edges")
+    for _ in range(depth):
+        # RZ is virtual on IBM hardware; SX is a calibrated native pulse.
         for q in range(num_qubits):
-            theta = rng.uniform(0, math.pi)
-            phi = rng.uniform(0, 2 * math.pi)
-            lam = rng.uniform(0, 2 * math.pi)
-            qc.u(theta, phi, lam, q)
-        # entangling layer: brick pattern, offset alternates each layer
-        offset = layer % 2
-        for q in range(offset, num_qubits - 1, 2):
-            qc.cx(q, q + 1)
+            qc.rz(rng.uniform(0, 2 * math.pi), q)
+            if rng.integers(0, 2):
+                qc.sx(q)
+            else:
+                qc.x(q)
+            qc.rz(rng.uniform(0, 2 * math.pi), q)
+        for a, b in _random_matching(edges, rng):
+            qc.cz(a, b)
     qc.measure(range(num_qubits), range(num_qubits))
     return qc
 
@@ -148,7 +196,14 @@ def harvest(args) -> None:
     else:
         service = QiskitRuntimeService()  # saved account
     backend = service.backend(args.backend)
+    backend_edges = list(backend.coupling_map.get_edges())
     nq = min(args.qubits or backend.num_qubits, backend.num_qubits)
+    physical_qubits = select_connected_qubits(backend.num_qubits,
+                                              backend_edges, nq)
+    physical_to_logical = {q: i for i, q in enumerate(physical_qubits)}
+    logical_edges = [(physical_to_logical[a], physical_to_logical[b])
+                     for a, b in _canonical_edges(backend_edges,
+                                                  physical_qubits)]
     print(f"[+] backend={backend.name} qubits={nq} "
           f"max_shots={getattr(backend, 'max_shots', 'n/a')}")
 
@@ -159,12 +214,16 @@ def harvest(args) -> None:
     # the QPU-time spend with --circuits x --shots, not wall-clock.
     rng = np.random.default_rng(args.circuit_seed)
     n_circuits = args.max_circuits or 20
-    pm = generate_preset_pass_manager(optimization_level=1, backend=backend)
+    pm = generate_preset_pass_manager(
+        optimization_level=1,
+        backend=backend,
+        initial_layout=physical_qubits,
+    )
     print(f"[+] building + transpiling {n_circuits} depth-{args.depth} "
           f"circuits ...")
     pubs = []
     for _ in range(n_circuits):
-        qc = build_random_circuit(nq, args.depth, rng)
+        qc = build_random_circuit(nq, args.depth, rng, logical_edges)
         pubs.append(pm.run(qc))
 
     sampler = Sampler(mode=backend)
@@ -190,7 +249,7 @@ def harvest(args) -> None:
     print(f"[+] collected {len(raw)} raw bits over {circuits_run} circuits")
 
     h_inf = estimate_min_entropy_per_bit(raw)
-    print(f"[+] est. min-entropy ~ {h_inf:.4f} bits/bit (raw)")
+    print(f"[+] diagnostic bias-only H_inf ~ {h_inf:.4f} bits/bit (raw)")
 
     debiased = von_neumann_debias(raw)
     print(f"[+] {len(debiased)} bits after von Neumann de-bias")
@@ -200,9 +259,11 @@ def harvest(args) -> None:
     eps = 2 ** -64
     needed = out_bits + 2 * math.log2(1 / eps)
     avail = len(debiased) * estimate_min_entropy_per_bit(debiased)
-    print(f"[+] entropy budget: need ~{needed:.0f} bits, have ~{avail:.0f} bits")
+    print(f"[+] heuristic conditioning budget: need ~{needed:.0f} bits, "
+          f"estimate ~{avail:.0f} bits")
     if avail < needed:
-        print("[!] WARNING: short on min-entropy; increase --max-circuits/--shots",
+        print("[!] WARNING: short on heuristic entropy estimate; increase "
+              "--max-circuits/--shots",
               file=sys.stderr)
 
     seed_bits = toeplitz_extract(debiased, out_bits, seed=args.extractor_seed)
@@ -220,19 +281,9 @@ def _write_outputs(args, seed: bytes, backend_name: str, job_ids, circuits,
     with open(os.path.join(outdir, "seed.bin"), "wb") as f:
         f.write(seed)
 
-    # NASM include for Grit
-    inc = [
-        "; Auto-generated by tools/quantum/qrng_seed.py -- DO NOT EDIT",
-        f"; backend={backend_name}  bytes={len(seed)}  "
-        f"generated={_dt.datetime.utcnow().isoformat()}Z",
-        "qrng_seed_blob:",
-    ]
-    for i in range(0, len(seed), 16):
-        row = seed[i : i + 16]
-        inc.append("    db " + ", ".join(f"0x{b:02x}" for b in row))
-    inc.append(f"qrng_seed_len equ {len(seed)}")
-    with open(os.path.join(outdir, "seed.inc"), "w") as f:
-        f.write("\n".join(inc) + "\n")
+    commitment = hashlib.sha256(seed).hexdigest()
+    with open(os.path.join(outdir, "qrng_commitment.txt"), "w") as f:
+        f.write(commitment + "\n")
 
     with open(os.path.join(outdir, "qrng_manifest.txt"), "w") as f:
         f.write(f"backend       : {backend_name}\n")
@@ -243,13 +294,14 @@ def _write_outputs(args, seed: bytes, backend_name: str, job_ids, circuits,
         f.write(f"raw bits      : {raw_bit_count}\n")
         f.write(f"raw H_inf/bit : {h_inf:.4f}\n")
         f.write(f"seed bytes    : {len(seed)}\n")
+        f.write(f"seed sha256   : {commitment}\n")
         f.write(f"extractor_seed: {args.extractor_seed}\n")
         f.write("job_ids       :\n")
         for j in job_ids:
             f.write(f"  - {j}\n")
 
-    print(f"[+] wrote {outdir}/seed.bin, seed.inc, qrng_manifest.txt")
-    print(f"[+] seed (hex): {seed.hex()}")
+    print(f"[+] wrote private {outdir}/seed.bin")
+    print(f"[+] wrote public commitment + provenance (sha256={commitment})")
 
 
 def parse_args(argv=None):
@@ -273,8 +325,8 @@ def parse_args(argv=None):
                         "until decoherence (default 100)")
     p.add_argument("--shots", type=int, default=4096,
                    help="shots per circuit (default 4096)")
-    p.add_argument("--out-bytes", dest="out_bytes", type=int, default=256,
-                   help="final seed size in bytes (default 256)")
+    p.add_argument("--out-bytes", dest="out_bytes", type=int, default=1024,
+                   help="final seed size in bytes (default 1024, matching Grit)")
     p.add_argument("--max-circuits", type=int, default=0,
                    help="number of circuits in the single batched job (0 -> 20)")
     p.add_argument("--circuit-seed", type=int, default=None,

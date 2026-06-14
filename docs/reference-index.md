@@ -42,6 +42,8 @@ through the whole tree first.
   Proposed future external app binary and loader contract.
 - `multicore.md`
   SMP work queue: offloading heavy work to application processors.
+- `quantum-workloads.md`
+  Repo-specific Heron experiments, validation boundaries, and QRNG caveats.
 
 ## By Problem Area
 

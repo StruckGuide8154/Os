@@ -7,6 +7,7 @@ section .text
 
 %include "constants.inc"
 %include "macros.inc"
+%include "syscall_caps.inc"
 %include "window_layout.inc"
 
 section .text
@@ -64,6 +65,7 @@ extern ser_print_hex64
 extern process_kill_window
 extern process_create
 extern l3_slot_base
+extern cap_mask_store
 extern desktop_draw_icons
 extern nx_icon_close_16
 extern app_hl_wallpaper_draw

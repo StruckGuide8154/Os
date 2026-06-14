@@ -122,6 +122,7 @@ xhci_int_cycle2:    db 1          ; Interrupt ring cycle bit (slot 2)
 ; ============================================================================
 ; xhci_debug_dump - Dump XHCI state to buffer
 ; ============================================================================
+%ifndef RELEASE_BUILD
 global xhci_debug_dump
 xhci_debug_dump:
     push rdi
@@ -296,6 +297,7 @@ xhci_debug_dump:
 .s_cmd    db " C:", 0
 .s_evt    db " E:", 0
 .s_int    db " I:", 0
+%endif
 
 szXhciStart db "XHCI: Scanning...", 0
 szXhciFound db "XHCI: Controller Found.", 0

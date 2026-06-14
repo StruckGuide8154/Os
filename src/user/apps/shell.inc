@@ -16,6 +16,11 @@ global explorer_sel
 ; Opens a BMP file and displays it in a window
 ; ============================================================================
 
+; Maximum BMP width/height the viewer will accept. Bounds the stride*height
+; arithmetic below well clear of any 32/64-bit overflow and keeps a crafted
+; header from describing an image larger than the slot file buffer.
+BMP_MAX_DIM equ 4096
+
 app_open_file_in_bmpview:
     push rbx
     push r12
@@ -32,6 +37,11 @@ app_open_file_in_bmpview:
     SYS_FS_READ rdi, rsi, rdx
     cmp eax, -1
     je .bmp_open_fail
+    ; eax = actual bytes read. Remember it: every byte the renderer touches
+    ; must lie inside this range, never just inside the buffer capacity.
+    mov [bmp_file_len], eax
+    cmp eax, 54                              ; smaller than BITMAPINFOHEADER+offset
+    jb .bmp_open_fail
 
     ; Parse BMP header
     ; Check 'BM' signature
@@ -51,6 +61,37 @@ app_open_file_in_bmpview:
     ; Get bits per pixel (offset 28)
     movzx eax, word [r13 + 28]
     mov [bmp_bpp], eax
+
+    ; --- Bounds validation. A crafted header (huge data_offset, width, or
+    ; height) would otherwise make app_bmp_draw stream source pixels past the
+    ; loaded file and paint adjacent memory to the screen. Reject anything
+    ; whose pixel extent does not lie wholly inside the bytes actually read. ---
+    cmp dword [bmp_bpp], 24                  ; legacy viewer renders 24bpp only
+    jne .bmp_open_fail
+    mov eax, [bmp_width]                     ; signed
+    test eax, eax
+    jle .bmp_open_fail
+    cmp eax, BMP_MAX_DIM
+    ja .bmp_open_fail
+    mov eax, [bmp_height]                    ; signed; bottom-up only here
+    test eax, eax
+    jle .bmp_open_fail
+    cmp eax, BMP_MAX_DIM
+    ja .bmp_open_fail
+    ; stride = (width*3 + 3) & ~3
+    mov eax, [bmp_width]
+    lea eax, [eax + eax*2]
+    add eax, 3
+    and eax, ~3
+    mov ecx, eax                             ; rcx = stride (zero-extended)
+    mov eax, [bmp_height]                    ; rax = height (zero-extended)
+    imul rax, rcx                            ; rax = stride * height (<= ~200 MiB)
+    mov ecx, [bmp_data_offset]               ; rcx = data_offset (zero-extended)
+    add rax, rcx                             ; end of pixel data
+    jc .bmp_open_fail
+    mov ecx, [bmp_file_len]
+    cmp rax, rcx
+    ja .bmp_open_fail
 
     ; Create viewer window
     mov rdi, fat16_name_buf

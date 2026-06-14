@@ -1,0 +1,769 @@
+{
+  "_about": "Per-app required-capability matrix derived from source. required_caps = OR of the CAP tags of every syscall the app reaches; over_grant = declared & ~required.",
+  "atomic_caps": [
+    "CAP_CORE",
+    "CAP_NET",
+    "CAP_APP_CTRL",
+    "CAP_WX",
+    "CAP_MEDIA",
+    "CAP_FS_READ",
+    "CAP_FS_WRITE",
+    "CAP_FS_DELETE",
+    "CAP_GUI_DRAW",
+    "CAP_GUI_DISPLAY"
+  ],
+  "cap_values": {
+    "CAP_CORE": 1,
+    "CAP_NET": 8,
+    "CAP_APP_CTRL": 16,
+    "CAP_WX": 32,
+    "CAP_MEDIA": 64,
+    "CAP_FS_READ": 256,
+    "CAP_FS_WRITE": 512,
+    "CAP_FS_DELETE": 1024,
+    "CAP_FS": 1792,
+    "CAP_GUI_DRAW": 2048,
+    "CAP_GUI_DISPLAY": 4096,
+    "CAP_GUI": 6144,
+    "CAP_ALL": 65535,
+    "CAP_AUDIT_ENTRIES": 64,
+    "CAP_AUDIT_ENT_SIZE": 16,
+    "CAP_AUDIT_DECLARE": 1,
+    "CAP_AUDIT_APPLY": 2,
+    "CAP_AUDIT_RECYCLE": 3,
+    "CAP_AUDIT_STRIKE": 4,
+    "CAP_AUDIT_ANOMALY": 5,
+    "CAP_AUDIT_OTHER": 0
+  },
+  "apps": [
+    {
+      "app_id": 2,
+      "app": "APP_EXPLORER",
+      "manifest": "MANIFEST_EXPLORER",
+      "sources": [
+        "grithl/apps/explorer.ghl"
+      ],
+      "declared_mask": 7953,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_APP_CTRL",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 3857,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_APP_CTRL",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW"
+      ],
+      "syscalls": {
+        "SYS_FS_CHDIR": {
+          "sysno": 6,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_COUNT": {
+          "sysno": 4,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_DELETE": {
+          "sysno": 19,
+          "caps": [
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_ENTRY": {
+          "sysno": 5,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_ENTRY_INFO": {
+          "sysno": 71,
+          "caps": [
+            "CAP_FS_READ"
+          ]
+        },
+        "SYS_FS_MKDIR": {
+          "sysno": 21,
+          "caps": [
+            "CAP_FS_WRITE"
+          ]
+        },
+        "SYS_FS_RENAME": {
+          "sysno": 20,
+          "caps": [
+            "CAP_FS_WRITE"
+          ]
+        },
+        "SYS_HANDLE_CLOSE": {
+          "sysno": 70,
+          "caps": [
+            "CAP_CORE"
+          ]
+        },
+        "SYS_OPEN_FILE_MEDIA": {
+          "sysno": 64,
+          "caps": [
+            "CAP_APP_CTRL"
+          ]
+        },
+        "SYS_OPEN_FILE_NP": {
+          "sysno": 22,
+          "caps": [
+            "CAP_APP_CTRL"
+          ]
+        },
+        "SYS_TICKS": {
+          "sysno": 18,
+          "caps": [
+            "CAP_CORE"
+          ]
+        },
+        "SYS_WM_CREATE": {
+          "sysno": 7,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        },
+        "SYS_WM_GET_USER_ARG": {
+          "sysno": 73,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        },
+        "SYS_WM_HANDLERS": {
+          "sysno": 9,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        },
+        "SYS_WM_SET_USER_ARG": {
+          "sysno": 65,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 3,
+      "app": "APP_TERMINAL",
+      "manifest": "MANIFEST_TERMINAL",
+      "sources": [
+        "grithl/apps/terminal.ghl"
+      ],
+      "declared_mask": 7961,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_NET",
+        "CAP_APP_CTRL",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 25,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_NET",
+        "CAP_APP_CTRL"
+      ],
+      "syscalls": {
+        "SYS_APP_OPEN": {
+          "sysno": 23,
+          "caps": [
+            "CAP_APP_CTRL"
+          ]
+        },
+        "SYS_NET_DNS_A": {
+          "sysno": 61,
+          "caps": [
+            "CAP_NET"
+          ]
+        },
+        "SYS_NET_PING4_TICK": {
+          "sysno": 62,
+          "caps": [
+            "CAP_NET"
+          ]
+        },
+        "SYS_TICKS": {
+          "sysno": 18,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 4,
+      "app": "APP_NOTEPAD",
+      "manifest": "MANIFEST_NOTEPAD",
+      "sources": [
+        "grithl/apps/notepad.ghl"
+      ],
+      "declared_mask": 6913,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 1793,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE"
+      ],
+      "syscalls": {
+        "SYS_FS_CHDIR": {
+          "sysno": 6,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_COUNT": {
+          "sysno": 4,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_ENTRY": {
+          "sysno": 5,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_ENTRY_INFO": {
+          "sysno": 71,
+          "caps": [
+            "CAP_FS_READ"
+          ]
+        },
+        "SYS_FS_SYNC_ROOT": {
+          "sysno": 14,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_WRITE": {
+          "sysno": 13,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_HANDLE_CLOSE": {
+          "sysno": 70,
+          "caps": [
+            "CAP_CORE"
+          ]
+        },
+        "SYS_TICKS": {
+          "sysno": 18,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [
+        "CAP_FS_DELETE"
+      ],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 5,
+      "app": "APP_SETTINGS",
+      "manifest": "MANIFEST_SETTINGS",
+      "sources": [
+        "grithl/apps/settings.ghl"
+      ],
+      "declared_mask": 7937,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 4097,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_GUI_DISPLAY"
+      ],
+      "syscalls": {
+        "SYS_CURSOR_INIT": {
+          "sysno": 17,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DESKTOP_BG": {
+          "sysno": 26,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DESKTOP_BG_BUSY": {
+          "sysno": 63,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DESKTOP_SET_BG": {
+          "sysno": 27,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DISPLAY_FLAGS": {
+          "sysno": 24,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DISPLAY_NATIVE": {
+          "sysno": 28,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DISPLAY_SET_FLAGS": {
+          "sysno": 25,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DISPLAY_SIZE": {
+          "sysno": 29,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_MOUSE_SENSE": {
+          "sysno": 74,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_SET_MOUSE_SENSE": {
+          "sysno": 75,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_SYSINFO": {
+          "sysno": 55,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW"
+      ],
+      "over_grant_significant": [
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 6,
+      "app": "APP_PAINT",
+      "manifest": "MANIFEST_PAINT",
+      "sources": [
+        "grithl/apps/paint.ghl"
+      ],
+      "declared_mask": 7937,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 0,
+      "required_caps": [],
+      "syscalls": {},
+      "over_grant": [
+        "CAP_CORE",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 7,
+      "app": "APP_ABOUT",
+      "manifest": "MANIFEST_ABOUT",
+      "sources": [
+        "grithl/apps/about.ghl"
+      ],
+      "declared_mask": 6145,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 4097,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_GUI_DISPLAY"
+      ],
+      "syscalls": {
+        "SYS_DISPLAY_NATIVE": {
+          "sysno": 28,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_DISPLAY_SIZE": {
+          "sysno": 29,
+          "caps": [
+            "CAP_GUI_DISPLAY"
+          ]
+        },
+        "SYS_SYSINFO": {
+          "sysno": 55,
+          "caps": [
+            "CAP_CORE"
+          ]
+        },
+        "SYS_TICKS": {
+          "sysno": 18,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_GUI_DRAW"
+      ],
+      "over_grant_significant": [
+        "CAP_GUI_DRAW"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 8,
+      "app": "APP_SECURITY_PROBE",
+      "manifest": "MANIFEST_SECURITY_PROBE",
+      "sources": [
+        "apps/security_probe.inc"
+      ],
+      "declared_mask": 6177,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_WX",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 3856,
+      "required_caps": [
+        "CAP_APP_CTRL",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW"
+      ],
+      "syscalls": {
+        "SYS_APP_LAUNCH": {
+          "sysno": 12,
+          "caps": [
+            "CAP_APP_CTRL"
+          ]
+        },
+        "SYS_FS_READ": {
+          "sysno": 8,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_FS_WRITE": {
+          "sysno": 13,
+          "caps": [
+            "CAP_FS_READ",
+            "CAP_FS_WRITE",
+            "CAP_FS_DELETE"
+          ]
+        },
+        "SYS_GUI_RECT": {
+          "sysno": 2,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        },
+        "SYS_GUI_TEXT": {
+          "sysno": 3,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        },
+        "SYS_WM_CLOSE": {
+          "sysno": 15,
+          "caps": [
+            "CAP_GUI_DRAW"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_CORE",
+        "CAP_WX",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_WX",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [
+        "CAP_APP_CTRL",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE"
+      ],
+      "extern_primitives": []
+    },
+    {
+      "app_id": 9,
+      "app": "APP_TASKMGR",
+      "manifest": "MANIFEST_TASKMGR",
+      "sources": [
+        "grithl/apps/taskmgr.ghl"
+      ],
+      "declared_mask": 6145,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 17,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_APP_CTRL"
+      ],
+      "syscalls": {
+        "SYS_APP_LAUNCH": {
+          "sysno": 12,
+          "caps": [
+            "CAP_APP_CTRL"
+          ]
+        },
+        "SYS_SYSINFO": {
+          "sysno": 55,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [
+        "CAP_APP_CTRL"
+      ],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 10,
+      "app": "APP_PING",
+      "manifest": "MANIFEST_PING",
+      "sources": [
+        "grithl/apps/ping.ghl"
+      ],
+      "declared_mask": 6153,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_NET",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 9,
+      "required_caps": [
+        "CAP_CORE",
+        "CAP_NET"
+      ],
+      "syscalls": {
+        "SYS_NET_DNS_A": {
+          "sysno": 61,
+          "caps": [
+            "CAP_NET"
+          ]
+        },
+        "SYS_NET_PING4_TICK": {
+          "sysno": 62,
+          "caps": [
+            "CAP_NET"
+          ]
+        },
+        "SYS_TICKS": {
+          "sysno": 18,
+          "caps": [
+            "CAP_CORE"
+          ]
+        }
+      },
+      "over_grant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [],
+      "extern_primitives": [
+        "render_rect",
+        "render_text"
+      ]
+    },
+    {
+      "app_id": 11,
+      "app": "APP_MEDIA",
+      "manifest": "MANIFEST_MEDIA",
+      "sources": [
+        "grithl/apps/media.ghl"
+      ],
+      "declared_mask": 8001,
+      "declared_caps": [
+        "CAP_CORE",
+        "CAP_MEDIA",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "used_mask": 0,
+      "required_caps": [],
+      "syscalls": {},
+      "over_grant": [
+        "CAP_CORE",
+        "CAP_MEDIA",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "over_grant_significant": [
+        "CAP_MEDIA",
+        "CAP_FS_READ",
+        "CAP_FS_WRITE",
+        "CAP_FS_DELETE",
+        "CAP_GUI_DRAW",
+        "CAP_GUI_DISPLAY"
+      ],
+      "under_declared": [],
+      "extern_primitives": []
+    }
+  ]
+}

@@ -283,9 +283,9 @@ fn kmain() {
     boot_mark(77, 68);                # "MD": measured_boot_init done (isolated)
     app_manifest_verify();            # signed per-app integrity table
     app_segment_verify(0);            # APP_SEG_COMMON: launch glue/common code
-    cfg "LEGACY_BLOB_HMAC" {
-        app_blob_verify_signature();  # rollback: whole-blob MAC; fails closed
-    }
+    # (Track 7) The legacy whole-blob symmetric HMAC rollback check was removed:
+    # its key shipped in the image and the blob is fully covered by the Ed25519
+    # envelope + per-segment SHA-256 below.
     # Track 2 boot-chain call sites (envelope_gate.ghl): the integrity table
     # verified above must ALSO arrive inside a threshold-Ed25519-signed
     # envelope (SYSSIG.ENV, fail-closed panic), and any staged update artifact
@@ -319,6 +319,15 @@ fn kmain() {
         shadow_stack_poc_run();       # fail-closed shadow-stack proof harness
     }
     syscall_init();
+    # XSCC: empirical cross-syscall callee-saved contract self-test. Loads
+    # sentinels into rbx/rbp/r12-r15, runs the SYSRET exit-tail callees
+    # (l3_apply_wx_policy + SANITIZE_SEG_USER_EXIT) and checks survival - the
+    # one residual that decides whether the regalloc gate can keep app values in
+    # r12-r14 across a syscall. Emits "XSCC A=.. B=.. -> PASS|FAIL" on COM1.
+    # Debug builds only (the verdict is build-config-independent: same callees).
+    cfg !"RELEASE_BUILD" {
+        cross_syscall_contract_selftest();
+    }
     bootlog2(TAG_K, D0 + 6);          # K6: syscall path initialized
 
     scheduler_init();

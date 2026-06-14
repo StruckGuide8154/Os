@@ -1,6 +1,7 @@
 ; --- Debug: build diagnostic string into buffer ---
 ; RDI = output buffer (at least 256 bytes)
 ; Returns: RDI preserved
+%ifndef RELEASE_BUILD
 global mouse_debug_dump
 mouse_debug_dump:
     push rdi
@@ -194,6 +195,7 @@ mouse_debug_dump:
 .s_rst  db " Rst:", 0
 .s_pic  db " PIC:", 0
 .s_raw  db " Raw:", 0
+%endif
 
 ; ----------------------------------------------------------------------------
 ; mouse_apply_sense_x / _y - scale a signed relative delta by the per-axis
@@ -222,4 +224,4 @@ mouse_apply_sense_y:
     pop rdx
     pop rcx
     ret
-
+

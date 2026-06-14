@@ -5,7 +5,6 @@
 # implementation and a small streaming state machine. The public symbols keep
 # the existing call-site names:
 #   measured_boot_init
-#   app_blob_verify_signature
 #   app_manifest_verify
 #   app_segment_verify
 #   mb_digest
@@ -20,7 +19,6 @@ unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over the SHA-256 / HMAC scratch sta
 unsafe implicit_extern;  # &fn / &data resolved as same-unit kernel labels (-f bin)
 
 global measured_boot_init;
-global app_blob_verify_signature;
 global app_manifest_verify;
 global app_segment_verify;
 global sha256_self_test;
@@ -48,14 +46,15 @@ const APP_MANIFEST_COVER_BYTES = 1412;      # count dword + 32 fixed entries
 const APP_MANIFEST_TABLE_BYTES = 1444;      # cover bytes + 32-byte HMAC
 const APP_MANIFEST_MAC_OFF = 1412;
 
-# HMAC key bytes. This is the little-endian byte spelling of the legacy
-# APP_BLOB_SIG_KEY value 0x4752424C4F425349, kept so key rotation remains
-# explicit in one small table and mirrored by tools/build/patch_blob_sig.py.
-data hmac_boot_key: 8 = [0x49, 0x53, 0x42, 0x4F, 0x4C, 0x42, 0x52, 0x47];
-
-# HMAC key bytes for the per-app integrity manifest. This is the little-endian
-# spelling of APP_MANIFEST_KEY 0x214B494E414D5247 ("GRMANIK!").
-data hmac_manifest_key: 8 = [0x47, 0x52, 0x4D, 0x41, 0x4E, 0x49, 0x4B, 0x21];
+# Track 7 (single public-key root of trust): the two legacy *symmetric* HMAC
+# trust keys that used to live here (hmac_boot_key / "ISBOLBRG" and
+# hmac_manifest_key / "GRMANIK!") were REMOVED. Shipping a verifier's key inside
+# the artifact it verifies gives any reverse-engineer the verifier's full power,
+# so both were forgeable trust chains. Authenticity of the app blob now rests
+# SOLELY on the Ed25519 quorum envelope (SYSSIG.ENV, syssig_verify_boot), which
+# byte-identical-binds app_integrity_table, plus the per-segment SHA-256 check in
+# app_segment_verify. app_manifest_verify is demoted to a keyless SHA-256
+# integrity checksum (fast-fail only, NOT a trust boundary).
 
 data sha256_k: 64 x 4 = [
     0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
@@ -361,17 +360,6 @@ fn sha256_blob_segment_canonical(base, seg_off, size, out) {
     sha256_final(out);
 }
 
-fn hmac_boot_prepare() {
-    let i = 0;
-    while i < 64 {
-        let kb = 0;
-        if i < 8 { kb = lb(&hmac_boot_key + i); }
-        sb(&hmac_ipad + i, kb ^ 0x36);
-        sb(&hmac_opad + i, kb ^ 0x5C);
-        i = i + 1;
-    }
-}
-
 fn sha256_self_test() {
     sha256_hash(&sha_self_abc_msg, 0, &sha_tmp_digest);
     if !digest_eq(&sha_tmp_digest, &sha_self_empty, 32) {
@@ -434,7 +422,11 @@ fn app_manifest_verify() {
         kernel_panic_canary(0x4D414E43, &app_manifest_verify, 0x4D414E43);
     }
 
-    hmac_sha256(&hmac_manifest_key, 8, tbl, APP_MANIFEST_COVER_BYTES, &sha_tmp_digest);
+    # Keyless SHA-256 integrity checksum (Track 7): NOT an authenticity gate -
+    # authenticity comes from the Ed25519 SYSSIG.ENV envelope that binds this
+    # exact table. This is a cheap fail-fast on a corrupt in-image table; it
+    # carries no shipped secret (anyone can recompute it, by design).
+    sha256_hash(tbl, APP_MANIFEST_COVER_BYTES, &sha_tmp_digest);
     if !digest_eq(&sha_tmp_digest, tbl + APP_MANIFEST_MAC_OFF, SHA256_DIGEST) {
         kernel_panic_canary(0x4D414E48, &app_manifest_verify, 0x4D414E48);
     }
@@ -511,7 +503,7 @@ fn app_segment_verify(app_id) {
                     call svg_dump_putc(al: 13);
                     call svg_dump_putc(al: 10);
                 }
-                return;   # FAIL-SOFT: do not panic the kernel on a verify bug
+                kernel_panic_canary(app_id, &app_segment_verify, 0x41485041);
             }
             return;
         }
@@ -520,12 +512,10 @@ fn app_segment_verify(app_id) {
     kernel_panic_canary(app_id, &app_segment_verify, 0x41504D49);
 }
 
-fn app_blob_verify_signature() {
-    if lb(&mb_blob_sig_done) != 0 { return; }
-    hmac_boot_prepare();
-    hmac_blob_canonical(lq(&app_blob_base_v), lq(&app_blob_size_v), &sha_tmp_digest);
-    if !digest_eq(&sha_tmp_digest, &mb_blob_sig_expected, 32) {
-        kernel_panic_canary(0x424C4F42, &app_blob_verify_signature, 0x424C4F42);
-    }
-    sb(&mb_blob_sig_done, 1);
-}
+# app_blob_verify_signature (whole-blob HMAC with the shipped "ISBOLBRG" key)
+# was REMOVED (Track 7). It was only ever called under cfg "LEGACY_BLOB_HMAC",
+# which no shipping build defines, and its key shipped in the image. The blob is
+# fully covered by the Ed25519 envelope + per-segment SHA-256, so nothing is
+# lost. The KASLR sliding-fixup table (mb_blob_sig_fixups, patched by
+# tools/build/patch_blob_sig.py) is retained because sha256_blob_segment_canonical
+# still needs it; only the forgeable symmetric MAC is gone.
