@@ -184,6 +184,14 @@ dispatch_app_callback:
     mov r15, rcx                       ; arg2
     DBG_EVT EVT_CALLBACK_DISPATCH, 0, r12, r13, r14, r15, 0, 0
 
+    ; Full-quality wallpaper SVG rasterization owns the global ring-3 callback
+    ; lock because slot isolation still rewrites shared page tables. Never spin
+    ; the BSP on that lock: the compositor has a wallpaper-busy present path,
+    ; and Settings exposes the busy state. Returning here keeps cursor/input,
+    ; timers and kernel work alive while the AP finishes and publishes its cache.
+    cmp byte [wallpaper_render_active], 0
+    jne .busy_return
+
     cmp dword [ring3_ap_enabled], 0
     je .inline
     test r13, r13
@@ -357,6 +365,9 @@ dispatch_app_callback:
     pop rbx
     pop rbp
     ret
+.busy_return:
+    xor eax, eax
+    jmp .ret
 %endif
 
 ; --- media_draw_dispatch ------------------------------------------------------
@@ -462,4 +473,4 @@ process_get_affinity:
 .bad:
     xor eax, eax
     ret
-
+

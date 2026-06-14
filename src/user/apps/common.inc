@@ -57,9 +57,11 @@ extern fat16_change_dir
 extern l3_slot_base
 extern bb_addr
 extern scr_pitch
+%ifndef RELEASE_BUILD
 extern mouse_debug_dump
 extern xhci_debug_dump
 extern i2c_hid_debug_dump
+%endif
 extern mouse_wait_input
 extern fat16_debug_dump_root
 
@@ -164,8 +166,12 @@ app_sys_cursor_init:
 %xdefine display_set_mode app_sys_display_set_mode
 %xdefine cursor_init app_sys_cursor_init
 
+; L3 self-test handlers are debug-only (gated out of -Release in
+; launch_handlers.inc); only export them when they are compiled in.
+%ifndef RELEASE_BUILD
 global app_l3_test_draw
 global app_l3_test_click
 global app_l3_test_key
+%endif
 ; app_terminal_kernel_draw/key removed - Terminal migrated to GritHL.
 

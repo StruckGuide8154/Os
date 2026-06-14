@@ -145,6 +145,9 @@ klog_scroll:
 ; into the backbuffer just like the rest of the GUI.
 global klog_render_overlay
 klog_render_overlay:
+%ifdef RELEASE_BUILD
+    ret
+%else
     cmp byte [rel klog_visible], 0
     je .kr_done
 
@@ -249,6 +252,7 @@ klog_render_overlay:
     pop rax
 .kr_done:
     ret
+%endif
 
 ; ============================================================================
 ; klog_flush_and_reboot
@@ -260,6 +264,9 @@ klog_render_overlay:
 ; ============================================================================
 global klog_flush_and_reboot
 klog_flush_and_reboot:
+%ifdef RELEASE_BUILD
+    ret
+%else
     cli
 
     ; Write magic + reserve length slot
@@ -347,11 +354,14 @@ klog_flush_and_reboot:
     int 3
     hlt
     jmp .kf_hang
+%endif
 
 section .data
+%ifndef RELEASE_BUILD
 klog_hdr: db "[ Grit klog -- F12 close  Up/Down scroll  F11 flush+reboot ]", 0
 klog_ftr: db "klog overlay -- live ring buffer", 0
 align 8
 klog_bad_idt:
     dw 0
     dq 0
+%endif

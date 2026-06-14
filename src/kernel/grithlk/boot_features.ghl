@@ -255,6 +255,11 @@ fn ft_handle_line(buf, ls, le) {
 fn boot_features_init() {
     sq(&feat_mask, ALL_FEATURES);
 
+    # Public release BOOTCFG.TXT is unauthenticated. Ignore it completely so an
+    # ESP edit cannot weaken runtime policy. Signed CONFIG.ENV is the future
+    # release configuration channel; debug builds retain the bisection parser.
+    cfg "RELEASE_BUILD" { return; }
+
     # Build-time default-disable fallback (testable before file-path is proven).
     cfg "FEAT_DEFAULT_DISABLE_CURSOR" {
         sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_CURSOR_DRAW));

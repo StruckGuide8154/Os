@@ -1,11 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" width="100%" height="100%" style="background:#050508;">
   <defs>
-    <!-- Film Grain / Render Noise for Realism -->
-    <filter id="noise">
-      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="4" stitchTiles="stitch"/>
-      <feColorMatrix type="matrix" values="1 0 0 0 0, 0 1 0 0 0, 0 0 1 0 0, 0 0 0 0.04 0" />
-    </filter>
-
     <!-- Intense Central Glow -->
     <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
       <stop offset="0%" stop-color="#ffffff">
@@ -43,7 +37,7 @@
   <circle cx="960" cy="540" r="800" fill="url(#coreGlow)" />
 
   <!-- Overlapping Translucent 3D Ribbons -->
-  <g style="mix-blend-mode: screen;" stroke="url(#rimLight)" stroke-width="1.5">
+  <g stroke="url(#rimLight)" stroke-width="1.5">
     <!-- Top Right Violet Flow -->
     <path id="ribbon1" d="M 960 540 C 1300 200, 1800 100, 2100 400 C 1700 600, 1400 800, 960 540 Z" fill="url(#glass3)">
       <animateTransform attributeName="transform" type="translate" values="0 0; 10 5; 0 0; -10 -5; 0 0" dur="15s" repeatCount="indefinite" additive="sum"/>
@@ -69,6 +63,4 @@
     </path>
   </g>
 
-  <!-- Render Noise Overlay -->
-  <rect width="100%" height="100%" filter="url(#noise)" style="pointer-events:none;" />
 </svg>

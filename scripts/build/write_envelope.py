@@ -241,6 +241,8 @@ def main():
     p.add_argument('--sig-count', default=None,      metavar='N', dest='sig_count')
     p.add_argument('--provenance', default=None,     metavar='FILE')
     p.add_argument('--policy-dep', default=None,     metavar='FILE', dest='policy_dep')
+    p.add_argument('--require-policy-dep', action='store_true',
+                   help='fail for runnable artifacts unless --policy-dep is a non-zero 32-byte hash')
     p.add_argument('--sign-roles', default=None,     metavar='R,R,..', dest='sign_roles',
                    help='threshold role indices (1..6) to sign with; '
                         '"none" emits 0x5A placeholder slots; default: '
@@ -320,6 +322,10 @@ def main():
         # For runnable types, zero hash is a placeholder; the caller should
         # supply a real policy dependency hash via --policy-dep.
         policy_dep_hash = b'\x00' * 32
+
+    if args.require_policy_dep and kind in RUNNABLE_TYPES:
+        if policy_dep_hash == b'\x00' * 32:
+            raise SystemExit('runnable artifact requires a non-zero --policy-dep hash')
     else:
         policy_dep_hash = b'\x00' * 32
 

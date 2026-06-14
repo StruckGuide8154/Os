@@ -52,6 +52,7 @@ BS_LOCHNDL            equ 312           ; LocateHandle/Buffer    (UEFI §7.3)
 BS_LOCATE             equ 320           ; LocateProtocol         (UEFI §7.3)
 BS_EXITBOOT           equ 232           ; ExitBootServices       (UEFI §7.4)
 BS_WATCHDOG           equ 256           ; SetWatchdogTimer       (UEFI §7.5)
+RNG_GET               equ 8             ; EFI_RNG_PROTOCOL.GetRNG
 
 ; ----------------------------------------------------------------------------
 ; EFI_GRAPHICS_OUTPUT_PROTOCOL & mode/info member offsets (UEFI §12.9)

@@ -1,5 +1,7 @@
 param(
     [switch]$Release,
+    [ValidateRange(1, 4294967295)]
+    [uint32]$ReleaseVersion = 20260613,
     [switch]$Trace,
     [ValidateSet('Default', 'Cache32Max')]
     [string]$PerfProfile = 'Default',
@@ -19,6 +21,7 @@ param(
     [switch]$NoSyscallPerm,  # Disable heterogeneous syscall numbering per slot (security_todo.md §12). ON by default: per-launch keyed-random permutation of the syscall table; the loader rewrites each app's compiled SYS_* immediates (via the .scfix fixup table) to the slot's forward-permuted numbers, and the dispatcher applies the kernel-side inverse mapping on entry. Pass -NoSyscallPerm to fall back to identity numbering.
     [switch]$AppO0,          # Compile GritHL user apps with gritc --O0 instead of the default lossless -O1 optimizer.
     [switch]$AppO2,          # Compile GritHL user apps with gritc --O2 (lossless register allocator, implies O1).
+    [switch]$AppO3,          # Compile GritHL user apps with gritc --O3 (lossless density passes on the O2 stream, implies O2).
     [switch]$BootAnim,       # Play the pre-GUI /BOOTANIM.NBA splash at boot. OFF by default (deterministic boot). Defines GRIT_BOOT_ANIM so the gated boot_anim_play() call site compiles in. The BOOTANIM.NBA asset is always built (Media Player demo content) regardless of this flag.
     [switch]$SyscallTrace,   # Emit a per-syscall serial trace ('s'<num>...). OFF by default: it floods COM1 on syscall-heavy apps (e.g. Task Manager polls per-core util/mhz every frame) and serial-out is slow enough to make the app crawl. Pass -SyscallTrace only when debugging the dispatcher.
     [switch]$CopyToE         # Copy built ESP\EFI tree to E:\ for boot from removable media.
@@ -46,6 +49,7 @@ if (-not $Release) {
 }
 else {
     $KernelDefines += '-dRELEASE_BUILD'
+    $LoaderDefines += '-dRELEASE_BUILD'
 }
 if ($BootAnim) {
     $KernelDefines += '-dGRIT_BOOT_ANIM'
@@ -163,6 +167,10 @@ Write-Host ("  Trace: " + ($(if ($Trace) { 'on' } else { 'off' }))) -ForegroundC
 Write-Host ''
 
 New-Item -Path $ESP -ItemType Directory -Force | Out-Null
+if ($Release) {
+    # Do not let debug-profile leftovers survive into a public release directory.
+    Remove-Item -LiteralPath (Join-Path $ESP 'BOOTCFG.TXT') -Force -ErrorAction SilentlyContinue
+}
 
 # 0. Embed SVG wallpaper sources into wallpaper.ghl so the native GritHL
 # renderer (svg_render) has the current SVG strings. Run on every build so
@@ -178,6 +186,7 @@ $NxhBuildArgs = @()
 if ($Release) { $NxhBuildArgs += '-Release' }
 if ($AppO0) { $NxhBuildArgs += '-O0' }
 if ($AppO2) { $NxhBuildArgs += '-O2' }
+if ($AppO3) { $NxhBuildArgs += '-O3' }
 & powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
 
@@ -317,17 +326,17 @@ if ($SecurityRegression) {
     Write-Host "  All $($PocHarnesses.Count) ring-3 PoC harnesses assemble; kernel shadow-stack trip armed." -ForegroundColor Green
 }
 
-# 1. Assemble UEFI Loader -> BOOTX64.EFI
-Write-Host '[1/2] Assembling UEFI Loader...' -ForegroundColor Yellow
-$ErrorActionPreference = 'Continue'
-& $NASM @LoaderDefines -f bin -o "$ESP\BOOTX64.EFI" "$SRC_DIR\boot\uefi_loader.asm" 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "  $_" -ForegroundColor DarkYellow } }
-$ErrorActionPreference = 'Stop'
-if ($LASTEXITCODE -ne 0) {
-    Write-Host '  FAILED' -ForegroundColor Red
-    exit 1
+# 1. Debug loaders have no artifact manifest. Release loaders are assembled
+# only after every payload exists, then signed as the external trust anchor.
+if (-not $Release) {
+    Write-Host '[1/2] Assembling UEFI Loader...' -ForegroundColor Yellow
+    $ErrorActionPreference = 'Continue'
+    & $NASM @LoaderDefines -f bin -o "$ESP\BOOTX64.EFI" "$SRC_DIR\boot\uefi_loader.asm" 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "  $_" -ForegroundColor DarkYellow } }
+    $ErrorActionPreference = 'Stop'
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED' -ForegroundColor Red; exit 1 }
+    $sz = (Get-Item "$ESP\BOOTX64.EFI").Length
+    Write-Host "  OK - BOOTX64.EFI ($sz bytes)" -ForegroundColor Green
 }
-$sz = (Get-Item "$ESP\BOOTX64.EFI").Length
-Write-Host "  OK - BOOTX64.EFI ($sz bytes)" -ForegroundColor Green
 
 # 2. Assemble Kernel TWICE for diff-relocation KASLR.
 #
@@ -340,33 +349,36 @@ Write-Host "  OK - BOOTX64.EFI ($sz bytes)" -ForegroundColor Green
 # Pass B: ORG = 0x200000 (slide of +0x100000)
 # Differ on exactly the qwords that hold absolute label references; the
 # extractor diffs them into a fixup table and wraps Pass A as the payload.
-# Generate the quantum-entropy include the kernel folds into kernel_canary.
-# The raw seed (tools/quantum/seed.bin) is a PRIVATE build secret and is NOT in
-# the repo. If present we emit it; if absent we emit 1024 zero bytes, which
-# XOR-fold to a no-op so a clean public checkout still builds and behaves
-# exactly like the pre-quantum kernel (RDTSC^RDRAND only). Regenerate the seed
-# with tools/quantum/qrng_seed.py.
+# Generate a PUBLIC commitment to the private quantum seed. Only SHA-256(seed)
+# enters KERNEL.BIN; KERNEL.ENV later signs the whole container. Runtime secrets
+# mix this public salt with fresh boot entropy. Raw seed bytes never ship.
 $qseedBin = Join-Path $Root 'tools\quantum\seed.bin'
-$qseedInc = Join-Path $BUILD_DIR 'qrng_seed.inc'
-$QSEED_LEN = 1024
+$qseedInc = Join-Path $BUILD_DIR 'qrng_commitment.inc'
+# Minimum extracted-seed length. Only SHA-256(seed) ships, so the exact size is
+# a build-diversity choice, not a crypto constraint; we just require enough bytes
+# to commit to. (Was a hard ==1024 gate; relaxed to accept shorter real seeds.)
+$QSEED_MIN = 32
 if (Test-Path $qseedBin) {
     $bytes = [System.IO.File]::ReadAllBytes($qseedBin)
-    if ($bytes.Length -ne $QSEED_LEN) { throw "seed.bin must be $QSEED_LEN bytes, got $($bytes.Length)" }
-    Write-Host "  (QRNG: folding $QSEED_LEN bytes of quantum entropy from tools/quantum/seed.bin)" -ForegroundColor Green
-    $hdr = "; Auto-generated from tools/quantum/seed.bin (PRIVATE) -- DO NOT COMMIT"
+    if ($bytes.Length -lt $QSEED_MIN) { throw "seed.bin must be at least $QSEED_MIN bytes, got $($bytes.Length)" }
+    $commitment = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    Write-Host '  (QRNG: embedding only SHA-256(seed); raw seed remains off-image)' -ForegroundColor Green
+    $hdr = '; Auto-generated PUBLIC SHA-256 commitment to private seed.bin'
 } else {
-    $bytes = New-Object byte[] $QSEED_LEN   # all zeros -> fold is a no-op
-    Write-Host "  (QRNG: seed.bin absent -- emitting zero fallback; canary uses RDTSC^RDRAND only)" -ForegroundColor DarkYellow
-    $hdr = "; Auto-generated ZERO FALLBACK (no tools/quantum/seed.bin present)"
+    $commitment = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+        [System.Text.Encoding]::ASCII.GetBytes('GRIT-QRNG-NO-PRIVATE-SEED-v1'))
+    Write-Host '  (QRNG: seed.bin absent -- embedding public no-seed domain commitment)' -ForegroundColor DarkYellow
+    $hdr = '; Auto-generated PUBLIC no-private-seed domain commitment'
 }
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine($hdr)
-[void]$sb.AppendLine('qrng_seed_blob:')
-for ($i = 0; $i -lt $bytes.Length; $i += 16) {
-    $row = for ($j = $i; $j -lt [Math]::Min($i + 16, $bytes.Length); $j++) { '0x{0:x2}' -f $bytes[$j] }
+[void]$sb.AppendLine('; Public salt/domain separator only; contributes no secret entropy.')
+[void]$sb.AppendLine('qrng_commitment:')
+for ($i = 0; $i -lt $commitment.Length; $i += 16) {
+    $row = for ($j = $i; $j -lt [Math]::Min($i + 16, $commitment.Length); $j++) { '0x{0:x2}' -f $commitment[$j] }
     [void]$sb.AppendLine('    db ' + ($row -join ', '))
 }
-[void]$sb.AppendLine("qrng_seed_len equ $($bytes.Length)")
+[void]$sb.AppendLine("qrng_commitment_len equ $($commitment.Length)")
 [System.IO.File]::WriteAllText($qseedInc, $sb.ToString(), [System.Text.Encoding]::ASCII)
 
 Write-Host '[2/2] Assembling Kernel (two-pass for KASLR fixup table)...' -ForegroundColor Yellow
@@ -419,9 +431,23 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - app manifest patch' -Foregroun
 # in-image app_integrity_table. DEV role keys sign here; production signing
 # replaces this step with the HSM signer.
 Write-Host '[2a3] Signing SYSSIG.ENV (Track 2 envelope)...' -ForegroundColor Yellow
+$policyDepPath = Join-Path $BUILD_DIR 'release_policy_dependency.bin'
+$policyInputs = @(
+    (Join-Path $Root 'src\include\syscall_caps.inc'),
+    (Join-Path $Root 'src\tools\security\policy_graph_check.ghl'),
+    (Join-Path $Root 'src\kernel\grithlk\boot_features.ghl'),
+    (Join-Path $Root 'src\kernel\grithlk\envelope_gate.ghl')
+)
+$policyStream = [System.IO.MemoryStream]::new()
+foreach ($policyInput in $policyInputs) {
+    $policyBytes = [System.IO.File]::ReadAllBytes($policyInput)
+    $policyStream.Write($policyBytes, 0, $policyBytes.Length)
+}
+$policyHash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($policyStream.ToArray())
+[System.IO.File]::WriteAllBytes($policyDepPath, $policyHash)
 & python (Join-Path $Root 'scripts\build\write_envelope.py') `
     --payload $syssigPayload --out "$ESP\SYSSIG.ENV" `
-    --type app --device-id 1
+    --type app --device-id 1 --policy-dep $policyDepPath --require-policy-dep
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - SYSSIG.ENV signing' -ForegroundColor Red; exit 1 }
 $sz = (Get-Item "$ESP\SYSSIG.ENV").Length
 Write-Host "  OK - SYSSIG.ENV ($sz bytes)" -ForegroundColor Green
@@ -437,6 +463,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED' -ForegroundColor Red; exit 1 }
 $sz = (Get-Item "$ESP\APPS.BIN").Length
 Write-Host "  OK - APPS.BIN ($sz bytes)" -ForegroundColor Green
 
+# Recompute every canonical per-app digest from the exact APPS.BIN that will be
+# released. A stale/partial manifest is a hard build failure, never a boot-time
+# diagnostic surprise.
+& python (Join-Path $Root 'tools\build\gen_app_manifest.py') `
+    --a $kernelA --b $kernelB --verify-blob "$ESP\APPS.BIN"
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - released APPS.BIN manifest mismatch' -ForegroundColor Red; exit 1 }
+
 # 2c. Diff A vs B, wrap pass A + fixup table into KERNEL.BIN.
 # In -Kaslr mode the loader uses the embedded app blob because it is covered
 # by the same kernel fixup table; APPS.BIN remains the non-KASLR app source.
@@ -446,6 +479,14 @@ Write-Host '[2c] Building KASLR fixup table and wrapping KERNEL.BIN...' -Foregro
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED' -ForegroundColor Red; exit 1 }
 $sz = (Get-Item "$ESP\KERNEL.BIN").Length
 Write-Host "  OK - KERNEL.BIN ($sz bytes, wrapped)" -ForegroundColor Green
+
+# A public commitment is expected; its private preimage must never occur in a
+# release image. Run this before signing so no leaking build can be blessed.
+if (Test-Path $qseedBin) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'tools\security\check_no_shipped_secrets.ps1') `
+        -ArtifactPath "$ESP\KERNEL.BIN" -SecretPath $qseedBin
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - private QRNG seed leaked into KERNEL.BIN' -ForegroundColor Red; exit 1 }
+}
 
 # 2c2. Track 2 loader-side kernel envelope: sign the SHA-256 of the final
 # KERNEL.BIN container as a KERNEL-class envelope -> ESP\KERNEL.ENV. The
@@ -457,7 +498,7 @@ $kimgHashPath = Join-Path $BUILD_DIR 'kernel_env_payload.bin'
 [System.IO.File]::WriteAllBytes($kimgHashPath, $kimgHash)
 & python (Join-Path $Root 'scripts\build\write_envelope.py') `
     --payload $kimgHashPath --out "$ESP\KERNEL.ENV" `
-    --type kernel --device-id 1
+    --type kernel --device-id 1 --policy-dep $policyDepPath --require-policy-dep
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - KERNEL.ENV signing' -ForegroundColor Red; exit 1 }
 $sz = (Get-Item "$ESP\KERNEL.ENV").Length
 Write-Host "  OK - KERNEL.ENV ($sz bytes)" -ForegroundColor Green
@@ -682,6 +723,61 @@ $dataImgMax = 32 * 1024 * 1024
 if ($espDataImgBytes.Length -gt $dataImgMax) {
     Write-Host "  FAILED - DATA.IMG ($($espDataImgBytes.Length) bytes) exceeds DATA_IMG_MAX_SIZE ($dataImgMax). Bump src/include/boot_memory.inc." -ForegroundColor Red
     exit 1
+}
+
+if ($Release) {
+    Write-Host '[release] Pinning payloads into BOOTX64.EFI...' -ForegroundColor Yellow
+    $loaderManifest = Join-Path $BUILD_DIR 'loader_manifest.inc'
+    & python (Join-Path $Root 'tools\build\gen_loader_manifest.py') `
+        --esp $ESP --out $loaderManifest --version $ReleaseVersion
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - loader manifest generation' -ForegroundColor Red; exit 1 }
+
+    $ErrorActionPreference = 'Continue'
+    & $NASM @LoaderDefines -f bin -o "$ESP\BOOTX64.EFI" "$SRC_DIR\boot\uefi_loader.asm" 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "  $_" -ForegroundColor DarkYellow } }
+    $ErrorActionPreference = 'Stop'
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - release loader assembly' -ForegroundColor Red; exit 1 }
+
+    $openssl = 'C:\Program Files\Git\usr\bin\openssl.exe'
+    $signtool = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
+    if (-not (Test-Path $openssl)) { Write-Host '  FAILED - openssl.exe is required for release signing' -ForegroundColor Red; exit 1 }
+    if (-not (Test-Path $signtool)) { Write-Host '  FAILED - signtool.exe is required for release signing' -ForegroundColor Red; exit 1 }
+
+    $signDir = Join-Path $BUILD_DIR 'secureboot'
+    New-Item -Path $signDir -ItemType Directory -Force | Out-Null
+    $keyPem = Join-Path $signDir 'grit-test-db.key.pem'
+    $certPem = Join-Path $signDir 'grit-test-db.cert.pem'
+    $certDer = Join-Path $signDir 'GRIT_TEST_DB.cer'
+    $pfxPath = Join-Path $signDir 'grit-test-db.pfx'
+    $passwordPath = Join-Path $signDir 'pfx-password.txt'
+    if (-not (Test-Path $pfxPath)) {
+        $pfxPassword = [Guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText($passwordPath, $pfxPassword, [System.Text.Encoding]::ASCII)
+        & $openssl req -new -x509 -newkey rsa:3072 -sha256 -nodes `
+            -keyout $keyPem -out $certPem -days 3650 `
+            -subj '/CN=Grit Secure Boot Test DB/' `
+            -addext 'keyUsage=critical,digitalSignature' `
+            -addext 'extendedKeyUsage=codeSigning'
+        if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - Secure Boot certificate generation' -ForegroundColor Red; exit 1 }
+        & $openssl pkcs12 -export -out $pfxPath -inkey $keyPem -in $certPem -passout "pass:$pfxPassword"
+        if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - PFX generation' -ForegroundColor Red; exit 1 }
+        & $openssl x509 -in $certPem -outform DER -out $certDer
+        if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - enrollment certificate export' -ForegroundColor Red; exit 1 }
+    }
+    if (-not (Test-Path $passwordPath)) { Write-Host '  FAILED - signing password is missing' -ForegroundColor Red; exit 1 }
+    $pfxPassword = [System.IO.File]::ReadAllText($passwordPath).Trim()
+    & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword "$ESP\BOOTX64.EFI"
+    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED - BOOTX64.EFI signing' -ForegroundColor Red; exit 1 }
+    Write-Host "  OK - signed BOOTX64.EFI; enroll $certDer in the firmware db for testing" -ForegroundColor Green
+
+    Write-Host '[release] Scanning public artifacts...' -ForegroundColor Yellow
+    # --allow-test-cert: this build self-signs with the development Secure Boot
+    # test-DB cert (above). A production release omits this flag so the gate
+    # rejects the test cert and demands the production signing cert.
+    & python (Join-Path $Root 'tools\security\check_release_artifacts.py') --esp $ESP --allow-test-cert
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '  FAILED - release artifact security scan' -ForegroundColor Red
+        exit 1
+    }
 }
 
 Write-Host ''

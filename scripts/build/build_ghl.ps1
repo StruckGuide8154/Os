@@ -7,7 +7,9 @@ param(
     [switch]$Release,
     [switch]$Verify = $true,
     [switch]$O0,
-    [switch]$O2
+    [switch]$O2,
+    [switch]$O3,
+    [switch]$O4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,7 +30,7 @@ Write-Host ''
 Write-Host '  GritHL Build' -ForegroundColor Cyan
 Write-Host '  =============' -ForegroundColor Cyan
 Write-Host ("  Mode: " + ($(if ($Release) { 'release' } else { 'debug' }))) -ForegroundColor DarkGray
-Write-Host ("  Opt:  " + ($(if ($O0) { 'O0' } elseif ($O2) { 'O2' } else { 'O1' }))) -ForegroundColor DarkGray
+Write-Host ("  Opt:  " + ($(if ($O0) { 'O0' } elseif ($O3) { 'O3' } elseif ($O2) { 'O2' } else { 'O1' }))) -ForegroundColor DarkGray
 
 $count = 0
 $manifestApps = @()
@@ -50,6 +52,8 @@ Get-ChildItem -Path $APP_DIR -Filter '*.ghl' | ForEach-Object {
     $CompilerArgs = @($in, '-o', $asm, '-L', $LIB_DIR, '--prefix', $name, '--embed', '--emit-sigs')
     if ($O0) { $CompilerArgs += '--O0' }
     if ($O2) { $CompilerArgs += '--O2' }
+    if ($O3) { $CompilerArgs += '--O3' }
+    if ($O4) { $CompilerArgs += '--O4' }
     & $PY $COMPILER @CompilerArgs
     if ($LASTEXITCODE -ne 0) { Write-Host '    FAILED compile' -ForegroundColor Red; exit 1 }
     $sz = (Get-Item $asm).Length

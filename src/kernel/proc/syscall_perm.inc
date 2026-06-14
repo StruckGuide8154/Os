@@ -444,12 +444,12 @@ sc_slot_perm_apply_blob:
 ;
 ; Clobbers: rax, rcx, rsi, r8.
 FN_BEGIN kernel_apply_app_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), FN_RET_VOID
-    cmp rsi, APP_MIN_ID
-    jb .kam_done
-    cmp rsi, APP_MAX_ID
-    ja .kam_done
     cmp edi, MAX_WINDOWS
-    jae .kam_done
+    jae .kam_done                     ; slot out of range: cannot store -> no-op
+    cmp rsi, APP_MIN_ID
+    jb .kam_deny                      ; valid slot, unknown app_id -> default-deny
+    cmp rsi, APP_MAX_ID
+    ja .kam_deny
     push rsi                          ; stash original app_id for the audit record
     sub rsi, APP_MIN_ID
     lea rcx, [rel app_manifest_table]
@@ -470,7 +470,8 @@ FN_BEGIN kernel_apply_app_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR),
     call cap_audit_log
     pop rsi
     pop rdi
-    add rsp, 8                         ; discard stashed app_id
+    ; (original app_id stays stashed on the stack for the allow-bitmap rebuild
+    ; after cap_mask_store; discarded there.)
     ; Write mask + authenticator together so the dispatcher's HMAC check trusts
     ; this (legitimate) narrowing instead of treating it as tampering.
 %ifdef ENABLE_DEBUG_SERIAL
@@ -496,8 +497,27 @@ FN_BEGIN kernel_apply_app_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR),
     pop rsi
     pop rdi
 %endif
-    call cap_mask_store               ; (rdi=slot, rsi=mask)
+    call cap_mask_store               ; (rdi=slot, rsi=mask) - rdi/rsi preserved
+    ; Activate the finer per-syscall gate: rebuild this slot's allow bitmap to
+    ; the manifest's cap-implied call set minus its deny list, instead of
+    ; leaving the all-ones BSS default that made slot_syscall_allow a no-op.
+    ; This is what finally enforces e.g. Notepad's SYS_FS_DELETE deny.
+    mov rdx, [rsp]                    ; original app_id (still stashed)
+    call sc_build_allow_bitmap        ; (rdi=slot, rsi=mask, rdx=app_id)
+    add rsp, 8                        ; discard stashed app_id
 .kam_done:
+    ret
+.kam_deny:
+    ; Valid slot but unknown/out-of-range app_id (launcher bug or forged
+    ; launch). Default-deny (security_todo.md §4): drop to the CAP_CORE floor
+    ; - exit/print only - rather than leave the slot at its pre-launch mask
+    ; (CAP_ALL), and narrow the allow bitmap to that floor. rdi = the
+    ; range-checked slot.
+    movzx edi, dil
+    mov esi, CAP_CORE
+    call cap_mask_store               ; rdi=slot, rsi=CAP_CORE preserved
+    mov edx, APP_MAX_ID + 1           ; out-of-range app_id -> no deny-list pass
+    call sc_build_allow_bitmap        ; (rdi=slot, rsi=CAP_CORE, rdx=oob)
     ret
 section .data
 

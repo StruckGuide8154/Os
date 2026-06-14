@@ -101,6 +101,22 @@ nx_media_blit_bmp:
     and eax, ~3
     mov [rsp + 0], eax
 
+    ; Source-extent guard: data_offset + stride*height must lie inside the
+    ; slot file buffer (APP_SLOT_BMP_FILE_SZ bytes). Without this a crafted
+    ; data_offset / dimensions would stream bytes past the loaded BMP into the
+    ; framebuffer (memory disclosure to screen) or fault.
+    mov eax, [r12 + 10]                      ; data_offset (u32)
+    cmp eax, APP_SLOT_BMP_FILE_SZ
+    ja .bmp_done
+    mov ecx, eax                             ; rcx = data_offset (zero-extended)
+    mov eax, [rsp + 0]                       ; rax = row_stride (zero-extended)
+    mul r15                                  ; rdx:rax = stride * height (r15>0)
+    jo .bmp_done                             ; product overflowed 64 bits
+    add rax, rcx                             ; + data_offset
+    jc .bmp_done
+    cmp rax, APP_SLOT_BMP_FILE_SZ
+    ja .bmp_done
+
     mov eax, [r12 + 10]
     lea rax, [r12 + rax]
     mov [rsp + 16], rax

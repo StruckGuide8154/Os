@@ -158,9 +158,10 @@ Test entry points (all green 2026-06-11): `test_track4_pmemsave.ps1`,
   256-bit per-boot ephemeral memory key `nx_mem_key` (wide enough for AES-XTS-128's
   two subkeys, the Part B encrypt-at-rest follow-up). `nx_mem_key_ensure` draws it
   once from RDTSC (^ RDRAND when CPUID.01H:ECX[30] reports it) folded through
-  splitmix64 and mixed with the already-final `kernel_canary` (which itself folds
-  the certified qrng seed), so the no-RDRAND fallback - the default QEMU TCG model
-  among them - stays unguessable rather than RDTSC-only. RDRAND is CPUID-gated like
+  splitmix64 and mixed with the already-final `kernel_canary` (which itself binds
+  a signed public QRNG commitment). Release builds require a successful hardware
+  entropy draw; the debug/QEMU timing fallback is not claimed cryptographically
+  unpredictable. RDRAND is CPUID-gated like
   `kernel_canary_init` (the raw instruction #UDs on CPUs/VMs without it). Drawn once
   at boot from `kmain` right after `kernel_canary_init`/`slot_cap_hmac_init`
   (`kernel_lifecycle.ghl`). It lives only in kernel `.data` + transiently in

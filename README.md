@@ -195,6 +195,6 @@ For the current syscall and callback ABI, see:
 - `docs/TODO-INDEX.md` is the single entry point for the spec/TODO doc set;
   `docs/STATUS.md` holds detailed status and milestones.
 - See `SECURITY.md` for the vulnerability disclosure policy.
-- The private QRNG seed (`tools/quantum/seed.bin` and derived files) is a
-  build secret and is never committed or published; releases ship only the
-  folded boot image.
+- The private QRNG seed (`tools/quantum/seed.bin`) is never committed or shipped.
+  Releases contain only its signed SHA-256 commitment, used as a public KDF salt
+  alongside fresh per-boot hardware entropy.

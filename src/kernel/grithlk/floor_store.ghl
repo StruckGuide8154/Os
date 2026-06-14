@@ -63,6 +63,8 @@ global floor_store_abi_version;
 
 extern ata_read_sectors;   # (rdi=LBA, rsi=buf, edx=count) -> 0 ok / -1 err
 extern ata_write_sectors;  # same contract
+extern ramdisk_storage_class;  # ramdisk.asm: 0 none/1 NVMe/2 USB-MSC/3 ATA
+extern blk_write_sectors;  # blkdev.asm Phase-4 NVMe/USB write-back (issue #21)
 extern serial_puts;
 extern serial_crlf;
 extern ser_print_hex64;
@@ -74,6 +76,8 @@ const FLOOR_CLASS_MAX = 9;       # signed_envelope.ghl ART_* classes 1..9
 const FLOOR_REC_BYTES = 132;
 const FLOOR_DEFAULT = 1;         # build-time floor (former GATE_REQUIRED_*)
 const FLOOR_TIME_SLACK = 600;    # persist clock high-water in >=10min steps
+const STORAGE_NVME = 1;
+const STORAGE_USB  = 2;
 
 data floor_buf: 512;             # sector I/O buffer
 data floor_ver: 10 x 4;          # ACTIVE per-class floors (entry 0 unused)
@@ -90,6 +94,7 @@ data s_floor_blank:  14 = [91,70,76,79,79,82,93,32,98,108,97,110,107,0];        
 data s_floor_loaded: 18 = [91,70,76,79,79,82,93,32,108,111,97,100,101,100,32,103,61,0];     # "[FLOOR] loaded g="
 data s_floor_pers:   21 = [91,70,76,79,79,82,93,32,112,101,114,115,105,115,116,101,100,32,103,61,0];  # "[FLOOR] persisted g="
 data s_floor_fail:   21 = [91,70,76,79,79,82,93,32,112,101,114,115,105,115,116,32,102,97,105,108,0];  # "[FLOOR] persist fail"
+data s_floor_noblk:  27 = [91,70,76,79,79,82,93,32,110,111,32,110,118,109,101,47,117,115,98,32,119,114,45,98,107,0,0];  # "[FLOOR] no nvme/usb wr-bk"
 
 fn floor_store_abi_version() {
     return 1;
@@ -239,6 +244,30 @@ fn floor_observe(kind, version, counter, epoch) {
 }
 
 # ---------------------------------------------------------------------------
+# Route the floor-sector write-back by boot-medium storage class. ATA -> raw
+# PIO (works today, QEMU). NVMe/USB-MSC -> the Phase-4 block backing driver
+# (blk_write_sectors, issue #21); until that lands it answers BLK_ENODEV and we
+# fail soft with an explicit log. CORRECTNESS: fail-soft only ever lowers floors
+# to the build-time constants - it can never admit a rolled-back artifact, since
+# the in-RAM floors still ratchet forward this boot; only cross-reboot
+# persistence on NVMe/USB is deferred to #21.
+# ---------------------------------------------------------------------------
+fn floor_write_back(cls) {
+    if cls == STORAGE_NVME { return floor_blk_write(); }
+    if cls == STORAGE_USB { return floor_blk_write(); }
+    return ata_write_sectors(FLOOR_LBA, &floor_buf, 1);
+}
+
+fn floor_blk_write() {
+    let rc = blk_write_sectors(FLOOR_LBA, &floor_buf, 1);
+    if rc != 0 {
+        serial_puts(&s_floor_noblk);
+        serial_crlf();
+    }
+    return rc;
+}
+
+# ---------------------------------------------------------------------------
 # Write the ratcheted record back (kmain K5, after the admission call sites).
 # Returns 0 written, 1 nothing to write, 2 no media / write failed (floors
 # stay raised in RAM for this boot; logged, non-fatal).
@@ -250,10 +279,18 @@ fn floor_persist(now) {
         sb(&floor_dirty, 1);
     }
     if lb(&floor_dirty) == 0 { return 1; }
+    # ATA media that never answered the boot read has no writable sector here -
+    # UNLESS the boot medium is NVMe/USB, where the floor sector is reached via
+    # the Phase-4 block path (blk_write_sectors), not ATA PIO.
+    let cls = ramdisk_storage_class();
     if lb(&floor_media) == 0 {
-        serial_puts(&s_floor_fail);
-        serial_crlf();
-        return 2;
+        if cls != STORAGE_NVME {
+            if cls != STORAGE_USB {
+                serial_puts(&s_floor_fail);
+                serial_crlf();
+                return 2;
+            }
+        }
     }
     let i = 0;
     while i < 512 {
@@ -274,7 +311,7 @@ fn floor_persist(now) {
         k = k + 1;
     }
     floor_wr_u32(&floor_buf + 20, floor_checksum());
-    let rc = ata_write_sectors(FLOOR_LBA, &floor_buf, 1);
+    let rc = floor_write_back(cls);
     if rc != 0 {
         serial_puts(&s_floor_fail);
         serial_crlf();

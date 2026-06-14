@@ -717,6 +717,7 @@ fn wm_bg_restore_cache(rdi source) preserves(all) {
     }
 }
 
+
 # ---------------------------------------------------------------------------
 # wm_bg_diamond - draw a soft diamond from one-pixel-tall scanlines.
 #   In: EDI = cx, ESI = cy, EDX = radius, R8D = color.

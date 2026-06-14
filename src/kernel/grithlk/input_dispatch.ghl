@@ -99,10 +99,10 @@ fn key_dbg_cpi_req(focused, win, stored, ev) {
     }
 }
 
-# Idle-cursor tail: when nothing consumed the event, either mark dirty (a drag is
-# in progress) or just redraw the cursor at its new position (optionally vsynced).
+# Idle-cursor tail: redraw immediately even during a drag. The compositor still
+# owns the drag outline, but pointer motion must not wait for a frame repaint.
 fn pm_idle_cursor() {
-    if lq(&wm_drag_window_id) != NO_FOCUS { sb(&scene_dirty, 1); return; }
+    if lq(&wm_drag_window_id) != NO_FOCUS { sb(&scene_dirty, 1); }
     # Frame timing is centralized in the pacer (frame_pacing.ghl); the old
     # wait_vsync() here only added latency and held the cursor at its stale
     # position during the spin. Redraw immediately for a snappy pointer.
@@ -139,7 +139,11 @@ fn process_mouse() {
 
     # Window manager gets first refusal on the event.
     let r = wm_handle_mouse_event(x, y, btn);
-    if r != 0 { sb(&scene_dirty, 1); return; }
+    if r != 0 {
+        sb(&scene_dirty, 1);
+        pm_idle_cursor();
+        return;
+    }
 
     if (btn & BTN_LEFT) != 0 {
         # Already-down -> a drag is in flight; just refresh the cursor.
@@ -203,24 +207,21 @@ fn process_keyboard() {
     let sc = ev & 0xFF;                       # scancode
     let ch = (ev >> EV_ASCII_SHIFT) & 0xFF;   # ascii
 
-    # Global klog toggle ('-' / '`' / '~' / F12). '-' is intentionally reserved
-    # here so it always opens logs (cannot be typed into apps).
-    if ch == CH_MINUS || ch == CH_BACKTICK || ch == CH_TILDE || ch == KEY_F12 {
-        klog_toggle();
-        sb(&scene_dirty, 1);
-        return;
-    }
-    # F11 flushes + reboots (does not return).
-    if ch == KEY_F11 { klog_flush_and_reboot(); }
-
-    # While the overlay is up it owns Up/Down (scroll) and Enter (flush+reboot);
-    # every other key is consumed so we don't act on a hidden world.
-    if lb(&klog_visible) != 0 {
-        if ch == CH_ENTER { klog_flush_and_reboot(); }
-        if sc == SC_UP { klog_scroll(KLOG_SCROLL_OLDER); sb(&scene_dirty, 1); return; }
-        if sc == SC_DOWN { klog_scroll(KLOG_SCROLL_NEWER); sb(&scene_dirty, 1); return; }
-        sb(&scene_dirty, 1);
-        return;
+    cfg !"RELEASE_BUILD" {
+        # Development-only log overlay and persistent dump controls.
+        if ch == CH_MINUS || ch == CH_BACKTICK || ch == CH_TILDE || ch == KEY_F12 {
+            klog_toggle();
+            sb(&scene_dirty, 1);
+            return;
+        }
+        if ch == KEY_F11 { klog_flush_and_reboot(); }
+        if lb(&klog_visible) != 0 {
+            if ch == CH_ENTER { klog_flush_and_reboot(); }
+            if sc == SC_UP { klog_scroll(KLOG_SCROLL_OLDER); sb(&scene_dirty, 1); return; }
+            if sc == SC_DOWN { klog_scroll(KLOG_SCROLL_NEWER); sb(&scene_dirty, 1); return; }
+            sb(&scene_dirty, 1);
+            return;
+        }
     }
 
     # Overlay closed. Numlock OFF = cursor mode: arrows move the mouse, '*'/'-'

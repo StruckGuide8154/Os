@@ -53,6 +53,7 @@ module "envelope_gate";
 
 unsafe raw_mem;          # lb over envelope bytes, lq over the VBE_INFO struct
 unsafe implicit_extern;  # &gate_* module-local data
+unsafe kernel_priv;      # cpuid_* for the real per-device identity derivation
 
 global artifact_gate_admit;
 global syssig_verify_boot;
@@ -60,8 +61,11 @@ global kernel_env_verify_boot;
 global boot_update_check;
 global quorum_change_admit;
 global boot_quorum_check;
+global boot_artifact_class_check;
 global gate_quorum_active_min;
 global gate_quorum_active_required;
+global gate_device_id_init;
+global gate_device_id;
 global gate_time_set;
 global gate_time_now;
 global envelope_gate_abi_version;
@@ -100,6 +104,12 @@ const VBE_KERNENV_BASE_OFF = 0xB0;
 const VBE_KERNENV_SIZE_OFF = 0xB8;
 const VBE_KIMG_BASE_OFF    = 0xC0;
 const VBE_KIMG_SIZE_OFF    = 0xC8;
+const VBE_DRVENV_BASE_OFF  = 0xD0;
+const VBE_DRVENV_SIZE_OFF  = 0xD8;
+const VBE_CFGENV_BASE_OFF  = 0xE0;
+const VBE_CFGENV_SIZE_OFF  = 0xE8;
+const VBE_POLENV_BASE_OFF  = 0xF0;
+const VBE_POLENV_SIZE_OFF  = 0xF8;
 
 # Envelope geometry (mirror of signed_envelope.ghl / envelope_reader.ghl).
 const ENV_HEADER_FIXED = 18;
@@ -116,8 +126,10 @@ const GATE_ERR_QUORUM_RATCHET = 28; # envelope's declared quorum below the ACTIV
 
 # Artifact classes this module's call sites expect (signed_envelope.ghl ART_*).
 const ART_KERNEL = 2;
+const ART_DRIVER = 4;
 const ART_APP = 5;
 const ART_POLICY = 6;
+const ART_CONFIG = 7;
 const ART_UPDATE = 8;
 const ART_CLASS_MAX = 9;
 
@@ -125,12 +137,14 @@ const ART_CLASS_MAX = 9;
 const QCH_MAGIC_LEN = 4;
 const QCH_PAYLOAD_BYTES = 18;
 
-# Verifier context (see header note). Device identity matches the
-# write_envelope.py defaults; the anti-rollback floors are PERSISTENT -
-# floor_required_*(class) from floor_store.ghl (build-time default 1 per
-# class, ratcheted forward by every accepted envelope's signed monotonic
-# fields and persisted across boots).
-const GATE_DEVICE_ID = 1;
+# Verifier context (see header note). The anti-rollback floors are PERSISTENT
+# (floor_store.ghl). Device identity is no longer pinned to 1:
+# gate_device_id_init() (kmain K5) derives a REAL per-machine id from several
+# CPUID leaves. Build-time artifacts are device-AGNOSTIC (TARGET_DEVICE
+# EXACT == GATE_DEVICE_WILDCARD); an envelope naming a concrete device must
+# EXACT-match this machine's derived id. See gate_device_for_target(). Until
+# init runs (host eval, no CPUID), gate_device_id() answers the wildcard.
+const GATE_DEVICE_WILDCARD = 1;  # device-agnostic placeholder (write_envelope.py)
 const GATE_DEVICE_CLASS = 0;
 
 # Verifier-clock floor: 2026-01-01 00:00:00 UTC. The clock can never answer
@@ -194,11 +208,31 @@ data gate_quorum_changes: 1 x 4; # accepted quorum changes (observability)
 data kquorum_present: 1;
 data kquorum_rc: 1 x 4;
 
+# Staged per-class artifact verdict latches (driver / config / policy).
+data kdriver_present: 1;
+data kdriver_rc: 1 x 4;
+data kconfig_present: 1;
+data kconfig_rc: 1 x 4;
+data kpolicy_present: 1;
+data kpolicy_rc: 1 x 4;
+
 # Verifier wallclock (unix seconds). 0 = no RTC sample bound yet -> the
 # floor is answered. Forward-ratchet only: see gate_time_set.
 data gate_now_unix: 1 x 8;
 
-# Serial strings.
+# Real per-machine device identity (CPUID-derived; gate_device_id_init).
+data gate_dev_id: 1 x 4;
+data gate_dev_init: 1;
+cfg "ENABLE_DEBUG_SERIAL" {
+data s_devid: 13 = [91,68,69,86,73,68,93,32,105,100,61,0,0];
+}
+
+# Serial strings. Debug-only: these carry bracketed diagnostic tags
+# ([SYSSIG]/[KERNSIG]/[UPDATE]/[QUORUM]/...) that the release-artifact scan
+# (tools/security/check_release_artifacts.py) forbids in a public image, so they
+# are gated out of a -Release build (no ENABLE_DEBUG_SERIAL). Every &s_* use site
+# below is wrapped in the same cfg guard.
+cfg "ENABLE_DEBUG_SERIAL" {
 data s_syssig_ok:   16 = [91,83,89,83,83,73,71,93,32,111,107,32,99,61,0];  # "[SYSSIG] ok c="
 data s_syssig_rc:   14 = [91,83,89,83,83,73,71,93,32,114,99,61,0];         # "[SYSSIG] rc="
 data s_upd_none:    15 = [91,85,80,68,65,84,69,93,32,110,111,110,101,0];   # "[UPDATE] none"
@@ -208,8 +242,12 @@ data s_qch_none:    15 = [91,81,85,79,82,85,77,93,32,110,111,110,101,0];    # "[
 data s_qch_accept:  22 = [91,81,85,79,82,85,77,93,32,97,99,99,101,112,116,101,100,32,107,61,0];  # "[QUORUM] accepted k="
 data s_qch_reject:  23 = [91,81,85,79,82,85,77,93,32,114,101,106,101,99,116,101,100,32,114,99,61,0];  # "[QUORUM] rejected rc="
 data s_rtcnow:      15 = [91,82,84,67,78,79,87,93,32,110,111,119,61,0];     # "[RTCNOW] now="
+data s_class_none:   16 = [91,67,76,65,83,83,93,32,107,61,0,0,0,0,0,0];
+data s_class_accept: 22 = [91,67,76,65,83,83,93,32,97,99,99,101,112,116,101,100,32,107,61,0,0,0];
+data s_class_reject: 22 = [91,67,76,65,83,83,93,32,114,101,106,101,99,116,101,100,32,114,99,61,0,0];
 data s_kernsig_ok:  18 = [91,75,69,82,78,83,73,71,93,32,111,107,32,110,61,0];  # "[KERNSIG] ok n="
 data s_kernsig_rc:  15 = [91,75,69,82,78,83,73,71,93,32,114,99,61,0];          # "[KERNSIG] rc="
+}
 data kimg_digest:   32;          # SHA-256 of the pristine KERNEL.BIN bytes
 
 # Declared-field scratch (filled by gate_read_declared_quorum: the signed
@@ -267,7 +305,7 @@ fn gate_rd_u32(p) {
 }
 
 fn envelope_gate_abi_version() {
-    return 4;
+    return 5;
 }
 
 # ---------------------------------------------------------------------------
@@ -286,9 +324,11 @@ fn gate_time_set(now) {
     let v = now;
     if v < GATE_TIME_FLOOR { v = GATE_TIME_FLOOR; }
     if v > lq(&gate_now_unix) { sq(&gate_now_unix, v); }
-    serial_puts(&s_rtcnow);
-    call ser_print_hex64(rdi: lq(&gate_now_unix));
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_rtcnow);
+        call ser_print_hex64(rdi: lq(&gate_now_unix));
+        serial_crlf();
+    }
     return 0;
 }
 
@@ -296,6 +336,74 @@ fn gate_time_now() {
     let now = lq(&gate_now_unix);
     if now == 0 { return GATE_TIME_FLOOR; }
     return now;
+}
+
+# Real per-machine device identity (Track 2: device_id no longer pinned to 1).
+fn gate_dev_mix(acc, word) {
+    return ((acc ^ (word & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF;
+}
+
+fn gate_device_id_init() {
+    if lb(&gate_dev_init) != 0 { return lw(&gate_dev_id); }
+    let acc = 2166136261;
+    acc = gate_dev_mix(acc, cpuid_eax(0));
+    acc = gate_dev_mix(acc, cpuid_ebx(0));
+    acc = gate_dev_mix(acc, cpuid_edx(0));
+    acc = gate_dev_mix(acc, cpuid_ecx(0));
+    acc = gate_dev_mix(acc, cpuid_eax(1));
+    acc = gate_dev_mix(acc, cpuid_ecx(1));
+    acc = gate_dev_mix(acc, cpuid_edx(1));
+    let extmax = cpuid_eax(0x80000000);
+    if extmax >= 0x80000004 {
+        let leaf = 0x80000002;
+        while leaf <= 0x80000004 {
+            acc = gate_dev_mix(acc, cpuid_eax(leaf));
+            acc = gate_dev_mix(acc, cpuid_ebx(leaf));
+            acc = gate_dev_mix(acc, cpuid_ecx(leaf));
+            acc = gate_dev_mix(acc, cpuid_edx(leaf));
+            leaf = leaf + 1;
+        }
+    }
+    acc = acc & 0xFFFFFFFF;
+    if acc == 0 { acc = 0x9E3779B9; }
+    if acc == GATE_DEVICE_WILDCARD { acc = 0x9E3779B9; }
+    sw(&gate_dev_id, acc);
+    sb(&gate_dev_init, 1);
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_devid);
+        call ser_print_hex64(rdi: acc);
+        serial_crlf();
+    }
+    return acc;
+}
+
+fn gate_device_id() {
+    if lb(&gate_dev_init) == 0 { return GATE_DEVICE_WILDCARD; }
+    return lw(&gate_dev_id);
+}
+
+fn gate_envelope_target_value(base) {
+    let header_len = gate_rd_u16(base + 12);
+    let p = base + ENV_HEADER_FIXED;
+    let hdr_end = base + header_len;
+    let out = 0;
+    while p < hdr_end {
+        let id_width = lb(p);
+        let field_id = envelope_rd_scalar(p + 1, id_width);
+        let len_width = lb(p + 1 + id_width);
+        let field_len = envelope_rd_scalar(p + 2 + id_width, len_width);
+        let vptr = p + 2 + id_width + len_width;
+        if field_id == 3 { out = gate_rd_u32(vptr + 2); }
+        p = vptr + field_len;
+    }
+    return out;
+}
+
+fn gate_device_for_target(base) {
+    if gate_envelope_target_value(base) == GATE_DEVICE_WILDCARD {
+        return GATE_DEVICE_WILDCARD;
+    }
+    return gate_device_id();
 }
 
 # ---------------------------------------------------------------------------
@@ -404,6 +512,7 @@ fn artifact_gate_admit(base, total_len, expected_type) {
     let req_epo = floor_required_epoch(expected_type);
 
     let vnow = gate_time_now();
+    let dev = gate_device_for_target(base);
     let rc = 0;
     if gate_cache_find(&gate_env_digest) != 0 {
         # Threshold signatures over these exact bytes already verified this
@@ -411,10 +520,10 @@ fn artifact_gate_admit(base, total_len, expected_type) {
         # the validity window against the LIVE clock and the LIVE floors - a
         # cached artifact can still expire or fall below a ratcheted floor).
         sw(&gate_stat_hits, lw(&gate_stat_hits) + 1);
-        rc = envelope_verify(base, total_len, &gate_payload_digest, vnow, GATE_DEVICE_ID, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
+        rc = envelope_verify(base, total_len, &gate_payload_digest, vnow, dev, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
     } else {
         sw(&gate_stat_checks, lw(&gate_stat_checks) + 1);
-        rc = envelope_verify_signed(base, total_len, &gate_payload_digest, vnow, GATE_DEVICE_ID, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
+        rc = envelope_verify_signed(base, total_len, &gate_payload_digest, vnow, dev, GATE_DEVICE_CLASS, req_ver, req_ctr, req_epo);
         if rc == 0 { gate_cache_insert(&gate_env_digest); }
     }
     if rc != 0 { return rc; }
@@ -484,7 +593,7 @@ fn quorum_change_admit(base, total_len) {
     # context = the POLICY class's persistent floors (this call site only
     # admits ART_POLICY, enforced right below).
     sw(&gate_stat_checks, lw(&gate_stat_checks) + 1);
-    let rc = envelope_verify_signed(base, total_len, &gate_payload_digest, gate_time_now(), GATE_DEVICE_ID, GATE_DEVICE_CLASS, floor_required_version(ART_POLICY), floor_required_counter(ART_POLICY), floor_required_epoch(ART_POLICY));
+    let rc = envelope_verify_signed(base, total_len, &gate_payload_digest, gate_time_now(), gate_device_for_target(base), GATE_DEVICE_CLASS, floor_required_version(ART_POLICY), floor_required_counter(ART_POLICY), floor_required_epoch(ART_POLICY));
     if rc != 0 { return rc; }
     if gate_rd_u16(base + 6) != ART_POLICY { return GATE_ERR_CALLER_TYPE; }
 
@@ -543,31 +652,39 @@ fn boot_quorum_check() {
     if base == 0 {
         sb(&kquorum_present, 0);
         sw(&kquorum_rc, 0);
-        serial_puts(&s_qch_none);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_qch_none);
+            serial_crlf();
+        }
         return;
     }
     sb(&kquorum_present, 1);
     let rc = quorum_change_admit(base, size);
     sw(&kquorum_rc, rc);
     if rc == 0 {
-        serial_puts(&s_qch_accept);
-        call ser_print_hex64(rdi: lw(&gate_quorum_changes));
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_qch_accept);
+            call ser_print_hex64(rdi: lw(&gate_quorum_changes));
+            serial_crlf();
+        }
         return;
     }
-    serial_puts(&s_qch_reject);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_qch_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
 # Boot-chain call site (kmain K5). FAIL-CLOSED.
 # ---------------------------------------------------------------------------
 fn syssig_panic(code, rc) {
-    serial_puts(&s_syssig_rc);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_syssig_rc);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
     kernel_panic_canary(code, &syssig_verify_boot, code);
 }
 
@@ -597,9 +714,11 @@ fn syssig_verify_boot() {
     if rc != 0 {
         syssig_panic(PANIC_SYSSIG_REJECTED, rc);
     }
-    serial_puts(&s_syssig_ok);
-    call ser_print_hex64(rdi: lw(&gate_stat_hits));
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_syssig_ok);
+        call ser_print_hex64(rdi: lw(&gate_stat_hits));
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -616,9 +735,11 @@ fn syssig_verify_boot() {
 # persistent floor) is a boot panic, not a boot.
 # ---------------------------------------------------------------------------
 fn kernsig_panic(code, rc) {
-    serial_puts(&s_kernsig_rc);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_kernsig_rc);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
     kernel_panic_canary(code, &kernel_env_verify_boot, code);
 }
 
@@ -649,9 +770,11 @@ fn kernel_env_verify_boot() {
     if gate_ct_memeq(base + header_len, &kimg_digest, KERNSIG_PAYLOAD_BYTES) == 0 {
         kernsig_panic(PANIC_KERNSIG_MISMATCH, 0);
     }
-    serial_puts(&s_kernsig_ok);
-    call ser_print_hex64(rdi: klen);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_kernsig_ok);
+        call ser_print_hex64(rdi: klen);
+        serial_crlf();
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -663,8 +786,10 @@ fn boot_update_check() {
     if base == 0 {
         sb(&kupdate_present, 0);
         sw(&kupdate_rc, 0);
-        serial_puts(&s_upd_none);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_upd_none);
+            serial_crlf();
+        }
         return;
     }
     sb(&kupdate_present, 1);
@@ -674,11 +799,57 @@ fn boot_update_check() {
         # Verdict only: staging/commit (write-back + reboot) is the next
         # Update System increment. Until then an accepted artifact is merely
         # latched; a rejected or unsigned one is unreachable by construction.
-        serial_puts(&s_upd_accept);
-        serial_crlf();
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_upd_accept);
+            serial_crlf();
+        }
         return;
     }
-    serial_puts(&s_upd_reject);
-    call ser_print_hex64(rdi: rc);
-    serial_crlf();
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_upd_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
+}
+
+# Staged per-class artifact call sites (kmain K5): exercise DRIVER/CONFIG/
+# POLICY classes through the same gate as boot/update. Optional files; verdict
+# latched + logged. Closes the "driver/config/policy have no loaded artifacts"
+# residual. Applying an accepted artifact is a later increment.
+fn boot_class_one(base, size, expected_type, present_p, rc_p) {
+    if base == 0 {
+        sb(present_p, 0);
+        sw(rc_p, 0);
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_class_none);
+            call ser_print_hex64(rdi: expected_type);
+            serial_crlf();
+        }
+        return;
+    }
+    sb(present_p, 1);
+    let rc = artifact_gate_admit(base, size, expected_type);
+    sw(rc_p, rc);
+    if rc == 0 {
+        cfg "ENABLE_DEBUG_SERIAL" {
+            serial_puts(&s_class_accept);
+            call ser_print_hex64(rdi: expected_type);
+            serial_crlf();
+        }
+        return;
+    }
+    cfg "ENABLE_DEBUG_SERIAL" {
+        serial_puts(&s_class_reject);
+        call ser_print_hex64(rdi: rc);
+        serial_crlf();
+    }
+}
+
+fn boot_artifact_class_check() {
+    boot_class_one(lq(VBE_INFO + VBE_DRVENV_BASE_OFF), lq(VBE_INFO + VBE_DRVENV_SIZE_OFF),
+                   ART_DRIVER, &kdriver_present, &kdriver_rc);
+    boot_class_one(lq(VBE_INFO + VBE_CFGENV_BASE_OFF), lq(VBE_INFO + VBE_CFGENV_SIZE_OFF),
+                   ART_CONFIG, &kconfig_present, &kconfig_rc);
+    boot_class_one(lq(VBE_INFO + VBE_POLENV_BASE_OFF), lq(VBE_INFO + VBE_POLENV_SIZE_OFF),
+                   ART_POLICY, &kpolicy_present, &kpolicy_rc);
 }

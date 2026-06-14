@@ -84,6 +84,22 @@ guid_spp:
     dw 0x0b75, 0x11d5
     db 0x9a, 0x4f, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d
 
+; EFI_RNG_PROTOCOL_GUID 3152bca5-eade-433d-862e-c01cdc291f44
+guid_rng:
+    dd 0x3152bca5
+    dw 0xeade, 0x433d
+    db 0x86, 0x2e, 0xc0, 0x1c, 0xdc, 0x29, 0x1f, 0x44
+
+; EFI_HASH2_PROTOCOL and EFI_HASH_ALGORITHM_SHA256_GUID (UEFI 2.10, 37.4).
+guid_hash2:
+    dd 0x55b1d734
+    dw 0xc5e1, 0x49db
+    db 0x96, 0x47, 0xb1, 0x6a, 0xfb, 0x0e, 0x30, 0x5b
+guid_hash_sha256:
+    dd 0x51aa59de
+    dw 0xfdf2, 0x4ea3
+    db 0xbc, 0x63, 0x87, 0x5f, 0xb7, 0x84, 0x2e, 0xe9
+
 ; ============================================================================
 ; UCS-2 file paths
 ; ============================================================================
@@ -96,7 +112,12 @@ s_syssig_path:  ustr "\EFI\BOOT\SYSSIG.ENV"
 s_kupdate_path: ustr "\EFI\BOOT\KUPDATE.ENV"
 s_kquorum_path: ustr "\EFI\BOOT\KQUORUM.ENV"
 s_kernenv_path: ustr "\EFI\BOOT\KERNEL.ENV"
+s_drvenv_path:  ustr "\EFI\BOOT\DRIVER.ENV"
+s_cfgenv_path:  ustr "\EFI\BOOT\CONFIG.ENV"
+s_polenv_path:  ustr "\EFI\BOOT\POLICY.ENV"
+%ifndef RELEASE_BUILD
 s_klog_path:    ustr "\KLOG.TXT"
+%endif
 
 ; FAT32 8.3 path components for \EFI\BOOT\DATA.IMG extent resolution.
 s_efi_83:       db 'EFI     ', '   '
@@ -112,6 +133,9 @@ v_systab:      dq 0
 v_bs:          dq 0
 v_gop:         dq 0
 v_spp:         dq 0
+v_rng:         dq 0
+v_hash2:       dq 0
+v_hash_output: times 64 db 0
 v_fb:          dq 0
 v_scrw:        dd 0
 v_scrh:        dd 0
@@ -135,6 +159,8 @@ v_fixup_src:    dq 0
 v_fixup_count:  dq 0
 v_entry_off:    dq 0
 v_kslide:       dq 0
+v_kaslr_entropy: times 4 dq 0
+v_kaslr_entropy_valid: db 0
 
 ; --- Phase 1b: storage extent resolution scratch -------------------------
 ; Populated by resolve_data_img_extents. Once Phase 2/3 land (NVMe / USB-MSC)

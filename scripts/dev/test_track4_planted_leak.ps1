@@ -62,8 +62,8 @@
 #     property, which is a sufficient and testable proxy.
 #
 # USAGE
-#   pwsh scripts/test/test_track4_planted_leak.ps1
-#   pwsh scripts/test/test_track4_planted_leak.ps1 -SkipBuild
+#   pwsh scripts/dev/test_track4_planted_leak.ps1
+#   pwsh scripts/dev/test_track4_planted_leak.ps1 -SkipBuild
 #
 # EXIT 0 = all barriers confirmed active / leak cannot compose into elevation.
 # Non-zero = a regression in the anti-elevation scaffolding.

@@ -30,14 +30,20 @@
 ; FAT32 DATA.IMG extent probing while firmware block I/O is available.
 %include "src/boot/uefi_loader_storage_extents.inc"
 
-; Previous-boot kernel-log flush to the ESP.
+; Previous-boot kernel-log flush is a development-only persistence channel.
+%ifndef RELEASE_BUILD
 %include "src/boot/uefi_loader_klog.inc"
+%endif
 
 ; Paging setup, pointer protocol discovery, ExitBootServices, and E820 publish.
 %include "src/boot/uefi_loader_paging_exit.inc"
 
 ; GDT, protocol GUIDs, UCS-2 paths, and loader variables.
 %include "src/boot/uefi_loader_data.inc"
+
+%ifdef RELEASE_BUILD
+%include "build/loader_manifest.inc"
+%endif
 
 ; Raw-size padding and minimal .reloc section.
 %include "src/boot/uefi_loader_image_tail.inc"

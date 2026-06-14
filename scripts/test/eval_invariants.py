@@ -276,6 +276,14 @@ def _same_domain_or_not_signing(signer_domain, measured_domain, signs_measuremen
     return 1 if signs_measurement == 0 or signer_domain == measured_domain else 0
 
 
+def _planted_cap_hmac(dump_canary, live_canary, slot, mask, planted_tag, accepted):
+    fold = ((mask >> 8) & 0xFF) ^ (mask & 0xFF)
+    live_tag = (live_canary ^ slot ^ fold ^ 0x5C) & 0xFF
+    if accepted == 0:
+        return 1
+    return 1 if planted_tag == live_tag else 0
+
+
 def exhaustive_specs(mod):
     """The bounded theorem table for the current Track-3 invariants."""
     auth_memory = mod.consts['AUTH_MEMORY_GRANT']
@@ -419,6 +427,17 @@ def exhaustive_specs(mod):
                       for live_perm in AUTH_SPACE
                       for dispatches in BOOL_SPACE),
             'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1]) else 0,
+        },
+        'INV-PLANTED-CAP-HMAC-REJECTED': {
+            'predicate': 'inv_planted_cap_hmac_rejected',
+            'cases': ((dump_c, live_c, slot, mask, tag, accepted)
+                      for dump_c in (0x00, 0x11, 0x7F)
+                      for live_c in (0x11, 0x22, 0x7F)
+                      for slot in (0, 3, 7)
+                      for mask in (0x0001, 0x0801, 0xFFFF)
+                      for tag in AUTH_SPACE
+                      for accepted in BOOL_SPACE),
+            'expect': lambda args: _planted_cap_hmac(*args),
         },
         # Track 2 (signed everything) anti-rollback invariants. Ordering, not
         # equality: an admitted artifact must meet the floor, and the floor only

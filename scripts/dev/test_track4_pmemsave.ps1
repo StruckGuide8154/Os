@@ -62,9 +62,9 @@
 #   and is documented as such in docs/track4-ram-secure-erasure-todo.md Part C.
 #
 # USAGE
-#   pwsh scripts/test/test_track4_pmemsave.ps1
-#   pwsh scripts/test/test_track4_pmemsave.ps1 -SkipBuild
-#   pwsh scripts/test/test_track4_pmemsave.ps1 -SkipBuild -GuestMemMB 256
+#   pwsh scripts/dev/test_track4_pmemsave.ps1
+#   pwsh scripts/dev/test_track4_pmemsave.ps1 -SkipBuild
+#   pwsh scripts/dev/test_track4_pmemsave.ps1 -SkipBuild -GuestMemMB 256
 #
 # EXIT 0 = post-wipe dump contains no must-vanish secrets.
 # Non-zero = scrub regression or boot failure.

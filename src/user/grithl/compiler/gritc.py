@@ -216,6 +216,25 @@ def parse(toks,path):
         elif t.v=="extern":
             p.eat(); nm=p.eat("id").v; p.match(";")
             decls.append(node("extern",name=nm))
+        elif t.v=="cfg":
+            # Top-level build-config guard: `cfg "NAME" { <data decls> }` wraps
+            # the contained top-level `data` declarations in `%ifdef NAME ...
+            # %endif`; `cfg !"NAME" { ... }` uses %ifndef. Lets debug-only kernel
+            # data (e.g. serial diagnostic strings) be stripped from a -Release
+            # image instead of leaking into the public binary. The inner decls
+            # are parsed by the normal top-level loop; the matching `}` closes
+            # the guard. Intended for `data` only (no nesting).
+            p.eat()
+            neg=False
+            if p.peek().k=="!": p.eat(); neg=True
+            nm=p.eat("str").v
+            p.eat("{")
+            directive="%ifndef" if neg else "%ifdef"
+            decls.append(node("cfgguard",text=f"{directive} {nm}"))
+        elif t.k=="}":
+            # Closes a top-level `cfg "..." { ... }` guard (see above).
+            p.eat()
+            decls.append(node("cfgguard",text="%endif"))
         elif t.v=="unsafe":
             p.eat(); cap=p.eat("id").v; p.match(";")
             decls.append(node("unsafe",cap=cap,line=t.line))
@@ -693,7 +712,47 @@ def _operand_safe_for_target(op, target_reg):
             return False
     return True
 
-def _peephole(lines, extended=True):
+_ZERO_REG_RE = re.compile(r"^mov (r[a-z]{2}|r(?:8|9|1[0-5])), 0$")
+_REG64_TO_32 = {"rax":"eax","rcx":"ecx","rdx":"edx","rbx":"ebx","rsi":"esi",
+                "rdi":"edi","rbp":"ebp","rsp":"esp","r8":"r8d","r9":"r9d",
+                "r10":"r10d","r11":"r11d","r12":"r12d","r13":"r13d",
+                "r14":"r14d","r15":"r15d"}
+# Mnemonics that READ the arithmetic flags - converting a preceding `mov reg,0`
+# to `xor` (which writes flags) ahead of one of these would change behavior.
+_FLAGS_READERS = re.compile(
+    r"^(j[a-z]+|set[a-z]+|cmov[a-z]+|adc|sbb|rcl|rcr|lahf|pushfq?|into)\b")
+# Mnemonics that fully overwrite the arithmetic flags: reaching one before any
+# reader proves the flags were dead, so the xor rewrite is safe.
+_FLAGS_WRITERS = re.compile(
+    r"^(add|sub|and|or|xor|test|cmp|neg|inc|dec|imul|mul|idiv|div|"
+    r"sar|sal|shl|shr|rol|ror)\b")
+
+def _zero_idiom_flags_dead(lines, start):
+    # True iff the arithmetic flags are dead at `lines[start]` (the line AFTER a
+    # `mov reg,0`), so replacing that mov with `xor reg32,reg32` is sound.
+    n = len(lines)
+    for k in range(start, n):
+        c = _code(lines[k]).strip()
+        if not c or c.startswith(";"):
+            continue
+        # A label, an unconditional jmp, or an unknown macro leaves the flag
+        # liveness ambiguous - be conservative and decline.
+        if c.endswith(":") or c.startswith("jmp ") or c.startswith("jmp\t"):
+            return False
+        if _FLAGS_READERS.match(c):
+            return False
+        if _FLAGS_WRITERS.match(c):
+            return True
+        # Flags are dead across a call/syscall/return by ABI (caller-clobbered;
+        # syscall loads RFLAGS into r11), and across the function-call macros.
+        head = c.split(None, 1)[0]
+        if head in ("call","syscall","ret","FN_CALL","FN_END","APP_SYSNO",
+                    "leave","sysret","iretq"):
+            return True
+        # mov/lea/movzx/movsx/push/pop/nop and friends are flag-transparent.
+    return False  # ran off the end with no resolution -> decline
+
+def _peephole(lines, extended=True, zero_idiom=False):
     # `extended=False` (--O0) limits this pass to the original single-round
     # A/B/C patterns so -O0 reproduces the historical byte-exact output for
     # debugging / byte-diffing. The D/E/F passes and the B/C/D fixpoint loop
@@ -882,6 +941,24 @@ def _peephole(lines, extended=True):
                     continue
         out.append(lines[i])
         i += 1
+
+    # Pass G (--O3+): `mov reg, 0` -> `xor reg32, reg32` (7 bytes -> 2) where the
+    # arithmetic flags are provably dead afterwards. Gated on zero_idiom so O0/O1
+    # output is unchanged.
+    if zero_idiom:
+        lines = out
+        out = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            m = _ZERO_REG_RE.match(_code(lines[i]).strip())
+            if m and _zero_idiom_flags_dead(lines, i + 1):
+                r32 = _REG64_TO_32[m.group(1)]
+                out.append(f"    xor {r32}, {r32}{_comment(lines[i])}")
+                i += 1
+                continue
+            out.append(lines[i])
+            i += 1
     return out
 
 # -------------------- function-level optimizer (lossless) --------------------
@@ -1156,8 +1233,15 @@ def _p_frame(seg, codes, addr_of_frame):
     has_neg_slot=any(_RBP_SLOT_RE.search(c) and "[rbp-" in c for c in codes)
     drop=set()
     if not has_neg_slot:
+        # Drop only the FRAME-ALLOCATION `sub rsp,N` (the one immediately after
+        # `mov rbp, rsp`), whose teardown is the rbp-relative `mov rsp, rbp`. A
+        # body-level `sub rsp,8` is NOT a frame allocation: it is the regalloc
+        # alignment pad balanced by an explicit `add rsp,8` (see
+        # _regalloc_one_fn). Dropping that here without its `add` would imbalance
+        # the stack and corrupt a callee-saved restore, so leave it alone.
         for k,c in enumerate(codes):
-            if c.startswith("sub rsp,"): drop.add(k)
+            if c=="mov rbp, rsp" and k+1<len(codes) and codes[k+1].startswith("sub rsp,"):
+                drop.add(k+1)
     # level 2
     bodytext=codes[lo:hi]
     has_call=any(c.startswith(("call ","FN_CALL")) or c=="call" or c.startswith("call_table")
@@ -1246,6 +1330,15 @@ def _optimize_functions(lines, target):
 # and each added push R is balanced by its pop R before the epilogue).
 
 _O2_CALLEE_SAVED=["rbx","r12","r13","r14","r15"]
+# Subset of callee-saved GPRs that the Grit kernel's syscall round-trip PROVABLY
+# preserves, so a value may live in one of these ACROSS a `syscall`/APP_SYSNO.
+# Established empirically by the boot-time XSCC self-test
+# (src/kernel/proc/syscall_xscc_selftest.inc, `XSCC A=0 B=0 PASS`): the dispatcher
+# restores user rbx/rbp/r12/r13/r14 on every exit path; r15 carries the slot id
+# and is CLOBBERED by design, so r15 is excluded. (rbp is the frame pointer and
+# is not part of the regalloc pool.) See memory:
+# xscc_cross_syscall_callee_saved_verified.
+_O2_SYSCALL_SAFE=["rbx","r12","r13","r14"]
 # All register spellings (any width) that map to a given canonical 64-bit reg,
 # for the "body never mentions R" freedom test.
 def _spellings_for_canon(canon):
@@ -1483,10 +1576,26 @@ def _regalloc_one_fn(seg, safe_callees=None):
     # cannot clobber a reg it never names). Promotion candidates are then
     # restricted to the intersection of all callees' preserved sets. syscall /
     # APP_SYSNO / indirect / extern / non-leaf targets still bail.
+    #
+    # GATE EXTENSION (cross-syscall promotion): a `syscall`/APP_SYSNO is NOT a
+    # disqualifier anymore. The XSCC boot self-test proved the kernel preserves
+    # rbx/r12/r13/r14 across a syscall round-trip (r15 clobbered = slot id). So
+    # when the body contains a syscall we simply RESTRICT promotion candidates to
+    # _O2_SYSCALL_SAFE (the proven-preserved subset) - a value kept in one of
+    # those survives the syscall with no extra spill. Indirect/bare/table calls
+    # still bail (unknown register behavior); direct same-unit calls still go
+    # through the safe_callees intersection.
     allowed_regs=set(_O2_CALLEE_SAVED)
+    has_syscall=False
     for c in codes[lo:hi]:
-        if c.startswith(("syscall","APP_SYSNO","call_table")) or c=="call":
+        if c.startswith("call_table") or c=="call":
             return seg
+        if c.startswith(("syscall","APP_SYSNO")):
+            has_syscall=True
+            allowed_regs&=set(_O2_SYSCALL_SAFE)
+            if not allowed_regs:
+                return seg
+            continue
         if c.startswith(("call ","FN_CALL ")):
             # `call name` / `FN_CALL name, argc` - FN_CALL is a pure compile-
             # time argc check followed by `call name` (src/include/trace.inc).
@@ -1533,6 +1642,54 @@ def _regalloc_one_fn(seg, safe_callees=None):
             continue                # out of registers -> memory fallback
         promote[slot]=chosen
         used_regs.add(chosen)
+    if not promote:
+        return seg
+    # PROFITABILITY GATE (instruction-line cost model): a promotion that needs a
+    # NEW callee-save register pays `push R`+`pop R` (2 lines, +2 more if it tips
+    # the total callee-push count odd and forces a balanced sub/add rsp,8). Each
+    # promoted slot only SAVES a line when a rewritten mov collapses to `mov R,R`
+    # (dropped); mem->reg substitution is 1:1 in lines (a byte win, not a line
+    # win). Stack-machine spill/reload slots produce few such collapses, so an
+    # unguarded new-save promotion REGRESSES the line count. Estimate each slot's
+    # dropped-line yield; keep a new-save register only when the slots assigned to
+    # it cover its push/pop overhead. Slots that don't make the cut fall back to
+    # their memory home. Registers ALREADY saved (already_saved) cost nothing, so
+    # promoting into them is always taken (pure byte win, line-neutral).
+    def _slot_access_count(slot):
+        # Number of slot store/reload movs that become register-form movs. Each is
+        # a memory access turned into a register access: line-neutral but a byte
+        # win (mem-form mov ~4-7B -> reg-form mov ~3B) and a reload-traffic win.
+        n=0
+        for ln in whole:
+            cs=_code(ln).strip()
+            m=_MOV2_RE.match(cs)
+            if not m: continue
+            dest=m.group(1).strip(); src=m.group(2).strip()
+            if dest==slot or src==slot: n+=1
+        return n
+    # The gate is scoped to the NEWLY-enabled cross-syscall path only. For leaf
+    # and same-unit-call fns the prior allocator promoted unconditionally and that
+    # is the accepted O0/O1/O2 baseline (and is byte-identity-load-bearing); do not
+    # second-guess it here. Only syscall-containing bodies (whose new-save pushes
+    # would otherwise regress the line count, see model above) get filtered.
+    # Byte cost model: each rewritten slot access turns a memory-form mov into a
+    # register-form mov, saving ~3 bytes (and one memory access). A NEW callee-
+    # save reg costs `push R`+`pop R` (~2 bytes) and, if it tips the callee-push
+    # count odd, a balanced sub/add rsp,8 (~8 bytes). Promotion into an
+    # ALREADY-saved syscall-safe reg is free, so always taken. A new-save reg is
+    # taken only when its slots' combined accesses pay back its push/pop+alignment
+    # bytes (>=4 accesses comfortably covers the worst case incl. alignment).
+    if has_syscall:
+        by_reg={}
+        for slot,r in promote.items():
+            by_reg.setdefault(r,[]).append(slot)
+        for r,rslots in list(by_reg.items()):
+            if r in already_saved:
+                continue            # free to use, always profitable
+            accesses=sum(_slot_access_count(s) for s in rslots)
+            if accesses<4:          # new save not worth its push/pop+alignment
+                for s in rslots:
+                    del promote[s]; used_regs.discard(r)
     if not promote:
         return seg
     new_saves=[r for r in _O2_CALLEE_SAVED if r in used_regs and r not in already_saved]
@@ -1620,15 +1777,73 @@ def _regalloc_one_fn(seg, safe_callees=None):
     body=body[:pops_at]+pop_lines+body[pops_at:]
     return frame+push_lines+spills+body
 
+# -------------------- QUBO export hook (advisory, quantum-ready) --------------
+# Register allocation = graph coloring; block/function layout = partition. These
+# are clean QUBO/Max-Cut instances. When GRITC_QUBO_OUT is set, we EXPORT the
+# per-function register-allocation instance (promotable slots, candidate
+# callee-saved colors, and the body-blocked colors that act as the interference
+# constraints) as JSON, so an external solver (e.g. QAOA) can later propose an
+# assignment. This is ADVISORY ONLY: the classical greedy allocator below is the
+# default and the sole producer of emitted code, and remains the verifiable
+# baseline. No quantum dependency enters the build. A solver's proposal would be
+# replayed through the exact same lossless gates before it could affect output.
+def _qubo_export_regalloc(segs):
+    out_path=os.environ.get("GRITC_QUBO_OUT")
+    if not out_path:
+        return
+    instances=[]
+    for is_fn,chunk in segs:
+        if not is_fn: continue
+        name=_o2_fn_name(chunk)
+        if not name: continue
+        codes=[_code(l).strip() for l in chunk]
+        body=_body_codes(codes)
+        if body is None: continue
+        lo,hi=body
+        slots=sorted(_o2_collect_neg_slots(" ".join(codes)),
+                     key=lambda s:int(re.search(r"-(\d+)",s).group(1)))
+        if not slots: continue
+        # candidate colors = callee-saved regs free in the body (interference);
+        # a slot may take any free color, distinct colors per simultaneously-live
+        # slot (whole-fn promotion => all promoted slots are mutually exclusive
+        # over the register file).
+        free=[r for r in _O2_CALLEE_SAVED if _o2_reg_free_in_body(r, codes, lo, hi)]
+        instances.append({
+            "fn": name,
+            "variables": slots,            # one var per promotable slot
+            "colors": free,                # callee-saved registers available
+            "mutual_exclusion": True,      # distinct color per slot (whole-fn live)
+            "note": "graph-coloring QUBO: minimize unassigned slots s.t. distinct "
+                    "colors; advisory, classical greedy is the verified baseline",
+        })
+    try:
+        with open(out_path,"w",encoding="utf-8",newline="\n") as f:
+            json.dump({"problem":"register_allocation_coloring",
+                       "instances":instances}, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
+
 def _regalloc_functions(lines, target):
     if target!="user":
         return lines
     # Pass 1: regalloc every function under the base (leaf-only) gate. Collect
     # the FINAL text of each same-unit leaf fn so pass 2 can prove which
     # callee-saved regs each one preserves.
+    def _is_leaf_fn(chunk):
+        codes=[_code(l).strip() for l in chunk]
+        body=_body_codes(codes)
+        if body is None: return False
+        return _o2_is_leaf(codes,*body)
     segs=[]
     for is_fn,chunk in _fn_segments(lines):
-        segs.append((is_fn, _regalloc_one_fn(chunk) if is_fn else chunk))
+        # Pass 1 handles LEAF fns only (no safe_callees needed). Call/syscall fns
+        # are deferred to pass 2 so they see the leaf-preservation facts AND are
+        # never double-processed (pass 2 retries every non-leaf fn).
+        if is_fn and _is_leaf_fn(chunk):
+            chunk=_regalloc_one_fn(chunk)
+        segs.append((is_fn, chunk))
+    _qubo_export_regalloc(segs)
     safe_callees={}
     for is_fn,chunk in segs:
         if not is_fn: continue
@@ -1651,6 +1866,298 @@ def _regalloc_functions(lines, target):
             if body is not None and not _o2_is_leaf(codes,*body):
                 chunk=_regalloc_one_fn(chunk, safe_callees)
         out.extend(chunk)
+    return out
+
+# -------------------- Phase 3: O3 density passes (--O3, lossless) -------------
+# O3 runs strictly AFTER the O0/O1 cleanup and the O2 register allocator, on the
+# already-allocated instruction stream. It is opt-in (--O3) and never alters the
+# O0/O1/O2 outputs, so KERNEL.BIN byte-identity (which expects --O0) and the
+# existing O2 builds are unaffected.
+#
+# Every O3 rewrite is the SAME class of provably-semantics-preserving local
+# transformation the Phase-1 passes already use - it just removes the deliberate
+# O0/O1 conservatism that left two large, fully-dead idioms standing in
+# syscall-wrapper bodies (the dominant shape in real apps):
+#
+#   (A) cross-register store-forward + dead-store elimination
+#         mov [rbp-K], Rsrc      ; param spill
+#         ...                     ; Rsrc and slot both unchanged
+#         mov Rdst, [rbp-K]       ; reload into a DIFFERENT reg
+#       -> the reload becomes  mov Rdst, Rsrc , and if the slot is then never
+#          read again the spill store is dead and is removed. _p_value_forward
+#          only forwarded reloads into the *same* register; this generalizes it
+#          to any destination, which is what unlocks the spill removal.
+#
+#   (B) dead callee-save elision
+#         push rbx / push r12 ... pop r12 / pop rbx
+#       removed when the body provably never names that register at any width.
+#       (_p_dead_callee_save already proves this; O0/O1 keep the pair as a
+#       compatibility bracket - O3 drops it once it is shown genuinely dead.)
+#
+# After (A)+(B) the frame is usually empty, so the existing _p_frame level-2
+# elision collapses `push rbp / mov rbp,rsp / sub rsp,N` too. The passes are run
+# to a fixpoint per function. NOTE on 16-byte alignment: dropping a *balanced*
+# even-count push set (B removes pairs; A removes no pushes) preserves rsp parity
+# at every body call/syscall, and _p_frame only fully elides the frame when the
+# body has no call/push/pop at all, so alignment obligations are never broken.
+
+def _o3_store_forward(seg, codes):
+    # Generalized store-forward: track, per slot, the register that last stored
+    # into it (reg currently equal to slot's memory). Rewrite a reload
+    # `mov Rdst, [slot]` into `mov Rdst, Rsrc` when Rsrc still holds the value.
+    # Invalidate a slot's tracked source when that source reg is written, when
+    # the slot is overwritten by a non-reg value, or at any control-flow break.
+    slot_src={}      # slot -> canon reg that currently equals it (and its spelling)
+    rewrites={}      # idx -> new line text
+    for idx,c in enumerate(codes):
+        m=_MOV2_RE.match(c)
+        if m:
+            dest=m.group(1).strip(); src=m.group(2).strip()
+            d_can=_canon(dest); s_can=_canon(src)
+            # store: mov [slot], R64
+            if _RBP_SLOT_ONLY_RE.match(dest) and s_can:
+                slot=dest
+                # storing into slot: slot now equals src reg (record its spelling)
+                slot_src[slot]=(s_can, src)
+                # any slot previously sourced from this same reg is unaffected
+                # (the reg's value is what we just stored); but a write to the reg
+                # later will invalidate via _writes handling below.
+                continue
+            # reload: mov R64, [slot]
+            if d_can and _RBP_SLOT_ONLY_RE.match(src):
+                slot=src
+                rec=slot_src.get(slot)
+                if rec is not None:
+                    s_can2,s_spell=rec
+                    if s_can2==d_can:
+                        pass  # mov R, [slot] where R already == slot's reg; leave
+                              # to _p_value_forward / harmless. Still: rewrite to
+                              # self-mov would be dropped; keep simple, skip.
+                    else:
+                        cmt=_comment(seg[idx])
+                        rewrites[idx]=f"    mov {dest}, {s_spell}{cmt}"
+                    # after the reload, d_can also equals this slot
+                    slot_src[slot]=(d_can, dest) if False else rec
+                    # invalidate: d_can is now written, drop slots it sourced
+                    for sl in [s for s,(rc,_sp) in slot_src.items() if rc==d_can]:
+                        if sl!=slot: slot_src.pop(sl,None)
+                    continue
+                # unknown slot: writing d_can, fall through to invalidation
+            # plain reg<-x move into a reg: that reg is written -> invalidate
+            if d_can:
+                for sl in [s for s,(rc,_sp) in slot_src.items() if rc==d_can]:
+                    slot_src.pop(sl,None)
+                continue
+            # store of non-reg into a slot (imm/mem): slot no longer tracks a reg
+            if _RBP_SLOT_ONLY_RE.match(dest):
+                slot_src.pop(dest,None)
+                continue
+        w=_writes_reg_canons(c)
+        if w is None:
+            slot_src.clear()                     # label / unknown: clear
+        else:
+            for r in w:
+                if not r: continue
+                for sl in [s for s,(rc,_sp) in slot_src.items() if rc==r]:
+                    slot_src.pop(sl,None)
+    if not rewrites:
+        return seg, codes
+    seg2=[rewrites.get(k,ln) for k,ln in enumerate(seg)]
+    codes2=[(_code(rewrites[k]).strip() if k in rewrites else c)
+            for k,c in enumerate(codes)]
+    return seg2, codes2
+
+def _o3_one_fn(seg):
+    codes=[_code(l).strip() for l in seg]
+    addr_of_frame=_opt_fn_uses_addr_of_frame(codes)
+    if addr_of_frame:
+        return seg                               # never touch address-taken frames
+    # Iterate the local rewrites to a fixpoint: store-forward exposes dead
+    # stores, dead-store removal can leave a callee-save dead, dead-callee-save
+    # removal can leave the frame dead, etc.
+    for _ in range(8):
+        before=tuple(codes)
+        seg,codes=_o3_store_forward(seg,codes)
+        seg,codes=_p_value_forward(seg,codes)
+        seg,codes=_p_dead_store(seg,codes)
+        seg,codes=_p_dead_callee_save(seg,codes)
+        seg,codes=_p_frame(seg,codes,addr_of_frame)
+        seg,codes=_p_jmp_to_next(seg,codes)
+        if tuple(codes)==before:
+            break
+    return seg
+
+def _o3_optimize_functions(lines, target):
+    if target!="user":
+        return lines
+    out=[]
+    for is_fn,chunk in _fn_segments(lines):
+        out.extend(_o3_one_fn(chunk) if is_fn else chunk)
+    return out
+
+# -------------------- --O4 frameless dead callee-save elision --------------
+# Once Phase-1 frame-collapse removes `push rbp` from an empty-bodied wrapper,
+# the O3 dead-callee-save pass goes silent: its `_body_codes` helper uses
+# `push rbp` as the prologue anchor and bails without it, leaving the unused
+# `push rbx`/`push r12` ... `pop r12`/`pop rbx` brackets standing on every
+# frameless passthrough syscall wrapper (e.g. display_set_mode). This pass finds
+# the body without needing the frame anchor and drops the pair when the body
+# provably never names the register at any width. Same proof as
+# _p_dead_callee_save, just frame-anchor-independent.
+def _o4_body_span(codes):
+    # (lo, hi) over `codes`: lo = first line past the prologue (FN_BEGIN/FN_ARG,
+    # optional push rbp / mov rbp,rsp / sub rsp / [rbp-K] spills / push rbx /
+    # push r12), hi = the `.fn_end` label index. None if no epilogue label.
+    lo=0; n=len(codes)
+    _prologue=("push rbp","mov rbp, rsp","push rbx","push r12")
+    while lo<n:
+        c=codes[lo]
+        if (c.startswith(("FN_BEGIN","FN_ARG")) or c in _prologue
+                or c.startswith("sub rsp,")
+                or (_MOV2_RE.match(c) and _RBP_SLOT_ONLY_RE.match(
+                        _MOV2_RE.match(c).group(1).strip()))):
+            lo+=1; continue
+        break
+    for k in range(lo,n):
+        if codes[k].startswith(".fn_end") and codes[k].endswith(":"):
+            return lo,k
+    return None
+
+def _o4_dead_callee_save_one(seg):
+    codes=[_code(l).strip() for l in seg]
+    if _opt_fn_uses_addr_of_frame(codes):
+        return seg
+    span=_o4_body_span(codes)
+    if span is None:
+        return seg
+    lo,hi=span
+    bodytext=" ".join(codes[lo:hi])
+    drop=set()
+    for r in ("rbx","r12","r13","r14","r15"):
+        used=any(re.search(r"\b"+re.escape(sp)+r"\b", bodytext)
+                 for sp in _spellings_for_canon(r))
+        if used:
+            continue
+        # only drop a balanced pair (every push has its pop) to stay safe
+        pushes=[k for k,c in enumerate(codes) if c==f"push {r}"]
+        pops=[k for k,c in enumerate(codes) if c==f"pop {r}"]
+        if pushes and len(pushes)==len(pops):
+            drop.update(pushes); drop.update(pops)
+    if not drop:
+        return seg
+    return [ln for k,ln in enumerate(seg) if k not in drop]
+
+def _o4_frameless_cleanup(lines, target):
+    if target!="user":
+        return lines
+    out=[]
+    for is_fn,chunk in _fn_segments(lines):
+        out.extend(_o4_dead_callee_save_one(chunk) if is_fn else chunk)
+    return out
+
+# -------------------- --O4 dead-result (dead rax) elimination --------------
+# The stack machine materializes every expression's value in rax, including
+# expression STATEMENTS whose value is discarded: `sq(addr,v);` leaves a dead
+# `xor rax,rax` (the store builtin's "= 0" result), a discarded comparison
+# leaves a dead setcc/movzx, a discarded call-return leaves rax unused. When a
+# pure rax-producer is provably redefined ("killed") before any read - with no
+# intervening control flow, and (for the flag-setting `xor` form) no flag read -
+# it is dead and removed. Strictly local & conservative: a control-flow edge, a
+# label, an implicit rax reader (syscall/idiv/...), or any uncertainty KEEPS the
+# instruction, so a live value (incl. a function's rax return) is never dropped.
+# Gated on cg.o4 + user; O0/O1/O2/O3 streams never see it.
+_RAX_FAMILY=("rax","eax","ax","al","ah")
+_O4_FLAGS_READ_RE=re.compile(r"^(j[a-z]+|set[a-z]+|cmov[a-z]+|adc|sbb)\b")
+# Mnemonics that read rax implicitly (no textual "rax" operand) - never scan past
+# one without treating rax as live.
+_O4_IMPLICIT_RAX_READERS={"syscall","cqo","cdq","cdqe","cwde","idiv","imul",
+                          "mul","div"}
+
+def _o4_mentions_rax(text):
+    return any(re.search(r"\b"+t+r"\b", text) for t in _RAX_FAMILY)
+
+def _o4_split(c):
+    parts=c.split(None,1)
+    return (parts[0] if parts else ""), (parts[1] if len(parts)>1 else "")
+
+def _o4_is_stop(c):
+    # control-flow boundary: scanning must not cross it (conservative keep).
+    if c.endswith(":"):
+        return True
+    mn,_=_o4_split(c)
+    return mn=="ret" or mn=="jmp" or (mn.startswith("j") and re.fullmatch(r"j[a-z]+",mn) is not None)
+
+def _o4_kills_rax(c):
+    # Writes the whole rax WITHOUT reading it (a clean redefinition).
+    mn,ops=_o4_split(c)
+    opsj=ops.replace(" ","")
+    if mn in ("call","call_table") or c.startswith("FN_CALL"):
+        return not _o4_mentions_rax(ops)          # indirect `call [..rax..]` reads it
+    if c.startswith("APP_SYSNO"):
+        return True                               # expands to `mov rax, imm`
+    if mn=="xor" and opsj in ("rax,rax","eax,eax"):
+        return True
+    if mn in ("mov","movzx","movsxd","lea") and "," in ops:
+        dest,src=ops.split(",",1); dest=dest.strip(); src=src.strip()
+        if dest in ("rax","eax") and not _o4_mentions_rax(src):
+            return True
+    if mn=="pop" and ops.strip()=="rax":
+        return True
+    return False
+
+def _o4_reads_rax(c):
+    mn,_=_o4_split(c)
+    if mn in _O4_IMPLICIT_RAX_READERS:
+        return True
+    if not _o4_mentions_rax(c):
+        return False
+    if _o4_kills_rax(c):
+        return False                              # clean write, no read
+    return True
+
+def _o4_rax_producer(c):
+    # Removable pure rax-producer -> "flags" (sets flags) | "noflags" | None.
+    mn,ops=_o4_split(c)
+    opsj=ops.replace(" ","")
+    if mn=="xor" and opsj in ("rax,rax","eax,eax"):
+        return "flags"
+    if mn in ("mov","movzx","movsxd","lea") and "," in ops:
+        dest,src=ops.split(",",1); dest=dest.strip(); src=src.strip()
+        if dest in ("rax","eax") and not _o4_mentions_rax(src):
+            return "noflags"
+    return None
+
+def _o4_dead_rax_one(seg):
+    codes=[_code(l).strip() for l in seg]
+    n=len(codes); drop=set()
+    for i,c in enumerate(codes):
+        kind=_o4_rax_producer(c)
+        if kind is None:
+            continue
+        dead=False; j=i+1
+        while j<n:
+            cj=codes[j]
+            if _o4_is_stop(cj):
+                break                             # control flow: keep
+            if _o4_reads_rax(cj):
+                break                             # value is live
+            if kind=="flags" and _O4_FLAGS_READ_RE.match(cj):
+                break                             # our flags would be observed
+            if _o4_kills_rax(cj):
+                dead=True; break
+            j+=1
+        if dead:
+            drop.add(i)
+    if not drop:
+        return seg
+    return [ln for k,ln in enumerate(seg) if k not in drop]
+
+def _o4_dead_result_elim(lines, target):
+    if target!="user":
+        return lines
+    out=[]
+    for is_fn,chunk in _fn_segments(lines):
+        out.extend(_o4_dead_rax_one(chunk) if is_fn else chunk)
     return out
 
 def _contains_asm_stmt(stmts):
@@ -1715,7 +2222,7 @@ def _require_cap(cg, cap, what):
         return
     raise SyntaxError(f"{what} requires `unsafe {cap};`")
 
-def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False):
+def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False,o3=False,o4=False):
     global LAST_SIGS
     if forbid_asm:
         _enforce_no_asm(decls, "--forbid-asm")
@@ -1734,6 +2241,25 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     cg.embed=embed
     cg.src=src
     cg.target=target
+    # --O3 also unlocks register-targeted expression-tree codegen: side-effect-free
+    # leaf operands/args are evaluated directly into their destination register,
+    # skipping the stack-machine `push rax`/`pop REG` staging. Gated so O0/O1/O2
+    # emitted bytes are untouched (O0 stays the byte-identity reference).
+    cg.o3=bool(o3)
+    # --O4 (USER target only): AST-level inlining of expression-wrapper functions
+    # at their call sites + dead-function elimination of wrappers that end up
+    # called nowhere. This is the structural win that breaks the leaf-only
+    # register-allocator ceiling: a thin `fn f(a,b){ return syscall(N,a,b); }`
+    # otherwise costs a full frame + param home-slot spill/reload + call/ret
+    # that no lossless pass can remove (the frame is observable across the call).
+    # Inlining substitutes the wrapper's return expression directly into the
+    # caller (only when every arg is a side-effect-free leaf, so the substitution
+    # cannot duplicate or reorder side effects), letting the existing O3 leaf
+    # codegen marshal straight into ABI registers. It changes emitted bytes by
+    # design (and thus app MAC sigs) - O0 stays the byte-identity reference.
+    cg.o4=bool(o4)
+    cg._inlining=set()        # recursion guard (names currently being inlined)
+    cg._inlined_names=set()   # wrappers that were inlined at >=1 site
     # Source-line provenance is kernel-only: it is pure NASM comments (zero
     # machine-code cost), but gating it to kernel mode guarantees the ring-3
     # app blobs + their MAC signatures stay byte-identical and keeps the
@@ -1746,6 +2272,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     str_defs={}
     for d in decls:
         if d["k"]=="unsafe":
+            continue
+        if d["k"]=="cfgguard":
+            # Top-level `cfg` guard line (%ifdef/%ifndef/%endif) emitted inline
+            # into the data section so the wrapped `data` decls that follow in
+            # source order are bracketed by NASM build-config conditionals.
+            cg.data.append(d["text"])
             continue
         if d["k"]=="app":
             if kernel:
@@ -1883,6 +2415,24 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # collect local fn names (so calls resolve to prefixed symbols)
     cg.local_fns={d["name"] for d in decls if d["k"]=="fn"}
     cg.fn_argc={d["name"]:len(d["params"]) for d in decls if d["k"]=="fn"}
+    # --O4 inline table: a fn whose entire body is a single `return EXPR;` is an
+    # "expression wrapper" and can be inlined by substituting its params. Built
+    # only for the USER target (kernel/boot codegen stays byte-identical).
+    cg.inline_exprs={}
+    if cg.o4 and target=="user":
+        for d in decls:
+            if d.get("k")!="fn":
+                continue
+            body=d.get("body") or []
+            if (len(body)==1 and body[0].get("k")=="return"
+                    and body[0].get("expr") is not None):
+                cg.inline_exprs[d["name"]]=(list(d["params"]), body[0]["expr"])
+        # Static per-wrapper call-count across every fn body (drives the size gate).
+        cg.inline_callcount={}
+        for d in decls:
+            if d.get("k")=="fn":
+                for s in d.get("body") or []:
+                    _stmt_count_calls(s, cg.inline_callcount)
     if target=="boot":
         cg.boot_bits=boot_bits or 64
     # functions
@@ -1931,7 +2481,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             out.append(f"global {g}")
     if not embed:
         out.append("section .text")
-    body=_peephole(cg.text, extended=optimize)
+    # Phase 0 (--O4): drop wrapper fns that were inlined everywhere and are now
+    # called nowhere, before the line-level passes run on the survivors.
+    text=cg.text
+    if cg.o4 and target=="user":
+        text=_dead_inlined_fn_elim(text, app_prefix, cg._inlined_names)
+    body=_peephole(text, extended=optimize, zero_idiom=o3)
     # Phase 1 (function scaffolding cleanup) runs when the global default switch
     # is on OR when --O2 is requested. --O2 is the explicit opt-in that turns the
     # whole function optimizer on without disturbing the default (-O0/-O1) builds,
@@ -1942,6 +2497,20 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # Implies Phase 1 (it runs on the Phase-1-cleaned stream). USER target only.
     if regalloc and optimize:
         body=_regalloc_functions(body, target)
+    # Phase 3 (--O3): density passes on the allocated stream. Implies O2.
+    # USER target only; opt-in, leaves O0/O1/O2 outputs untouched.
+    if o3 and optimize:
+        body=_o3_optimize_functions(body, target)
+    # Phase 0b (--O4): drop dead callee-save pairs the O3 pass left standing on
+    # frame-collapsed wrappers (its body anchor needs a `push rbp` that frame
+    # collapse already removed). USER target only.
+    if cg.o4 and optimize:
+        body=_o4_frameless_cleanup(body, target)
+    # Phase 0c (--O4): drop dead rax-producers - discarded expression-statement
+    # results (`sq()`'s `xor rax,rax`, a discarded comparison's setcc/movzx, an
+    # unused call return) that the stack machine always materializes.
+    if cg.o4 and optimize:
+        body=_o4_dead_result_elim(body, target)
     out.extend(body)
     # Strings: emit as inert bytes in current section. In standalone mode put
     # them in .rodata; in embed mode keep them in .text (safe - no code falls
@@ -2663,6 +3232,13 @@ def gen_fn(cg,fn,prefix):
     next_off=[-8*(reg_param_count+1)]  # locals start below the reg-param slots
     st=FnState(cg,scope,next_off,local_size)
     st.epilogue=f".fn_end_{cg.lbl}_{name}"
+    # --O4 Case B: if this is a thin syscall passthrough wrapper, marshal its
+    # params straight from their incoming registers at the syscall site (no
+    # home-slot reload) so the spill store goes dead and the frame collapses.
+    _pt=_o4_passthrough_syscall(cg, fn["body"], params, st)
+    if _pt is not None:
+        st._o4_passthru=_pt
+        st._o4_passthru_params={pn:CALL_REGS[i] for i,pn in enumerate(params)}
     for stmt in fn["body"]:
         gen_stmt(st,stmt)
     cg.emit(f"{st.epilogue}:")
@@ -2841,8 +3417,512 @@ def _gen_state_index_store(st,lhs,rhs):
     cg.emit("    mov [rcx], al")
     cg.emit("    xor rax, rax")
 
+# -------------------- register-targeted leaf codegen (O3) --------------------
+# A "direct leaf" is a side-effect-free expression whose value can be produced
+# with a SINGLE instruction writing an arbitrary destination register (no use of
+# rax/rcx as scratch, no clobber of any other register, no flags dependency that
+# matters to a caller marshaling args). For such leaves we can evaluate straight
+# into the ABI/target register, skipping the stack-machine `push rax`/`pop REG`
+# round-trip. Anything not handled here returns False and the caller falls back
+# to the safe stack-staged path. Used ONLY under --O3 (cg.o3); O0/O1/O2 codegen
+# is byte-for-byte unchanged.
+def _emit_leaf_into(st, e, reg):
+    cg=st.cg; k=e.get("k")
+    if k=="int":
+        cg.emit(f"    mov {reg}, {e['val']}"); return True
+    if k=="strlit":
+        lbl=cg.str_label(e["val"]); cg.emit(f"    lea {reg}, [rel {lbl}]"); return True
+    if k=="ident":
+        n=e["name"]
+        if n in st.scope:
+            w=getattr(st,"regparam_width",{}).get(n)
+            off=rbpoff(st.scope[n])
+            r32={"rax":"eax","rcx":"ecx","rdx":"edx","rbx":"ebx","rsi":"esi",
+                 "rdi":"edi","rbp":"ebp","rsp":"esp","r8":"r8d","r9":"r9d",
+                 "r10":"r10d","r11":"r11d","r12":"r12d","r13":"r13d",
+                 "r14":"r14d","r15":"r15d"}.get(reg, reg)
+            if w==8:
+                cg.emit(f"    movzx {reg}, byte [rbp{off}]")
+            elif w==16:
+                cg.emit(f"    movzx {reg}, word [rbp{off}]")
+            elif w==32:
+                cg.emit(f"    mov {r32}, dword [rbp{off}]")
+            else:
+                cg.emit(f"    mov {reg}, [rbp{rbpoff(st.scope[n])}]")
+            return True
+        if n in cg.consts:
+            cg.emit(f"    mov {reg}, {cg.consts[n]}"); return True
+        if n in getattr(cg,"symconsts",set()):
+            cg.emit(f"    mov {reg}, {n}"); return True
+        if n in cg.str_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.str_defs[n]}]"); return True
+        if n in cg.state_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.state_defs[n]}]"); return True
+        return False
+    if k=="addr":
+        n=e["name"]
+        if n in st.scope:
+            cg.emit(f"    lea {reg}, [rbp{rbpoff(st.scope[n])}]"); return True
+        if n in cg.str_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.str_defs[n]}]"); return True
+        if n in cg.state_defs:
+            cg.emit(f"    lea {reg}, [rel {cg.state_defs[n]}]"); return True
+        if n in cg.externs:
+            cg.emit(f"    lea {reg}, [rel {n}]"); return True
+        return False
+    return False
+
+# -------------------- --O4 expression-tree codegen --------------------
+# The stack machine stages every binary-op operand through `push rax`/`pop rax`.
+# O3 already removes that staging when the RHS is a direct leaf; this evaluator
+# removes it for NESTED right operands too (e.g. `a*(b+c)`) by keeping each
+# subtree's value in a scratch register instead of on the stack. It targets an
+# arbitrary destination GPR, recurses, and is restricted to call-free,
+# load-free, side-effect-free arithmetic/bitwise/compare trees so evaluation
+# order is immaterial and no register-special op (shift count in cl, div in
+# rax:rdx, short-circuit branches) appears. Anything outside that set falls back
+# to the existing gen_expr path. Result register contents match the stack
+# machine exactly -> semantics-preserving.
+_LOW8={"rax":"al","rbx":"bl","rcx":"cl","rdx":"dl","rsi":"sil","rdi":"dil",
+       "rbp":"bpl","rsp":"spl","r8":"r8b","r9":"r9b","r10":"r10b","r11":"r11b",
+       "r12":"r12b","r13":"r13b","r14":"r14b","r15":"r15b"}
+# Caller-saved scratch pool (no callee-save bookkeeping needed; subtrees are
+# call-free so these are pure temporaries). rax is excluded: it is the usual
+# top-level destination and the fallback path's result register.
+_O4_SCRATCH=["rcx","rdx","r8","r9","r10","r11","rsi","rdi"]
+# Binary ops the tree evaluator handles (all combine into an arbitrary dst with
+# dst as LHS, scratch as RHS, no fixed-register operand). Excludes / % << >>
+# (need rax:rdx / cl) and && || (control flow).
+_TREE_BIN_OPS={"+":"add","-":"sub","*":"imul","&":"and","|":"or","^":"xor",
+               "==":"sete","!=":"setne","<":"setl",">":"setg","<=":"setle",">=":"setge"}
+
+def _o4_tree_ok(st, e):
+    # Structural eligibility: a call-free / load-free arithmetic tree.
+    if _is_direct_leaf(st, e):
+        return True
+    k=e.get("k")
+    if k in ("neg","not"):
+        return _o4_tree_ok(st, e["expr"])
+    if k=="bin" and e.get("op") in _TREE_BIN_OPS:
+        return _o4_tree_ok(st, e["lhs"]) and _o4_tree_ok(st, e["rhs"])
+    return False
+
+def _tree_regneed(st, e):
+    # Peak scratch registers needed to evaluate e into a destination, given the
+    # "lhs into dst, rhs into one scratch" scheme: need(leaf)=0,
+    # need(bin)=max(need(lhs), 1+need(rhs)). Used to PROVE the emit cannot run
+    # out of scratch mid-way (so it never fails after emitting partial code).
+    if _is_direct_leaf(st, e):
+        return 0
+    k=e.get("k")
+    if k in ("neg","not"):
+        return _tree_regneed(st, e["expr"])
+    return max(_tree_regneed(st, e["lhs"]), 1+_tree_regneed(st, e["rhs"]))
+
+def _emit_expr_tree(st, e, dst, busy):
+    # Emit e into 64-bit GPR `dst`; `busy` = regs holding live values to preserve.
+    # Caller must have checked _o4_tree_ok(e) and _tree_regneed(e) <= free pool,
+    # so this always succeeds.
+    cg=st.cg
+    if _is_direct_leaf(st, e):
+        _emit_leaf_into(st, e, dst); return
+    k=e.get("k")
+    if k=="neg":
+        _emit_expr_tree(st, e["expr"], dst, busy); cg.emit(f"    neg {dst}"); return
+    if k=="not":
+        _emit_expr_tree(st, e["expr"], dst, busy)
+        low=_LOW8[dst]
+        cg.emit(f"    test {dst}, {dst}"); cg.emit(f"    sete {low}")
+        cg.emit(f"    movzx {dst}, {low}"); return
+    # binary op: lhs -> dst, rhs -> a fresh scratch t, then combine.
+    _emit_expr_tree(st, e["lhs"], dst, busy)
+    t=None
+    blocked=busy | {dst}
+    for r in _O4_SCRATCH:
+        if r not in blocked:
+            t=r; break
+    _emit_expr_tree(st, e["rhs"], t, busy | {dst})
+    op=e["op"]
+    mn=_TREE_BIN_OPS[op]
+    if op in ("+","-","*","&","|","^"):
+        cg.emit(f"    {mn} {dst}, {t}")
+    else:                                      # comparison -> setcc + zero-extend
+        low=_LOW8[dst]
+        cg.emit(f"    cmp {dst}, {t}")
+        cg.emit(f"    {mn} {low}")
+        cg.emit(f"    movzx {dst}, {low}")
+
+def _is_direct_leaf(st, e):
+    # Predicate-only check (no emission) mirroring _emit_leaf_into's coverage.
+    k=e.get("k")
+    if k in ("int","strlit"): return True
+    cg=st.cg
+    if k=="ident":
+        n=e["name"]
+        return (n in st.scope or n in cg.consts or n in getattr(cg,"symconsts",set())
+                or n in cg.str_defs or n in cg.state_defs)
+    if k=="addr":
+        n=e["name"]
+        return (n in st.scope or n in cg.str_defs or n in cg.state_defs or n in cg.externs)
+    return False
+
+# -------------------- --O4 param-spill elimination (Case B) ----------------
+# A thin syscall passthrough wrapper - `fn f(i){ return syscall(N, C, i); }` -
+# costs a full frame + a param home-slot spill/reload that no lossless pass can
+# remove: the naive marshaler emits `mov rdi, C` (clobbering the incoming param
+# register) BEFORE reading the param, so O3 store-forward can't forward the
+# reload. The fix is to marshal the args with a PARALLEL MOVE that reads each
+# param directly from its incoming register (params survive FN_BEGIN - its trace
+# stub push/pops them), ordering the moves so no source is clobbered before it is
+# read and breaking register cycles with a scratch temp. Once the param is no
+# longer read from its home slot, the spill store is dead - the existing O3
+# dead-store pass removes it, dead-callee-save drops the now-unused rbx/r12, and
+# _p_frame fully elides the frame (a `syscall`-only body has no call/push/pop/rbp
+# left). So this pass adds NO frame logic; it only changes how the recognized
+# passthrough syscall site reads its params. Gated on cg.o4 + user target, and
+# applied ONLY to the exact recognized node (identity compare) so all other
+# codegen - and every O0/O1/O2/O3 byte - is untouched.
+_O4_MARSHAL_SCRATCH="r11"   # caller-saved; never a param-incoming or syscall-num reg
+
+def _o4_passthrough_syscall(cg, body, params, st):
+    if not (getattr(cg,"o4",False) and getattr(cg,"target","user")=="user"):
+        return None
+    if len(params) > len(ARG_REGS):
+        return None
+    if len(body) != 1:
+        return None
+    s=body[0]
+    if s.get("k") not in ("return","exprstmt"):
+        return None
+    e=s.get("expr")
+    if not e or e.get("k")!="syscall":
+        return None
+    if const_fold_int(cg, e["num"]) is None:
+        return None                       # need a constant num (APP_SYSNO path)
+    args=e["args"]
+    if len(args) > len(ARG_REGS):
+        return None
+    pset=set(params)
+    for a in args:
+        if not _is_direct_leaf(st, a):
+            return None                   # nested/computed arg -> needs staging
+        if a.get("k")=="addr" and a.get("name") in pset:
+            return None                   # &param needs a stack home slot
+    return e
+
+def _emit_parallel_marshal(st, entries):
+    # entries: list of (dest_reg, src_reg_or_None, node_or_None)
+    #   src_reg set  -> register move (param still live in its incoming reg)
+    #   src_reg None -> value load of `node` into dest via _emit_leaf_into
+    # All destinations are written only after every read of their prior contents;
+    # register cycles are broken by stashing one source in the scratch temp.
+    cg=st.cg
+    # Identity register moves (param already in its destination reg) are no-ops:
+    # drop them up front. They must NOT enter the scheduler - their src==dest
+    # would make the register look "still needed" and stall the whole move set as
+    # a false cycle. Dropping is safe even when that register is read by another
+    # move: leaving it untouched keeps its value live for that reader.
+    pending=[(d,s,n) for (d,s,n) in entries if not (s is not None and s==d)]
+    while pending:
+        srcs={s for (_d,s,_n) in pending if s is not None}
+        progressed=False
+        for i,(d,s,n) in enumerate(pending):
+            if d in srcs:
+                continue                  # something still reads d; defer
+            if s is None:
+                _emit_leaf_into(st, n, d)
+            else:
+                cg.emit(f"    mov {d}, {s}")
+            pending.pop(i)
+            progressed=True
+            break
+        if progressed:
+            continue
+        # Only register cycles remain (every dest is also a needed source). Stash
+        # one cycle register in the scratch temp; its readers then read the temp,
+        # freeing the register to be written.
+        victim=next(d for (d,s,_n) in pending if s is not None and d in srcs)
+        cg.emit(f"    mov {_O4_MARSHAL_SCRATCH}, {victim}")
+        pending=[(d, _O4_MARSHAL_SCRATCH if s==victim else s, n)
+                 for (d,s,n) in pending]
+
+# -------------------- --O4 expression-wrapper inlining --------------------
+# Max static call-count at which a (non-tiny) wrapper is still inlined. A
+# granular size knob: 1 inlines only single-use wrappers (always a shrink);
+# raising it trades duplication for fewer call/frame sequences. Overridable via
+# GRITC_O4_MAXCALLS for tuning / the future quantum config search.
+try:
+    _O4_INLINE_MAX_CALLS=int(os.environ.get("GRITC_O4_MAXCALLS","4"))
+except ValueError:
+    _O4_INLINE_MAX_CALLS=2
+
+# Per-wrapper inline OVERRIDES (the granular knob the coupled whole-program QUBO
+# searches over). These let an external proposer FORCE individual wrappers to be
+# inlined or NOT inlined, independent of the global GRITC_O4_MAXCALLS threshold,
+# so the quantum handoff can model per-wrapper inline booleans. Comma-separated
+# wrapper names. Default empty => behaviour is byte-identical to before. Both are
+# gated behind --O4 (cg.o4) so O0..O3 are wholly unaffected.
+#   GRITC_O4_INLINE_SET   : names to inline regardless of call count.
+#   GRITC_O4_NOINLINE_SET : names to NEVER inline (overrides INLINE_SET).
+def _o4_name_set(var):
+    raw=os.environ.get(var,"")
+    return frozenset(n.strip() for n in raw.split(",") if n.strip())
+_O4_FORCE_INLINE=_o4_name_set("GRITC_O4_INLINE_SET")
+_O4_FORCE_NOINLINE=_o4_name_set("GRITC_O4_NOINLINE_SET")
+# An expression node's child slots, so substitution / scanning can walk an
+# arbitrary expression tree without enumerating every kind. Single-child slots
+# and list-child slots; anything not listed (int/strlit/ident immediates) is a
+# leaf and copied verbatim.
+_EXPR_CHILD_KEYS=("expr","lhs","rhs","idx","target","num")
+_EXPR_LIST_KEYS =("args",)
+
+def _subst_expr(node, mapping):
+    # Return a new expression with every `ident`/`addr` referencing a wrapper
+    # param replaced by the caller's argument node. Args are side-effect-free
+    # leaves (enforced at the call site), so sharing an arg node across multiple
+    # substitution points is safe - gen_expr only reads it.
+    if not isinstance(node, dict):
+        return node
+    k=node.get("k")
+    if k=="ident" and node.get("name") in mapping:
+        return mapping[node["name"]]
+    if k=="addr" and node.get("name") in mapping:
+        # &param: the arg is guaranteed (by _try_inline_call) to be an ident,
+        # so &param becomes &arg with the arg's own name.
+        return {"k":"addr","name":mapping[node["name"]]["name"],
+                "line":node.get("line")}
+    new=dict(node)
+    for ck in _EXPR_CHILD_KEYS:
+        if isinstance(new.get(ck), dict):
+            new[ck]=_subst_expr(new[ck], mapping)
+    for lk in _EXPR_LIST_KEYS:
+        if isinstance(new.get(lk), list):
+            new[lk]=[_subst_expr(x, mapping) for x in new[lk]]
+    return new
+
+def _expr_addr_of_params(node, params, found):
+    if not isinstance(node, dict):
+        return
+    if node.get("k")=="addr" and node.get("name") in params:
+        found.add(node["name"])
+    for ck in _EXPR_CHILD_KEYS:
+        if isinstance(node.get(ck), dict):
+            _expr_addr_of_params(node[ck], params, found)
+    for lk in _EXPR_LIST_KEYS:
+        for x in node.get(lk) or []:
+            _expr_addr_of_params(x, params, found)
+
+def _expr_count_calls(node, counts):
+    if not isinstance(node, dict):
+        return
+    if node.get("k")=="call" and "name" in node:
+        counts[node["name"]]=counts.get(node["name"],0)+1
+    for ck in _EXPR_CHILD_KEYS:
+        if isinstance(node.get(ck), dict):
+            _expr_count_calls(node[ck], counts)
+    for lk in _EXPR_LIST_KEYS:
+        for x in node.get(lk) or []:
+            _expr_count_calls(x, counts)
+
+def _stmt_count_calls(s, counts):
+    if not isinstance(s, dict):
+        return
+    for ck in ("expr","rhs","cond","num"):
+        if isinstance(s.get(ck), dict):
+            _expr_count_calls(s[ck], counts)
+    lhs=s.get("lhs")
+    if isinstance(lhs, dict):                 # assign target may be buf[idx]
+        _expr_count_calls(lhs, counts)
+    for lk in ("then","els","body"):
+        for x in s.get(lk) or []:
+            _stmt_count_calls(x, counts)
+
+# A wrapper body cheap enough to inline regardless of how many times it is
+# called: a small side-effect-free arithmetic/leaf expression (no nested
+# call/syscall, bounded node count). Such a body is fewer instructions than the
+# call+frame sequence it replaces even when duplicated.
+def _expr_is_tiny(node, budget=4):
+    cnt=[0]
+    def walk(n):
+        if not isinstance(n, dict):
+            return True
+        k=n.get("k")
+        if k in ("call","syscall","index"):
+            return False                     # has a call/load/bounds-check: not tiny
+        cnt[0]+=1
+        if cnt[0]>budget:
+            return False
+        for ck in _EXPR_CHILD_KEYS:
+            if isinstance(n.get(ck), dict) and not walk(n[ck]):
+                return False
+        for lk in _EXPR_LIST_KEYS:
+            for x in n.get(lk) or []:
+                if not walk(x):
+                    return False
+        return True
+    return walk(node)
+
+# --O4 compile-time integer folding. Restricted to +,-,* and unary neg with
+# exact 64-bit two's-complement WRAPPING (what add/sub/imul produce) so a folded
+# value is bit-identical to what the emitted code would compute. `/ % << >>` and
+# comparisons are deliberately EXCLUDED: their signed-truncate / logical-shift /
+# signed-compare semantics are easy to get subtly wrong and a fold miscompile is
+# invisible to an assemble-only check. Used to (a) collapse constant arithmetic
+# under O4 and (b) decide that an all-constant-arg wrapper call will fold tight
+# enough to inline regardless of call count.
+def _s64(v):
+    v &= (1<<64)-1
+    return v-(1<<64) if v>=(1<<63) else v
+
+def _o4_fold_int(cg, e):
+    if not isinstance(e, dict):
+        return None
+    k=e.get("k")
+    if k=="int":
+        v=e.get("val"); return v if isinstance(v,int) else None
+    if k=="ident":
+        n=e.get("name")
+        if n in cg.consts and isinstance(cg.consts[n],int):
+            return cg.consts[n]
+        return None
+    if k=="neg":
+        v=_o4_fold_int(cg, e.get("expr")); return None if v is None else _s64(-v)
+    if k=="bin":
+        op=e.get("op")
+        if op not in ("+","-","*"):
+            return None
+        a=_o4_fold_int(cg, e.get("lhs")); b=_o4_fold_int(cg, e.get("rhs"))
+        if a is None or b is None:
+            return None
+        r=a+b if op=="+" else a-b if op=="-" else a*b
+        return _s64(r)
+    return None
+
+def _o4_rel_addr_sym(cg, e):
+    # If `e` is `&sym` lowering to a `[rel LABEL]` (string / state buffer /
+    # extern - NOT an rbp frame slot), return LABEL; else None. Used to fold
+    # `&sym + const` into a single lea with displacement.
+    if not isinstance(e, dict) or e.get("k")!="addr":
+        return None
+    n=e.get("name")
+    if n in cg.str_defs:   return cg.str_defs[n]
+    if n in cg.state_defs: return cg.state_defs[n]
+    if n in getattr(cg,"externs",set()): return n
+    return None
+
+def _expr_node_count(node):
+    if not isinstance(node, dict):
+        return 0
+    c=1
+    for ck in _EXPR_CHILD_KEYS:
+        if isinstance(node.get(ck), dict):
+            c+=_expr_node_count(node[ck])
+    for lk in _EXPR_LIST_KEYS:
+        for x in node.get(lk) or []:
+            c+=_expr_node_count(x)
+    return c
+
+# A wrapper with all-constant-int args folds tight at the call site (constant
+# arithmetic collapses, address offsets become a displacement), so inline it
+# regardless of call count when its body is not huge - avoids duplicating a big
+# body across very many sites.
+_O4_INLINE_CONST_BUDGET=16
+
+def _try_inline_call(st, name, args):
+    # If `name` is an --O4-inlinable expression wrapper and every arg is a
+    # side-effect-free leaf, emit the substituted wrapper body inline (result in
+    # rax, exactly like the call would leave it) and return True. Otherwise
+    # return False and let the normal call path run.
+    cg=st.cg
+    if not getattr(cg,"o4",False) or getattr(cg,"target","user")!="user":
+        return False
+    info=getattr(cg,"inline_exprs",{}).get(name)
+    if info is None:
+        return False
+    params, E = info
+    if len(args)!=len(params):
+        return False
+    # Only inline when args are leaves: no side effects, so duplicating a param
+    # use or evaluating in a different order is observationally identical.
+    if not all(_is_direct_leaf(st, a) for a in args):
+        return False
+    # Size gate: inlining duplicates the wrapper body at every site, so it is a
+    # net SHRINK only when the wrapper is called few times (the once-amortized
+    # frame/spill/call/ret it removes outweighs the duplication) OR its body is
+    # tiny. _O4_INLINE_MAX_CALLS is the granular knob a later quantum pass will
+    # search over (inline decisions interact: inlining A changes B's size and
+    # call counts, making the joint choice combinatorial).
+    # Per-wrapper override (quantum/external proposal). NOINLINE wins over all.
+    if name in _O4_FORCE_NOINLINE:
+        return False
+    cc=getattr(cg,"inline_callcount",{}).get(name,0)
+    all_const=all(_o4_fold_int(cg,a) is not None for a in args)
+    if name not in _O4_FORCE_INLINE and not (
+            _expr_is_tiny(E) or cc<=_O4_INLINE_MAX_CALLS
+            or (all_const and _expr_node_count(E)<=_O4_INLINE_CONST_BUDGET)):
+        return False
+    mapping=dict(zip(params, args))
+    # `&param` only stays a valid lvalue if the arg is itself an ident.
+    addr_params=set()
+    _expr_addr_of_params(E, set(params), addr_params)
+    for p in addr_params:
+        if mapping[p].get("k")!="ident":
+            return False
+    stack=cg._inlining
+    if name in stack:
+        return False                       # direct/mutual recursion: don't inline
+    sub=_subst_expr(E, mapping)
+    stack.add(name)
+    try:
+        gen_expr(st, sub)                  # nested inlinable calls recurse here
+    finally:
+        stack.discard(name)
+    cg._inlined_names.add(name)
+    return True
+
+# Drop the definitions of wrapper fns that were inlined at >=1 site and are not
+# referenced by any surviving real call (FN_CALL / call) or address-of (lea
+# [rel ...]). Unit-private helpers only; the app entry is never inlined so it is
+# never a drop candidate.
+def _dead_inlined_fn_elim(lines, prefix, inlined_names):
+    if not inlined_names:
+        return lines
+    referenced=set()
+    _ref_re=re.compile(r'\bFN_CALL\s+([A-Za-z_][A-Za-z0-9_]*)')
+    _call_re=re.compile(r'^\s*call\s+([A-Za-z_][A-Za-z0-9_]*)\s*$')
+    _rel_re=re.compile(r'\[rel\s+([A-Za-z_][A-Za-z0-9_]*)\s*\]')
+    for l in lines:
+        c=_code(l)
+        m=_ref_re.search(c)
+        if m: referenced.add(m.group(1))
+        m=_call_re.match(c)
+        if m: referenced.add(m.group(1))
+        for mm in _rel_re.finditer(c):
+            referenced.add(mm.group(1))
+    drop={f"{prefix}_{n}" for n in inlined_names} - referenced
+    # App ABI entry points are invoked from the kernel side (apps.asm manifest),
+    # not via any FN_CALL in the app's own stream, so they never look "referenced"
+    # here. Never drop them even if they were inlined somewhere internally.
+    drop={d for d in drop if not d.endswith(("_draw","_click","_key","_main","_init"))}
+    if not drop:
+        return lines
+    out=[]
+    for is_fn,chunk in _fn_segments(lines):
+        if is_fn and _o2_fn_name(chunk) in drop:
+            continue
+        out.extend(chunk)
+    return out
+
 def gen_expr(st,e):
     cg=st.cg; k=e["k"]
+    # --O4: collapse a compile-time-constant integer arithmetic tree to a single
+    # immediate load (bit-identical to the wrapping +,-,* the stack machine would
+    # emit). The dominant payoff is inlined wrappers with constant args, e.g.
+    # `slot_addr(3)` -> `&pal + 3*8` whose `3*8` folds to 24. O0-O3 untouched.
+    if getattr(cg,"o4",False) and k in ("bin","neg"):
+        _fv=_o4_fold_int(cg,e)
+        if _fv is not None:
+            cg.emit(f"    mov rax, {_fv}"); return
     if k=="int":
         cg.emit(f"    mov rax, {e['val']}")
     elif k=="strlit":
@@ -2912,6 +3992,20 @@ def gen_expr(st,e):
         cg.emit("    test rax, rax"); cg.emit("    sete al"); cg.emit("    movzx rax, al")
     elif k=="bin":
         op=e["op"]
+        # --O4: fold `&sym + const` / `&sym - const` into a single RIP-relative
+        # lea with a displacement. This is what makes inlining an all-constant-arg
+        # address wrapper (`slot_addr(3)` -> `&pal + 3*8`) a net shrink: one
+        # `lea rax,[rel pal+24]` beats the 2-instruction call it replaces.
+        if getattr(cg,"o4",False) and op in ("+","-"):
+            ls=_o4_rel_addr_sym(cg,e["lhs"]); rs=_o4_rel_addr_sym(cg,e["rhs"])
+            lc=_o4_fold_int(cg,e["lhs"]);     rc=_o4_fold_int(cg,e["rhs"])
+            def _disp(v): return f"+ {v}" if v>=0 else f"- {-v}"
+            if op=="+" and ls is not None and rc is not None:
+                cg.emit(f"    lea rax, [rel {ls} {_disp(rc)}]"); return
+            if op=="+" and rs is not None and lc is not None:
+                cg.emit(f"    lea rax, [rel {rs} {_disp(lc)}]"); return
+            if op=="-" and ls is not None and rc is not None:
+                cg.emit(f"    lea rax, [rel {ls} {_disp(-rc)}]"); return
         # Strength-reduce `/` and `%` by a compile-time power-of-two constant.
         # idiv is ~20-90 cycles; the shift idiom below is ~3 and preserves the
         # signed (truncate-toward-zero) semantics GritHL `/` guarantees.
@@ -2939,8 +4033,55 @@ def gen_expr(st,e):
                         cg.emit(f"    and rax, {cv-1}")
                         cg.emit("    sub rax, rcx")
                 return
-        gen_expr(st,e["lhs"]); cg.emit("    push rax")
-        gen_expr(st,e["rhs"]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
+        # --O3: fold a constant RHS into an immediate-form instruction instead of
+        # materializing it in rcx and doing a reg-reg op (the stack machine's
+        # `mov rcx, C` / `op rax, rcx`). Lossless; gated on cg.o3 so O0/O1 output
+        # - and KERNEL.BIN byte-identity, which expects --O0 - is unchanged.
+        if getattr(cg,"o3",False):
+            rc=_o4_fold_int(cg,e["rhs"])
+            if rc is not None:
+                IMM32_MIN, IMM32_MAX = -(1<<31), (1<<31)-1
+                # `x & 0xFFFFFFFF` u32 truncation -> `mov eax, eax` (writing a
+                # 32-bit reg zero-extends bits 63:32). The `and rax, imm32` form
+                # SIGN-extends imm32, so the all-ones-low-32 mask can't use it -
+                # this 2-byte idiom replaces the 12-byte `mov rcx,4294967295`/and.
+                if op=="&" and (rc & ((1<<64)-1))==0xFFFFFFFF:
+                    gen_expr(st,e["lhs"]); cg.emit("    mov eax, eax"); return
+                # Constant shift count -> immediate-form shift (no rcx/cl round
+                # trip). Same masking semantics as `shl/shr rax, cl` for 0..63.
+                if op in ("<<",">>") and 0<=rc<=63:
+                    gen_expr(st,e["lhs"])
+                    cg.emit(f"    {'shl' if op=='<<' else 'shr'} rax, {rc}"); return
+                # add/sub/and/or/xor/imul take a sign-extended imm32 directly.
+                if op in ("+","-","&","|","^","*") and IMM32_MIN<=rc<=IMM32_MAX:
+                    gen_expr(st,e["lhs"])
+                    mn={"+":"add","-":"sub","&":"and","|":"or","^":"xor"}.get(op)
+                    if mn: cg.emit(f"    {mn} rax, {rc}")
+                    else:  cg.emit(f"    imul rax, rax, {rc}")
+                    return
+                # Comparison against a constant: `cmp rax, imm32` (sign-extended)
+                # avoids staging the constant in rcx.
+                if op in ("==","!=","<",">","<=",">=") and IMM32_MIN<=rc<=IMM32_MAX:
+                    gen_expr(st,e["lhs"])
+                    cg.emit(f"    cmp rax, {rc}")
+                    setop={"==":"sete","!=":"setne","<":"setl",">":"setg",
+                           "<=":"setle",">=":"setge"}[op]
+                    cg.emit(f"    {setop} al"); cg.emit("    movzx rax, al"); return
+        # --O4: register-tree codegen for call-free arithmetic trees. Handles
+        # nested right operands the O3 leaf path still stages on the stack, with
+        # a pre-checked scratch budget so it never fails after partial emit.
+        if (getattr(cg,"o4",False) and op in _TREE_BIN_OPS and _o4_tree_ok(st,e)
+                and _tree_regneed(st,e) <= len(_O4_SCRATCH)):
+            _emit_expr_tree(st, e, "rax", set())
+            return
+        if getattr(cg,"o3",False) and _is_direct_leaf(st,e["rhs"]):
+            # rhs is side-effect-free: evaluate lhs into rax, then load rhs
+            # directly into rcx. No stack staging needed (rhs read of mem/imm
+            # cannot disturb rax). Same final rax/rcx as the staged path.
+            gen_expr(st,e["lhs"]); _emit_leaf_into(st,e["rhs"],"rcx")
+        else:
+            gen_expr(st,e["lhs"]); cg.emit("    push rax")
+            gen_expr(st,e["rhs"]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
         if op=="+": cg.emit("    add rax, rcx")
         elif op=="-": cg.emit("    sub rax, rcx")
         elif op=="*": cg.emit("    imul rax, rcx")
@@ -2974,10 +4115,32 @@ def gen_expr(st,e):
         args=e["args"]
         if len(args)>6: raise SyntaxError("syscall has max 6 args")
         # evaluate to stack first (left-to-right), then pop in reverse
-        for a in args:
-            gen_expr(st,a); cg.emit("    push rax")
-        for reg in reversed(ARG_REGS[:len(args)]):
-            cg.emit(f"    pop {reg}")
+        if getattr(st,"_o4_passthru",None) is e:
+            # --O4 Case B: read params from their incoming registers via a
+            # parallel move; non-param args (const/imm/addr) load in place.
+            pmap=st._o4_passthru_params
+            entries=[]
+            for i,a in enumerate(args):
+                dest=ARG_REGS[i]
+                if a.get("k")=="ident" and a.get("name") in pmap:
+                    entries.append((dest, pmap[a["name"]], None))
+                else:
+                    entries.append((dest, None, a))
+            _emit_parallel_marshal(st, entries)
+        elif getattr(cg,"o3",False):
+            complex_idx=[i for i,a in enumerate(args) if not _is_direct_leaf(st,a)]
+            leaf_idx   =[i for i,a in enumerate(args) if _is_direct_leaf(st,a)]
+            for i in complex_idx:
+                gen_expr(st,args[i]); cg.emit("    push rax")
+            for i in reversed(complex_idx):
+                cg.emit(f"    pop {ARG_REGS[i]}")
+            for i in leaf_idx:
+                _emit_leaf_into(st, args[i], ARG_REGS[i])
+        else:
+            for a in args:
+                gen_expr(st,a); cg.emit("    push rax")
+            for reg in reversed(ARG_REGS[:len(args)]):
+                cg.emit(f"    pop {reg}")
         # Heterogeneous syscall numbering (security_todo.md §12): if the syscall
         # number is a compile-time constant (it always is for the SYS_* consts),
         # emit it through APP_SYSNO so the build records a fixup for the loader to
@@ -3437,17 +4600,37 @@ def gen_expr(st,e):
             return
         if name in getattr(cg,"fn_argc",{}) and len(args)!=cg.fn_argc[name]:
             raise SyntaxError(f"{name} expects {cg.fn_argc[name]} args, got {len(args)}")
+        # --O4: inline expression-wrapper calls before any marshaling.
+        if _try_inline_call(st, name, args):
+            return
         reg_args=args[:len(CALL_REGS)]
         stack_args=args[len(CALL_REGS):]
         # System V: push stack args 7+ right-to-left so arg6 lands at [rsp].
         for a in reversed(stack_args):
             gen_expr(st,a); cg.emit("    push rax")
-        # Evaluate register args, stage on the stack, then pop into regs so
-        # earlier args' evaluation can't clobber a register already loaded.
-        for a in reg_args:
-            gen_expr(st,a); cg.emit("    push rax")
-        for reg in reversed(CALL_REGS[:len(reg_args)]):
-            cg.emit(f"    pop {reg}")
+        if getattr(cg,"o3",False):
+            # Register-targeted marshaling: complex (side-effecting / rax-clobbering)
+            # args still stage through the stack, but side-effect-free LEAF args go
+            # straight into their ABI register. Leaves are emitted AFTER all complex
+            # args are popped into their regs, so a complex pop can't clobber a leaf
+            # already placed, and a leaf (memory/immediate read) can't disturb a
+            # staged complex value. Stack balance and final register contents are
+            # identical to the all-staged path -> semantics-preserving.
+            complex_idx=[i for i,a in enumerate(reg_args) if not _is_direct_leaf(st,a)]
+            leaf_idx   =[i for i,a in enumerate(reg_args) if _is_direct_leaf(st,a)]
+            for i in complex_idx:
+                gen_expr(st,reg_args[i]); cg.emit("    push rax")
+            for i in reversed(complex_idx):
+                cg.emit(f"    pop {CALL_REGS[i]}")
+            for i in leaf_idx:
+                _emit_leaf_into(st, reg_args[i], CALL_REGS[i])
+        else:
+            # Evaluate register args, stage on the stack, then pop into regs so
+            # earlier args' evaluation can't clobber a register already loaded.
+            for a in reg_args:
+                gen_expr(st,a); cg.emit("    push rax")
+            for reg in reversed(CALL_REGS[:len(reg_args)]):
+                cg.emit(f"    pop {reg}")
         if getattr(cg,"kernel",False):
             # Kernel mode: direct call to an in-unit label (the kernel is one
             # NASM translation unit, so every label resolves without extern
@@ -3472,7 +4655,7 @@ def resolve_use(name, lib_dir):
 
 def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False,
                  kernel=False, target="user", forbid_asm=False, deny_unsafe=False,
-                 optimize=True, regalloc=False):
+                 optimize=True, regalloc=False, o3=False, o4=False):
     with open(path,"r",encoding="utf-8") as f: src=f.read()
     toks=lex(src,path); decls=parse(toks,path)
     # expand uses: prepend decls from lib files
@@ -3505,7 +4688,7 @@ def compile_file(path, lib_dir, app_prefix=None, embed=False, return_sigs=False,
     asm=compile_unit(expanded, unit_prefix, embed=embed, kernel=kernel,
                      src=os.path.basename(path), target=target,
                      forbid_asm=forbid_asm, deny_unsafe=deny_unsafe,
-                     optimize=optimize, regalloc=regalloc)
+                     optimize=optimize, regalloc=regalloc, o3=o3, o4=o4)
     if return_sigs:
         return asm, LAST_SIGS
     return asm
@@ -3541,24 +4724,41 @@ def main():
                          "live range so values stay in registers instead of round-tripping "
                          "through memory. Implies -O1. OFF by default; conservative and "
                          "signature-preserving (only .text changes).")
+    ap.add_argument("--O3",dest="o3",action="store_true",
+                    help="enable the Phase-3 density passes (USER target only): on top of "
+                         "the O2-allocated stream, cross-register store-forward + dead-store "
+                         "elimination, dead callee-save elision, and frame collapse, iterated "
+                         "to a fixpoint. Implies -O2/-O1. OFF by default; every rewrite is the "
+                         "same provably semantics-preserving local class as O0/O1, and only "
+                         ".text changes. Use for smallest emitted code; O0 remains the "
+                         "byte-identity reference.")
+    ap.add_argument("--O4",dest="o4",action="store_true",
+                    help="enable Phase-0 inlining (USER target only, EXPERIMENTAL): inline "
+                         "expression-wrapper functions (`fn f(..){ return EXPR; }`) at call "
+                         "sites with all-leaf args, then dead-eliminate wrappers called "
+                         "nowhere. Breaks the leaf-only regalloc ceiling on syscall-wrapper "
+                         "apps. Implies -O3/-O2/-O1. Changes emitted bytes (and app sigs) by "
+                         "design; O0 remains the byte-identity reference.")
     args=ap.parse_args()
     optimize=not args.no_opt
     # --O2 is the explicit opt-in for the function optimizer + register allocator.
     # It no longer depends on the global default switch (which gates -O1 builds);
-    # passing --O2 turns the passes on for that compile.
-    regalloc=args.o2 and optimize
+    # passing --O2 turns the passes on for that compile. --O3 implies --O2.
+    regalloc=(args.o2 or args.o3 or args.o4) and optimize
+    o3=(args.o3 or args.o4) and optimize
+    o4=args.o4 and optimize
     kernel=(args.target in ("kernel","boot"))
     if args.emit_sigs:
         asm,sigs=compile_file(args.input, os.path.abspath(args.lib), args.prefix,
                               embed=args.embed, return_sigs=True, kernel=kernel,
                               target=args.target, forbid_asm=args.forbid_asm,
                               deny_unsafe=args.deny_unsafe, optimize=optimize,
-                              regalloc=regalloc)
+                              regalloc=regalloc, o3=o3, o4=o4)
     else:
         asm=compile_file(args.input, os.path.abspath(args.lib), args.prefix,
                          embed=args.embed, kernel=kernel, target=args.target,
                          forbid_asm=args.forbid_asm, deny_unsafe=args.deny_unsafe,
-                         optimize=optimize, regalloc=regalloc)
+                         optimize=optimize, regalloc=regalloc, o3=o3, o4=o4)
         sigs=[]
     with open(args.output,"w",encoding="utf-8",newline="\n") as f: f.write(asm)
     if args.emit_sigs:

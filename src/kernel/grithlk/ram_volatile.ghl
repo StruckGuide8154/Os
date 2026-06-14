@@ -151,9 +151,9 @@ const SLP_S5         = 0x2000;      # SLP_EN with QEMU's S5 typ
 #
 # Entropy honesty (matches kernel_canary_init): the rdrand() intrinsic is a
 # single attempt - on a host without RDRAND (QEMU TCG, older CPUs) it yields no
-# fresh hardware entropy, so the draw also folds in kernel_canary, which itself
-# folds the certified qrng seed. That makes the no-RDRAND fallback unguessable
-# rather than RDTSC-only. A final non-zero guard avoids an all-zero key.
+# fresh hardware entropy. Release boot has already required a successful RDRAND
+# draw for kernel_canary; debug/QEMU builds retain a timing-only fallback that is
+# explicitly not a cryptographic guarantee. A final non-zero guard avoids zero.
 const NX_MEM_KEY_QWORDS = 4;        # 256-bit (covers AES-XTS-128's 2x128 subkeys)
 # splitmix64 mixing constants (Steele & Vigna, "Fast Splittable PRNGs", 2014) -
 # same family already used for the KASLR slide (src/include/uefi_abi.inc).
@@ -192,8 +192,8 @@ fn nx_splitmix64(x) {
 # RDRAND is gated behind CPUID.01H:ECX[30] exactly like kernel_canary_init /
 # l3_boot_nonce_ensure: the raw `rdrand` instruction #UDs on a CPU/VM that does
 # not implement it (the default QEMU TCG model among them), so it must NEVER be
-# executed unconditionally. When absent, the draw folds RDTSC + the canary (which
-# itself folds the certified qrng seed), keeping the fallback unguessable.
+# executed unconditionally. The canary is hardware-random in release builds and
+# also binds the signed public QRNG commitment; debug builds may be timing-only.
 fn nx_mem_key_ensure() {
     if lb(&nx_mem_key_done) != 0 { return; }
     let has_rdrand = (cpuid_ecx(1) >> 30) & 1;
