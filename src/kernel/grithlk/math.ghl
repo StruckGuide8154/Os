@@ -1,0 +1,95 @@
+# ============================================================================
+# math.ghl  -  GritHLK (zero-asm) math/geometry LEAF helpers.
+#
+# Ports src/kernel/lib/math.asm into structured GritHLK fns, keeping the EXACT
+# same global symbol names and the EXACT same register ABI (System-V: edi/esi/edx
+# in, eax out) each (documented) caller binds to. There is ZERO assembly here.
+#
+# Compile (kernel emit mode) with:
+#   python src/user/grithl/compiler/gritc.py \
+#       src/kernel/grithlk/math.ghl -o build/ghl/math.asm \
+#       -L src/user/grithl/lib --embed --target kernel --forbid-asm
+# and %include the generated build/ghl/math.asm into kernel_build.asm.
+#
+# SIGNEDNESS NOTE: the asm operated on 32-bit operands with SIGNED ops
+# (cmovl/cmovg/cdq) and a SIGNED 32-bit add in rect_intersect. gritc widens to
+# 64-bit and loads 32-bit ABI params ZERO-extended (`mov r32, dword[rbp]`), so a
+# negative coordinate would be misread as a large positive. math_sx32() restores
+# the signed-32 interpretation of the low dword so every comparison matches the
+# original jl/jg/jle exactly. Memory fields are read with lw() which is a SIGNED
+# 32-bit load (movsxd), matching the asm's `mov eax,[rdi]` over signed coords.
+#
+# NOTE: as of this migration none of these fns has an in-tree caller (the entire
+# module was dead code besides docs/kernel-function-reference.md). It is kept for
+# API/contract parity; it is also a deletion candidate.
+# ============================================================================
+
+module "math";
+
+unsafe raw_mem;          # lw over caller-supplied rect pointers
+
+global fn_clamp;
+global fn_min;
+global fn_max;
+global fn_abs;
+global fn_rect_intersect;
+
+const RECT_OFF_X = 0;
+const RECT_OFF_Y = 4;
+const RECT_OFF_W = 8;
+const RECT_OFF_H = 12;
+
+# Sign-extend the low 32 bits of a zero-extended ABI param to 64-bit, so signed
+# comparisons match the asm's 32-bit signed ops. Params arrive in [0,0xFFFFFFFF].
+fn math_sx32(v) {
+    return (v ^ 0x80000000) - 0x80000000;
+}
+
+# --- clamp: clamp value to [min, max].  EDI=value ESI=min EDX=max -> EAX ---
+# asm: cmovl (value<min -> min) then cmovg (result>max -> max), in that order.
+fn fn_clamp(edi value, esi min, edx max) {
+    let v = math_sx32(value);
+    let lo = math_sx32(min);
+    let hi = math_sx32(max);
+    if v < lo { v = lo; }
+    if v > hi { v = hi; }
+    return v;
+}
+
+# --- min: signed integer minimum.  EDI=a ESI=b -> EAX ---
+fn fn_min(edi a, esi b) {
+    let x = math_sx32(a);
+    let y = math_sx32(b);
+    if x > y { x = y; }
+    return x;
+}
+
+# --- max: signed integer maximum.  EDI=a ESI=b -> EAX ---
+fn fn_max(edi a, esi b) {
+    let x = math_sx32(a);
+    let y = math_sx32(b);
+    if x < y { x = y; }
+    return x;
+}
+
+# --- abs: absolute value.  EDI=value -> EAX ---
+fn fn_abs(edi value) {
+    let v = math_sx32(value);
+    if v < 0 { v = 0 - v; }
+    return v;
+}
+
+# --- rect_intersect: do two rects overlap?  RDI=r1 RSI=r2 -> EAX (1/0) ---
+# Rect layout: x@0, y@4, w@8, h@12 (4-byte signed fields). The asm rejects when
+# any separating-axis test (r1.x+r1.w <= r2.x, etc.) holds, else returns 1.
+fn fn_rect_intersect(rdi r1, rsi r2) {
+    let r1x = lw(r1 + RECT_OFF_X);
+    let r1y = lw(r1 + RECT_OFF_Y);
+    let r2x = lw(r2 + RECT_OFF_X);
+    let r2y = lw(r2 + RECT_OFF_Y);
+    if r1x + lw(r1 + RECT_OFF_W) <= r2x { return 0; }
+    if r2x + lw(r2 + RECT_OFF_W) <= r1x { return 0; }
+    if r1y + lw(r1 + RECT_OFF_H) <= r2y { return 0; }
+    if r2y + lw(r2 + RECT_OFF_H) <= r1y { return 0; }
+    return 1;
+}

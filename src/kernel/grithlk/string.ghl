@@ -1,0 +1,188 @@
+# ============================================================================
+# string.ghl  -  GritHLK (zero-asm) string / memory utility functions.
+#
+# Ports src/kernel/lib/string.asm into structured GritHLK fns, keeping the EXACT
+# same global symbol names and the System-V register ABI each caller binds to
+# (rdi/rsi/rdx in, rax out). There is ZERO assembly here.
+#
+# Compile (kernel emit mode):
+#   python src/user/grithl/compiler/gritc.py \
+#       src/kernel/grithlk/string.ghl -o build/ghl/string.asm \
+#       -L src/user/grithl/lib --embed --target kernel --forbid-asm
+# and %include build/ghl/string.asm into kernel_build.asm (section .text). The
+# kernel is one NASM TU, so the memcpy/memset/strlen equ wrappers at the foot of
+# kernel_build.asm resolve fn_memcpy/fn_memset/fn_strlen as forward refs.
+#
+# FIDELITY NOTES (semantics preserved exactly vs the asm):
+#   * memcpy: asm did `rep movsq` (count>>3 qwords) + `rep movsb` (count&7). Here
+#     rep_movsq copies the qwords and a <=7-byte scalar tail finishes - identical
+#     bytes. (No rep_movsb intrinsic exists; a <=7 iteration loop is negligible.)
+#   * memset: asm replicated the byte across a qword and did `rep stosq`
+#     (count>>3) + `rep stosb` (count&7). Here the byte is replicated across a
+#     DWORD and rep_stosd fills count>>2 dwords + a <=3-byte scalar tail. Same
+#     byte pattern, same total bytes - the memory image is identical. (No
+#     rep_stosq intrinsic; rep_stosd is the available dword filler.)
+#   * itoa: documented unsigned-u64, but gritc's `/` `%` are SIGNED idiv. For the
+#     hex path (radix 16) we use `& 15` and logical `>> 4` (fully unsigned-safe);
+#     the decimal path uses signed `/` `%`, which is bit-exact for every value
+#     < 2^63. The only in-tree caller (uint32_to_str, value is a uint32) and any
+#     realistic decimal use stay well under that bound.
+#   * strcmp returns the zero-extended-byte difference (matches asm movzx/sub).
+# ============================================================================
+
+module "string";
+
+unsafe kernel_priv;      # rep_movsq / rep_stosd block-move intrinsics
+unsafe raw_mem;          # lb/sb over caller-supplied buffers
+
+global fn_strlen;
+global fn_strcmp;
+global fn_strcpy;
+global fn_memcpy;
+global fn_memset;
+global fn_memsetd;
+global fn_itoa;
+global fn_itoa_dec2;
+global uint32_to_str;
+
+# --- strlen: RDI = string -> RAX = length ---
+fn fn_strlen(rdi s) {
+    let n = 0;
+    while lb(s + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+# --- strcmp: RDI = s1, RSI = s2 -> EAX (0 / s1-s2 byte diff) ---
+fn fn_strcmp(rdi s1, rsi s2) {
+    let i = 0;
+    let diff = 0;
+    let go = 1;
+    while go == 1 {
+        let a = lb(s1 + i);
+        let b = lb(s2 + i);
+        if a != b {
+            diff = a - b;
+            go = 0;
+        } else {
+            if a == 0 {
+                go = 0;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    return diff;
+}
+
+# --- strcpy: RDI = dest, RSI = src -> RAX = dest (copies the NUL too) ---
+fn fn_strcpy(rdi dest, rsi src) {
+    let i = 0;
+    let go = 1;
+    while go == 1 {
+        let c = lb(src + i);
+        sb(dest + i, c);
+        if c == 0 {
+            go = 0;
+        } else {
+            i = i + 1;
+        }
+    }
+    return dest;
+}
+
+# --- memcpy: RDI = dest, RSI = src, RDX = count -> RAX = dest ---
+fn fn_memcpy(rdi dest, rsi src, rdx count) {
+    let q = count >> 3;
+    rep_movsq(dest, src, q);
+    let done = q * 8;
+    let tail = count & 7;
+    let i = 0;
+    while i < tail {
+        sb(dest + done + i, lb(src + done + i));
+        i = i + 1;
+    }
+    return dest;
+}
+
+# --- memset: RDI = dest, ESI = byte value, RDX = count -> RAX = dest ---
+fn fn_memset(rdi dest, esi value, rdx count) {
+    let b = value & 0xFF;
+    let d = b | (b << 8) | (b << 16) | (b << 24);
+    let dc = count >> 2;
+    rep_stosd(dest, d, dc);
+    let done = dc * 4;
+    let tail = count & 3;
+    let i = 0;
+    while i < tail {
+        sb(dest + done + i, b);
+        i = i + 1;
+    }
+    return dest;
+}
+
+# --- memsetd: RDI = dest, ESI = dword value, RDX = count (dwords) ---
+# The asm preserved RAX (no defined return); no caller reads a result. We return
+# dest for a well-defined RAX.
+fn fn_memsetd(rdi dest, esi value, rdx count) {
+    rep_stosd(dest, value, count);
+    return dest;
+}
+
+# --- itoa: RDI = value (u64), RSI = buffer, EDX = radix (10 or 16) -> RAX = buf ---
+fn fn_itoa(rdi value, rsi buf, edx radix) {
+    let v = value;
+    let p = buf;
+    if v == 0 {
+        sb(p, 48);          # '0'
+        p = p + 1;
+        sb(p, 0);
+        return buf;
+    }
+    while v != 0 {
+        let rem = 0;
+        if radix == 16 {
+            rem = v & 15;
+            v = v >> 4;
+        } else {
+            rem = v % radix;
+            v = v / radix;
+        }
+        if rem < 10 {
+            sb(p, rem + 48);        # '0'..'9'
+        } else {
+            sb(p, rem + 55);        # 'A'..  ('A' - 10 == 55)
+        }
+        p = p + 1;
+    }
+    sb(p, 0);                       # NUL-terminate
+    # reverse digits in [buf, p-1]
+    let i = buf;
+    let j = p - 1;
+    while i < j {
+        let a = lb(i);
+        let b = lb(j);
+        sb(i, b);
+        sb(j, a);
+        i = i + 1;
+        j = j - 1;
+    }
+    return buf;
+}
+
+# --- itoa_dec2: EDI = value (0-99), RSI = buffer (>=3 bytes) ---
+fn fn_itoa_dec2(edi value, rsi buf) {
+    let tens = value / 10;
+    let ones = value % 10;
+    sb(buf, tens + 48);
+    sb(buf + 1, ones + 48);
+    sb(buf + 2, 0);
+    return buf;
+}
+
+# --- uint32_to_str: decimal convenience wrapper for fn_itoa ---
+fn uint32_to_str(rdi value, rsi buf) {
+    call fn_itoa(rdi: value, rsi: buf, rdx: 10);   # returns buf in rax
+    return buf;
+}

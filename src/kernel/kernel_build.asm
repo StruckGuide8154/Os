@@ -308,9 +308,12 @@ section .text
 
 ; --- Libraries ---
 section .text
-%include "src/kernel/lib/string.asm"
-%include "src/kernel/lib/font.asm"
-%include "src/kernel/lib/math.asm"
+; GritHLK (zero-asm) string/memory utilities (ported from lib/string.asm).
+%include "build/ghl/string.asm"
+; GritHLK (zero-asm) VGA 8x16 bitmap font table (ported from lib/font.asm).
+%include "build/ghl/font.asm"
+; GritHLK (zero-asm) math/geometry leaf helpers (ported from lib/math.asm).
+%include "build/ghl/math.asm"
 %include "src/kernel/lib/xml.asm"
 
 ; --- Generated Signature Registry ---

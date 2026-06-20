@@ -232,6 +232,9 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\boot_features.ghl'; out = 'build\ghl\boot_features.asm' },
     @{ src = 'src\kernel\grithlk\cursor.ghl'; out = 'build\ghl\cursor.asm' },
     @{ src = 'src\kernel\grithlk\eth.ghl'; out = 'build\ghl\eth.asm' },
+    @{ src = 'src\kernel\grithlk\math.ghl'; out = 'build\ghl\math.asm' },
+    @{ src = 'src\kernel\grithlk\string.ghl'; out = 'build\ghl\string.asm' },
+    @{ src = 'src\kernel\grithlk\font.ghl'; out = 'build\ghl\font.asm' },
     # Track 2 signed-envelope enforcement: the structural + semantic policy
     # kernels (shared with the host checker fixtures) and the in-kernel reader
     # that walks envelope bytes and calls them (envelope_verify).
