@@ -197,8 +197,6 @@ src/kernel/lib/xml_parse.inc | kernel-lib | medium | legacy | TBD
 src/kernel/lib/xml_access.inc | kernel-lib | medium | legacy | TBD
 src/kernel/lib/xml_selftest.inc | kernel-lib | medium | legacy | TBD
 src/kernel/net/arp.asm | kernel-net | medium | legacy | TBD
-src/kernel/net/dhcp.asm | kernel-net | medium | legacy | TBD
-src/kernel/net/icmp.asm | kernel-net | medium | legacy | TBD
 src/kernel/net/ip.asm | kernel-net | medium | legacy | TBD
 src/kernel/net/nic.asm | kernel-net | medium | legacy | TBD
 src/kernel/net/tcp.asm | kernel-net | medium | legacy | TBD

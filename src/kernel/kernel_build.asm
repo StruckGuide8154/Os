@@ -182,13 +182,9 @@ section .text
 section .text
 %include "src/kernel/net/arp.asm"
 section .text
-%include "src/kernel/net/dhcp.asm"
-section .text
 %include "src/kernel/net/udp.asm"
 section .text
 %include "build/ghl/dns.asm"
-section .text
-%include "src/kernel/net/icmp.asm"
 section .text
 %include "src/kernel/net/tcp.asm"
 
