@@ -12,12 +12,23 @@ KEYWORDS = {
     "use","app","module","fn","let","if","else","while","for","return",
     "str","i8","i16","i32","i64","u8","u16","u32","u64","ptr","void","bool",
     "true","false","asm","syscall","extern","const","struct","state","break","continue",
-    "global","data","table","naked","align","unsafe",
+    "global","data","table","naked","align","unsafe","buffer","reserve",
     # Kernel-mode explicit-register ABI:
     #   preserves(...) - callee-save contract (see gen_kernel_fn)
     #   call           - register-annotated call statement `call f(al: x);`
     "preserves","call"
 }
+
+# Per-app budget for compiler-managed `buffer` scratch arenas. They live in the
+# app's .data blob inside its 2 MiB (0x200000) slot, alongside the code blob and
+# the per-slot stack/shadow window, so this is capped well under the slot size.
+# Exceeding it is a hard compile error (see the `buffer` lowering) - that is the
+# point: scratch sizing is checked at build time, never silently overlapping.
+BUFFER_REGION_CAP = 0x100000   # 1 MiB
+
+# Set by compile_unit; consumed by main() to write the debug memory-layout
+# manifest sidecar (parallel to LAST_SIGS).
+LAST_MEMMAP = {"buffers": [], "used": 0, "cap": BUFFER_REGION_CAP}
 
 # ---------------------------------------------------------------------------
 # Kernel-mode explicit-register ABI register table.
@@ -336,6 +347,35 @@ def parse(toks,path):
                 p.match(";")
                 fields.append((nm,sz))
             decls.append(node("state",fields=fields))
+        elif t.v=="buffer":
+            # `buffer NAME[BYTES];` - a compiler-managed scratch arena. Unlike a
+            # hand-picked magic address, the compiler bump-allocates it inside the
+            # app's own .data blob (slot-correct + KASLR-correct, see the lowering
+            # pass), bounds-checks every index into it for free (it rides the
+            # `state` machinery), and records it in the debug memory-layout
+            # manifest. The size may be a literal or a previously-defined const.
+            p.eat(); nm=p.eat("id").v; p.eat("[")
+            if p.peek().k=="num":
+                szt=("num", p.eat("num").v)
+            else:
+                szt=("ident", p.eat("id").v)
+            p.eat("]"); p.match(";")
+            decls.append(node("buffer",name=nm,size=szt))
+        elif t.v=="reserve":
+            # `reserve NAME[BYTES];` - like `buffer`, a compiler-managed,
+            # bounds-checked, RIP-relative scratch arena, but UNINITIALIZED:
+            # it lowers into a `.bss`/NOBITS section (`resb`) instead of the
+            # .data blob, so it costs ZERO image bytes. The kernel's `-f bin`
+            # build places .bss after all emitted sections, so a multi-MiB
+            # reserve does not grow KERNEL.BIN. This is the primitive that makes
+            # large per-slot arenas (e.g. the XML DOM) hostable in zero-asm GHL.
+            p.eat(); nm=p.eat("id").v; p.eat("[")
+            if p.peek().k=="num":
+                szt=("num", p.eat("num").v)
+            else:
+                szt=("ident", p.eat("id").v)
+            p.eat("]"); p.match(";")
+            decls.append(node("reserve",name=nm,size=szt))
         elif t.v=="fn":
             decls.append(parse_fn(p))
         else:
@@ -588,7 +628,7 @@ def rbpoff(o):
 
 class CG:
     def __init__(s,app_prefix,kernel=False):
-        s.text=[]; s.rodata=[]; s.data=[]
+        s.text=[]; s.rodata=[]; s.data=[]; s.bss=[]
         s.lbl=0
         s.kernel=kernel
         s.target="kernel" if kernel else "user"
@@ -611,6 +651,15 @@ class CG:
         s.loops=[]  # (brk_lbl, cont_lbl)
         s.sigs=[]
         s.need_oob=False      # an out-of-bounds trap stub is referenced
+        # --- Compiler-managed scratch buffers (`buffer NAME[BYTES];`) ----------
+        # Each declared buffer is bump-allocated, 8-byte aligned, within a single
+        # per-app scratch region that physically lives in the app's `.data`
+        # section (so it is part of the RIP-relative blob copied into the slot -
+        # automatically slot-correct and W^X-classified as W+NX data). The list
+        # feeds the debug memory-layout manifest; s.buffer_used tracks the running
+        # aligned total so the build fails loudly before the slot would overflow.
+        s.buffers=[]          # ordered [(name, size, aligned_off)] for the manifest
+        s.buffer_used=0       # running aligned scratch total in bytes
     def L(s,base="L"):
         s.lbl+=1; return f".{base}{s.lbl}"
     def oob(s):
@@ -2223,7 +2272,7 @@ def _require_cap(cg, cap, what):
     raise SyntaxError(f"{what} requires `unsafe {cap};`")
 
 def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False,o3=False,o4=False):
-    global LAST_SIGS
+    global LAST_SIGS, LAST_MEMMAP
     if forbid_asm:
         _enforce_no_asm(decls, "--forbid-asm")
     if target=="boot":
@@ -2365,6 +2414,70 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             cg.data.append(f"{nm}: times {count} {directive} {initval}")
             cg.state_sizes[nm]=count*w     # byte size for bounds checks
             cg.state_widths[nm]=w
+        elif d["k"]=="buffer":
+            # Compiler-managed scratch arena. We bump-allocate it (8-byte aligned)
+            # inside the app's .data blob and expose NAME as its base address.
+            # Because it is a label in the blob - not a magic absolute VA - it is
+            # resolved RIP-relative (`lea NAME, [rel ...]`, see the `state` path),
+            # so it is automatically correct in every slot and under KASLR. We
+            # register it in the `state_*` maps so indexing is bounds-checked
+            # against its declared size (the security win over a raw const addr).
+            if kernel or target=="boot":
+                raise SyntaxError("`buffer` is a ring-3 app scratch arena; not valid for --target kernel/boot (use `data`/`state`)")
+            nm=d["name"]
+            szt=d["size"]
+            if szt[0]=="num":
+                size=szt[1]
+            elif szt[1] in cg.consts:
+                size=cg.consts[szt[1]]
+            else:
+                raise SyntaxError(f"buffer {nm}: size must be a literal or const, got {szt[1]!r}")
+            if not isinstance(size,int) or size<=0:
+                raise SyntaxError(f"buffer {nm}: size must be a positive integer, got {size!r}")
+            if nm in cg.state_defs:
+                raise SyntaxError(f"buffer {nm}: name already declared")
+            asize=(size+7)&~7                       # 8-byte align the slot
+            off=cg.buffer_used
+            cg.buffer_used+=asize
+            if cg.buffer_used>BUFFER_REGION_CAP:
+                raise SyntaxError(
+                    f"buffer {nm}: app scratch arenas total {cg.buffer_used} bytes, "
+                    f"over the {BUFFER_REGION_CAP}-byte per-app budget. Shrink a "
+                    f"buffer or raise BUFFER_REGION_CAP (slot is {0x200000} bytes; "
+                    f"blob + stack must also fit).")
+            lbl=f"{app_prefix}_buf_{nm}"
+            cg.state_defs[nm]=lbl
+            cg.state_sizes[nm]=size                 # declared size drives OOB trap
+            cg.state_widths[nm]=1
+            cg.data.append("align 8")
+            cg.data.append(f"{lbl}: times {size} db 0")
+            cg.buffers.append({"name":nm,"size":size,"aligned_size":asize,
+                               "region_offset":off,"label":lbl})
+        elif d["k"]=="reserve":
+            # Uninitialized scratch arena. Lowers into `.bss` (`resb`) so it
+            # costs no image bytes, while still being bounds-checked and
+            # RIP-relative (it rides the same `state_*` machinery as `state`).
+            # Unlike `buffer`, this is allowed for --target kernel (the whole
+            # point: zero-cost multi-MiB per-slot DOM arenas). `.bss` is zeroed
+            # by the loader/at boot, matching `state`'s zero-init contract.
+            nm=d["name"]
+            szt=d["size"]
+            if szt[0]=="num":
+                size=szt[1]
+            elif szt[1] in cg.consts:
+                size=cg.consts[szt[1]]
+            else:
+                raise SyntaxError(f"reserve {nm}: size must be a literal or const, got {szt[1]!r}")
+            if not isinstance(size,int) or size<=0:
+                raise SyntaxError(f"reserve {nm}: size must be a positive integer, got {size!r}")
+            if nm in cg.state_defs:
+                raise SyntaxError(f"reserve {nm}: name already declared")
+            lbl=f"{app_prefix}_bss_{nm}"
+            cg.state_defs[nm]=lbl
+            cg.state_sizes[nm]=size                 # declared size drives OOB trap
+            cg.state_widths[nm]=1
+            cg.bss.append("alignb 16")
+            cg.bss.append(f"{lbl}: resb {size}")
         elif d["k"]=="align":
             if not kernel:
                 raise SyntaxError("`align` declaration requires --target kernel or --target boot")
@@ -2523,7 +2636,16 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
         if target!="boot" and (not embed or kernel):
             out.append("section .data")
         out.extend(cg.data)
+    # Uninitialized `reserve` arenas. Emitted LAST and into `.bss` (NOBITS) so
+    # under the kernel's `-f bin` single-TU link they occupy address space but
+    # contribute zero file bytes - a multi-MiB reserve does not grow KERNEL.BIN.
+    if cg.bss:
+        if target=="boot":
+            raise SyntaxError("`reserve` is not valid for --target boot")
+        out.append("section .bss")
+        out.extend(cg.bss)
     LAST_SIGS=cg.sigs
+    LAST_MEMMAP={"buffers":cg.buffers,"used":cg.buffer_used,"cap":BUFFER_REGION_CAP}
     return "\n".join(out)+"\n"
 
 def _boot_regs(bits):
@@ -4157,7 +4279,13 @@ def gen_expr(st,e):
         name=e["name"]
         # Builtins: memory load/store - compile inline, no actual call.
         if name in ("lb","lw","lq","sb","sw","sq"):
-            if getattr(cg,"target","user")!="user":
+            # Ring-3 targets (user apps AND Track-8 driver-host processes) may use
+            # the load/store builtins without a capability: the MMU confines every
+            # such access to the process's own mapped pages, so they can never
+            # reach kernel memory (that is the ring boundary's job, not the
+            # compiler's). In kernel/boot targets the same builtins touch unchecked
+            # physical addresses, so there they stay gated behind `unsafe raw_mem`.
+            if getattr(cg,"target","user") not in ("user","driver"):
                 _require_cap(cg,"raw_mem",f"{cg.target} raw memory builtin {name}()")
             if name in ("lb","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
             if name in ("sb","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
@@ -4704,11 +4832,23 @@ def main():
                     help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives, strings inline in .text")
     ap.add_argument("--emit-sigs",action="store_true",
                     help="write a .sig.json sidecar next to the generated assembly")
-    ap.add_argument("--target",choices=["user","kernel","boot"],default="user",
+    ap.add_argument("--memmap",default=None,metavar="PATH",
+                    help="write a JSON memory-layout manifest of the app's compiler-managed "
+                         "`buffer` scratch arenas (name/size/offset within the per-app region, "
+                         "and the region's used/cap budget). Intended for debug builds.")
+    ap.add_argument("--target",choices=["user","kernel","boot","driver"],default="user",
                     help="user (default): emit a ring-3 app blob with syscall wrappers. "
                          "kernel: emit plain NASM for %%include into kernel_build.asm - "
                          "bare labels, direct in-unit calls, no app framing, no syscall wrappers. "
-                         "boot: emit guarded boot-layout NASM with bits/org support and no inline asm.")
+                         "boot: emit guarded boot-layout NASM with bits/org support and no inline asm. "
+                         "driver: a ring-3 driver-host process (Track 8 / guarantee G1). Codegen is "
+                         "identical to a `user` app blob, but the target carries a NON-OVERRIDABLE "
+                         "contract: --forbid-asm and --deny-unsafe are forced ON, so the module can "
+                         "declare NO unsafe capability (no kernel_io/kernel_priv/raw MMIO/DMA boundary) "
+                         "and emit no inline asm. Combined with the ring-3 privilege gate (privileged "
+                         "intrinsics inb/outb/write_cr*/lgdt/... already require --target kernel), a "
+                         "driver binary provably holds ZERO ambient hardware authority: it reaches "
+                         "hardware only by syscalling the in-kernel driver_host broker.")
     ap.add_argument("--forbid-asm",action="store_true",
                     help="reject any inline asm block. Use for new code and migration gates.")
     ap.add_argument("--deny-unsafe",action="store_true",
@@ -4740,6 +4880,14 @@ def main():
                          "apps. Implies -O3/-O2/-O1. Changes emitted bytes (and app sigs) by "
                          "design; O0 remains the byte-identity reference.")
     args=ap.parse_args()
+    # --target driver (Track 8 / G1): a ring-3 driver-host process. Force the
+    # hardening contract ON and refuse to let it be relaxed - a driver may NOT
+    # declare an unsafe capability and may NOT use inline asm, full stop. The
+    # ring-3 privilege gate (privileged intrinsics require --target kernel) does
+    # the rest, so the binary cannot name any direct hardware authority.
+    if args.target=="driver":
+        args.forbid_asm=True
+        args.deny_unsafe=True
     optimize=not args.no_opt
     # --O2 is the explicit opt-in for the function optimizer + register allocator.
     # It no longer depends on the global default switch (which gates -O1 builds);
@@ -4766,6 +4914,17 @@ def main():
         with open(sig_path,"w",encoding="utf-8",newline="\n") as f:
             json.dump(sigs,f,indent=2)
             f.write("\n")
+    if args.memmap:
+        # Memory-layout manifest (debug aid). The blob-relative VA of each buffer
+        # is resolved by NASM/the loader (slot base + KASLR slide), so we report
+        # the build-time facts: declared/aligned size and offset within the app's
+        # scratch region, plus the region budget. Emitting it never changes the
+        # generated asm, so it is safe to omit on release builds for byte-identity.
+        mm=dict(LAST_MEMMAP)
+        mm["app"]=os.path.splitext(os.path.basename(args.input))[0]
+        mm["slot_bytes"]=0x200000
+        with open(args.memmap,"w",encoding="utf-8",newline="\n") as f:
+            json.dump(mm,f,indent=2); f.write("\n")
     print(f"[gritc] {args.input} -> {args.output} ({len(asm)} bytes)")
 
 if __name__=="__main__":
