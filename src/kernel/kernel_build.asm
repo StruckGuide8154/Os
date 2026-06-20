@@ -178,11 +178,11 @@ section .text
 section .text
 %include "build/ghl/eth.asm"
 section .text
-%include "src/kernel/net/ip.asm"
+%include "build/ghl/ip.asm"
 section .text
-%include "src/kernel/net/arp.asm"
+%include "build/ghl/arp.asm"
 section .text
-%include "src/kernel/net/udp.asm"
+%include "build/ghl/udp.asm"
 section .text
 %include "build/ghl/dns.asm"
 section .text
@@ -310,7 +310,11 @@ section .text
 %include "build/ghl/font.asm"
 ; GritHLK (zero-asm) math/geometry leaf helpers (ported from lib/math.asm).
 %include "build/ghl/math.asm"
-%include "src/kernel/lib/xml.asm"
+; GritHLK (zero-asm) XML 1.0 parser (ported from lib/xml*.asm/.inc). Its ~3 MiB
+; per-slot DOM lives in `.bss` via the compiler's `reserve` primitive (zero image
+; bytes). The generated module leaves `.bss` active, so restore `.text` after it.
+%include "build/ghl/xml.asm"
+section .text
 
 ; --- Generated Signature Registry ---
 %ifdef ENABLE_SIG_SECTION

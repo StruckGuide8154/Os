@@ -1,0 +1,225 @@
+# ============================================================================
+# arp.ghl  -  GritHLK (zero-asm) ARP resolver.
+#
+# Structured zero-asm port of src/kernel/net/arp.asm. Generic ARP above
+# net_nic_tx_frame / net_nic_poll_rx: drivers only move Ethernet frames; the
+# one-entry ARP cache and the on-wire ARP packet format live here.
+#
+# Exported symbols / ABI are byte-for-byte the same as the asm module:
+#   net_arp_resolve_ipv4(edi=A.B.C.D-packed IPv4) -> eax = 1 resolved (blocking)
+#   net_arp_resolve_ipv4_try(edi=...)             -> eax = 1 resolved (non-block)
+#   net_arp_resolved_mac_ptr()                    -> rax = &net_arp_resolved_mac
+#   net_arp_rx_frame(rdi=frame, ecx=len)          -> eax = 1 consumed
+#
+# Externs (stay in their owning units): net_info, net_nic_mac, net_nic_poll_rx,
+# net_nic_tx_frame, tick_count.
+#
+# BYTE-ORDER NOTE (TX correctness):
+#   16-bit on-wire fields are written as explicit byte pairs (sb) so the network
+#   byte order is visible and audited per byte - this exactly reproduces the asm
+#   `mov word [..], <imm>` little-endian stores. Wire constants from
+#   net_driver.inc are little-endian-stored words (NET_ETH_TYPE_ARP=0x0608 puts
+#   0x08 first on the wire, NET_ETH_TYPE_IPV4=0x0008 puts 0x08 first).
+#   IPv4 addresses are stored A.B.C.D-packed (host scalar); the on-wire sender/
+#   target protocol addresses are the byte-swapped (network-order) form, which is
+#   precisely net_arp_target_net = htonl(host IP).
+#
+# Compile: python gritc.py arp.ghl -o build/ghl/arp.asm -L <lib> --embed \
+#          --target kernel --forbid-asm ; %include before/around ip+udp.
+# ============================================================================
+
+module "arp";
+
+unsafe raw_mem;          # sb/lb/sw/lw over the ARP frame + cache state
+unsafe kernel_priv;      # pause() in the blocking resolver busy-wait
+unsafe implicit_extern;  # net_info / net_nic_* / tick_count (stay in their units)
+
+global net_arp_resolve_ipv4;
+global net_arp_resolve_ipv4_try;
+global net_arp_resolved_mac_ptr;
+global net_arp_rx_frame;
+
+const MASK32 = 0xFFFFFFFF;
+
+# --- ARP module state (was arp.asm .bss; GritHLK has no .bss so these emit real
+# image bytes - net state is only a few bytes, per the migration constraint). ---
+align 16;
+data net_arp_frame:        60 x 1;
+data net_arp_target_host:  1 x 4 = 0;
+data net_arp_target_net:   1 x 4 = 0;
+data net_arp_cache_ip:     1 x 4 = 0;
+data net_arp_cache_mac:    6 x 1;
+data net_arp_resolved_mac: 6 x 1;
+data net_arp_cache_valid:  1 x 1 = 0;
+data net_arp_waiting:      1 x 1 = 0;
+
+# htonl: byte-swap a 32-bit host value to network order. Mirrors `bswap eax`.
+# Logical >> (GHL note), mask after every wrap (unbounded ints).
+fn htonl32(v) {
+    let a = (v >> 24) & 0xFF;
+    let b = (v >> 8)  & 0xFF00;
+    let c = (v << 8)  & 0xFF0000;
+    let d = (v << 24) & 0xFF000000;
+    return (a | b | c | d) & MASK32;
+}
+
+# Copy the 6-byte cache MAC into net_arp_resolved_mac (the asm `rep movsb` of 6).
+fn arp_copy_cache_to_resolved() preserves(all) {
+    let i = 0;
+    while i < 6 {
+        sb(&net_arp_resolved_mac + i, lb(&net_arp_cache_mac + i));
+        i = i + 1;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# net_arp_send_request - build + transmit a 60-byte broadcast ARP "who-has
+# target_net". Returns eax=1 if net_nic_tx_frame was reached, 0 on any failure
+# (no MAC / no IP). Byte-identical frame to arp.asm.
+# Preserves rcx/rdi/rsi (asm push/pop set).
+# ---------------------------------------------------------------------------
+fn net_arp_send_request(rax ok) preserves(rcx, rdx, rsi, rdi, r8, r9, r10, r11) {
+    # Zero the 60-byte minimum Ethernet frame.
+    let i = 0;
+    while i < 60 {
+        sb(&net_arp_frame + i, 0);
+        i = i + 1;
+    }
+
+    # Ethernet dst = broadcast (6x 0xFF).
+    let j = 0;
+    while j < 6 {
+        sb(&net_arp_frame + j, 0xFF);
+        j = j + 1;
+    }
+    # Ethernet src = our MAC, written into frame+6 (net_nic_mac copies 6 bytes
+    # to rdi). eax=0 -> no active NIC -> fail.
+    if net_nic_mac(&net_arp_frame + 6) == 0 { ok = 0; return; }
+
+    # ethertype ARP (0x0608 word LE -> 0x08,0x06 on wire).
+    sb(&net_arp_frame + 12, 0x08);
+    sb(&net_arp_frame + 13, 0x06);
+    sb(&net_arp_frame + 14, 0x00); sb(&net_arp_frame + 15, 0x01);  # htype=Ethernet
+    sb(&net_arp_frame + 16, 0x08); sb(&net_arp_frame + 17, 0x00);  # ptype=IPv4
+    sb(&net_arp_frame + 18, 6);                                     # hlen
+    sb(&net_arp_frame + 19, 4);                                     # plen
+    sb(&net_arp_frame + 20, 0x00); sb(&net_arp_frame + 21, 0x01);  # oper=request
+
+    # Sender hardware address (our MAC) at frame+22.
+    if net_nic_mac(&net_arp_frame + 22) == 0 { ok = 0; return; }
+
+    # Sender protocol address (our IPv4) at frame+28, network order.
+    let myip = net_info(2);          # NI_IP, A.B.C.D-packed
+    if myip == 0 { ok = 0; return; }
+    sw(&net_arp_frame + 28, htonl32(myip));
+
+    # Target hardware address (frame+32..37) stays zero from the wipe.
+    sb(&net_arp_frame + 36, 0); sb(&net_arp_frame + 37, 0);  # explicit (was word 0)
+    # Target protocol address (frame+38) = net_arp_target_net (already network
+    # order from the resolve entry points).
+    sw(&net_arp_frame + 38, lw(&net_arp_target_net));
+
+    call net_nic_tx_frame(rdi: &net_arp_frame, rcx: 60);
+    ok = 1;
+}
+
+# ---------------------------------------------------------------------------
+# net_arp_resolve_ipv4 - BLOCKING resolver. edi = A.B.C.D-packed IPv4.
+# Cache hit -> copy MAC, eax=1. Miss -> send one request and busy-wait up to
+# 1s (100 ticks) pumping rx until the cache warms. eax=1 resolved / 0 timeout.
+# ---------------------------------------------------------------------------
+fn net_arp_resolve_ipv4(edi host) preserves(rbx, rcx, rdx, rsi, rdi) {
+    sw(&net_arp_target_host, host);
+    let netip = htonl32(host);
+    sw(&net_arp_target_net, netip);
+
+    if lb(&net_arp_cache_valid) == 1 {
+        if (lw(&net_arp_cache_ip) & MASK32) == netip {
+            arp_copy_cache_to_resolved();
+            return 1;
+        }
+    }
+
+    # Miss: fire one request, then wait.
+    sb(&net_arp_waiting, 1);
+    sb(&net_arp_cache_valid, 0);
+    if net_arp_send_request() == 0 {
+        sb(&net_arp_waiting, 0);
+        return 0;
+    }
+    let deadline = lq(&tick_count) + 100;        # 1 second at 100 Hz
+    while 1 {
+        call net_nic_poll_rx();
+        if lb(&net_arp_cache_valid) == 1 {
+            arp_copy_cache_to_resolved();
+            sb(&net_arp_waiting, 0);
+            return 1;
+        }
+        if lq(&tick_count) >= deadline {
+            sb(&net_arp_waiting, 0);
+            return 0;
+        }
+        pause();
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# net_arp_resolve_ipv4_try - NON-BLOCKING variant. Cache hit -> copy MAC, eax=1.
+# Miss -> fire ONE request and return eax=0 immediately (caller retries; the
+# main loop's poll_rx -> net_arp_rx_frame warms the cache). This is the freeze
+# fix referenced by net_udp_send_ipv4 / the DNS FSM.
+# ---------------------------------------------------------------------------
+fn net_arp_resolve_ipv4_try(edi host) preserves(rbx, rcx, rdx, rsi, rdi) {
+    sw(&net_arp_target_host, host);
+    let netip = htonl32(host);
+    sw(&net_arp_target_net, netip);
+
+    if lb(&net_arp_cache_valid) == 1 {
+        if (lw(&net_arp_cache_ip) & MASK32) == netip {
+            arp_copy_cache_to_resolved();
+            return 1;
+        }
+    }
+    sb(&net_arp_waiting, 1);
+    sb(&net_arp_cache_valid, 0);
+    call net_arp_send_request();        # single non-blocking request
+    return 0;                            # not resolved yet -> caller retries
+}
+
+# Returns rax = &net_arp_resolved_mac.
+fn net_arp_resolved_mac_ptr() preserves(all) {
+    return &net_arp_resolved_mac;
+}
+
+# ---------------------------------------------------------------------------
+# net_arp_rx_frame - rdi = complete Ethernet frame, ecx = length.
+# Consumes an ARP reply for the outstanding target and warms the cache.
+# eax = 1 consumed / 0 dropped. Byte-identical checks to arp.asm.
+# ---------------------------------------------------------------------------
+# Plain System-V (rdi=frame, rsi=len): the only caller is net_rx_frame (ip.ghl),
+# which invokes it positionally. No asm caller remains after the net/ port, so the
+# legacy rdi/ecx contract is no longer needed here.
+fn net_arp_rx_frame(frame, len) {
+    if len < 42 { return 0; }
+    # ethertype ARP at +12 (wire bytes 0x08,0x06).
+    if lb(frame + 12) != 0x08 { return 0; }
+    if lb(frame + 13) != 0x06 { return 0; }
+    # oper at +20..21 = ARP reply (wire 0x00,0x02).
+    if lb(frame + 20) != 0x00 { return 0; }
+    if lb(frame + 21) != 0x02 { return 0; }
+    if lb(&net_arp_waiting) != 1 { return 0; }
+    # sender protocol address (+28) must equal our outstanding target_net.
+    let want = lw(&net_arp_target_net) & MASK32;
+    if (lw(frame + 28) & MASK32) != want { return 0; }
+    sw(&net_arp_cache_ip, want);
+    # sender hardware address (+22) -> cache MAC.
+    let i = 0;
+    while i < 6 {
+        sb(&net_arp_cache_mac + i, lb(frame + 22 + i));
+        i = i + 1;
+    }
+    arp_copy_cache_to_resolved();
+    sb(&net_arp_cache_valid, 1);
+    return 1;
+}

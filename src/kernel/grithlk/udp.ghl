@@ -1,0 +1,141 @@
+# ============================================================================
+# udp.ghl  -  GritHLK (zero-asm) IPv4/UDP transport.
+#
+# Structured zero-asm port of src/kernel/net/udp.asm. Generic IPv4/UDP TX above
+# the NIC abstraction (next-hop ARP + UDP framing) plus the UDP RX demux into the
+# DNS resolver. No NIC driver contains UDP knowledge.
+#
+# Exported symbols:
+#   net_udp_send_ipv4(dst A.B.C.D, dport, sport, len, payload) -> eax = 1 sent
+#     Plain System-V order rdi,rsi,rdx,rcx,r8. This intentionally matches the old
+#     udp.asm custom ABI (edi=dst, si=dport, dx=sport, ecx=len, r8=payload) AND
+#     dns.ghl's existing positional call (dst, DST_PORT, SRC_PORT, len, &buf).
+#   net_udp_rx_ipv4(pkt, len)  -> eax = 1 consumed  (plain System-V rdi,rsi)
+#
+# Externs (stay put / other GHL units): net_info, net_arp_resolve_ipv4_try +
+# net_arp_resolved_mac_ptr (arp.ghl), ipv4_tx_build (ip.ghl), net_dns_rx_udp
+# (dns.ghl).
+#
+# BYTE-ORDER NOTE (TX correctness):
+#   UDP source/dest ports and the UDP length are 16-bit network-order fields,
+#   written as explicit big-endian byte pairs (sb high then low) - reproducing the
+#   asm `xchg al,ah; mov word [..], ax` stores byte-for-byte. The UDP checksum is
+#   left 0 (optional for IPv4/UDP), exactly as the asm. The port/len inputs arrive
+#   as host-order scalars in the low 16 bits of their argument registers.
+# ============================================================================
+
+module "udp";
+
+unsafe raw_mem;
+unsafe implicit_extern;
+
+global net_udp_send_ipv4;
+global net_udp_rx_ipv4;
+
+const MASK32 = 0xFFFFFFFF;
+const NI_IP        = 2;
+const NI_ROUTER    = 3;
+const NI_NEXT_HOP  = 6;
+const NET_IP_PROTO_UDP = 17;
+
+# --- UDP module state (was udp.asm .bss). ---
+align 16;
+data net_udp_segment:          1480 x 1;
+data net_udp_dst_ip:           1 x 4 = 0;
+data net_udp_dst_port:         1 x 4 = 0;     # low 16 bits used
+data net_udp_src_port:         1 x 4 = 0;
+data net_udp_payload_ptr:      1 x 8 = 0;
+data net_udp_payload_len:      1 x 4 = 0;
+data net_udp_next_hop_mac_ptr: 1 x 8 = 0;
+
+# Store a 16-bit value big-endian (network order) at addr.
+fn udp_store_be16(addr, v) {
+    sb(addr,     (v >> 8) & 0xFF);
+    sb(addr + 1, v & 0xFF);
+}
+
+# ---------------------------------------------------------------------------
+# net_udp_send_ipv4 - frame + send one UDP datagram. Non-blocking ARP: if the
+# next-hop MAC is not yet cached, fires one ARP request and returns 0 (the DNS
+# FSM retries on a later tick). eax = 1 if the datagram was handed to IPv4 TX.
+# ---------------------------------------------------------------------------
+fn net_udp_send_ipv4(dst, dport, sport, len, payload) {
+    if len > 1472 { return 0; }
+    sw(&net_udp_dst_ip, dst);
+    sw(&net_udp_dst_port, dport & 0xFFFF);
+    sw(&net_udp_src_port, sport & 0xFFFF);
+    sq(&net_udp_payload_ptr, payload);
+    sw(&net_udp_payload_len, len);
+
+    # Resolve the next hop: NI_NEXT_HOP, then NI_ROUTER, then the dst directly.
+    let hop = net_info(NI_NEXT_HOP);
+    if hop == 0 {
+        hop = net_info(NI_ROUTER);
+        if hop == 0 {
+            hop = lw(&net_udp_dst_ip) & MASK32;
+        }
+    }
+    # Non-blocking next-hop ARP. 0 -> not cached yet -> caller retries.
+    if net_arp_resolve_ipv4_try(hop) == 0 { return 0; }
+    sq(&net_udp_next_hop_mac_ptr, net_arp_resolved_mac_ptr());
+
+    # Build the UDP segment: zero (len+8) bytes, then header fields + payload.
+    let total = (len + 8) & 0xFFFF;
+    let z = 0;
+    while z < total {
+        sb(&net_udp_segment + z, 0);
+        z = z + 1;
+    }
+    udp_store_be16(&net_udp_segment + 0, sport & 0xFFFF);   # source port
+    udp_store_be16(&net_udp_segment + 2, dport & 0xFFFF);   # destination port
+    udp_store_be16(&net_udp_segment + 4, total);            # UDP length = payload+8
+    sb(&net_udp_segment + 6, 0); sb(&net_udp_segment + 7, 0);  # checksum optional -> 0
+
+    # Copy payload to segment+8.
+    let plen = lw(&net_udp_payload_len) & MASK32;
+    let src = lq(&net_udp_payload_ptr);
+    let i = 0;
+    while i < plen {
+        sb(&net_udp_segment + 8 + i, lb(src + i));
+        i = i + 1;
+    }
+
+    # Hand to IPv4 TX (System-V worker): payload=segment, len=plen+8, dst,
+    # next-hop MAC, proto=UDP.
+    return ipv4_tx_build(&net_udp_segment, plen + 8,
+                         lw(&net_udp_dst_ip) & MASK32,
+                         lq(&net_udp_next_hop_mac_ptr),
+                         NET_IP_PROTO_UDP);
+}
+
+# ---------------------------------------------------------------------------
+# net_udp_rx_ipv4 - rdi = IPv4 packet, rsi = IPv4 packet length. Strips the IPv4
+# + UDP headers and hands the payload to the DNS demux. eax = 1 if consumed.
+# Validation mirrors udp.asm byte-for-byte.
+# ---------------------------------------------------------------------------
+fn net_udp_rx_ipv4(pkt, len) {
+    if len < 28 { return 0; }
+    let ihl = (lb(pkt) & 0x0F) << 2;       # IPv4 header length in bytes
+    if ihl < 20 { return 0; }
+    if len <= ihl { return 0; }
+    let up = pkt + ihl;                    # UDP header start
+    let ulen = len - ihl;                  # bytes from UDP header onward
+    if ulen < 8 { return 0; }
+
+    # Ports are read as raw little-endian-into-a-reg bytes (the asm `mov si,[..]`),
+    # i.e. exactly the on-wire bytes in the low 16 bits; net_dns_rx_udp compares
+    # them against its own network-order port constants, so do NOT byte-swap here.
+    let srcport = lb(up + 0) | (lb(up + 1) << 8);
+    let dstport = lb(up + 2) | (lb(up + 3) << 8);
+
+    # UDP length field is big-endian on the wire.
+    let dlen = (lb(up + 4) << 8) | lb(up + 5);
+    if dlen < 8 { return 0; }
+    if dlen > ulen { return 0; }
+
+    let paylen = dlen - 8;
+    let payload = up + 8;
+    # net_dns_rx_udp(payload, srcport, dstport, len) - plain System-V; matches
+    # the udp.asm call (rdi=payload, si=srcport, dx=dstport, ecx=len).
+    return net_dns_rx_udp(payload, srcport, dstport, paylen);
+}
