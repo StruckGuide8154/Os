@@ -343,6 +343,12 @@ rtl8139_handle_udp:
     ret
 
 rtl_ser_putc:
+%ifdef RELEASE_BUILD
+    ; Release images carry no debug serial. NIC bring-up markers
+    ; ([RTL INIT]/[LINK WAIT]/[RTL READY]/...) funnel through this COM1 leaf;
+    ; no-op it so they don't ship.
+    ret
+%endif
     push rax
     push rdx
     mov dx, 0x3F8

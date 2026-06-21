@@ -48,6 +48,7 @@ const SYS_HANDLE_CLOSE   = 70
 const SYS_FS_ENTRY_INFO  = 71
 const SYS_MOUSE_SENSE     = 74    # get packed pointer sensitivity (x[15:0],y[31:16] tenths)
 const SYS_SET_MOUSE_SENSE = 75    # set packed pointer sensitivity, each axis [1,50]=0.1x..5.0x
+const SYS_PROC_SETPRIO    = 76    # priority manager: retune a process's scheduling priority
 const SYS_FS_ENTRY_INFO_SIZE = 20
 
 # SYS_FS_ENTRY_INFO output struct offsets (matches FAT16 short-entry head):
@@ -91,6 +92,7 @@ const SI_CPU_MHZ     = 3
 const SI_CORE_COUNT  = 4
 const SI_CORE_UTIL   = 5
 const SI_CORE_MHZ    = 6
+const SI_RAM_MANAGED_KB = 7
 const SI_GPU_PROVIDER = 16
 const SI_GPU_BDF      = 17
 const SI_GPU_ID       = 18
@@ -99,6 +101,31 @@ const SI_GPU_BAR0_LO  = 20
 const SI_GPU_BAR0_HI  = 21
 const SI_GPU_CMD      = 22
 const SI_GPU_ACTIVE   = 23
+
+# Per-process priority-manager selectors (SYS_SYSINFO, rsi = process index).
+# See the .si_proc band in syscall_handlers_sys_fs.inc.
+const SI_PROC_PRIORITY = 50
+const SI_PROC_BASEPRI  = 51
+const SI_PROC_CPUTIME  = 52
+const SI_PROC_STATE    = 53
+const SI_PROC_STRIKES  = 54
+const SI_PROC_WINID    = 55
+const SI_PROC_SLOT     = 56
+const SI_PROC_ID       = 57
+
+# Process pool size + state codes (mirror constants.inc / structs.inc).
+const PROC_MAX_SLOTS = 12
+const PROC_ST_EMPTY  = 0
+const PROC_ST_READY  = 1
+const PROC_ST_RUN    = 2
+const PROC_ST_SLEEP  = 3
+const PROC_ST_TERM   = 4
+
+# Priority classes (mirror constants.inc PRIO_*).
+const PRIO_IDLE   = 0
+const PRIO_LOW    = 4
+const PRIO_NORMAL = 8
+const PRIO_HIGH   = 16
 
 const GPU_PROVIDER_NONE = 0
 const GPU_PROVIDER_780M = 1
@@ -207,10 +234,23 @@ fn display_current_height() {
 fn sys_fps()          { return syscall(SYS_SYSINFO, SI_FPS, 0); }
 fn sys_ram_free_kb()  { return syscall(SYS_SYSINFO, SI_RAM_FREE_KB, 0); }
 fn sys_ram_max_kb()   { return syscall(SYS_SYSINFO, SI_RAM_MAX_KB, 0); }
+fn sys_ram_managed_kb() { return syscall(SYS_SYSINFO, SI_RAM_MANAGED_KB, 0); }
 fn sys_cpu_mhz()      { return syscall(SYS_SYSINFO, SI_CPU_MHZ, 0); }
 fn sys_core_count()   { return syscall(SYS_SYSINFO, SI_CORE_COUNT, 0); }
 fn sys_core_util(i)   { return syscall(SYS_SYSINFO, SI_CORE_UTIL, i); }
 fn sys_core_mhz(i)    { return syscall(SYS_SYSINFO, SI_CORE_MHZ, i); }
+
+# --- Priority manager: per-process queries + retune ---
+fn sys_proc_priority(i) { return syscall(SYS_SYSINFO, SI_PROC_PRIORITY, i); }
+fn sys_proc_basepri(i)  { return syscall(SYS_SYSINFO, SI_PROC_BASEPRI, i); }
+fn sys_proc_cputime(i)  { return syscall(SYS_SYSINFO, SI_PROC_CPUTIME, i); }
+fn sys_proc_state(i)    { return syscall(SYS_SYSINFO, SI_PROC_STATE, i); }
+fn sys_proc_strikes(i)  { return syscall(SYS_SYSINFO, SI_PROC_STRIKES, i); }
+fn sys_proc_winid(i)    { return syscall(SYS_SYSINFO, SI_PROC_WINID, i); }
+fn sys_proc_id(i)       { return syscall(SYS_SYSINFO, SI_PROC_ID, i); }
+# Retune the scheduling priority of process index i (0 = idle .. 16 = high).
+# Returns 0 on success, -1 on a bad index / empty slot. CAP_PROC required.
+fn sys_proc_setprio(i, prio) { return syscall(SYS_PROC_SETPRIO, i, prio); }
 fn gpu_provider()     { return syscall(SYS_SYSINFO, SI_GPU_PROVIDER, 0); }
 fn gpu_bdf()          { return syscall(SYS_SYSINFO, SI_GPU_BDF, 0); }
 fn gpu_id()           { return syscall(SYS_SYSINFO, SI_GPU_ID, 0); }

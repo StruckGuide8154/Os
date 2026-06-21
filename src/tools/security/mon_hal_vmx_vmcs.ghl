@@ -1,0 +1,258 @@
+# THREAT: a compromised ring-0 that, after the monitor is armed, tries to escape
+# or disarm the below-ring-0 floor. The defense is to run the existing kernel as
+# a VMX *guest* under a root-mode monitor so the floor sits beneath ring-0. This
+# module is the Intel VT-x half of Track 5 G1 item 2: the VMXON region header
+# math, the VMCS revision/shadow header math, the architectural VMCS field
+# ENCODING, the CR0/CR4 fixed-bit legality adjustment, and - the security crux -
+# the kernel-as-guest STATE-CAPTURE invariant (guest mirrors the live kernel so
+# behavior is unchanged; HOST state points at the monitor, never back into the
+# guest, so every VM-exit lands in the floor).
+#
+# HONEST MATURITY: `modeled`. Every function here is a pure combinational policy
+# over (control-MSR bits, field encodings, captured register values). It computes
+# what the silicon REQUIRES - a legal VMXON region, a well-formed VMCS, a guest
+# image identical to the running kernel, and a host image rooted in the monitor -
+# but it executes NO privileged instruction. There is no VMXON / VMPTRLD /
+# VMWRITE / VMLAUNCH here; that is the `tested-accel` back-end (Track 5 G1 item
+# 3). Compiles `--forbid-asm --deny-unsafe`: no memory ops, no ambient authority,
+# so a caller cannot smuggle a real launch through this model. The companion
+# vendor-neutral second-stage / IOMMU math is in mon_hal.ghl; detect is in
+# mon_hal_detect.ghl.
+
+module "security_mon_hal_vmx_vmcs";
+
+global mon_hal_vmx_model_version;
+global mon_hal_vmx_basic_revision;
+global mon_hal_vmx_region_size_ok;
+global mon_hal_vmx_vmxon_region_ok;
+global mon_hal_vmx_vmcs_header_ok;
+global mon_hal_vmx_fix_cr0;
+global mon_hal_vmx_fix_cr4;
+global mon_hal_vmx_cr_is_legal;
+global mon_hal_vmcs_encode;
+global mon_hal_vmcs_field_access;
+global mon_hal_vmcs_field_index;
+global mon_hal_vmcs_field_type;
+global mon_hal_vmcs_field_width;
+global mon_hal_vmcs_field_is_guest;
+global mon_hal_vmcs_field_is_host;
+global mon_hal_vmx_guest_field_mirrors;
+global mon_hal_vmx_host_field_in_monitor;
+global mon_hal_vmx_host_state_rooted_in_monitor;
+global mon_hal_vmx_capture_complete;
+global mon_hal_vmx_make_guest_ok;
+
+fn mon_hal_vmx_model_version() {
+    return 1;
+}
+
+# ---- VMXON region + VMCS header math ---------------------------------------
+# IA32_VMX_BASIC (MSR 0x480): bits 30:0 = VMCS/VMXON revision identifier; bit 31
+# MUST be 0 for the revision word written into a region; bits 44:32 = the number
+# of bytes a VMXON/VMCS region occupies (architecturally <= 4096 and the region
+# must be 4 KiB-aligned). The first 4 bytes of a VMXON or VMCS region hold this
+# revision id; for a VMCS, bit 31 of that word selects a shadow VMCS.
+const VMX_BASIC_REV_MASK = 0x7FFFFFFF;
+const VMX_REGION_SHADOW_BIT = 0x80000000;
+const VMX_BASIC_SIZE_SHIFT = 32;
+const VMX_BASIC_SIZE_MASK = 0x1FFF;
+const VMX_REGION_MAX = 4096;
+const VMX_PAGE_MASK = 0xFFF;
+
+fn mon_hal_vmx_basic_revision(ia32_vmx_basic) {
+    return ia32_vmx_basic & VMX_BASIC_REV_MASK;
+}
+
+# Architectural size from IA32_VMX_BASIC is legal: nonzero, no larger than one
+# page, and a region of that size sits in a 4 KiB-aligned page.
+fn mon_hal_vmx_region_size_ok(ia32_vmx_basic, region_pa) {
+    let size = (ia32_vmx_basic >> VMX_BASIC_SIZE_SHIFT) & VMX_BASIC_SIZE_MASK;
+    if size == 0 { return 0; }
+    if size > VMX_REGION_MAX { return 0; }
+    if (region_pa & VMX_PAGE_MASK) != 0 { return 0; }
+    return 1;
+}
+
+# A VMXON region is well-formed when: its physical address is page-aligned and
+# sized per IA32_VMX_BASIC, AND its first dword == the basic revision id with the
+# shadow bit CLEAR (the shadow bit is only meaningful for a VMCS, never VMXON).
+fn mon_hal_vmx_vmxon_region_ok(ia32_vmx_basic, region_pa, region_rev_word) {
+    if mon_hal_vmx_region_size_ok(ia32_vmx_basic, region_pa) == 0 { return 0; }
+    if (region_rev_word & VMX_REGION_SHADOW_BIT) != 0 { return 0; }
+    if (region_rev_word & VMX_BASIC_REV_MASK) != mon_hal_vmx_basic_revision(ia32_vmx_basic) {
+        return 0;
+    }
+    return 1;
+}
+
+# A VMCS header is well-formed when the revision id matches and the shadow bit is
+# in its intended state (want_shadow != 0 -> bit set; else clear). The active
+# kernel-as-guest VMCS is a normal (non-shadow) VMCS, so the back-end calls this
+# with want_shadow == 0.
+fn mon_hal_vmx_vmcs_header_ok(ia32_vmx_basic, region_pa, header_word, want_shadow) {
+    if mon_hal_vmx_region_size_ok(ia32_vmx_basic, region_pa) == 0 { return 0; }
+    if (header_word & VMX_BASIC_REV_MASK) != mon_hal_vmx_basic_revision(ia32_vmx_basic) {
+        return 0;
+    }
+    let shadow = header_word & VMX_REGION_SHADOW_BIT;
+    if want_shadow == 0 {
+        if shadow != 0 { return 0; }
+        return 1;
+    }
+    if shadow == 0 { return 0; }
+    return 1;
+}
+
+# ---- CR0/CR4 fixed-bit legality (IA32_VMX_CR0/CR4_FIXED0/1) -----------------
+# VMX requires guest/host CR0 and CR4 to satisfy the fixed-bit MSRs: every bit
+# set in FIXED0 MUST be 1, every bit clear in FIXED1 MUST be 0. The canonical
+# adjustment is (val | fixed0) & fixed1; a value is already legal iff adjusting
+# it is a no-op. Writing an illegal CRx into the VMCS makes VMLAUNCH fail with a
+# guest-state error, so the back-end legalizes before VMWRITE.
+fn mon_hal_vmx_fix_cr0(cr0, cr0_fixed0, cr0_fixed1) {
+    return (cr0 | cr0_fixed0) & cr0_fixed1;
+}
+
+fn mon_hal_vmx_fix_cr4(cr4, cr4_fixed0, cr4_fixed1) {
+    return (cr4 | cr4_fixed0) & cr4_fixed1;
+}
+
+fn mon_hal_vmx_cr_is_legal(cr, fixed0, fixed1) {
+    if ((cr | fixed0) & fixed1) != cr { return 0; }
+    return 1;
+}
+
+# ---- VMCS field encoding (Intel SDM Vol.3 "Field Encoding in VMCS") --------
+# A 32-bit field encoding packs: bit 0 = access type (0 full / 1 high, only for
+# 64-bit fields), bits 9:1 = index, bits 11:10 = field type, bits 14:13 = width.
+# Field type 2 = GUEST state, 3 = HOST state, 0 = control, 1 = read-only data.
+# Width 0 = 16-bit, 1 = 64-bit, 2 = 32-bit, 3 = natural-width.
+const VMCS_ACCESS_SHIFT = 0;
+const VMCS_INDEX_SHIFT = 1;
+const VMCS_INDEX_MASK = 0x1FF;
+const VMCS_TYPE_SHIFT = 10;
+const VMCS_TYPE_MASK = 0x3;
+const VMCS_WIDTH_SHIFT = 13;
+const VMCS_WIDTH_MASK = 0x3;
+
+const VMCS_TYPE_CONTROL = 0;
+const VMCS_TYPE_RODATA = 1;
+const VMCS_TYPE_GUEST = 2;
+const VMCS_TYPE_HOST = 3;
+
+fn mon_hal_vmcs_encode(access, index, type, width) {
+    let a = access & 0x1;
+    let i = (index & VMCS_INDEX_MASK) << VMCS_INDEX_SHIFT;
+    let t = (type & VMCS_TYPE_MASK) << VMCS_TYPE_SHIFT;
+    let w = (width & VMCS_WIDTH_MASK) << VMCS_WIDTH_SHIFT;
+    return a | i | t | w;
+}
+
+fn mon_hal_vmcs_field_access(enc) {
+    return enc & 0x1;
+}
+
+fn mon_hal_vmcs_field_index(enc) {
+    return (enc >> VMCS_INDEX_SHIFT) & VMCS_INDEX_MASK;
+}
+
+fn mon_hal_vmcs_field_type(enc) {
+    return (enc >> VMCS_TYPE_SHIFT) & VMCS_TYPE_MASK;
+}
+
+fn mon_hal_vmcs_field_width(enc) {
+    return (enc >> VMCS_WIDTH_SHIFT) & VMCS_WIDTH_MASK;
+}
+
+fn mon_hal_vmcs_field_is_guest(enc) {
+    if mon_hal_vmcs_field_type(enc) == VMCS_TYPE_GUEST { return 1; }
+    return 0;
+}
+
+fn mon_hal_vmcs_field_is_host(enc) {
+    if mon_hal_vmcs_field_type(enc) == VMCS_TYPE_HOST { return 1; }
+    return 0;
+}
+
+# ---- kernel-as-guest capture invariant -------------------------------------
+# The capture must satisfy two opposite properties simultaneously, and this is
+# the whole point of running the kernel as a guest:
+#
+#   GUEST state == the live kernel (identity). The guest CR0/CR3/CR4, GDTR/IDTR
+#   base+limit, TR selector+base, RIP/RSP/RFLAGS we VMWRITE must equal the values
+#   the kernel had at capture time, so resuming the guest is indistinguishable
+#   from never having entered VMX. Any mismatch means the kernel would observe a
+#   changed machine - rejected.
+fn mon_hal_vmx_guest_field_mirrors(captured, live) {
+    if captured != live { return 0; }
+    return 1;
+}
+
+#   HOST state == the MONITOR, never the guest. Host RIP (VM-exit entry) and host
+#   RSP must land inside the monitor carve-out, and host CR3 must be the monitor's
+#   own page-table root, distinct from the guest CR3. If host RIP/RSP pointed into
+#   the guest, a VM-exit would re-enter the compromised kernel instead of the
+#   floor - this predicate is what forbids that.
+fn mon_hal_vmx_host_field_in_monitor(addr, mon_base, mon_len) {
+    if addr < mon_base { return 0; }
+    if addr >= (mon_base + mon_len) { return 0; }
+    return 1;
+}
+
+fn mon_hal_vmx_host_state_rooted_in_monitor(host_rip, host_rsp, host_cr3,
+                                            guest_cr3, mon_base, mon_len, mon_cr3) {
+    if mon_hal_vmx_host_field_in_monitor(host_rip, mon_base, mon_len) == 0 { return 0; }
+    if mon_hal_vmx_host_field_in_monitor(host_rsp, mon_base, mon_len) == 0 { return 0; }
+    if host_cr3 != mon_cr3 { return 0; }
+    if host_cr3 == guest_cr3 { return 0; }
+    return 1;
+}
+
+# Completeness: every field the kernel-as-guest VMCS must carry has to be present
+# before VMLAUNCH or the guest resumes with a stale/zero register. The back-end
+# OR's a bit into present_mask after each successful VMWRITE; capture is complete
+# only when all required guest+host fields are present. The required set mirrors
+# the Track 5 item: CR0/CR3/CR4, GDTR base+limit, IDTR base+limit, TR sel+base,
+# RIP/RSP/RFLAGS - on BOTH the guest side and the host side.
+const VMXCAP_CR0 = 0x00000001;
+const VMXCAP_CR3 = 0x00000002;
+const VMXCAP_CR4 = 0x00000004;
+const VMXCAP_GDTR_BASE = 0x00000008;
+const VMXCAP_GDTR_LIMIT = 0x00000010;
+const VMXCAP_IDTR_BASE = 0x00000020;
+const VMXCAP_IDTR_LIMIT = 0x00000040;
+const VMXCAP_TR_SEL = 0x00000080;
+const VMXCAP_TR_BASE = 0x00000100;
+const VMXCAP_RIP = 0x00000200;
+const VMXCAP_RSP = 0x00000400;
+const VMXCAP_RFLAGS = 0x00000800;
+const VMXCAP_REQUIRED = 0x00000FFF;
+
+fn mon_hal_vmx_capture_complete(present_mask) {
+    if (present_mask & VMXCAP_REQUIRED) != VMXCAP_REQUIRED { return 0; }
+    return 1;
+}
+
+# The single make_guest gate the back-end calls before VMLAUNCH. It folds the
+# whole invariant: a legal VMXON region + VMCS header, a legal (fixed-bit) guest
+# CR0/CR4, a complete guest capture, a complete host capture, and host state
+# rooted in the monitor and disjoint from the guest. Fails closed on any miss.
+fn mon_hal_vmx_make_guest_ok(ia32_vmx_basic, vmxon_pa, vmxon_word,
+                             vmcs_pa, vmcs_word,
+                             guest_cr0, cr0_fixed0, cr0_fixed1,
+                             guest_cr4, cr4_fixed0, cr4_fixed1,
+                             guest_present, host_present,
+                             host_rip, host_rsp, host_cr3, guest_cr3,
+                             mon_base, mon_len, mon_cr3) {
+    if mon_hal_vmx_vmxon_region_ok(ia32_vmx_basic, vmxon_pa, vmxon_word) == 0 { return 0; }
+    if mon_hal_vmx_vmcs_header_ok(ia32_vmx_basic, vmcs_pa, vmcs_word, 0) == 0 { return 0; }
+    if mon_hal_vmx_cr_is_legal(guest_cr0, cr0_fixed0, cr0_fixed1) == 0 { return 0; }
+    if mon_hal_vmx_cr_is_legal(guest_cr4, cr4_fixed0, cr4_fixed1) == 0 { return 0; }
+    if mon_hal_vmx_capture_complete(guest_present) == 0 { return 0; }
+    if mon_hal_vmx_capture_complete(host_present) == 0 { return 0; }
+    if mon_hal_vmx_host_state_rooted_in_monitor(host_rip, host_rsp, host_cr3,
+                                                guest_cr3, mon_base, mon_len, mon_cr3) == 0 {
+        return 0;
+    }
+    return 1;
+}

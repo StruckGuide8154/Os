@@ -28,6 +28,7 @@ global netpanel_live_refresh;
 # clobber. feat_on() lives in boot_features.ghl (same NASM translation unit).
 extern feat_on;
 const FEAT_FRAME_PRESENT_REFRESH = 2;
+const FEAT_DEBUG_OVERLAY = 512;
 
 # Window pool layout + flags (src/include/window_layout.inc, constants.inc).
 const WINDOW_POOL_ADDR   = extern;
@@ -86,6 +87,17 @@ fn rf_draw_fps_text() {
     render_text(FPS_REGION_X + 4, FPS_REGION_Y + 4, &szFPSPrefix, COL_FPS, COL_TRANSPARENT);
 }
 
+# Debug-only overlay hook. The overlay may draw into the backbuffer and mark its
+# own clipped rect dirty, but it never presents directly; this keeps framebuffer
+# ownership inside frame_present/render_flush.
+fn rf_debug_overlay_before_flush() {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        if feat_on(FEAT_DEBUG_OVERLAY) != 0 {
+            usb_debug_overlay();
+        }
+    }
+}
+
 # Restore the FPS region of the live backbuffer from the saved snapshot (used by
 # the idle fast path so the rest of the frame is untouched). Row-wise dword copy.
 fn rf_restore_fps_region() {
@@ -135,6 +147,7 @@ fn rf_full_path() {
         }
     }
     if saved != 0 { render_save_backbuffer(); }
+    rf_debug_overlay_before_flush();
     sb(&scene_dirty, 0);
     # Frame timing is owned by the central pacer (frame_pacing.ghl); the old
     # per-path wait_vsync() busy-spun here AND held the cursor hidden across the
@@ -161,8 +174,10 @@ fn rf_fast_path() {
     rf_update_fps();
     rf_restore_fps_region();
     rf_draw_fps_text();
+    render_mark_dirty(FPS_REGION_X, FPS_REGION_Y, FPS_REGION_W, FPS_REGION_H);
+    rf_debug_overlay_before_flush();
     cursor_hide();
-    display_flip_rect(FPS_REGION_X, FPS_REGION_Y, FPS_REGION_W, FPS_REGION_H);
+    render_flush();
     cursor_draw(lw(&mouse_x), lw(&mouse_y));
     rf_save_idle_keys();
 }
@@ -174,6 +189,7 @@ fn rf_draw_drag() {
     rf_update_fps();
     rf_draw_fps_text();
     render_mark_dirty(FPS_REGION_X, FPS_REGION_Y, FPS_REGION_W, FPS_REGION_H);
+    rf_debug_overlay_before_flush();
     cursor_hide();
     render_flush();
     cursor_draw(lw(&mouse_x), lw(&mouse_y));
@@ -219,13 +235,20 @@ fn render_frame() {
 
     if lb(&scene_dirty) != 0 { rf_full_path(); return; }
 
-    # Truly idle: skip everything unless the cursor moved or FPS changed.
+    # Truly idle: skip everything unless the FPS overlay changed. Mouse movement
+    # is already presented by process_mouse() directly to the front buffer; doing
+    # another cursor_hide()/flush()/cursor_draw() here makes the pointer flicker,
+    # especially at high refresh targets.
     if lw(&mouse_x) == lw(&rf_last_mouse_x) {
         if lw(&mouse_y) == lw(&rf_last_mouse_y) {
             if lw(&last_fps) == lw(&rf_last_fps) {
                 return;
             }
         }
+    }
+    if lw(&last_fps) == lw(&rf_last_fps) {
+        rf_save_idle_keys();
+        return;
     }
     rf_fast_path();
 }

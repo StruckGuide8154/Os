@@ -98,5 +98,20 @@ struc process_t
     ; seconds at display time via cpu_tsc_per_tick * 100. lock-add updated
     ; from APs; readers may see a stale value but never a torn one.
     .cpu_time_cycles:resq 1     ; 0xC8
-    .padding:       resb 360    ; Pad to 512 bytes
+    ; --- Priority manager fields (Stage 0) -------------------------------------
+    ; priority:      current EFFECTIVE scheduling priority (PRIO_* in
+    ;                constants.inc). The priority-aware process_schedule picks the
+    ;                highest-priority READY process; an over-budget slot is demoted
+    ;                toward PRIO_IDLE (Stage 1) and restored toward base_priority
+    ;                after a clean window.
+    ; base_priority: the class the process launched at; demotion/boost decays back
+    ;                to this value.
+    ; quantum_left:  remaining time-slice ticks for the running process (Stage 2
+    ;                preemption decrements this each tick; 0 => reschedule).
+    ; strikes:       consecutive over-budget windows (demote-then-kill counter).
+    .priority:      resd 1      ; 0xD0
+    .base_priority: resd 1      ; 0xD4
+    .quantum_left:  resd 1      ; 0xD8
+    .strikes:       resd 1      ; 0xDC
+    .padding:       resb 344    ; Pad to 512 bytes
 endstruc

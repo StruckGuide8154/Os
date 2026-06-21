@@ -170,6 +170,14 @@ FN_BEGIN l3_randomize_user_stack_top, 0, 0, FN_RET_VOID
     div rcx                              ; rdx = rbx mod (RANGE+1)
     and rdx, -16
     add rdx, L3_SLOT_USTACK_TOP_LOW
+    ; Avoid the legacy fixed stack top when ASLR is enabled and the range has
+    ; at least one alternate 16-byte slot. GRIT_NO_MEM_RANDOM still uses HIGH.
+    cmp rdx, L3_SLOT_USTACK_TOP_HIGH
+    jne .lrust_store
+%if L3_SLOT_USTACK_TOP_RANGE >= 16
+    sub rdx, 16
+%endif
+.lrust_store:
     mov ecx, r8d
     mov [rel l3_slot_ustack_off + rcx*8], rdx
 .lrust_done:

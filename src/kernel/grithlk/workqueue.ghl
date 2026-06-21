@@ -1,0 +1,519 @@
+# ============================================================================
+# workqueue.ghl - SMP work queue (worker-core offload), pure GHLK.
+#
+# Zero-asm replacement for the former hand-written trio
+#   src/kernel/proc/workqueue.asm + workqueue_api.inc + workqueue_worker.inc.
+# Keeps the GUI responsive: the boot CPU (BSP) hands expensive work (SVG raster,
+# ring-3 app callbacks, media blit) to the Application Processors (APs) as jobs;
+# the BSP keeps rendering while an AP crunches a job on another core.
+#
+# CONCURRENCY MODEL
+#   * One producer (BSP): workqueue_submit / submit_to / done / reap / wait.
+#   * N consumers (APs):  each AP runs smp_worker_loop forever.
+#   * A slot is claimed lock-free with `atomic_cmpxchg` on its status word -
+#     NO global lock, so a slow or dead AP can never stall the BSP and two APs
+#     can never run the same job.
+#   * Each slot is its own 64-byte cache line (no false sharing).
+#
+# SECURITY - SECURE JOB DISPATCH (the reason this is not a raw pointer queue):
+#   A slot does NOT hold a function pointer. It holds a small JOB-ID index into
+#   the fixed `wq_job_table` allow-list, and the worker dispatches via the
+#   bounds-checked `call_table` intrinsic. The only reachable job targets are the
+#   three vetted kernel entry points below - an attacker who corrupts a slot can
+#   at worst select a *different* legitimate job, never an arbitrary address.
+#   This removes every arbitrary indirect call from the work-queue path.
+#
+# SPEED
+#   * Lock-free claim (single `lock cmpxchg`), per-cache-line slots.
+#   * Priority-ordered claim so a flood of cheap app jobs cannot starve a
+#     system-critical job (workers take the highest-priority PENDING slot).
+#   * Per-core APERF/MPERF MHz + busy/idle utilisation accounting feeds Task
+#     Manager with no extra syscalls.
+#   * Billing uses one `atomic_add` (lock add) into the owning PCB counter.
+#
+# STATUS LIFECYCLE (dword at slot offset 0):
+#   FREE -> BUILDING -> PENDING -> RUNNING -> DONE -> FREE
+#   BSP: FREE->BUILDING (atomic claim), BUILDING->PENDING (publish), DONE->FREE
+#        (reap); also BUILDING->RUNNING->DONE on the single-core inline path.
+#   AP : PENDING->RUNNING (atomic claim), RUNNING->DONE (publish result LAST).
+# Publish discipline: the status store is ALWAYS the last write, so a reader that
+# sees PENDING/DONE also sees the fields written before it (x86 TSO).
+# ============================================================================
+
+module "workqueue";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over the slot array + core-state record
+unsafe kernel_priv;      # atomic_cmpxchg / atomic_add / set_reg / cpuid / rdmsr
+unsafe implicit_extern;  # &workqueue_* module-local data + extern symbols
+
+global workqueue_init;
+global workqueue_submit;
+global workqueue_submit_to;
+global workqueue_done;
+global workqueue_reap;
+global workqueue_wait;
+global workqueue_wait_timeout;
+global workqueue_wait_timed_out;
+global workqueue_selftest;
+global smp_worker_loop;
+global wq_lock;
+global wq_unlock;
+global wq_alloc_lock;
+global wq_fb_lock;
+global wq_driver_lock;
+global wq_lock_steals;      # diagnostics: bounded-lock deadline steals
+
+# Bounded, recovery-safe locking (bounded_lock.ghl).
+extern blk_self_tag;        # () -> nonzero per-core owner tag
+extern blk_held_push;       # (p) - record a held lock for recovery release
+extern blk_held_pop;        # (p) - forget a released lock
+# Tier-2 cross-core liveness watchdog (watchdog.ghl) - idle APs run the watcher.
+extern kwd_ap_watch;        # () - observe the BSP heartbeat; NMI the BSP if wedged
+extern wd_arm_ap_tick;      # () - arm this AP's one-shot self-wake LAPIC timer
+
+# Bounded-lock deadline: steal the lock if a holder has not released within this
+# many ticks' worth of TSC cycles. Far longer than any legitimate critical
+# section here (microseconds) yet well under the watchdog's ~5 s freeze deadline,
+# so a wedged holder is stolen long before the system would appear frozen.
+const WQ_LOCK_STALL_TICKS = 50;     # ~0.5 s of TSC
+
+extern smp_alive_cores;     # dd - alive core count (BSP + APs); >= 2 means an AP exists
+extern tick_count;          # dq - PIT tick counter
+extern cpu_tsc_per_tick;    # dq - TSC cycles per PIT tick (calibrated at boot)
+extern apic_wake_workers;   # () - send the worker-wake IPI
+extern serial_puts;
+extern serial_putc;
+extern serial_crlf;
+extern ser_print_hex64;
+extern call_app_l3_packed;  # wq_job_table[1]: AP-routed ring-3 callback thunk
+extern app_media_draw;      # wq_job_table[2]: kernel-context media blit
+extern render_flip_job;     # wq_job_table[3]: backbuffer->FB flip blit (grithlk/render.ghl)
+extern device_enum_job;     # wq_job_table[4]: async device bring-up (kernel_lifecycle.ghl)
+extern wallpaper_render_job; # wq_job_table[5]: full-quality SVG wallpaper raster (gui/window_desktop.inc)
+
+const PROCESS_POOL  = extern;
+const MAX_PROCESSES = extern;
+
+# --- secure job allow-list. Index = job ID stored in a slot. -----------------
+# A slot never holds a function pointer: the worker dispatches through this
+# bounds-checked table, so a corrupted slot can at worst pick a DIFFERENT vetted
+# job, never an arbitrary address. Every kernel job-submitter routes through here.
+table wq_job_table {
+    wq_test_job,            # 0 - self-test only
+    call_app_l3_packed,     # 1 - AP-routed ring-3 app callback thunk
+    app_media_draw,         # 2 - kernel-context media blit
+    render_flip_job,        # 3 - dirty-rect flip blit
+    device_enum_job,        # 4 - async device bring-up
+    wallpaper_render_job,   # 5 - full-quality wallpaper SVG raster
+};
+const WQ_JOB_TEST      = 0;
+const WQ_JOB_L3        = 1;
+const WQ_JOB_MEDIA     = 2;
+const WQ_JOB_FLIP      = 3;
+const WQ_JOB_DEVENUM   = 4;
+const WQ_JOB_WALLPAPER = 5;
+
+# --- slot layout (64 bytes / one cache line) ---------------------------------
+const WQ_OFF_STATUS = 0;    # dd - lifecycle state
+const WQ_OFF_FUNC   = 8;    # dd - JOB-ID index into wq_job_table (was a fn ptr)
+const WQ_OFF_ARG    = 16;   # dq - single argument, passed to the job in rdi
+const WQ_OFF_RESULT = 24;   # dq - job return value
+const WQ_OFF_RUNS   = 32;   # dd - diagnostics: incremented once a worker ran it
+const WQ_OFF_PRIO   = 36;   # dd - job priority
+const WQ_OFF_TARGET = 40;   # dd - target core index, or -1 = any AP
+const WQ_OFF_PROC   = 44;   # dd - process id to bill, or 0 = none
+const WQ_JOB_SIZE   = 64;
+const WQ_MAX_JOBS   = 32;
+const WQ_JOBS_BYTES = 2048; # WQ_MAX_JOBS * WQ_JOB_SIZE
+
+const WQ_FREE     = 0;
+const WQ_PENDING  = 1;
+const WQ_RUNNING  = 2;
+const WQ_DONE     = 3;
+const WQ_BUILDING = 4;
+
+const WQ_PRIO_NORMAL = 1;
+const WQ_INVALID     = -1;
+const WQ_TARGET_ANY  = -1;
+const WQ_SELFTEST_N  = 8;
+
+const WQ_PCB_STRIDE   = 512;
+const WQ_PCB_TIME_OFF = 0xC8;   # process_t.cpu_time_cycles
+
+# --- per-core SMP_CORE_STATE record offsets (Task Manager reads these) -------
+const CS_STATE      = 0;    # dd - 2 RUNNING / 3 PARKED
+const CS_CORE_IDX   = 4;    # dd - this core's index
+const CS_HEARTBEAT  = 16;   # dq - liveness counter
+const CS_UTIL       = 24;   # dd - utilisation percent
+const CS_MHZ        = 28;   # dd - current MHz
+const CS_BUSY       = 32;   # dq - busy-cycle accumulator
+const CS_IDLE       = 40;   # dq - idle/scan-cycle accumulator
+const CS_LAST_TSC   = 48;   # dq - last TSC mark
+const CS_LAST_TICK  = 56;   # dq - last published tick
+const CS_PREV_APERF = 64;   # dq - previous IA32_APERF
+const CS_PREV_MPERF = 72;   # dq - previous IA32_MPERF
+const ACCT_TICKS    = 50;   # publish util/MHz at most every 50 PIT ticks
+const MHZ_SANITY    = 100000;
+
+const MSR_APERF = 0xE8;
+const MSR_MPERF = 0xE7;
+
+align 64;
+data workqueue_ready: 4;            # 0 until workqueue_init; gates the workers
+data workqueue_wait_timed_out: 4;   # set by workqueue_wait_timeout (1 = timed out)
+data wq_test_handles: 8 x 4;
+data wq_msg: 4 = [87, 81, 58, 0];   # "WQ:"
+
+# Named shared-state locks - each on its own 64-byte line (no false sharing).
+align 64;
+data wq_alloc_lock: 4;     # guards page_alloc / page_free
+align 64;
+data wq_fb_lock: 4;        # guards the shared framebuffer
+align 64;
+data wq_driver_lock: 4;    # guards shared driver state
+align 64;
+data wq_lock_steals: 8;    # diagnostics: times a bounded lock was deadline-stolen
+
+# The job array: 64-byte aligned, 64 bytes per slot (one cache line each).
+align 64;
+data workqueue_jobs: 2048;
+
+# ---------------------------------------------------------------------------
+# wq_slot(i) -> &slot[i]. Trusted callers only pass 0..WQ_MAX_JOBS-1.
+# ---------------------------------------------------------------------------
+fn wq_slot(i) {
+    return &workqueue_jobs + i * WQ_JOB_SIZE;
+}
+
+# ===========================================================================
+# BSP API
+# ===========================================================================
+
+# workqueue_init - reset every slot to FREE, then release the workers LAST.
+fn workqueue_init() {
+    let i = 0;
+    while i < WQ_JOBS_BYTES {
+        sb(&workqueue_jobs + i, 0);
+        i = i + 1;
+    }
+    sw(&workqueue_ready, 1);     # publish last: only now may a worker touch the queue
+    return 0;
+}
+
+# workqueue_submit_to(jobid, arg, prio, target, proc) -> handle or WQ_INVALID.
+# Claims a FREE slot (FREE->BUILDING), fills it, then publishes PENDING and wakes
+# the workers. With no AP alive the job runs inline so single-core stays correct.
+fn workqueue_submit_to(jobid, arg, prio, target, proc) {
+    let i = 0;
+    while i < WQ_MAX_JOBS {
+        let s = wq_slot(i);
+        if atomic_cmpxchg(s + WQ_OFF_STATUS, WQ_FREE, WQ_BUILDING) == WQ_FREE {
+            sw(s + WQ_OFF_FUNC, jobid);
+            sq(s + WQ_OFF_ARG, arg);
+            sq(s + WQ_OFF_RESULT, 0);
+            sw(s + WQ_OFF_RUNS, 0);
+            sw(s + WQ_OFF_PRIO, prio);
+            sw(s + WQ_OFF_TARGET, target);
+            sw(s + WQ_OFF_PROC, proc);
+            if lw(&smp_alive_cores) >= 2 {
+                sw(s + WQ_OFF_STATUS, WQ_PENDING);   # publish LAST
+                apic_wake_workers();
+                return i;
+            }
+            # --- inline (single-core) path: run it now so the result is ready --
+            sw(s + WQ_OFF_STATUS, WQ_RUNNING);
+            set_reg(rdi, arg);
+            let res = call_table(wq_job_table, jobid);
+            sq(s + WQ_OFF_RESULT, res);
+            sw(s + WQ_OFF_RUNS, 1);
+            sw(s + WQ_OFF_STATUS, WQ_DONE);
+            return i;
+        }
+        i = i + 1;
+    }
+    return WQ_INVALID;
+}
+
+# workqueue_submit(jobid, arg, prio) - any AP, no billing.
+fn workqueue_submit(jobid, arg, prio) {
+    return workqueue_submit_to(jobid, arg, prio, WQ_TARGET_ANY, 0);
+}
+
+# workqueue_done(h) -> 1 if finished, else 0. Out-of-range / WQ_INVALID -> 0.
+fn workqueue_done(h) {
+    if h < 0 { return 0; }
+    if h >= WQ_MAX_JOBS { return 0; }
+    let s = wq_slot(h);
+    if lw(s + WQ_OFF_STATUS) == WQ_DONE { return 1; }
+    return 0;
+}
+
+# workqueue_reap(h) -> result; frees the slot. Call only once done() returned 1.
+fn workqueue_reap(h) {
+    if h < 0 { return 0; }
+    if h >= WQ_MAX_JOBS { return 0; }
+    let s = wq_slot(h);
+    let r = lq(s + WQ_OFF_RESULT);
+    sw(s + WQ_OFF_STATUS, WQ_FREE);
+    return r;
+}
+
+# workqueue_wait(h) -> result. Spins until done, then reaps.
+fn workqueue_wait(h) {
+    while workqueue_done(h) == 0 {
+        pause();
+    }
+    return workqueue_reap(h);
+}
+
+# workqueue_wait_timeout(h, budget_ticks) -> result (0 on timeout).
+# Sets workqueue_wait_timed_out to 1 on timeout, 0 on a normal completion. On
+# timeout the slot is NOT reaped: the owning AP is presumed dead and the slot
+# leaks (bounded by WQ_MAX_JOBS), which is the price of never freezing the BSP.
+# (Two-value rax/rdx asm ABI becomes rax + this exported flag, since both callers
+# are now GHLK.)
+fn workqueue_wait_timeout(h, budget) {
+    sw(&workqueue_wait_timed_out, 0);
+    let deadline = lq(&tick_count) + budget;
+    while workqueue_done(h) == 0 {
+        if lq(&tick_count) >= deadline {
+            sw(&workqueue_wait_timed_out, 1);
+            return 0;
+        }
+        pause();
+    }
+    return workqueue_reap(h);
+}
+
+# ===========================================================================
+# Shared-state spinlocks (test-and-test-and-set; preserve the caller's data).
+# ===========================================================================
+# BOUNDED, recovery-safe acquire (bounded_lock.ghl). On contention it spins with
+# a TSC deadline (valid even under cli, where tick_count is frozen) and, past the
+# deadline, STEALS the lock - so a waiter can never block forever on a wedged or
+# dead holder. The owner tag is recorded so the recovery pad can force-release a
+# lock the BSP held when the watchdog unwinds it (no re-deadlock). See the
+# bounded_lock.ghl header for the deliberate liveness-over-exclusion trade-off.
+fn wq_lock(p) {
+    let tag = blk_self_tag();                    # nonzero per-core owner tag
+    let deadline = rdtsc() + lq(&cpu_tsc_per_tick) * WQ_LOCK_STALL_TICKS;
+    while atomic_cmpxchg(p, 0, tag) != 0 {
+        if rdtsc() >= deadline {
+            sw(p, tag);                          # steal: presumed wedged/dead holder
+            sq(&wq_lock_steals, lq(&wq_lock_steals) + 1);
+            blk_held_push(p);
+            return 0;
+        }
+        pause();                                 # TTAS: back off without bus-locking
+        while lw(p) != 0 {
+            if rdtsc() >= deadline {
+                sw(p, tag);
+                sq(&wq_lock_steals, lq(&wq_lock_steals) + 1);
+                blk_held_push(p);
+                return 0;
+            }
+            pause();
+        }
+    }
+    blk_held_push(p);
+    return 0;
+}
+
+fn wq_unlock(p) {
+    blk_held_pop(p);
+    sw(p, 0);     # a plain store; x86 ordering publishes the critical section first
+    return 0;
+}
+
+# ===========================================================================
+# AP worker
+# ===========================================================================
+
+# wq_test_job(x) -> x*x + 1. Pure, ABI-clean; used only by the self-test.
+fn wq_test_job(x) {
+    return x * x + 1;
+}
+
+# Seed the APERF/MPERF baselines if the CPU exposes them (CPUID leaf 6, ECX bit 0).
+fn wq_core_init_aperf(cs) {
+    if cpuid_eax(0) < 6 { return 0; }
+    if (cpuid_ecx(6) & 1) == 0 { return 0; }
+    sq(cs + CS_PREV_APERF, rdmsr(MSR_APERF));
+    sq(cs + CS_PREV_MPERF, rdmsr(MSR_MPERF));
+    return 0;
+}
+
+# Publish this core's MHz: prefer the APERF/MPERF-scaled base clock, else fall
+# back to busy+idle cycles over the elapsed PIT-tick window. `el` = elapsed ticks.
+fn wq_core_publish_mhz(cs, el) {
+    let have = 0;
+    if cpuid_eax(0) >= 6 {
+        if (cpuid_ecx(6) & 1) != 0 { have = 1; }
+    }
+    if have != 0 {
+        let a = rdmsr(MSR_APERF);
+        let ad = a - lq(cs + CS_PREV_APERF);
+        sq(cs + CS_PREV_APERF, a);
+        let m = rdmsr(MSR_MPERF);
+        let md = m - lq(cs + CS_PREV_MPERF);
+        sq(cs + CS_PREV_MPERF, m);
+        if md != 0 {
+            let base = lq(&cpu_tsc_per_tick) / 10000;   # base TSC MHz
+            let mhz = base * ad / md;                    # scale by aperf/mperf
+            if mhz <= MHZ_SANITY {
+                sw(cs + CS_MHZ, mhz);
+                return 0;
+            }
+        }
+    }
+    # TSC fallback: total cycles this window / (elapsed ticks * 10000).
+    let cyc = lq(cs + CS_BUSY) + lq(cs + CS_IDLE);
+    let d = el * 10000;
+    if d != 0 {
+        sw(cs + CS_MHZ, cyc / d);
+    }
+    return 0;
+}
+
+# Close an accounting window: util% from busy/total, then MHz, then reset.
+fn wq_publish_window(cs, el) {
+    let busy = lq(cs + CS_BUSY);
+    let total = busy + lq(cs + CS_IDLE);
+    if total != 0 {
+        let u = busy * 100 / total;
+        if u > 100 { u = 100; }
+        sw(cs + CS_UTIL, u);
+    }
+    wq_core_publish_mhz(cs, el);
+    sq(cs + CS_BUSY, 0);
+    sq(cs + CS_IDLE, 0);
+    sq(cs + CS_LAST_TICK, lq(&tick_count));
+    return 0;
+}
+
+# smp_worker_loop(cs) - the permanent home of every AP. Entered via
+# `jmp smp_worker_loop` from the AP trampoline with state = &SMP_CORE_STATE.
+# Never returns (the trailing epilogue is unreachable).
+fn smp_worker_loop(cs) {
+    sq(cs + CS_LAST_TSC, rdtsc());
+    sq(cs + CS_LAST_TICK, lq(&tick_count));
+    sw(cs + CS_MHZ, lq(&cpu_tsc_per_tick) / 10000);
+    wq_core_init_aperf(cs);
+
+    # Do not touch the queue until the BSP has run workqueue_init.
+    while lw(&workqueue_ready) != 1 {
+        pause();
+    }
+
+    while 1 {
+        sq(cs + CS_HEARTBEAT, lq(cs + CS_HEARTBEAT) + 1);
+
+        # Tier-2 liveness watchdog: every AP pass, observe the BSP heartbeat and
+        # NMI the BSP if it has been frozen past the deadline (catches a BSP
+        # spin/deadlock under cli, which the PIT can't). See watchdog.ghl.
+        kwd_ap_watch();
+
+        # Sweep for the highest-priority PENDING slot eligible for this core.
+        let best = -1;
+        let bestprio = -1;
+        let i = 0;
+        while i < WQ_MAX_JOBS {
+            let s = wq_slot(i);
+            if lw(s + WQ_OFF_STATUS) == WQ_PENDING {
+                let tgt = lw(s + WQ_OFF_TARGET);
+                let ok = 0;
+                if tgt == WQ_TARGET_ANY { ok = 1; }
+                if tgt == lw(cs + CS_CORE_IDX) { ok = 1; }
+                if ok != 0 {
+                    let pr = lw(s + WQ_OFF_PRIO);
+                    if pr > bestprio {
+                        bestprio = pr;
+                        best = i;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+
+        if best < 0 {
+            # --- idle: accumulate idle cycles, periodically publish, then HLT --
+            let t = rdtsc();
+            sq(cs + CS_IDLE, lq(cs + CS_IDLE) + (t - lq(cs + CS_LAST_TSC)));
+            sq(cs + CS_LAST_TSC, t);
+            let el = lq(&tick_count) - lq(cs + CS_LAST_TICK);
+            if el >= ACCT_TICKS { wq_publish_window(cs, el); }
+            # Arm a one-shot LAPIC-timer self-wake so this idle AP leaves HLT at a
+            # bounded cadence and re-runs kwd_ap_watch - otherwise an idle AP would
+            # only wake on a work IPI and the watchdog could go blind.
+            wd_arm_ap_tick();
+            sti();
+            hlt();
+            cli();
+        } else {
+            # --- try to claim the chosen slot: PENDING -> RUNNING -------------
+            let s = wq_slot(best);
+            if atomic_cmpxchg(s + WQ_OFF_STATUS, WQ_PENDING, WQ_RUNNING) == WQ_PENDING {
+                sw(cs + CS_STATE, 2);                  # RUNNING/busy
+                let t0 = rdtsc();
+                sq(cs + CS_IDLE, lq(cs + CS_IDLE) + (t0 - lq(cs + CS_LAST_TSC)));
+                sq(cs + CS_LAST_TSC, t0);
+
+                # Run the job through the secure bounded table (arg in rdi).
+                let jid = lw(s + WQ_OFF_FUNC);
+                set_reg(rdi, lq(s + WQ_OFF_ARG));
+                let res = call_table(wq_job_table, jid);
+
+                let t1 = rdtsc();
+                let busy = t1 - lq(cs + CS_LAST_TSC);
+                sq(cs + CS_BUSY, lq(cs + CS_BUSY) + busy);
+                sq(cs + CS_LAST_TSC, t1);
+
+                # Bill the cycles to the owning process, if any.
+                let proc = lw(s + WQ_OFF_PROC);
+                if proc != 0 {
+                    if proc < MAX_PROCESSES {
+                        atomic_add(PROCESS_POOL + proc * WQ_PCB_STRIDE + WQ_PCB_TIME_OFF, busy);
+                    }
+                }
+
+                let el = lq(&tick_count) - lq(cs + CS_LAST_TICK);
+                if el >= ACCT_TICKS { wq_publish_window(cs, el); }
+
+                # Publish result, then status LAST.
+                sq(s + WQ_OFF_RESULT, res);
+                sw(s + WQ_OFF_RUNS, lw(s + WQ_OFF_RUNS) + 1);
+                sw(s + WQ_OFF_STATUS, WQ_DONE);
+                sw(cs + CS_STATE, 3);                  # PARKED/available
+            }
+            # Lost the race -> just re-sweep next iteration.
+        }
+    }
+    return 0;
+}
+
+# ===========================================================================
+# Self-test: submit WQ_SELFTEST_N known jobs, verify, print "WQ:<n>/<passed>".
+# ===========================================================================
+fn workqueue_selftest() {
+    let i = 0;
+    while i < WQ_SELFTEST_N {
+        sw(&wq_test_handles + i * 4, workqueue_submit(WQ_JOB_TEST, i, WQ_PRIO_NORMAL));
+        i = i + 1;
+    }
+    i = 0;
+    let passed = 0;
+    while i < WQ_SELFTEST_N {
+        let h = lw(&wq_test_handles + i * 4);
+        if h != WQ_INVALID {
+            let r = workqueue_wait(h);
+            if r == i * i + 1 { passed = passed + 1; }
+        }
+        i = i + 1;
+    }
+    serial_puts(&wq_msg);
+    ser_print_hex64(WQ_SELFTEST_N);
+    serial_putc(47);     # '/'
+    ser_print_hex64(passed);
+    serial_crlf();
+    return 0;
+}

@@ -60,6 +60,27 @@ SMP_APP_CORE_MASK    equ 0xFFFFFFFC   ; complement; masked against ncores at use
 MAX_PROCESSES        equ 12
 PROCESS_POOL         equ 0xC30000     ; 12 * 512 bytes
 
+; --- Priority manager (Stage 0): scheduling priority classes ----------------
+; Windows-style numeric priority. Higher value = scheduled first. The
+; priority-aware process_schedule picks the highest-priority READY process and
+; round-robins within a level. PRIO_IDLE is the demotion floor for a slot that
+; blew its CPU budget (Stage 1 demote-then-kill). PRIO_REALTIME requires an
+; explicit capability at SYS_PROC_SETPRIO time (cannot be reached by clamp).
+PRIO_IDLE            equ 0            ; demotion floor for over-budget offenders
+PRIO_LOW             equ 4
+PRIO_NORMAL          equ 8            ; default class for a freshly created app
+PRIO_HIGH            equ 16
+PRIO_KERNEL          equ 24           ; PID 0 (kernel main loop)
+PRIO_REALTIME        equ 31           ; cap-gated ceiling
+PRIO_MIN             equ PRIO_IDLE
+PRIO_MAX             equ PRIO_REALTIME
+; Time-slice length in PIT ticks per priority class (Stage 2 honours this; Stage
+; 0/1 only store it). ~100 Hz PIT, so NORMAL ~= 50 ms.
+QUANTUM_TICKS_NORMAL equ 5
+QUANTUM_TICKS_HIGH   equ 8
+; Demote-then-kill: strikes before a sustained over-budget slot is TERMINATED.
+PRIO_STRIKES_TO_KILL equ 3
+
 ; --- Stage 2 disk layout ---
 STAGE2_SECTORS      equ 63           ; Sectors 1-63
 KERNEL_START_SECTOR equ 64           ; Kernel starts at sector 64
@@ -423,3 +444,26 @@ XHCI_SPEED_FULL      equ 1
 XHCI_SPEED_LOW       equ 2
 XHCI_SPEED_HIGH      equ 3
 XHCI_SPEED_SUPER     equ 4
+
+; --- gui2 retained-mode command buffer (SYS_GUI_BATCH) ---
+; Fixed 64-byte little-endian-quad records: q0=op q1=A q2=B q3=C q4=D q5=E
+; q6=F q7=tag(reserved). See syscall_handlers_gui2.inc.
+GUI_REC_SIZE         equ 64
+GUI_MAX_RECORDS      equ 4096        ; per-batch cap (range = count*64 bytes)
+GUI_DAMAGE_RECT_SIZE equ 32          ; SYS_GUI_PRESENT damage rect = 4 quads
+GUI_GLYPH_NONE       equ -1          ; SYS_GUI_GLYPH_BAKE "no atlas cell"
+; Record opcodes
+GUI_OP_NOP           equ 0
+GUI_OP_RECT          equ 1           ; A=x B=y C=w D=h E=color
+GUI_OP_TEXT          equ 2           ; A=x B=y C=str_ptr D=fg E=bg F=len
+GUI_OP_GLYPH         equ 3
+GUI_OP_CLIP          equ 4           ; A=x B=y C=w D=h ; C<0 = pop
+GUI_OP_BLIT          equ 5
+; Record field byte offsets
+GUI_REC_OP           equ 0
+GUI_REC_A            equ 8
+GUI_REC_B            equ 16
+GUI_REC_C            equ 24
+GUI_REC_D            equ 32
+GUI_REC_E            equ 40
+GUI_REC_F            equ 48

@@ -12,8 +12,8 @@
 #
 # Strategy: a single deadline-driven pacer the main loop calls once per frame.
 #   - Compute the per-frame TSC budget from a target rate:
-#       vsync off -> target_fps (default 60)
-#       vsync on  -> vsync_hz   (default 60; user panel = 180)
+#       vsync off -> target_fps (default 180)
+#       vsync on  -> vsync_hz   (default 180; user panel = 180)
 #     Both clamped to 5..1000 Hz.
 #   - Hold a running `next_deadline` TSC stamp. Each frame we wait until rdtsc()
 #     reaches it, then advance it by exactly one budget - this gives EVEN frame
@@ -56,8 +56,8 @@ extern scene_dirty;       # byte: a repaint is pending (keyboard/app activity)
 extern tick_count;        # qword, advanced by the PIT handler (100 Hz)
 extern cpu_tsc_per_tick;  # qword, calibrated TSC cycles per 10 ms PIT tick
 extern vsync_enabled;     # byte:  0 = fps-cap pacing, !=0 = vsync_hz pacing
-extern target_fps;        # dword: fps cap when vsync off (default 60)
-extern vsync_hz;          # dword: target refresh when vsync on (default 60)
+extern target_fps;        # dword: fps cap when vsync off (default 180)
+extern vsync_hz;          # dword: target refresh when vsync on (default 180)
 
 const RATE_MIN = 5;       # Hz floor (matches the 5..1000 range the UI exposes)
 const RATE_MAX = 1000;    # Hz ceiling
@@ -79,12 +79,12 @@ data fp_activity_tsc: 1 x 8 = 0;    # TSC of the last observed cursor movement
 const ACTIVITY_TICKS = 25;          # I2C burst window: 25 PIT ticks (~250 ms)
 
 # Idle frame governor: after IDLE_DOWNSHIFT_TICKS with no activity (no cursor
-# movement, no pending repaint), pace the loop at IDLE_FPS instead of the full
-# target rate. Input latency is unaffected - the wakeup pump above handles the
-# pointer at PIT rate regardless of frame rate - and ANY activity (mouse, key,
-# app repaint, media frame) restores the full rate on the very next frame.
+# movement, no pending repaint), pace the loop at IDLE_FPS instead of any
+# above-panel target. The 180 Hz floor keeps the UI from reporting 30 fps on
+# high-refresh panels; input latency is unaffected because the wakeup pump above
+# handles the pointer at PIT rate regardless of frame rate.
 const IDLE_DOWNSHIFT_TICKS = 200;   # 2 s of nothing before downshifting
-const IDLE_FPS = 30;                # idle render floor
+const IDLE_FPS = 180;               # idle render floor for 180 Hz panels
 
 # One low-latency input pass: drain USB HID events (cheap event-ring peek when
 # idle), drain touchpad reports while in the activity window, then route the
@@ -141,7 +141,8 @@ fn fp_frame_budget() {
 # Target rate with the idle governor applied: a pending repaint counts as
 # activity (covers typing / app draws / media frames, which don't move the
 # cursor); cursor movement is stamped by fp_input_pump. Only when BOTH have
-# been quiet for IDLE_DOWNSHIFT_TICKS does the loop downshift to IDLE_FPS.
+# been quiet for IDLE_DOWNSHIFT_TICKS does the loop downshift to IDLE_FPS, and
+# only for targets above that floor.
 fn fp_effective_rate() {
     let rate = fp_target_rate();
     let tick_tsc = lq(&cpu_tsc_per_tick);

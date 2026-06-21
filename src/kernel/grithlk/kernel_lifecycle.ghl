@@ -17,9 +17,10 @@ module "kernel_lifecycle";
 unsafe kernel_priv;   # sti / cli / hlt
 unsafe raw_mem;       # lb/lw/sb/sw/sq of kernel boot + main-loop state
 unsafe kernel_io;     # TEMP DEBUG: outb/ind to the Bochs VBE ports (clobber detect)
-unsafe implicit_extern; # &device_enum_job (fn pointer handed to workqueue_submit)
+unsafe implicit_extern; # extern kernel symbols + workqueue.ghl table reference
 
 global kmain;
+global device_enum_job;   # wq_job_table[4] (workqueue.ghl); dispatched by job ID
 
 const PAGE_TABLE_ADDR = 0x70000;   # src/include/boot_memory.inc (PROBE_NK_PT)
 const GUI_READY = 1;
@@ -50,6 +51,24 @@ extern frame_pace_wait;
 # wrapper's landing pad). Call this in place of render_frame() on the hot loop.
 extern render_frame_guarded;
 
+# Top-level ring-3 orphan-fault recovery (isr.asm r3guard_arm + callback_dispatch
+# cb_orphan_recover). r3guard_arm is setjmp-style: returns 0 when armed, and
+# "returns" non-zero when the ISR longjmps the BSP back here after an orphaned
+# ring-3 fault (one with no in-flight callback slot to unwind) - which would
+# otherwise park the BSP forever in l3_return_guard's cli;hlt (the app-open
+# freeze). On that recovery we clear the mid-flight callback bookkeeping and
+# strike the offending app, then fall straight back into the loop body so input /
+# render / timers keep running. Must be called directly in kmain's frame.
+extern r3guard_arm;       # () -> 0 first time, non-zero on longjmp recovery
+extern cb_orphan_recover; # () clear callback state + strike the running app
+
+# BSP kernel-liveness watchdog (watchdog.ghl, feedback_no_freeze_invariant).
+# kwd_init arms it just before the loop; kwd_bsp_tick is the once-per-iteration
+# progress heartbeat. The ring-0 PIT timer path (isr.asm) calls kwd_check and, on
+# a wedge past the deadline, longjmps back to this loop's r3guard landing pad.
+extern kwd_init;          # () arm the watchdog
+extern kwd_bsp_tick;      # () bump the BSP progress heartbeat
+
 # Runtime feature toggles (boot_features.ghl). boot_features_init parses the
 # optional ESP BOOTCFG.TXT (default = everything ON) into feat_mask; feat_enabled
 # is a cheap AND-test predicate (RDI = bit -> RAX 0/1) used to gate subsystem
@@ -60,9 +79,10 @@ extern feat_on;          # feat_on(bit) -> 1 if the feature is enabled
 # SMP work queue (proc/workqueue.asm): used to offload the slow device bring-up
 # (xHCI enumeration + PHY link waits) onto an Application Processor so boot does
 # not halt waiting for it. Plain SysV ABI: args in rdi/rsi/rdx, result in rax.
-extern workqueue_submit; # (func, arg, prio) -> job handle (or -1 if full)
+extern workqueue_submit; # (jobid, arg, prio) -> job handle (or -1 if full)
 extern workqueue_wait;   # (handle) -> result; blocks until the job is done, frees it
-const WQ_PRIO_HIGH = 2;  # keep in lockstep with proc/workqueue.asm WQ_PRIO_HIGH
+const WQ_PRIO_HIGH   = 2;  # keep in lockstep with workqueue.ghl WQ_PRIO_HIGH
+const WQ_JOB_DEVENUM = 4;  # wq_job_table index for device_enum_job (workqueue.ghl)
 
 # TEMP DEBUG: slow-motion main-loop tracer. Draws a per-call colored marker block
 # directly to the FRONT framebuffer, then stalls SLOWMO_TICKS PIT ticks, so the
@@ -393,7 +413,7 @@ fn kmain() {
     # Offload the slow device bring-up now that the APs are live. On multicore a
     # worker runs it while the BSP continues to the GUI below; on single-core
     # workqueue_submit executes it inline here (cleanly degrades to in-order boot).
-    let dev_job = workqueue_submit(&device_enum_job, 0, WQ_PRIO_HIGH);
+    let dev_job = workqueue_submit(WQ_JOB_DEVENUM, 0, WQ_PRIO_HIGH);
     boot_mark(68, 74);                # "DJ": device-enum job dispatched (async)
 
     perfdiag_init();
@@ -473,6 +493,14 @@ fn kmain() {
     workqueue_wait(dev_job);
     boot_mark(68, 87);                # "DW": device-enum job joined
 
+    # Debug-only one-shot PCI/xHCI probe for the overlay. Keep kernel_io/MMIO
+    # out of the per-frame overlay draw path and run it before lockdown.
+    cfg "ENABLE_DEBUG_SERIAL" {
+        if feat_on(FEAT_DEBUG_OVERLAY) != 0 {
+            usb_debug_overlay_prime();
+        }
+    }
+
     # Read-only kernel after init (§9): lock .text PDEs + CR0.WP. Last write to
     # .text has already happened, so any subsequent kernel code write now #PFs.
     kernel_lockdown_ro();
@@ -512,8 +540,21 @@ fn kmain() {
 
     xrdump(51);   # "X3" right BEFORE entering the main loop
 
+    # Arm the kernel-liveness watchdog now that the top-level r3guard landing pad
+    # is about to be armed each iteration. From here a wedged BSP main loop is
+    # force-recovered by the ring-0 PIT timer path instead of freezing the OS.
+    kwd_init();
+
     # ---- free-running main loop ----
     while 1 != 0 {
+        # Top-level orphan-ring-3-fault landing pad. Re-armed every iteration; a
+        # longjmp back here (r3guard_arm returns non-zero) means a ring-3 fault was
+        # recovered instead of freezing the BSP - clean up the interrupted callback
+        # state + strike the app, then continue the loop.
+        if r3guard_arm() != 0 {
+            cb_orphan_recover();
+        }
+        kwd_bsp_tick();          # progress heartbeat: proves the loop is iterating
         sb(&main_loop_stage, 1);
         cpu_acct_idle_end();
         sb(&main_loop_stage_done, 1);
@@ -535,15 +576,8 @@ fn kmain() {
 
             sb(&main_loop_stage, 4);
             slowmo_step(5);
-            # usb_debug_overlay lives in debug_overlay.asm, which kernel_build.asm
-            # only %includes when !RELEASE_BUILD. Gate the call to match (the gate
-            # symbol ENABLE_DEBUG_SERIAL is defined iff !RELEASE_BUILD) so a
-            # -Release link doesn't fail on the undefined symbol.
-            cfg "ENABLE_DEBUG_SERIAL" {
-                if feat_on(FEAT_DEBUG_OVERLAY) != 0 {
-                    usb_debug_overlay();  # USB + I2C-HID (touchpad) debug overlay
-                }
-            }
+            # Debug overlay presentation is owned by frame_present, immediately
+            # before render_flush(), so no post-frame path can race the AP flip.
             sb(&main_loop_stage_done, 4);
 
             sb(&main_loop_stage, 5);
@@ -578,9 +612,12 @@ fn kmain() {
 
             sw(&main_loop_iters, lw(&main_loop_iters) + 1);
 
-            # TEMP DEBUG: dump suspect counters once every 64 frames so a value
-            # that climbs with mouse movement (and never falls) is visible.
-            if (lw(&main_loop_iters) & 63) == 0 { dbg_counters(); }
+            # Diagnostic-only: dump suspect counters once every 64 frames when
+            # boot diagnostics are explicitly enabled. Keeping this on in every
+            # debug build floods COM1 and directly limits interactive FPS.
+            cfg "GRIT_BOOT_DIAG_LOG" {
+                if (lw(&main_loop_iters) & 63) == 0 { dbg_counters(); }
+            }
         }
 
         cpu_acct_work_end();

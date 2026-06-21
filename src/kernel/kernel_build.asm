@@ -79,6 +79,14 @@ section .text
 ; nx_mem_key / nx_splitmix64 labels resolve as same-unit symbols.
 %include "build/ghl/ram_atrest.asm"
 section .text
+; Track 5 G1: REAL Intel VT-x kernel-as-guest monitor back-end (vmx_backend_arm /
+; vmx_exit_trampoline). Emits actual VMXON/VMCS/VMLAUNCH via the gritc kernel_vmx
+; intrinsics. Dead unless mon_hal_detect reports VMX usable AND the boot path
+; calls vmx_backend_arm (it does not on the TCG CI boot, where VMX #UDs), so its
+; presence in the image does not change boot behavior. Verified tested-accel on
+; a nested-VMX / real-Intel host per scripts/test/run_vmx_accel.md.
+%include "build/ghl/mon_hal_vmx_backend.asm"
+section .text
 ; Track 2 signed-envelope enforcement: structural policy kernel
 ; (security_envelope_*), semantic policy kernel (security_artifact_*), and the
 ; in-kernel byte-walking reader (envelope_verify) that composes them. The
@@ -140,6 +148,12 @@ section .text
 section .text
 %include "src/kernel/proc/usermode.asm"
 section .text
+; GritHLK (zero-asm) ring-3 callback target pointer translation (was
+; proc/usermode_translate.inc; that .inc is now a no-op to avoid a
+; duplicate-symbol clash). Defines l3_slot_resolve_app_ptr + l3_translate_target;
+; arena/slide/blob data symbols resolve as forward refs in this single TU.
+%include "build/ghl/usermode_translate.asm"
+section .text
 ; GritHLK (zero-asm) ring-3 callback / app-done trampoline path. Ported from
 ; src/kernel/proc/usermode_callbacks.inc + l3_install_app_done_trampoline (was in
 ; usermode_integrity.inc); those .inc definitions are now removed to avoid a
@@ -171,8 +185,27 @@ section .text
 ; into the writable .data region past _kernel_text_end regardless of position.
 section .data
 %include "build/ghl/syscall_data.asm"
+; GritHLK (zero-asm) SMP work queue + ring-3 callback dispatch. Replaces the
+; hand-written trio proc/workqueue.asm + workqueue_api.inc + workqueue_worker.inc
+; and the pair proc/process_callbacks.inc + process_data.inc (all now removed to
+; avoid a duplicate-symbol clash). workqueue.ghl defines the queue + smp_worker_loop
+; + the secure wq_job_table; callback_dispatch.ghl defines dispatch_app_callback,
+; cb_run_guarded, cb_deadman_check, l3_return_guard, the priority manager, and the
+; deadman state (current_process_id, cb_*, l3_slot_in_flight, app_callback_*).
 section .text
-%include "src/kernel/proc/workqueue.asm"
+%include "build/ghl/workqueue.asm"
+section .text
+%include "build/ghl/callback_dispatch.asm"
+section .text
+; GritHLK (zero-asm) BSP kernel-liveness watchdog (feedback_no_freeze_invariant).
+; kwd_init/kwd_bsp_tick (kmain) + kwd_check (called from the ring-0 PIT timer path
+; in isr.asm); a wedged BSP main loop is force-recovered to kmain's r3guard pad.
+%include "build/ghl/watchdog.asm"
+section .text
+; Recovery-safe bounded spinlocks (feedback_no_freeze_invariant): bounded-steal
+; acquire + per-core held-lock registry so the watchdog's recovery longjmp can
+; release a lock the BSP held without re-deadlocking waiters.
+%include "build/ghl/bounded_lock.asm"
 
 ; --- Network stack ---
 section .text
@@ -272,14 +305,20 @@ section .text
 %include "src/kernel/drivers/battery.asm"
 
 ; --- Filesystem ---
+; Zero-asm GritHLK FAT16 driver (replaces fat16.asm + fat16_init/io/dirops/nav
+; .inc). Globals (fat16_init, fat16_file_count, fat16_get_entry, fat16_read_file,
+; fat16_write_file, fat16_delete_entry, fat16_rename_entry, fat16_mkdir,
+; fat16_change_dir, fat16_switch_to, fat16_sync_root, fat16_entry_*snapshot*)
+; resolve for syscall.asm / the FS handlers within this single NASM TU.
 section .text
-%include "src/kernel/fs/fat16.asm"
+%include "build/ghl/fat16_core.asm"
 
 ; --- GUI System ---
 section .text
 %include "src/kernel/gui/resources.asm"
 section .text
-%include "src/kernel/gui/render.asm"
+; GritHLK (zero-asm) render front-end + dirty-rect bookkeeping (was gui/render.asm).
+%include "build/ghl/render.asm"
 section .text
 ; GritHLK (zero-asm) window-manager leaf helpers - included BEFORE window.asm
 ; so wm_get_window_at / wm_cb_intern / wm_cb_resolve / wm_bg_* /

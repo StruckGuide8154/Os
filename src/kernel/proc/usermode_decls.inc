@@ -77,6 +77,7 @@ section .text
 ; auto-wrapped (FN_BEGIN emits global): global l3_install_app_done_trampoline
 ; auto-wrapped (FN_BEGIN emits global): global l3_translate_target
 ; auto-wrapped (FN_BEGIN emits global): global l3_copy_app_blob_to_slot
+; auto-wrapped (FN_BEGIN emits global): global l3_release_slot
 ; auto-wrapped (FN_BEGIN emits global): global l3_slot_resolve_app_ptr
 ; auto-wrapped (FN_BEGIN emits global): global app_blob_init
 global app_blob_base_v

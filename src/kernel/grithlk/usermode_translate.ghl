@@ -1,0 +1,144 @@
+# ============================================================================
+# usermode_translate.ghl - ring-3 callback pointer translation.  ZERO-ASM.
+#
+# Structured GritHLK port of src/kernel/proc/usermode_translate.inc. Keeps the
+# exact global names + the register ABI the callers (usermode_callbacks.ghl /
+# usermode.asm) bind to (rdi/rsi in, rax out). There is ZERO assembly here.
+#
+# These two functions map a callback TARGET pointer - which may be either a
+# canonical pointer into the built-in app blob OR a slot-local pointer handed to
+# the kernel by ring-3 through SYS_WM_CREATE / SYS_WM_HANDLERS - into the live,
+# per-slot, code-slid user address that ring 3 may safely iretq into.
+#
+# SECURITY - FAIL CLOSED (load-bearing, this is the KASLR background-click freeze
+# fix). If a target IS a blob VA but the slot base (app_base) fails validation we
+# MUST NOT return the untranslated kernel blob VA: ring 3 would iretq into a
+# supervisor (US=0) kernel page -> #PF -> slot-abort unwind at best, BSP cli/hlt
+# park at worst. Instead we return the sentinel 0 ("untranslatable");
+# l3_prepare_callback checks for it and redirects to this slot's app-done
+# trampoline (a valid in-slot ring-3 stub). Every reject path is preserved
+# bit-for-bit from the asm.
+#
+# FIDELITY NOTES
+#   * The asm used unsigned compares (jb/jae); every value here is a low VA / a
+#     small slot index (< 2^31), so GritHLK's signed `<`/`>=` are identical.
+#   * `test r, APP_SLOT_SIZE-1` -> `(r & (APP_SLOT_SIZE - 1)) != 0`.
+#   * `shr r, 21` (slot index from the 2 MiB-aligned in-arena offset) -> `>> 21`,
+#     operand is non-negative so logical == arithmetic.
+#   * The ENABLE_DEBUG_SERIAL "TXBF" diagnostic is reproduced under the same cfg
+#     gate; SER '<c>' was a raw `out 0x3F8, al`, here outb(SER_PORT, c).
+# ============================================================================
+
+module "usermode_translate";
+
+unsafe raw_mem;          # lq() over the arena/slide/blob data symbols
+unsafe kernel_io;        # outb() to COM1 for the debug diagnostic
+unsafe implicit_extern;  # &<symbol> over extern data + module-local helper
+
+global l3_slot_resolve_app_ptr;
+global l3_translate_target;
+
+# Built-in app blob bounds (labels in kernel.bin; usermode_decls.inc). Addresses
+# only - contents are zeroed post-build; the live blob is reached via the slots.
+extern app_blob_start;
+extern app_blob_end;
+
+# Live per-slot runtime state (defined in usermode_storage.inc / _decls.inc).
+extern l3_app_arena_base_v;   # dq - base VA of the 2 MiB-slot app arena
+extern l3_app_arena_size_v;   # dq - total arena span (slots * APP_SLOT_SIZE)
+extern app_blob_size_v;       # dq - live blob byte length
+extern l3_slot_code_slide;    # dq[MAX_WINDOWS] - per-slot code slide (KASLR-ish)
+
+extern ser_print_hex64;       # (rdi value) -> serial hex, debug only
+
+const APP_SLOT_SIZE = extern;     # 0x200000 (boot_memory.inc)
+const MAX_WINDOWS   = extern;     # APP_SLOT_COUNT (constants.inc)
+const SLOT_MASK     = 0x1FFFFF;   # APP_SLOT_SIZE - 1 (2 MiB - 1)
+const SER_PORT      = 0x3F8;      # COM1
+
+# ---------------------------------------------------------------------------
+# l3_slot_resolve_app_ptr(rdi slot, rsi uptr) -> rax
+# If uptr lies inside the built-in blob, relocate it into `slot`'s live arena
+# copy (arena base + slot*APP_SLOT_SIZE + that slot's code slide). Otherwise
+# return uptr unchanged. `slot` is a 32-bit index (the asm used edi/edx/ecx).
+# ---------------------------------------------------------------------------
+fn l3_slot_resolve_app_ptr(rdi slot, rsi uptr) {
+    if uptr < &app_blob_start { return uptr; }
+    if uptr >= &app_blob_end { return uptr; }
+    let s = slot & 0xFFFFFFFF;
+    let off = uptr - &app_blob_start;
+    let base = s * APP_SLOT_SIZE + lq(&l3_app_arena_base_v);
+    return off + base + lq(&l3_slot_code_slide + s * 8);
+}
+
+# ---------------------------------------------------------------------------
+# Fail-closed sentinel for a blob-VA target whose slot base failed validation.
+# Returns 0; the caller (l3_prepare_callback) redirects to the app-done stub.
+# ---------------------------------------------------------------------------
+fn l3_xlate_blob_fail(target, app_base) {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        outb(SER_PORT, 84);   # 'T'
+        outb(SER_PORT, 88);   # 'X'
+        outb(SER_PORT, 66);   # 'B'
+        outb(SER_PORT, 70);   # 'F'
+        outb(SER_PORT, 32);   # ' '
+        outb(SER_PORT, 116);  # 't'
+        ser_print_hex64(target);
+        outb(SER_PORT, 32);   # ' '
+        outb(SER_PORT, 98);   # 'b'
+        ser_print_hex64(app_base);
+        outb(SER_PORT, 32);   # ' '
+        outb(SER_PORT, 97);   # 'a'
+        ser_print_hex64(lq(&l3_app_arena_base_v));
+        outb(SER_PORT, 32);   # ' '
+        outb(SER_PORT, 122);  # 'z'
+        ser_print_hex64(lq(&l3_app_arena_size_v));
+        outb(SER_PORT, 13);
+        outb(SER_PORT, 10);
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# l3_translate_target(rdi target, rsi app_base) -> rax
+# ---------------------------------------------------------------------------
+fn l3_translate_target(rdi target, rsi app_base) {
+    # --- Case 1: target is a canonical pointer inside the built-in blob. ---
+    if target >= &app_blob_start {
+        if target < &app_blob_end {
+            let off = target - &app_blob_start;          # blob-relative offset
+            # Validate app_base before deriving the slot index: stale callback
+            # state must not index past l3_slot_code_slide.
+            let arena = lq(&l3_app_arena_base_v);
+            if app_base < arena { return l3_xlate_blob_fail(target, app_base); }
+            let rel = app_base - arena;
+            if (rel & SLOT_MASK) != 0 { return l3_xlate_blob_fail(target, app_base); }
+            if rel >= lq(&l3_app_arena_size_v) { return l3_xlate_blob_fail(target, app_base); }
+            let slot = rel >> 21;
+            if slot >= MAX_WINDOWS { return l3_xlate_blob_fail(target, app_base); }
+            return off + app_base + lq(&l3_slot_code_slide + slot * 8);
+        }
+    }
+
+    # --- Case 2: target is already a slot-local pointer. ---
+    let abase = lq(&l3_app_arena_base_v);
+    let aend = abase + lq(&l3_app_arena_size_v);
+    if target < abase { return target; }
+    if target >= aend { return target; }
+    let inoff = (target - abase) & SLOT_MASK;            # in-slot offset
+
+    # Validate app_base -> slot index, same gauntlet as Case 1.
+    if app_base < abase { return target; }
+    let rel = app_base - abase;
+    if (rel & SLOT_MASK) != 0 { return target; }
+    if rel >= lq(&l3_app_arena_size_v) { return target; }
+    let slot = rel >> 21;
+    if slot >= MAX_WINDOWS { return target; }
+
+    # The valid live-blob window is [slide, slide + blob_size). Reject outside it.
+    let slide = lq(&l3_slot_code_slide + slot * 8);
+    if inoff < slide { return target; }
+    let bo = inoff - slide;
+    if bo >= lq(&app_blob_size_v) { return target; }
+    return inoff + app_base;                             # bo + slide + app_base
+}

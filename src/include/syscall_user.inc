@@ -720,4 +720,47 @@ MPROT_WX_MODE_XRO equ 1
     syscall
 %endmacro
 
+; SYS_PROC_SETPRIO(process_index, priority) -> rax = 0 ok, -1 fail
+;   Priority manager: retune the scheduling priority of a live process. The
+;   priority is clamped to [PRIO_IDLE, PRIO_HIGH] (PRIO_REALTIME is kernel-
+;   reserved). Sets both effective and base priority and clears the over-budget
+;   strike count. CAP_PROC - only Task Manager's manifest grants it.
+%macro SYS_PROC_SETPRIO 2
+    APP_SYSNO 76
+    mov rdi, %1
+    mov rsi, %2
+    syscall
+%endmacro
+
+; --- gui2 retained-mode library ---
+; SYS_GUI_BATCH(buf_ptr, record_count) -> rax = #primitives drawn (-1 reject).
+;   buf_ptr is record_count fixed 64-byte records (see GUI_REC_* in
+;   constants.inc). Records are walked in order; per-record pointers are
+;   re-validated against the calling slot before use.
+%macro SYS_GUI_BATCH 2
+    APP_SYSNO 77
+    mov rdi, %1
+    mov rsi, %2
+    syscall
+%endmacro
+
+; SYS_GUI_PRESENT(damage_ptr, rect_count) -> rax = rect_count (-1 reject).
+;   damage_ptr is rect_count * 32-byte rects (x,y,w,h quads). Queues a repaint.
+%macro SYS_GUI_PRESENT 2
+    APP_SYSNO 78
+    mov rdi, %1
+    mov rsi, %2
+    syscall
+%endmacro
+
+; SYS_GUI_GLYPH_BAKE(codepoint, fg, bg) -> rax = atlas cell index, or -1
+;   (GUI_GLYPH_NONE). Currently always -1: callers fall back to OP_TEXT.
+%macro SYS_GUI_GLYPH_BAKE 3
+    APP_SYSNO 79
+    mov rdi, %1
+    mov rsi, %2
+    mov rdx, %3
+    syscall
+%endmacro
+
 %endif

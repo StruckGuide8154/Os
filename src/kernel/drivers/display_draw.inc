@@ -1,4 +1,4 @@
-; --- Fill rectangle (SSE2 optimized) ---
+; --- Fill rectangle (rep stosd per row) ---
 ; EDI = x, ESI = y, EDX = w, ECX = h, R8D = color
 ; auto-wrapped (FN_BEGIN emits global): global fill_rect
 FN_BEGIN fill_rect, 0, 0, FN_RET_SCALAR
@@ -71,10 +71,6 @@ FN_BEGIN fill_rect, 0, 0, FN_RET_SCALAR
     lea rax, [rax + r9 * 4]
     mov rbx, [bb_addr]
     add rbx, rax
-
-    ; Prepare SSE2 color vector: broadcast color to all 4 dword lanes
-    movd xmm0, r13d
-    pshufd xmm0, xmm0, 0    ; xmm0 = [color, color, color, color]
 
     mov rsi, [scr_pitch_q]
 
@@ -365,7 +361,15 @@ FN_BEGIN draw_string, 0, 0, FN_RET_SCALAR
     jle .str_done
 
 .str_loop:
+    ; rbx points at the caller's string, which for syscall-driven text
+    ; (.sc_gui_text -> render_text) lives in PTE.U app memory. With SMAP
+    ; enforced this supervisor read #PFs unless AC is set, so bracket the
+    ; user deref with stac/clac. Kernel-memory callers are unaffected (stac
+    ; permits kernel reads too). Kept tight to one byte so SMAP re-arms across
+    ; draw_char.
+    USER_ACCESS_BEGIN
     movzx eax, byte [rbx]
+    USER_ACCESS_END
     test al, al
     jz .str_done
 

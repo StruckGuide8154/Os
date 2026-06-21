@@ -63,10 +63,27 @@ class PanicCalled(Exception):
 # flow stays observable.
 STUB_NOOP_FNS = {'serial_puts', 'serial_crlf', 'svg_dump_putc',
                  'ser_print_hex64',
-                 # Host ATA: "success" (0) with the sector buffer left as-is,
-                 # so floor_persist -> floor_store_load round-trips through
+                 # Host ATA / block: "success" (0) with the sector buffer left
+                 # as-is, so floor_persist -> floor_store_load round-trips through
                  # floor_store's own floor_buf encode/decode/checksum path.
-                 'ata_read_sectors', 'ata_write_sectors'}
+                 # blk_write_sectors is floor_store's storage-class-routed writer
+                 # (NVMe/USB write-back path); same host no-op as the ATA pair.
+                 'ata_read_sectors', 'ata_write_sectors', 'blk_write_sectors',
+                 # floor_store storage-class selector: 0 (= ramdisk/default) is
+                 # the right host answer; the ed25519 tests don't depend on the
+                 # write-back routing it chooses.
+                 'ramdisk_storage_class',
+                 # envelope_gate's real per-machine device-id derivation
+                 # (gate_device_id_init) reads CPUID leaves. In the host eval
+                 # there is no CPU to query and, by the module's own contract,
+                 # gate_device_id() answers the wildcard until init runs - the
+                 # eval drives device_id through its verifier context directly,
+                 # so these only need to TRANSPILE, never execute. No-op = 0.
+                 'cpuid_eax', 'cpuid_ebx', 'cpuid_ecx', 'cpuid_edx',
+                 # Kernel spinlocks (workqueue.ghl / bounded_lock.ghl). The host
+                 # eval is single-threaded, so acquire/release are no-ops; crypto
+                 # serializes its scratch state behind wq_lock on real hardware.
+                 'wq_lock', 'wq_unlock'}
 STUB_PANIC_FNS = {'kernel_panic_canary'}
 
 

@@ -1,0 +1,18 @@
+# Negative fixture (Track 8 / guarantee G1). A ring-3 driver-host process tries
+# to declare a raw-memory boundary so it could touch device MMIO directly. The
+# driver target forces --deny-unsafe, so ANY `unsafe ...` declaration is a hard
+# compile error - a driver cannot name `raw_mem` (or kernel_io/kernel_priv/...)
+# and therefore cannot map or poke MMIO itself. It reaches device registers only
+# through the brokered drvhost_mmio_* path (the broker performs the access after
+# bounds-checking the driver's granted window).
+# Compile error expected: "--deny-unsafe rejects unsafe capability declarations: raw_mem".
+unsafe raw_mem;
+
+app "driver_target_no_mmio" { stack = 4096; }
+
+const HDA_BAR = 0xFEBF0000;   # pretend device BAR the driver must NOT reach directly
+
+fn main() {
+    sq(HDA_BAR, 1);   # raw MMIO poke -> the unsafe decl above is rejected first
+    return 0;
+}

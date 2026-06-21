@@ -9,6 +9,7 @@ $PresubmitGuard = Join-Path $Root 'tools\security\check_ghl_presubmit.ps1'
 $FixtureGuard = Join-Path $Root 'scripts\test\test_ghl_security_fixtures.ps1'
 $InvariantGuard = Join-Path $Root 'scripts\test\test_ghl_invariants.ps1'
 $MetaTest = Join-Path $Root 'scripts\test\test_enforcement_meta.ps1'
+$UserspaceDriverGuard = Join-Path $Root 'scripts\test\test_userspace_drivers.ps1'
 $NoShippedSecretsTest = Join-Path $Root 'scripts\test\test_no_shipped_secrets.ps1'
 $Compiler = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
 $LibDir = Join-Path $Root 'src\user\grithl\lib'
@@ -178,6 +179,96 @@ Write-Host '[ghl-security] === Enforcement meta-tests (the guards have negative 
 if ($LASTEXITCODE -ne 0) {
     throw 'Enforcement meta-tests failed.'
 }
+
+Write-Host '[ghl-security] === Track-8 user-space-driver enforcement (G2: no in-kernel drivers) ===' -ForegroundColor Cyan
+if (-not (Test-Path -LiteralPath $UserspaceDriverGuard)) {
+    throw "Missing Track-8 user-space-driver guard: $UserspaceDriverGuard"
+}
+& powershell -NoProfile -ExecutionPolicy Bypass -File $UserspaceDriverGuard
+if ($LASTEXITCODE -ne 0) {
+    throw 'Track-8 user-space-driver enforcement failed (new in-kernel driver or inventory drift).'
+}
+& powershell -NoProfile -ExecutionPolicy Bypass -File $UserspaceDriverGuard -SelfTest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Track-8 user-space-driver guard negative self-test failed (guard does not trip on a planted violation).'
+}
+
+Write-Host '[ghl-security] === Track-8 driver-host broker compiles (--target kernel --forbid-asm) ===' -ForegroundColor Cyan
+$DriverHostModule = Join-Path $Root 'src\kernel\grithlk\driver_host.ghl'
+if (-not (Test-Path -LiteralPath $DriverHostModule)) {
+    throw "Missing driver-host broker module: $DriverHostModule"
+}
+$DhOut = Join-Path ([System.IO.Path]::GetTempPath()) ('driver_host-' + [System.Guid]::NewGuid().ToString('N') + '.asm')
+& python $Compiler $DriverHostModule -o $DhOut -L $LibDir --embed --target kernel --forbid-asm
+if ($LASTEXITCODE -ne 0) {
+    throw 'Driver-host broker module failed to compile (--target kernel --forbid-asm).'
+}
+if (Test-Path -LiteralPath $DhOut) { Remove-Item -LiteralPath $DhOut -Force }
+
+Write-Host '[ghl-security] === Track-8 HDA audio class driver compiles broker-only (--target driver) ===' -ForegroundColor Cyan
+$HdaModule = Join-Path $Root 'src\drivers\audio\hda.ghl'
+if (-not (Test-Path -LiteralPath $HdaModule)) {
+    throw "Missing HDA class driver module: $HdaModule"
+}
+$HdaOut = Join-Path ([System.IO.Path]::GetTempPath()) ('hda-' + [System.Guid]::NewGuid().ToString('N') + '.asm')
+& python $Compiler $HdaModule -o $HdaOut -L $LibDir --target driver
+if ($LASTEXITCODE -ne 0) {
+    throw 'HDA audio class driver failed to compile (--target driver; G1 ambient-authority gate).'
+}
+if (Test-Path -LiteralPath $HdaOut) { Remove-Item -LiteralPath $HdaOut -Force }
+
+Write-Host '[ghl-security] === Track-8 Rung 2/3 device drivers compile broker-only (--target driver) ===' -ForegroundColor Cyan
+$Track8Drivers = @(
+    (Join-Path $Root 'src\drivers\acpi_ec\battery.ghl'),   # Rung 2: EC battery, PIO-only
+    (Join-Path $Root 'src\drivers\net\rtl8156.ghl')        # Rung 3: USB NIC, DMA descriptor rings
+)
+foreach ($drvModule in $Track8Drivers) {
+    if (-not (Test-Path -LiteralPath $drvModule)) {
+        throw "Missing Track-8 driver module: $drvModule"
+    }
+    $drvOut = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetFileNameWithoutExtension($drvModule) + '-' + [System.Guid]::NewGuid().ToString('N') + '.asm')
+    & python $Compiler $drvModule -o $drvOut -L $LibDir --target driver
+    if ($LASTEXITCODE -ne 0) {
+        throw "Track-8 driver failed to compile (--target driver; G1 ambient-authority gate): $drvModule"
+    }
+    if (Test-Path -LiteralPath $drvOut) { Remove-Item -LiteralPath $drvOut -Force }
+}
+
+Write-Host '[ghl-security] === Track-5 monitor-HAL detect/select/second-stage/IOMMU (real GHL math) ===' -ForegroundColor Cyan
+$MonHalEval = Join-Path $Root 'scripts\test\eval_mon_hal.py'
+if (-not (Test-Path -LiteralPath $MonHalEval)) {
+    throw "Missing Track-5 monitor-HAL eval: $MonHalEval"
+}
+& python $MonHalEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'Track-5 monitor-HAL model failed (detect, select+fallback, second-stage W^X/carve-out, or IOMMU DMA-confinement math).'
+}
+
+Write-Host '[ghl-security] === Track-5 G1 Intel VT-x kernel-as-guest VMXON/VMCS capture (real GHL math) ===' -ForegroundColor Cyan
+$MonHalVmxEval = Join-Path $Root 'scripts\test\eval_mon_hal_vmx.py'
+if (-not (Test-Path -LiteralPath $MonHalVmxEval)) {
+    throw "Missing Track-5 VT-x VMXON/VMCS eval: $MonHalVmxEval"
+}
+& python $MonHalVmxEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'Track-5 G1 VT-x model failed (VMXON-region/VMCS-header math, VMCS field encoding, CR0/CR4 fixed-bit legality, or kernel-as-guest capture invariant).'
+}
+
+Write-Host '[ghl-security] === Track-5 G1 REAL VT-x back-end compiles (kernel_vmx intrinsics) ===' -ForegroundColor Cyan
+# The back-end emits real VMXON/VMCS/VMLAUNCH; VMX #UDs on TCG so it is NOT run
+# here (verified tested-accel per scripts/test/run_vmx_accel.md). This guard
+# proves the module + the new kernel_vmx/sgdt/sidt/str intrinsics keep compiling
+# in kernel emit mode, so the privileged path can never silently rot.
+$VmxBackend = Join-Path $Root 'src\kernel\grithlk\mon_hal_vmx_backend.ghl'
+if (-not (Test-Path -LiteralPath $VmxBackend)) {
+    throw "Missing Track-5 VT-x back-end: $VmxBackend"
+}
+$VmxBeOut = Join-Path ([System.IO.Path]::GetTempPath()) ('mon_hal_vmx_backend-' + [System.Guid]::NewGuid().ToString('N') + '.asm')
+& python $Compiler $VmxBackend -o $VmxBeOut -L $LibDir --target kernel
+if ($LASTEXITCODE -ne 0) {
+    throw 'Track-5 G1 REAL VT-x back-end failed to compile (--target kernel; kernel_vmx intrinsics).'
+}
+if (Test-Path -LiteralPath $VmxBeOut) { Remove-Item -LiteralPath $VmxBeOut -Force }
 
 Write-Host '[ghl-security] === No private QRNG bytes in release artifacts ===' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass -File $NoShippedSecretsTest

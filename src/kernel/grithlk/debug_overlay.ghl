@@ -29,7 +29,9 @@
 #   ovl_puti(p, val)   append signed decimal -> advanced p
 #   ovl_puth32(p, val) append 8 hex chars -> advanced p
 #   usb_dbg_pci_scan() one-shot xHCI PCI scan -> usb_dbg_xhci_rec / _n
-#   usb_debug_overlay() draw the overlay into the backbuffer + flip rect
+#   usb_debug_overlay_prime() one-shot PCI/xHCI probe before the hot GUI loop
+#   usb_debug_overlay() draw the overlay into the backbuffer and mark it dirty;
+#     frame_present owns the later framebuffer present via render_flush()
 # ============================================================================
 
 module "debug_overlay";
@@ -43,6 +45,7 @@ global ovl_putu;
 global ovl_puti;
 global ovl_puth32;
 global usb_dbg_pci_scan;
+global usb_debug_overlay_prime;
 global usb_debug_overlay;
 
 # Overlay geometry (core_runtime_state.asm %defines).
@@ -206,7 +209,16 @@ fn usb_dbg_pci_scan() {
     sb(&usb_dbg_xhci_n, found);
 }
 
-# Draw the USB/xHCI/HID debug overlay into the backbuffer and flip its rect.
+# Phase boundary for the unsafe PCI/xHCI probe. Call this from debug boot/init
+# before lockdown; the hot per-frame draw path below must stay render-only.
+fn usb_debug_overlay_prime() {
+    usb_dbg_pci_scan();
+}
+
+# Draw the USB/xHCI/HID debug overlay into the backbuffer and mark its bounded
+# rectangle dirty. This function deliberately does not call display_flip_rect:
+# frame_present is the single owner of framebuffer presentation, so the overlay
+# cannot race an AP render_flip_job or write the front buffer from a side path.
 # No-op when there is no backbuffer. Preserves every register it touches.
 fn usb_debug_overlay() preserves(all) {
     if lq(&bb_addr) == 0 { return; }
@@ -315,8 +327,7 @@ fn usb_debug_overlay() preserves(all) {
     sb(p, 0);
     render_text(OVL_X, OVL_Y + 304, &ovl_buf, COL_RED, OVL_BG);
 
-    # Controller map: scan once, then either "no controllers" or per-controller.
-    usb_dbg_pci_scan();
+    # Controller map: populated by usb_debug_overlay_prime() before lockdown.
     if lb(&usb_dbg_xhci_n) == 0 {
         p = &ovl_buf;
         p = ovl_puts(p, &s_o_noctrl);
@@ -387,5 +398,5 @@ fn usb_debug_overlay() preserves(all) {
         fi = fi + 1;
     }
 
-    display_flip_rect(OVL_X, OVL_Y, OVL_W, OVL_H);
+    render_mark_dirty(OVL_X, OVL_Y, OVL_W, OVL_H);
 }

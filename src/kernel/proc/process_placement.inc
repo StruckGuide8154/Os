@@ -116,8 +116,13 @@ process_set_affinity:
     ret
 
 ; --- process_submit_job -------------------------------------------------------
-; Input:  EDI = PID, RSI = func, RDX = arg, R8d = priority
+; Input:  EDI = PID, RSI = job ID (wq_job_table index), RDX = arg, R8d = priority
 ; Output: RAX = WQ handle (or WQ_INVALID == -1)
+;
+; The work queue is a secure job-ID allow-list (grithlk/workqueue.ghl): a slot
+; holds a wq_job_table index, never a function pointer, so callers pass a JOB ID
+; here, not an address. workqueue_submit_to is now GHLK and uses the SysV ABI
+; (jobid=rdi, arg=rsi, prio=rdx, target=rcx, proc=r8).
 ;
 ; Pin a kernel job to a process. The job is queued with target_core =
 ; PCB.home_core and proc_id = PID, so when the matching AP picks it up the
@@ -137,12 +142,16 @@ process_submit_job:
     jae .bad
     test edi, edi
     jnz .have_app
-    ; PID 0: route as a generic any-core job.
-    mov rdi, rsi                    ; func
-    mov rsi, rdx                    ; arg
-    mov edx, r8d                    ; priority
-    mov r8d, -1                     ; WQ_TARGET_ANY
-    xor r9d, r9d                    ; no billing
+    ; PID 0: route as a generic any-core job (no billing). Stash jobid/arg in
+    ; scratch regs (r10/r11) first so reshuffling the arg registers can't clobber
+    ; an input that has not been consumed yet.
+    mov r10, rsi                    ; r10 = job ID
+    mov r11, rdx                    ; r11 = arg
+    mov edx, r8d                    ; arg3 = priority
+    mov ecx, -1                     ; arg4 = WQ_TARGET_ANY
+    xor r8d, r8d                    ; arg5 = no billing
+    mov rdi, r10                    ; arg1 = job ID
+    mov rsi, r11                    ; arg2 = arg
     call workqueue_submit_to
     pop rbx
     ret
@@ -153,12 +162,13 @@ process_submit_job:
     mov rbx, rax
     cmp dword [rbx + process_t.state], 0
     je .bad
-    mov r9d, edi                    ; proc_id to bill
-    mov r10d, [rbx + process_t.home_core]
-    mov rdi, rsi                    ; func
-    mov rsi, rdx                    ; arg
-    mov edx, r8d                    ; priority
-    mov r8d, r10d                   ; target_core
+    mov r10, rsi                    ; r10 = job ID
+    mov r11, rdx                    ; r11 = arg
+    mov edx, r8d                    ; arg3 = priority (read r8 before it is reused)
+    mov ecx, [rbx + process_t.home_core] ; arg4 = target_core
+    mov r8d, edi                    ; arg5 = proc_id to bill
+    mov rdi, r10                    ; arg1 = job ID
+    mov rsi, r11                    ; arg2 = arg
     call workqueue_submit_to
     pop rbx
     ret

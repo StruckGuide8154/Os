@@ -1,0 +1,27 @@
+# Positive companion (Track 8 / G1): a well-formed driver-host process compiles
+# under --target driver. It declares NO unsafe capability and uses NO privileged
+# intrinsic - it touches hardware ONLY by syscalling the in-kernel driver_host
+# broker, and uses ring-3-local memory (MMU-confined load/store builtins) for its
+# own scratch. This proves the driver target is usable for real drivers, not just
+# a deny-everything wall: the gate keys off ambient HW authority, not off the
+# load/store builtins (which the MMU confines to the process's own pages).
+
+app "driver_target_ok" { stack = 4096; }
+
+const SC_DRVHOST_MMIO_READ32  = 240;   # broker syscall ABI (see hda.ghl / Rung 1 wiring)
+const SC_DRVHOST_MMIO_WRITE32 = 241;
+
+state {
+    scratch: 16;
+}
+
+fn read_reg(addr) {
+    return syscall(SC_DRVHOST_MMIO_READ32, addr);
+}
+
+fn main() {
+    let v = read_reg(0xFEBF0000);          # brokered read, not a raw MMIO load
+    sw(&scratch, v);                        # ring-3-local store (MMU-confined)
+    syscall(SC_DRVHOST_MMIO_WRITE32, 0xFEBF0004, lw(&scratch));
+    return 0;
+}

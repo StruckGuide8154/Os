@@ -1,0 +1,161 @@
+# ============================================================================
+# GritHL GUI v2 - gui2.ghl
+# Public widget API. This is the only file an app should `use`.
+#
+#   use gui2
+#
+# Re-exports the v2 pipeline (batch / damage / atlas / layout / retained) and
+# provides a small retained widget vocabulary mirroring v1's ui_* helpers.
+#
+# THE FRAME LOOP
+#   Build the tree ONCE (g2_window + children), keep the handles. Each frame:
+#     1. re-stamp content that changed (g2_set_label, g2_set_fill, ...)
+#     2. g2_frame(root)   -> solve layout, diff, batch, present
+#   A frame where nothing changed crosses the ring ONCE (empty present) and
+#   draws zero primitives.
+# ============================================================================
+
+use core
+use theme
+use gui2.batch
+use gui2.damage
+use gui2.atlas
+use gui2.layout
+use gui2.retained
+
+# Default widget metrics.
+const G2_PAD        = 12
+const G2_GAP        = 8
+const G2_ROW_H      = 28
+const G2_BTN_H      = 28
+const G2_RADIUS     = 7
+const G2_FONT_H     = 12
+const G2_CHECK      = 16
+
+# --- Theme color shortcuts. -------------------------------------------------
+fn g2_col(tc) { return theme_col(tc); }
+
+# --- Containers ------------------------------------------------------------
+fn g2_vstack(parent) {
+    let n = node_new(NK_VSTACK);
+    sq(n + N_PAD, G2_PAD);
+    sq(n + N_GAP, G2_GAP);
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+fn g2_hstack(parent) {
+    let n = node_new(NK_HSTACK);
+    sq(n + N_PAD, 0);
+    sq(n + N_GAP, G2_GAP);
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+fn g2_panel(parent, color) {
+    let n = node_new(NK_VSTACK);
+    sq(n + N_PAD, G2_PAD);
+    sq(n + N_GAP, G2_GAP);
+    sq(n + N_FLAGS, NF_GROW);
+    stamp_fill(n, color);
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+# --- Leaves ----------------------------------------------------------------
+fn g2_label(parent, str_ptr, fg, bg) {
+    let n = node_new(NK_LEAF);
+    sq(n + N_INTRIN_W, atlas_text_w(str_ptr));
+    sq(n + N_INTRIN_H, G2_FONT_H);
+    stamp_text(n, str_ptr, fg, bg);
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+fn g2_button(parent, str_ptr) {
+    let n = node_new(NK_LEAF);
+    sq(n + N_INTRIN_W, atlas_text_w(str_ptr) + G2_PAD * 2);
+    sq(n + N_INTRIN_H, G2_BTN_H);
+    stamp_fill(n, g2_col(TC_SURFACE_2));
+    stamp_text(n, str_ptr, g2_col(TC_TEXT), g2_col(TC_SURFACE_2));
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+fn g2_button_primary(parent, str_ptr) {
+    let n = g2_button(parent, str_ptr);
+    stamp_fill(n, g2_col(TC_ACCENT));
+    stamp_text(n, str_ptr, g2_col(TC_TEXT_INVERT), g2_col(TC_ACCENT));
+    return n;
+}
+
+fn g2_checkbox(parent, checked, str_ptr) {
+    let n = node_new(NK_LEAF);
+    sq(n + N_INTRIN_W, G2_CHECK + G2_GAP + atlas_text_w(str_ptr));
+    sq(n + N_INTRIN_H, G2_CHECK);
+    let box = g2_col(TC_SURFACE);
+    if checked != 0 { box = g2_col(TC_ACCENT); }
+    stamp_fill(n, box);
+    stamp_text(n, str_ptr, g2_col(TC_TEXT), g2_col(TC_BG_BASE));
+    if parent != 0 { node_add(parent, n); }
+    return n;
+}
+
+# --- Window root -----------------------------------------------------------
+fn g2_window(win) {
+    let n = node_new(NK_FIXED);
+    sq(n + N_W, lq(win + WIN_W) - 4);
+    sq(n + N_H, lq(win + WIN_H) - 26);
+    sq(n + N_PAD, 0);
+    stamp_fill(n, g2_col(TC_BG_BASE));
+    return n;
+}
+
+# --- Live re-stamps (call between frames; cheap). --------------------------
+fn g2_set_label(node, str_ptr) {
+    let v = vz(node);
+    sq(node + N_INTRIN_W, atlas_text_w(str_ptr));
+    sq(v + NVZ_STR, str_ptr);
+}
+
+fn g2_set_fill(node, color) {
+    stamp_fill(node, color);
+}
+
+fn g2_set_checked(node, checked) {
+    let box = g2_col(TC_SURFACE);
+    if checked != 0 { box = g2_col(TC_ACCENT); }
+    stamp_fill(node, box);
+}
+
+# --- One-time init. Call once at app start. --------------------------------
+fn g2_init() {
+    node_reset();
+    atlas_reset();
+    dmg_reset();
+    batch_reset();
+}
+
+# --- The frame. ------------------------------------------------------------
+fn g2_frame(root) {
+    layout_solve(root, lq(root + N_X), lq(root + N_Y),
+                       lq(root + N_W), lq(root + N_H));
+    batch_reset();
+    diff_node(root);
+    let drawn = batch_flush();
+    dmg_present();
+    return drawn;
+}
+
+fn g2_mount(root, win) {
+    sq(root + N_X, lq(win + WIN_X) + 2);
+    sq(root + N_Y, lq(win + WIN_Y) + 24);
+    layout_bump();
+}
+
+fn g2_theme_changed(root, gen) {
+    atlas_invalidate(gen);
+    node_dirty(root);
+    layout_bump();
+    dmg_node(lq(root + N_X), lq(root + N_Y), lq(root + N_W), lq(root + N_H));
+}

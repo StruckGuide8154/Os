@@ -1,0 +1,108 @@
+# ============================================================================
+# GritHL GUI v2 - damage.ghl
+# Dirty-rect tracking + damage-tracked async present.
+# ============================================================================
+
+use core
+
+const SYS_GUI_PRESENT = 78   # present(damage_ptr, rect_count) -> queued, async
+
+# --- Damage rect ring. -----------------------------------------------------
+# Each rect is 4 quads (x,y,w,h). Two banks so present() can swap and the app
+# writes the next frame into the idle bank. Compiler-managed scratch replaces
+# magic VAs DMG_BANK_A=0x00BFE000 / DMG_BANK_B=0x00BFE800 / DMG_STATE=
+# 0x00BFDF00. Bank A lives at offset 0, bank B at offset 2048 (DMG_CAP*4*8).
+const DMG_CAP    = 64
+const DMG_RECT_Q = 4
+const DMG_BANK_BYTES = 2048           # DMG_CAP * DMG_RECT_Q * 8
+buffer dmg_banks[4096];               # bank A @ +0, bank B @ +2048
+buffer dmg_state[16];                 # quad0=active bank, quad1=count
+
+const DMG_FULL_W = 0x7FFFFFFF         # sentinel: whole-screen damage
+
+fn dmg_bank() {
+    if lq(dmg_state + 0) == 0 { return dmg_banks + 0; }
+    return dmg_banks + DMG_BANK_BYTES;
+}
+
+fn dmg_reset() {
+    sq(dmg_state + 8, 0);
+}
+
+fn dmg_count() {
+    return lq(dmg_state + 8);
+}
+
+# Two axis-aligned rects overlap (or touch)?
+fn dmg_touch(ax, ay, aw, ah, bx, by, bw, bh) {
+    if ax + aw < bx { return 0; }
+    if bx + bw < ax { return 0; }
+    if ay + ah < by { return 0; }
+    if by + bh < ay { return 0; }
+    return 1;
+}
+
+fn dmg_add(x, y, w, h) {
+    if w <= 0 { return; }
+    if h <= 0 { return; }
+    let base = dmg_bank();
+    let n = lq(dmg_state + 8);
+    let i = 0;
+    while i < n {
+        let r = base + i * DMG_RECT_Q * 8;
+        let rx = lq(r); let ry = lq(r + 8);
+        let rw = lq(r + 16); let rh = lq(r + 24);
+        if dmg_touch(rx, ry, rw, rh, x, y, w, h) != 0 {
+            let nx = rx; let ny = ry;
+            if x < nx { nx = x; }
+            if y < ny { ny = y; }
+            let ex = rx + rw; let ox = x + w;
+            if ox > ex { ex = ox; }
+            let ey = ry + rh; let oy = y + h;
+            if oy > ey { ey = oy; }
+            sq(r, nx); sq(r + 8, ny);
+            sq(r + 16, ex - nx); sq(r + 24, ey - ny);
+            return;
+        }
+        i = i + 1;
+    }
+    if n >= DMG_CAP {
+        sq(base, 0); sq(base + 8, 0);
+        sq(base + 16, DMG_FULL_W); sq(base + 24, DMG_FULL_W);
+        sq(dmg_state + 8, 1);
+        return;
+    }
+    let r = base + n * DMG_RECT_Q * 8;
+    sq(r, x); sq(r + 8, y); sq(r + 16, w); sq(r + 24, h);
+    sq(dmg_state + 8, n + 1);
+}
+
+fn dmg_node(x, y, w, h) {
+    dmg_add(x, y, w, h);
+}
+
+fn dmg_intersects(x, y, w, h) {
+    let base = dmg_bank();
+    let n = lq(dmg_state + 8);
+    let i = 0;
+    while i < n {
+        let r = base + i * DMG_RECT_Q * 8;
+        if dmg_touch(lq(r), lq(r + 8), lq(r + 16), lq(r + 24), x, y, w, h) != 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Present: queue the current damage list, swap banks. Async.
+fn dmg_present() {
+    let base = dmg_bank();
+    let n = lq(dmg_state + 8);
+    if n == 0 { return 0; }
+    syscall(SYS_GUI_PRESENT, base, n);
+    if lq(dmg_state + 0) == 0 { sq(dmg_state + 0, 1); }
+    else { sq(dmg_state + 0, 0); }
+    sq(dmg_state + 8, 0);
+    return n;
+}

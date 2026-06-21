@@ -80,6 +80,7 @@ const L3_RT_SLOT          = 120;
 #   L3_SLOT_MAGIC        usermode_decls.inc (0x30544F4C5358414E)
 const MAX_WINDOWS        = 12;
 const WINDOW_STRUCT_SIZE = 256;
+const WIN_OFF_ID         = 0;
 const WIN_OFF_APPDATA    = 136;
 const APP_SLOT_SIZE      = 0x200000;
 const L3_SHADOW_WIN_OFF  = 0x1FFE00;     # APP_SLOT_SIZE - 512
@@ -106,6 +107,7 @@ const SYS_PRINT    = 0;
 # usermode_storage.inc / usermode_entry.inc). Read/written through &symbol.
 extern l3_slot_live;          # qword[MAX_WINDOWS] - L3_SLOT_MAGIC when populated
 extern l3_app_arena_base_v;   # qword - arena base VA
+extern l3_slot_in_flight;     # qword[MAX_WINDOWS] - 1 while slot's ring-3 cb runs
 
 # ---------------------------------------------------------------------------
 # RFLAGS.IF/TF mask. The iretq frame's RFLAGS is the kernel RFLAGS with bits
@@ -175,7 +177,45 @@ fn l3_prepare_callback(rdi target, rsi arg0, rdx arg1, rcx arg2) {
     }
 
     # --- translate the kernel/blob target into the slot's ring-3 VA ---
+    # FAIL-CLOSED: l3_translate_target returns the sentinel 0 when the target is a
+    # blob VA it could not remap into this slot (e.g. a stale/invalid app_base).
+    # We must never iretq into an UNTRANSLATED kernel VA (-> ring-3 fetch from a
+    # supervisor page -> #PF -> potential whole-OS park). Redirect the callback to
+    # this slot's app-done trampoline: a valid in-slot ring-3 stub that immediately
+    # issues SYS_APP_DONE and unwinds cleanly, so the bad callback simply no-ops
+    # while the desktop keeps running. Strike the offending app so a repeat
+    # offender is demoted/killed by the priority manager.
     let entry = l3_translate_target(target, app_base);
+    # FAIL-CLOSED (extended): redirect to the app-done trampoline unless `entry`
+    # landed inside THIS slot's ring-3 arena window [app_base, app_base+APP_SLOT_SIZE).
+    # The sentinel-0 check alone is insufficient: l3_translate_target's
+    # `.translate_original` path returns a target that is neither a blob VA nor an
+    # in-arena VA UNCHANGED (e.g. a stale/garbage kernel VA from a corrupted handler
+    # slot). iretq'ing ring 3 into that supervisor (US=0) page faults on instruction
+    # fetch (CR2==RIP) and can park/freeze the whole OS - the observed app-open freeze
+    # (XINV #15 then a ring-3 #PF at a sub-arena kernel VA). Validating the final
+    # entry against the slot window closes the hole for every translate outcome.
+    let in_slot = 0;
+    if entry != 0 {
+        let eoff = entry - app_base;
+        if eoff >= 0 {
+            if eoff < APP_SLOT_SIZE { in_slot = 1; }
+        }
+    }
+    if in_slot == 0 {
+        entry = l3_install_app_done_trampoline(slot);
+        if arg0 != 0 {
+            pm_strike_and_maybe_kill(process_find_by_window(lw(arg0 + WIN_OFF_ID)));
+        }
+        cfg "ENABLE_DEBUG_SERIAL" {
+            cb_ser(84); cb_ser(88); cb_ser(65); cb_ser(66); cb_ser(32);   # "TXAB "
+            cb_ser(115);                                                   # 's'
+            call ser_print_hex64(rdi: slot);
+            cb_ser(32); cb_ser(116);                                       # " t"
+            call ser_print_hex64(rdi: target);
+            cb_ser(13); cb_ser(10);
+        }
+    }
     sq(rt + L3_RT_ENTRY, entry);
 
     # --- build / refresh the slot-local shadow window (ring 3 cannot deref the
@@ -219,7 +259,7 @@ fn l3_prepare_callback(rdi target, rsi arg0, rdx arg1, rcx arg2) {
     smap_close();
     sq(rt + L3_RT_USER_RSP, ustk);
 
-    cfg "ENABLE_DEBUG_SERIAL" {
+    cfg "ENABLE_L3_CALL_TRACE" {
         # Per-callback pre-iretq dump (click-freeze diagnosis): slot, iret target,
         # user RSP, and the return-trampoline qword at [user RSP].
         # "L3I s<slot> t<entry> u<urs p> r<tramp>" CRLF.
@@ -270,6 +310,13 @@ fn call_app_l3() naked {
     # no frame, so the runtime pointer lives in this single qword scratch.
     sq(&cb_rt, l3_prepare_callback());
 
+    # Mark this slot's ring-3 callback as in flight. dispatch_app_callback /
+    # cb_run_guarded refuse a nested callback for an in-flight slot BEFORE
+    # building another iret frame, so the kernel syscall stack cannot recurse
+    # callback->syscall->render->callback for the same slot. Cleared in
+    # call_app_l3_return on the kernel-resume side.
+    sq(&l3_slot_in_flight + lq(lq(&cb_rt) + L3_RT_SLOT) * 8, 1);
+
     # Record the kernel rsp (post-callee-save-push level) and rflags so
     # call_app_l3_return can restore this exact frame. save_rsp/save_flags compute
     # the destination address FIRST (stack-balanced), then store rsp/RFLAGS - so
@@ -278,7 +325,7 @@ fn call_app_l3() naked {
     save_rsp(lq(&cb_rt) + L3_RT_KERNEL_RSP);
     save_flags(lq(&cb_rt) + L3_RT_KERNEL_RFLAGS);
 
-    cfg "ENABLE_DEBUG_SERIAL" {
+    cfg "ENABLE_L3_CALL_TRACE" {
         cb_ser(76); cb_ser(51); cb_ser(83); cb_ser(32);   # "L3S "
         cb_ser(115);                                      # 's'
         call ser_print_hex64(rdi: lq(lq(&cb_rt) + L3_RT_SLOT));
@@ -363,10 +410,15 @@ fn call_app_l3_return() naked {
     if lq(&cb_slot) >= MAX_WINDOWS {
         sq(&cb_slot, 0);
     }
+    # Clear the slot's in-flight flag (paired with the set in call_app_l3): the
+    # ring-3 callback has resumed back into the kernel, so a fresh callback for
+    # this slot may now be dispatched again.
+    sq(&l3_slot_in_flight + lq(&cb_slot) * 8, 0);
+
     # rt = l3_runtime_ptr(slot).
     sq(&cb_rt, l3_runtime_ptr(lq(&cb_slot)));
 
-    cfg "ENABLE_DEBUG_SERIAL" {
+    cfg "ENABLE_L3_CALL_TRACE" {
         cb_ser(76); cb_ser(51); cb_ser(82); cb_ser(32);   # "L3R "
         cb_ser(115);                                      # 's'
         call ser_print_hex64(rdi: lq(&cb_slot));

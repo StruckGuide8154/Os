@@ -66,6 +66,15 @@ They are complementary, not duplicates: the tracks build the architecture; the
 | `track4-data-egress-elevation-matrix.md` | Part D leak≠elevation matrix: artifact × barrier, with code citations | **static audit DONE**; planted-leak negative test still `[ ]` |
 | `track5-hypervisor-monitor-todo.md` | **all-vendor hardware** monitor tier - the two irreducible-hardware guarantees only (G1 privilege-below-ring-0 to make the floor un-disableable; G2 IOMMU device-DMA), abstracted across Intel VT-x/VT-d, AMD SVM/AMD-Vi, ARM EL2/SMMUv3, RISC-V H-ext/IOMMU behind one `mon_hal` | **new, design only**; opportunistic; hardens Track 6 |
 | `track6-compartmentalized-monitor-todo.md` | the **software "-1" monitor** decomposed into mutually-isolated single-authority compartments (PT/KEY/HASH/CAP/DMA/LOAD-MON) so one compromise ≠ total compromise; the non-hardware half of the final goal, TCG-verifiable | **new, design only**; the realizable core; Track 5 makes it un-disableable |
+| `track8-userspace-drivers-todo.md` | the Kill-Chain keystone: **drivers as ring-3 default-deny sandbox processes** behind the in-kernel **driver-host broker** (`src/kernel/grithlk/driver_host.ghl`); design in `architecture-userspace-drivers.md` | **Rung 0+1 LANDED 2026-06-14**: design doc, broker framework (compiles `--target kernel --forbid-asm`), and **G2 enforcement** (`tools/security/driver_inventory.txt` freeze + `scripts/test/test_userspace_drivers.ps1`, wired into the entry point with a negative self-test) make a NEW in-kernel driver impossible. Next: Rung 1 G1 `--target driver` compiler gate + Rung 2 battery/acpi_ec migration |
+| `track9-speed-isolation-microarea-todo.md` | sandboxed **speed-isolation prioritisation micro-area**: signed custom scripts running real-time "faster than perfect asm" (whole-program O3/QUBO codegen + runtime-tax removal) inside the Track 2/3/6/8 envelope; multi-core pin/isolate; broker-proxied optimised module/net access; target = server HFT + fast provably-fair RNG/result generation | **new, design only** (2026-06-14); not started |
+| `track10-fpga-secure-enclave-todo.md` | **USB-attached FPGA secure-enclave board**, always-on but **single-use-per-boot**: a Phase-A boot one-shot releases only a derived measurement-bound key, then a **triplicated hardware latch** gates the privileged opcodes off in silicon until power-cycle; Phase B serves only board-signed sign/RNG/counter/attest, with the **Track 5 monitor/hypervisor + IOMMU** exclusively owning the device so no ring-3 app (or compromised kernel) can reach it. Moves root-of-trust (Track 7)/anti-rollback floors (Track 2)/real TRNG off host CPU+DRAM; AEAD+nonce session channel; board-enforced (not host-text) required/optional policy. Beyond-iOS = one-transaction privileged window vs SEP's whole-session reachability. Includes threat model + non-goals (lab-physical = raised bar not guarantee) + an **open-problem section on the first-instruction bootstrap gap** (host measures itself; 5 candidate tiers A–E, recommended = B earliest-self-measurement-into-board, in-ethos; C/D vendor-TPM/DRTM only as optional opportunistic hardening) | **new, design only** (2026-06-14); not started; depends on Track 2/5/7/8 |
+
+> **Track 10 status correction (2026-06-14):** software/design is complete: GHL
+> phase/session/boot/host/service models, the ring-3 Phase-B driver, USB and
+> supply/provisioning/power/bootstrap models, 61 RTL checks, post-synthesis
+> secret-taint gates, and RTLIL/Verilog generation are green. Physical board,
+> vendor programming reproducibility, and laboratory validation remain `[~]`.
 
 ### Landed baseline
 | Doc | Scope | State |
@@ -176,3 +185,16 @@ Build: monolithic `nasm -f bin` on `src/kernel/kernel_build.asm` via
   dynamic proofs that turn the audit into a demonstration).
 - **Kill-Chain Defense**: biggest lift is moving drivers out of the kernel into
   user-space sandboxed processes - everything else in that section builds on it.
+  **STARTED (Track 8, 2026-06-14)**: see `track8-userspace-drivers-todo.md` +
+  `architecture-userspace-drivers.md`. Rung 0 (design) and Rung 1 (driver-host
+  broker framework `driver_host.ghl`) landed; **G2 enforcement is live** - a new
+  in-kernel driver is now impossible (frozen shrink-only inventory guard, wired
+  into the security entry point with a negative self-test). **G1 `--target driver`
+  compiler gate landed** (forces forbid-asm + deny-unsafe; ring-3 blocks
+  privileged intrinsics; tests `driver_target_{ok,no_io,no_mmio}.ghl`). **Rung 2.5
+  HDA audio CLASS driver landed** (`src/drivers/audio/hda.ghl`, broker-only;
+  one driver ≈90% of machines because HDA+UAC are enumerable class standards and
+  PCM needs no software codec - see `track8-audio-class-driver.md`; broker gained
+  a DMA grant table). Remaining ladder: SC_DRVHOST_* dispatcher wiring, then the
+  battery/acpi_ec → rtl8156 → input/display migrations, quarantine-restart, and
+  the per-stage negative tests.

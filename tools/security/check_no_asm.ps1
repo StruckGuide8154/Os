@@ -195,6 +195,41 @@ if ($InventoryGuard) {
                 continue
             }
             $path = ($cols[0].Trim() -replace '\\', '/')
+            $risk = $cols[2].Trim()
+            $status = $cols[3].Trim()
+            $replacement = ($cols[4].Trim() -replace '\\', '/')
+            if ($risk -notin @('high', 'medium', 'low')) {
+                $findings.Add([pscustomobject]@{
+                    Rule = 'invalid-inventory-risk'
+                    Location = "tools/security/legacy_asm_inventory.txt:$invLine"
+                    Text = "Expected risk high|medium|low, got '$risk'."
+                })
+            }
+            if ($status -notin @('legacy', 'migrating')) {
+                $findings.Add([pscustomobject]@{
+                    Rule = 'invalid-inventory-status'
+                    Location = "tools/security/legacy_asm_inventory.txt:$invLine"
+                    Text = "Expected status legacy|migrating, got '$status'."
+                })
+            }
+            if ($status -eq 'migrating') {
+                if ($replacement -eq '' -or $replacement -eq 'TBD') {
+                    $findings.Add([pscustomobject]@{
+                        Rule = 'missing-migration-replacement'
+                        Location = "tools/security/legacy_asm_inventory.txt:$invLine"
+                        Text = 'Migrating inventory entries must name a concrete replacement file.'
+                    })
+                } else {
+                    $replacementPath = Join-Path $root ($replacement -replace '/', '\')
+                    if (-not (Test-Path -LiteralPath $replacementPath -PathType Leaf)) {
+                        $findings.Add([pscustomobject]@{
+                            Rule = 'missing-migration-replacement'
+                            Location = "tools/security/legacy_asm_inventory.txt:$invLine"
+                            Text = "Migrating replacement '$replacement' does not exist."
+                        })
+                    }
+                }
+            }
             [void]$inventory.Add($path)
         }
 

@@ -135,6 +135,9 @@ extern wallpaper_cache_presented
 extern wallpaper_render_active
 extern render_rect
 extern render_text
+extern render_mark_dirty
+extern render_mark_full
+extern render_flush
 extern scr_width
 extern scr_height
 extern l3_current_slot
@@ -274,6 +277,7 @@ FN_BEGIN syscall_init_this_cpu, 0, 0, FN_RET_VOID
 FN_DECL syscall_entry, 0, 0, FN_RET_SCALAR
 %include "src/kernel/proc/syscall_dispatch_core.inc"
 %include "src/kernel/proc/syscall_handlers_gui_wm.inc"
+%include "src/kernel/proc/syscall_handlers_gui2.inc"
 %include "src/kernel/proc/syscall_handlers_sys_fs.inc"
 %include "src/kernel/proc/syscall_handlers_xml_draw.inc"
 %include "src/kernel/proc/syscall_handlers_wx_net.inc"

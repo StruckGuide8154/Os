@@ -1,0 +1,124 @@
+# ============================================================================
+# GritHL GUI v2 - batch.ghl
+# Batched draw lists: one syscall flushes many primitives.
+#
+# v2 records primitives into a flat command buffer in user memory, then
+# crosses the ring ONCE per frame with SYS_GUI_BATCH(buf, count).
+#
+# Record format: fixed 64-byte (8-quad) records.
+# ============================================================================
+
+use core
+
+# SYS_GUI_BATCH(buf_ptr, record_count): walk a command buffer once.
+const SYS_GUI_BATCH = 77
+
+# --- Command opcodes (record quad 0). --------------------------------------
+const OP_NOP    = 0
+const OP_RECT   = 1      # q1=x q2=y q3=w q4=h q5=color
+const OP_TEXT   = 2      # q1=x q2=y q3=str_ptr q4=fg q5=bg q6=len
+const OP_GLYPH  = 3      # q1=x q2=y q3=atlas_cell q4=fg q5=bg
+const OP_CLIP   = 4      # q1=x q2=y q3=w q4=h  - push scissor; w<0 pops
+const OP_BLIT   = 5      # q1=x q2=y q3=w q4=h q5=src_cell
+
+# --- Record geometry. ------------------------------------------------------
+const REC_QUADS  = 8
+const REC_BYTES  = 64
+const REC_OP     = 0
+const REC_A      = 8
+const REC_B      = 16
+const REC_C      = 24
+const REC_D      = 32
+const REC_E      = 40
+const REC_F      = 48
+const REC_TAG    = 56
+
+# --- Command buffer arena. -------------------------------------------------
+# Compiler-managed scratch arenas (slot-correct + KASLR-correct, bounds
+# checked, within the 1 MiB per-app budget). Replaces the old magic VAs
+# CMDBUF=0x00C00000 / CMD_HEAD=0x00BFFF00.
+const CMD_CAP  = 4096                 # max records per flush
+buffer cmdbuf[262144];                # CMD_CAP * REC_BYTES (4096 * 64)
+buffer cmd_head[16];                  # write cursor (record index), quad 0
+
+fn batch_reset() {
+    sq(cmd_head + 0, 0);
+}
+
+fn batch_count() {
+    return lq(cmd_head + 0);
+}
+
+fn rec_addr(i) {
+    return cmdbuf + i * REC_BYTES;
+}
+
+fn batch_alloc() {
+    let n = lq(cmd_head + 0);
+    if n >= CMD_CAP { return -1; }
+    sq(cmd_head + 0, n + 1);
+    return cmdbuf + n * REC_BYTES;
+}
+
+# --- Primitive recorders. --------------------------------------------------
+fn cmd_rect(x, y, w, h, color) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_RECT);
+    sq(r + REC_A, x);  sq(r + REC_B, y);
+    sq(r + REC_C, w);  sq(r + REC_D, h);
+    sq(r + REC_E, color);
+}
+
+fn cmd_text(x, y, str_ptr, len, fg, bg) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_TEXT);
+    sq(r + REC_A, x);  sq(r + REC_B, y);
+    sq(r + REC_C, str_ptr);
+    sq(r + REC_D, fg); sq(r + REC_E, bg);
+    sq(r + REC_F, len);
+}
+
+fn cmd_glyph(x, y, cell, fg, bg) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_GLYPH);
+    sq(r + REC_A, x); sq(r + REC_B, y);
+    sq(r + REC_C, cell);
+    sq(r + REC_D, fg); sq(r + REC_E, bg);
+}
+
+fn cmd_clip_push(x, y, w, h) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_CLIP);
+    sq(r + REC_A, x); sq(r + REC_B, y);
+    sq(r + REC_C, w); sq(r + REC_D, h);
+}
+
+fn cmd_clip_pop() {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_CLIP);
+    sq(r + REC_C, -1);
+}
+
+fn cmd_retire(rec_ptr) {
+    sq(rec_ptr + REC_OP, OP_NOP);
+}
+
+# --- Flush. One ring transition for the whole frame. -----------------------
+fn batch_flush() {
+    let n = lq(cmd_head + 0);
+    if n == 0 { return 0; }
+    let drawn = syscall(SYS_GUI_BATCH, cmdbuf, n);
+    sq(cmd_head + 0, 0);
+    return drawn;
+}
+
+fn batch_flush_if_full() {
+    if lq(cmd_head + 0) >= CMD_CAP - 4 {
+        batch_flush();
+    }
+}

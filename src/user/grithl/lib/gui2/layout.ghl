@@ -1,0 +1,139 @@
+# ============================================================================
+# GritHL GUI v2 - layout.ghl
+# Cached / measured layout: compute layout once, reuse until invalidated.
+# ============================================================================
+
+use core
+
+# Node struct offsets (the retained node; see retained.ghl for the rest).
+const N_KIND    = 0
+const N_X       = 8
+const N_Y       = 16
+const N_W       = 24
+const N_H       = 32
+const N_MW      = 40
+const N_MH      = 48
+const N_FLAGS   = 56
+const N_PAD     = 64
+const N_GAP     = 72
+const N_CHILD   = 80
+const N_NEXT    = 88
+const N_EPOCH   = 96
+const N_INTRIN_W = 104
+const N_INTRIN_H = 112
+const N_SIZE    = 128
+
+# Node kinds.
+const NK_LEAF   = 0
+const NK_VSTACK = 1
+const NK_HSTACK = 2
+const NK_FIXED  = 3
+
+# Flags.
+const NF_GROW   = 1
+
+# Tree-wide layout epoch. Compiler-managed scratch replaces magic VA
+# LAYOUT_EPOCH = 0x00BFCFE0. Stored at offset 0 of its buffer.
+buffer layout_epoch_buf[16];
+
+fn layout_bump() {
+    sq(layout_epoch_buf + 0, lq(layout_epoch_buf + 0) + 1);
+}
+
+fn layout_epoch() {
+    return lq(layout_epoch_buf + 0);
+}
+
+# --- Measure pass: bottom-up intrinsic sizes, memoized per node. -----------
+fn measure(node) {
+    if node == 0 { return; }
+    let kind = lq(node + N_KIND);
+    let pad  = lq(node + N_PAD);
+    let gap  = lq(node + N_GAP);
+
+    if kind == NK_LEAF {
+        sq(node + N_MW, lq(node + N_INTRIN_W) + pad * 2);
+        sq(node + N_MH, lq(node + N_INTRIN_H) + pad * 2);
+        return;
+    }
+    if kind == NK_FIXED {
+        sq(node + N_MW, lq(node + N_W));
+        sq(node + N_MH, lq(node + N_H));
+        let c = lq(node + N_CHILD);
+        while c != 0 { measure(c); c = lq(c + N_NEXT); }
+        return;
+    }
+
+    let main = 0;
+    let cross = 0;
+    let count = 0;
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        measure(c);
+        let cw = lq(c + N_MW);
+        let ch = lq(c + N_MH);
+        if kind == NK_VSTACK {
+            main = main + ch;
+            if cw > cross { cross = cw; }
+        } else {
+            main = main + cw;
+            if ch > cross { cross = ch; }
+        }
+        count = count + 1;
+        c = lq(c + N_NEXT);
+    }
+    if count > 1 { main = main + gap * (count - 1); }
+    if kind == NK_VSTACK {
+        sq(node + N_MW, cross + pad * 2);
+        sq(node + N_MH, main + pad * 2);
+    } else {
+        sq(node + N_MW, main + pad * 2);
+        sq(node + N_MH, cross + pad * 2);
+    }
+}
+
+# --- Arrange pass: top-down absolute placement into (x,y,w,h). -------------
+fn arrange(node, x, y, w, h) {
+    if node == 0 { return; }
+    let epoch = lq(layout_epoch_buf + 0);
+    sq(node + N_X, x); sq(node + N_Y, y);
+    sq(node + N_W, w); sq(node + N_H, h);
+
+    if lq(node + N_EPOCH) == epoch {
+        return;
+    }
+    sq(node + N_EPOCH, epoch);
+
+    let kind = lq(node + N_KIND);
+    if kind == NK_LEAF { return; }
+
+    let pad = lq(node + N_PAD);
+    let gap = lq(node + N_GAP);
+    let cx = x + pad;
+    let cy = y + pad;
+    let inner_w = w - pad * 2;
+    let inner_h = h - pad * 2;
+
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        let cw = lq(c + N_MW);
+        let ch = lq(c + N_MH);
+        if kind == NK_VSTACK {
+            let use_w = cw;
+            if (lq(c + N_FLAGS) & NF_GROW) != 0 { use_w = inner_w; }
+            arrange(c, cx, cy, use_w, ch);
+            cy = cy + ch + gap;
+        } else {
+            let use_h = ch;
+            if (lq(c + N_FLAGS) & NF_GROW) != 0 { use_h = inner_h; }
+            arrange(c, cx, cy, cw, use_h);
+            cx = cx + cw + gap;
+        }
+        c = lq(c + N_NEXT);
+    }
+}
+
+fn layout_solve(root, x, y, w, h) {
+    measure(root);
+    arrange(root, x, y, w, h);
+}

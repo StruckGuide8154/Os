@@ -1,0 +1,431 @@
+# ============================================================================
+# enclave_host.ghl - Track 10 HOST-SIDE enclave integration model.
+#
+# This is the authority boundary between the Phase-A boot verifier, the Track 5
+# monitor and the Track 8 ring-3 driver/broker path.  It deliberately models no
+# raw-device syscall: applications can only submit one of four Phase-B service
+# ids, and this module maps those ids to the board's non-privileged opcodes.
+#
+# Security invariants made executable here:
+#   * the device is handed off only after the board reports its sticky latch set;
+#   * an active monitor plus IOMMU owns the endpoint and its one DMA window;
+#   * floor-only systems keep the board kernel-only and never expose it to apps;
+#   * CAP_ENCLAVE, signed driver policy and monitor mediation are all required;
+#   * hot-unplug terminates an async request rather than spinning or falling back;
+#   * the board root is authoritative; the in-image root is only a checked mirror.
+#
+# Honest boundary: this is a CI-testable policy/driver state machine.  Actual
+# xHCI endpoint assignment and IOMMU programming remain Track 5 hardware work.
+# ============================================================================
+
+module "enclave_host";
+
+unsafe raw_mem;          # module-local state only
+unsafe implicit_extern;  # addresses of module-local state
+
+global enclave_host_reset;
+global enclave_host_bind_roots;
+global enclave_host_handoff;
+global enclave_host_boot_state;
+global enclave_host_endpoint_owner;
+global enclave_host_apps_enabled;
+global enclave_host_kernel_only;
+global enclave_host_iommu_isolated;
+global enclave_host_register_driver;
+global enclave_host_driver_caps;
+global enclave_host_request;
+global enclave_host_kernel_request;
+global enclave_host_tick;
+global enclave_host_request_state;
+global enclave_host_result;
+global enclave_host_unplug;
+global enclave_host_direct_raw;
+global enclave_host_dma_access;
+global enclave_host_api_opcode;
+global enclave_host_result_signature;
+global enclave_host_service_status;
+global enclave_host_set_boot_measurement;
+
+extern enclave_boot_counter;
+extern enclave_boot_key;
+extern enclave_services_begin_boot;
+extern enclave_services_execute;
+extern enclave_services_result;
+extern enclave_services_signature;
+extern enclave_services_status;
+
+# Track 5 tiers.  Any non-zero tier represents a selected hardware monitor.
+const EH_MON_FLOOR_ONLY = 0;
+
+# Endpoint owner.  The boot verifier owns it only until the atomic handoff.
+const EH_OWNER_NONE    = 0;
+const EH_OWNER_BOOT    = 1;
+const EH_OWNER_MONITOR = 2;
+const EH_OWNER_KERNEL  = 3;  # floor-only: attested kernel needs, never ring-3
+
+# Host boot state.
+const EH_BOOT_RESET    = 0;
+const EH_BOOT_READY    = 1;
+const EH_BOOT_DEGRADED = 2;
+const EH_BOOT_HALT     = 3;
+
+# Board boot ABI values mirrored from enclave_boot.ghl.
+const EH_BOARD_BOOT_OK          = 0;
+const EH_BOARD_BOOT_FAIL_CLOSED = 3;
+const EH_BOARD_BOOT_DEGRADED    = 4;
+
+# Application entitlement and signed driver-policy capabilities.  These are
+# separate gates: CAP_ENCLAVE authorizes a caller to ask the service broker;
+# the driver capabilities authorize the ring-3 transport process itself.
+const CAP_ENCLAVE          = 1;
+const EH_DRV_CAP_DMA       = 4;
+const EH_DRV_CAP_RING      = 16;
+const EH_DRV_CAP_PHASE_B   = 64;
+const EH_DRV_REQUIRED      = 84;  # DMA | RING | PHASE_B
+
+# Public Phase-B service ABI.  There is intentionally no unseal/derive/export.
+const EH_SVC_SIGN         = 1;
+const EH_SVC_RNG          = 2;
+const EH_SVC_COUNTER_READ = 3;
+const EH_SVC_ATTEST       = 4;
+const EH_SVC_CREDENTIAL_USE = 5;
+const EH_SVC_RAM_KEY_USE    = 6;
+const EH_SVC_FLOOR_READ     = 7;
+const EH_SVC_FLOOR_BUMP     = 8;
+const EH_SVC_ATTESTED_RNG   = 9;
+const EH_SVC_RELEASE_COSIGN = 10;
+const EH_SVC_REMOTE_QUOTE   = 11;
+const EH_SVC_AUDIT_APPEND   = 12;
+const EH_SVC_FIDO_SIGN      = 13;
+const EH_SVC_TPM_EXTEND     = 14;
+const EH_SVC_TPM_QUOTE      = 15;
+const EH_SVC_TPM_SEAL       = 16;
+
+# Service-specific entitlements layered on top of CAP_ENCLAVE.
+const CAP_ENCLAVE_KEYS    = 2;
+const CAP_ENCLAVE_FLOORS  = 4;
+const CAP_ENCLAVE_RELEASE = 8;
+const CAP_ENCLAVE_AUDIT   = 16;
+const CAP_ENCLAVE_FIDO    = 32;
+const CAP_ENCLAVE_TPM     = 64;
+
+# Board opcodes mirrored from enclave_phase.ghl (non-privileged group only).
+const EH_OP_SIGN         = 0x20;
+const EH_OP_RNG          = 0x21;
+const EH_OP_COUNTER_READ = 0x22;
+const EH_OP_ATTEST       = 0x23;
+
+# Request state and return codes.
+const EH_REQ_IDLE    = 0;
+const EH_REQ_PENDING = 1;
+const EH_REQ_DONE    = 2;
+const EH_REQ_FAILED  = 3;
+
+const EH_OK            = 0;
+const EH_ERR_DENIED     = 1;
+const EH_ERR_MONITOR    = 2;
+const EH_ERR_LOCK       = 3;
+const EH_ERR_ABSENT     = 4;
+const EH_ERR_BUSY       = 5;
+const EH_ERR_SERVICE    = 6;
+const EH_ERR_DRIVER     = 7;
+const EH_ERR_ROOT       = 8;
+const EH_ASYNC_PENDING  = 9;
+
+# DMA requester identities used by the confinement model.
+const EH_DMA_MONITOR = 1;
+
+data eh_owner:       1;
+data eh_boot:        1;
+data eh_present:     1;
+data eh_required:    1;
+data eh_latched:     1;
+data eh_apps:        1;
+data eh_kernel_only: 1;
+data eh_iommu:       1;
+data eh_root_bound:  1;
+data eh_root_ok:     1;
+data eh_driver_caps: 1 x 8;
+data eh_dma_base:    1 x 8;
+data eh_dma_end:     1 x 8;
+data eh_measurement: 1 x 8;
+
+data eh_req_state:   1;
+data eh_req_ticks:   1;
+data eh_req_service: 1;
+data eh_req_arg:     1 x 8;
+data eh_req_result:  1 x 8;
+data eh_req_error:   1 x 8;
+
+fn enclave_host_reset() {
+    sb(&eh_owner, EH_OWNER_BOOT);
+    sb(&eh_boot, EH_BOOT_RESET);
+    sb(&eh_present, 0);
+    sb(&eh_required, 0);
+    sb(&eh_latched, 0);
+    sb(&eh_apps, 0);
+    sb(&eh_kernel_only, 0);
+    sb(&eh_iommu, 0);
+    sb(&eh_root_bound, 0);
+    sb(&eh_root_ok, 0);
+    sq(&eh_driver_caps, 0);
+    sq(&eh_dma_base, 0);
+    sq(&eh_dma_end, 0);
+    sq(&eh_measurement, 0);
+    sb(&eh_req_state, EH_REQ_IDLE);
+    sq(&eh_req_error, EH_OK);
+    sq(&eh_req_result, 0);
+    return EH_OK;
+}
+
+fn enclave_host_set_boot_measurement(measurement) {
+    if lb(&eh_owner) != EH_OWNER_BOOT { return EH_ERR_DENIED; }
+    sq(&eh_measurement, measurement);
+    return EH_OK;
+}
+
+# The device root is authoritative.  Equality makes the image copy a verified
+# mirror; absence or mismatch can never silently select the image copy.
+fn enclave_host_bind_roots(board_root, image_root) {
+    sb(&eh_root_bound, 1);
+    if board_root == 0 { sb(&eh_root_ok, 0); return EH_ERR_ROOT; }
+    if board_root != image_root { sb(&eh_root_ok, 0); return EH_ERR_ROOT; }
+    sb(&eh_root_ok, 1);
+    return EH_OK;
+}
+
+# Atomic Phase-A -> owner handoff.  The caller supplies the board's real latch
+# readout after enclave_boot_run.  No owner is published until every required
+# predicate has passed, so there is no raw-kernel/unlatched interval.
+fn enclave_host_handoff(tier, iommu_ready, board_latched, board_present,
+                        board_boot_rc, required_mode, dma_base, dma_len) {
+    sb(&eh_required, required_mode != 0);
+    sb(&eh_present, board_present != 0);
+    sb(&eh_apps, 0);
+    sb(&eh_kernel_only, 0);
+    sb(&eh_iommu, 0);
+    sb(&eh_latched, board_latched != 0);
+    sb(&eh_owner, EH_OWNER_NONE);
+
+    if board_present == 0 {
+        if required_mode != 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_ABSENT; }
+        sb(&eh_boot, EH_BOOT_DEGRADED); return EH_ERR_ABSENT;
+    }
+    if lb(&eh_root_bound) == 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_ROOT; }
+    if lb(&eh_root_ok) == 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_ROOT; }
+    if board_latched == 0 {
+        if required_mode != 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_LOCK; }
+        sb(&eh_boot, EH_BOOT_DEGRADED); return EH_ERR_LOCK;
+    }
+    if board_boot_rc == EH_BOARD_BOOT_FAIL_CLOSED {
+        sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_LOCK;
+    }
+    if board_boot_rc != EH_BOARD_BOOT_OK {
+        if required_mode != 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_LOCK; }
+        sb(&eh_boot, EH_BOOT_DEGRADED); return EH_ERR_LOCK;
+    }
+
+    enclave_services_begin_boot(enclave_boot_counter(), enclave_boot_key(),
+                                lq(&eh_measurement), board_latched);
+
+    # A hardware monitor without IOMMU isolation is not app-safe.  Both cases
+    # deliberately collapse to kernel-only rather than pretending mediation.
+    if tier == EH_MON_FLOOR_ONLY {
+        sb(&eh_owner, EH_OWNER_KERNEL);
+        sb(&eh_kernel_only, 1);
+        sb(&eh_boot, EH_BOOT_READY);
+        return EH_OK;
+    }
+    if iommu_ready == 0 {
+        sb(&eh_owner, EH_OWNER_KERNEL);
+        sb(&eh_kernel_only, 1);
+        sb(&eh_boot, EH_BOOT_READY);
+        return EH_OK;
+    }
+    if dma_len == 0 { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_MONITOR; }
+    let dma_end = dma_base + dma_len;
+    if dma_end < dma_base { sb(&eh_boot, EH_BOOT_HALT); return EH_ERR_MONITOR; }
+
+    sq(&eh_dma_base, dma_base);
+    sq(&eh_dma_end, dma_end);
+    sb(&eh_iommu, 1);
+    sb(&eh_owner, EH_OWNER_MONITOR);
+    sb(&eh_apps, 1);
+    sb(&eh_boot, EH_BOOT_READY);
+    return EH_OK;
+}
+
+fn enclave_host_boot_state() { return lb(&eh_boot); }
+fn enclave_host_endpoint_owner() { return lb(&eh_owner); }
+fn enclave_host_apps_enabled() { return lb(&eh_apps); }
+fn enclave_host_kernel_only() { return lb(&eh_kernel_only); }
+fn enclave_host_iommu_isolated() { return lb(&eh_iommu); }
+
+# Track 8 registration: effective authority is requested & signed policy.  A
+# transport is usable only when all three exact classes are present.
+fn enclave_host_register_driver(requested, policy_granted) {
+    let eff = requested & policy_granted;
+    sq(&eh_driver_caps, eff);
+    if (eff & EH_DRV_REQUIRED) != EH_DRV_REQUIRED { return EH_ERR_DRIVER; }
+    return EH_OK;
+}
+
+fn enclave_host_driver_caps() { return lq(&eh_driver_caps); }
+
+# Structural service->opcode map.  Values outside the four-service API return
+# zero; there is no mapping to Phase-A opcodes 0x10..0x12.
+fn enclave_host_api_opcode(service) {
+    if service == EH_SVC_SIGN { return EH_OP_SIGN; }
+    if service == EH_SVC_RNG { return EH_OP_RNG; }
+    if service == EH_SVC_COUNTER_READ { return EH_OP_COUNTER_READ; }
+    if service == EH_SVC_ATTEST { return EH_OP_ATTEST; }
+    if service == EH_SVC_CREDENTIAL_USE { return EH_OP_SIGN; }
+    if service == EH_SVC_RAM_KEY_USE { return EH_OP_SIGN; }
+    if service == EH_SVC_FLOOR_READ { return EH_OP_COUNTER_READ; }
+    if service == EH_SVC_FLOOR_BUMP { return EH_OP_COUNTER_READ; }
+    if service == EH_SVC_ATTESTED_RNG { return EH_OP_RNG; }
+    if service == EH_SVC_RELEASE_COSIGN { return EH_OP_SIGN; }
+    if service == EH_SVC_REMOTE_QUOTE { return EH_OP_ATTEST; }
+    if service == EH_SVC_AUDIT_APPEND { return EH_OP_SIGN; }
+    if service == EH_SVC_FIDO_SIGN { return EH_OP_SIGN; }
+    if service == EH_SVC_TPM_EXTEND { return EH_OP_ATTEST; }
+    if service == EH_SVC_TPM_QUOTE { return EH_OP_ATTEST; }
+    if service == EH_SVC_TPM_SEAL { return EH_OP_ATTEST; }
+    return 0;
+}
+
+fn eh_required_cap(service) {
+    if service == EH_SVC_CREDENTIAL_USE { return CAP_ENCLAVE_KEYS; }
+    if service == EH_SVC_RAM_KEY_USE { return CAP_ENCLAVE_KEYS; }
+    if service == EH_SVC_FLOOR_READ { return CAP_ENCLAVE_FLOORS; }
+    if service == EH_SVC_FLOOR_BUMP { return CAP_ENCLAVE_FLOORS; }
+    if service == EH_SVC_RELEASE_COSIGN { return CAP_ENCLAVE_RELEASE; }
+    if service == EH_SVC_AUDIT_APPEND { return CAP_ENCLAVE_AUDIT; }
+    if service == EH_SVC_FIDO_SIGN { return CAP_ENCLAVE_FIDO; }
+    if service >= EH_SVC_TPM_EXTEND {
+        if service <= EH_SVC_TPM_SEAL { return CAP_ENCLAVE_TPM; }
+    }
+    return 0;
+}
+
+# Raw endpoint access is absent by construction.  This explicit deny hook is a
+# negative-test surface for app, driver and compromised-kernel simulations.
+fn enclave_host_direct_raw(actor, opcode) { return EH_ERR_DENIED; }
+
+# IOMMU model: only the monitor-owned endpoint may touch the one handoff window.
+fn enclave_host_dma_access(requester, addr, len) {
+    if lb(&eh_iommu) == 0 { return EH_ERR_MONITOR; }
+    if lb(&eh_owner) != EH_OWNER_MONITOR { return EH_ERR_MONITOR; }
+    if requester != EH_DMA_MONITOR { return EH_ERR_DENIED; }
+    if len == 0 { return EH_ERR_DENIED; }
+    let end = addr + len;
+    if end < addr { return EH_ERR_DENIED; }
+    if addr < lq(&eh_dma_base) { return EH_ERR_DENIED; }
+    if end > lq(&eh_dma_end) { return EH_ERR_DENIED; }
+    return EH_OK;
+}
+
+fn eh_driver_ready() {
+    if (lq(&eh_driver_caps) & EH_DRV_REQUIRED) != EH_DRV_REQUIRED { return 0; }
+    return 1;
+}
+
+# Async ring-3 Phase-B API entry.  Default-deny means a zero caller mask fails.
+fn enclave_host_request(caller_caps, service, arg) {
+    if (caller_caps & CAP_ENCLAVE) == 0 { return EH_ERR_DENIED; }
+    let needed = eh_required_cap(service);
+    if needed != 0 {
+        if (caller_caps & needed) == 0 { return EH_ERR_DENIED; }
+    }
+    if lb(&eh_apps) == 0 { return EH_ERR_MONITOR; }
+    if lb(&eh_owner) != EH_OWNER_MONITOR { return EH_ERR_MONITOR; }
+    if lb(&eh_iommu) == 0 { return EH_ERR_MONITOR; }
+    if lb(&eh_present) == 0 { return EH_ERR_ABSENT; }
+    if lb(&eh_latched) == 0 { return EH_ERR_LOCK; }
+    if eh_driver_ready() == 0 { return EH_ERR_DRIVER; }
+    if enclave_host_api_opcode(service) == 0 { return EH_ERR_SERVICE; }
+    if lb(&eh_req_state) == EH_REQ_PENDING { return EH_ERR_BUSY; }
+
+    sb(&eh_req_service, service);
+    sq(&eh_req_arg, arg);
+    sb(&eh_req_ticks, 2);       # USB completion arrives on later ticks
+    sb(&eh_req_state, EH_REQ_PENDING);
+    sq(&eh_req_error, EH_ASYNC_PENDING);
+    sq(&eh_req_result, 0);
+    return EH_ASYNC_PENDING;
+}
+
+# Floor-only kernel service: still Phase-B only and only after an attested,
+# latched boot.  It is deliberately not reachable through the ring-3 API.
+fn enclave_host_kernel_request(service, arg) {
+    if lb(&eh_kernel_only) == 0 { return EH_ERR_DENIED; }
+    if lb(&eh_owner) != EH_OWNER_KERNEL { return EH_ERR_DENIED; }
+    if lb(&eh_present) == 0 { return EH_ERR_ABSENT; }
+    if lb(&eh_latched) == 0 { return EH_ERR_LOCK; }
+    let opcode = enclave_host_api_opcode(service);
+    if opcode == 0 { return EH_ERR_SERVICE; }
+    return opcode ^ arg;        # deterministic board-response stand-in
+}
+
+# One bounded scheduler step.  No polling loop exists on the syscall path.
+fn enclave_host_tick() {
+    if lb(&eh_req_state) != EH_REQ_PENDING { return lb(&eh_req_state); }
+    if lb(&eh_present) == 0 {
+        sb(&eh_req_state, EH_REQ_FAILED);
+        sq(&eh_req_error, EH_ERR_ABSENT);
+        if lb(&eh_required) != 0 { sb(&eh_boot, EH_BOOT_HALT); }
+        else { sb(&eh_boot, EH_BOOT_DEGRADED); }
+        sb(&eh_apps, 0);
+        return EH_REQ_FAILED;
+    }
+    let ticks = lb(&eh_req_ticks);
+    if ticks > 1 {
+        sb(&eh_req_ticks, ticks - 1);
+        return EH_REQ_PENDING;
+    }
+    let opcode = enclave_host_api_opcode(lb(&eh_req_service));
+    if opcode == 0 {
+        sb(&eh_req_state, EH_REQ_FAILED);
+        sq(&eh_req_error, EH_ERR_SERVICE);
+        return EH_REQ_FAILED;
+    }
+    let service = lb(&eh_req_service);
+    if service <= EH_SVC_ATTEST {
+        sq(&eh_req_result, opcode ^ lq(&eh_req_arg));
+        sq(&eh_req_error, EH_OK);
+        sb(&eh_req_state, EH_REQ_DONE);
+        return EH_REQ_DONE;
+    }
+    let src = enclave_services_execute(service, lq(&eh_req_arg));
+    if src != 0 {
+        sq(&eh_req_error, src);
+        sb(&eh_req_state, EH_REQ_FAILED);
+        return EH_REQ_FAILED;
+    }
+    sq(&eh_req_result, enclave_services_result());
+    sq(&eh_req_error, EH_OK);
+    sb(&eh_req_state, EH_REQ_DONE);
+    return EH_REQ_DONE;
+}
+
+fn enclave_host_request_state() { return lb(&eh_req_state); }
+fn enclave_host_result() {
+    if lb(&eh_req_state) == EH_REQ_DONE { return lq(&eh_req_result); }
+    return lq(&eh_req_error);
+}
+
+fn enclave_host_result_signature() {
+    if lb(&eh_req_state) != EH_REQ_DONE { return 0; }
+    if lb(&eh_req_service) <= EH_SVC_ATTEST { return 0; }
+    return enclave_services_signature();
+}
+
+fn enclave_host_service_status() { return enclave_services_status(); }
+
+fn enclave_host_unplug() {
+    sb(&eh_present, 0);
+    sb(&eh_apps, 0);
+    if lb(&eh_required) != 0 { sb(&eh_boot, EH_BOOT_HALT); }
+    else { sb(&eh_boot, EH_BOOT_DEGRADED); }
+    return EH_OK;
+}

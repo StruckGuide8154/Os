@@ -1,0 +1,103 @@
+# ============================================================================
+# phase_b.ghl - Track 10 ring-3 enclave transport driver.
+#
+# Compile with --target driver.  This process has no unsafe declaration, MMIO,
+# PIO or direct DMA authority.  It registers a signed-policy-bounded transport
+# with the Track 8 broker, then submits only the four public Phase-B service ids
+# to the monitor-mediated enclave broker. Higher-level services are multiplexed
+# under those four physical opcode classes. Phase A belongs to the boot verifier.
+# ============================================================================
+
+app "enclave_phase_b" { stack = 4096; }
+
+# Track 8 driver-host registration.  Effective authority is request & policy.
+const SC_DRVHOST_REGISTER = 232;
+
+# Track 10 monitor-mediated broker ABI.  These syscalls never return a raw USB
+# endpoint or TRB ring; submit is asynchronous and poll is bounded/non-blocking.
+const SC_ENCLAVE_SUBMIT = 246;  # (service, arg) -> pending/error
+const SC_ENCLAVE_POLL   = 247;  # () -> pending/done/error
+const SC_ENCLAVE_RESULT = 248;  # () -> signed Phase-B response
+
+const DRV_CAP_DMA     = 4;
+const DRV_CAP_RING    = 16;
+const DRV_CAP_PHASE_B = 64;
+const DRV_REQUIRED    = 84;
+
+const SVC_SIGN         = 1;
+const SVC_RNG          = 2;
+const SVC_COUNTER_READ = 3;
+const SVC_ATTEST       = 4;
+const SVC_CREDENTIAL_USE = 5;
+const SVC_RAM_KEY_USE    = 6;
+const SVC_FLOOR_READ     = 7;
+const SVC_FLOOR_BUMP     = 8;
+const SVC_ATTESTED_RNG   = 9;
+const SVC_RELEASE_COSIGN = 10;
+const SVC_REMOTE_QUOTE   = 11;
+const SVC_AUDIT_APPEND   = 12;
+const SVC_FIDO_SIGN      = 13;
+const SVC_TPM_EXTEND     = 14;
+const SVC_TPM_QUOTE      = 15;
+const SVC_TPM_SEAL       = 16;
+
+const DRV_OK      = 0;
+const DRV_PENDING = 9;
+const DRV_DENIED  = 1;
+
+state {
+    driver_id: 4;
+    pending:   4;
+    last_rc:   8;
+}
+
+fn service_allowed(service) {
+    if service == SVC_SIGN { return 1; }
+    if service == SVC_RNG { return 1; }
+    if service == SVC_COUNTER_READ { return 1; }
+    if service == SVC_ATTEST { return 1; }
+    if service >= SVC_CREDENTIAL_USE {
+        if service <= SVC_TPM_SEAL { return 1; }
+    }
+    return 0;
+}
+
+fn enclave_driver_init() {
+    let id = syscall(SC_DRVHOST_REGISTER, DRV_REQUIRED, DRV_REQUIRED,
+                     0x454E434C41564531);
+    if id <= 0 { return DRV_DENIED; }
+    sw(&driver_id, id);
+    sw(&pending, 0);
+    return DRV_OK;
+}
+
+# Starts one operation and returns immediately.  The caller's CAP_ENCLAVE gate
+# is checked by the kernel broker before this transport is reached.
+fn enclave_driver_submit(service, arg) {
+    if service_allowed(service) == 0 { return DRV_DENIED; }
+    if lw(&pending) != 0 { return DRV_DENIED; }
+    let rc = syscall(SC_ENCLAVE_SUBMIT, service, arg);
+    if rc == DRV_PENDING { sw(&pending, 1); }
+    sq(&last_rc, rc);
+    return rc;
+}
+
+# One scheduler step; never loops on USB completion.
+fn enclave_driver_tick() {
+    if lw(&pending) == 0 { return lw(&last_rc); }
+    let rc = syscall(SC_ENCLAVE_POLL);
+    if rc != DRV_PENDING {
+        sw(&pending, 0);
+        sq(&last_rc, rc);
+    }
+    return rc;
+}
+
+fn enclave_driver_result() {
+    if lw(&pending) != 0 { return DRV_PENDING; }
+    return syscall(SC_ENCLAVE_RESULT);
+}
+
+fn main() {
+    return enclave_driver_init();
+}

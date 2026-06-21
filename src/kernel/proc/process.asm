@@ -34,5 +34,5 @@ extern tss64
 extern tick_count
 %include "src/kernel/proc/process_core.inc"
 %include "src/kernel/proc/process_placement.inc"
-%include "src/kernel/proc/process_callbacks.inc"
-%include "src/kernel/proc/process_data.inc"
+; process_callbacks.inc + process_data.inc were converted to zero-asm GHLK and
+; are now compiled via build/ghl/callback_dispatch.asm (see kernel_build.asm).

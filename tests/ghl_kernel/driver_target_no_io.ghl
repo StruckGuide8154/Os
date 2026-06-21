@@ -1,0 +1,16 @@
+# Negative fixture (Track 8 / guarantee G1: "a driver holds no ambient hardware
+# authority"). A ring-3 driver-host process reaches for a raw port write. Port
+# I/O is a privileged intrinsic gated to --target kernel, AND `unsafe kernel_io`
+# is refused outright under --target driver (the driver target forces
+# --deny-unsafe). Either way this MUST fail to compile under --target driver:
+# a driver can never emit `out dx, al`; it must call the driver_host broker.
+# Compile error expected (one of): "outb() intrinsic requires --target kernel"
+# / "--deny-unsafe rejects unsafe capability declarations: kernel_io".
+unsafe kernel_io;
+
+app "driver_target_no_io" { stack = 4096; }
+
+fn main() {
+    outb(0x60, 0);   # privileged port write -> rejected for a driver target
+    return 0;
+}

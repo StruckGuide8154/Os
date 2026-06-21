@@ -17,6 +17,8 @@ extern isr_22, isr_23, isr_24, isr_25, isr_26, isr_27, isr_28
 extern isr_29, isr_30, isr_31
 extern irq_0, irq_1, irq_2, irq_3, irq_4, irq_5, irq_6, irq_7
 extern irq_8, irq_9, irq_10, irq_11, irq_12, irq_13, irq_14, irq_15, irq_17, irq_18
+extern isr_nmi          ; Tier-2 liveness NMI stub (vector 2)
+extern isr_ap_tick      ; Tier-2 per-AP self-wake timer stub (vector 48)
 
 ; --- Set one IDT entry ---
 ; RDI = entry index (0-255)
@@ -72,8 +74,11 @@ idt_init:
     lea rsi, [isr_1]
     call idt_set_entry
 
+    ; Vector 2 = NMI. Routed to the dedicated Tier-2 liveness stub (isr_nmi),
+    ; NOT isr_2/isr_common_stub: the common stub's nested-exception guard would
+    ; halt, defeating the watchdog that uses NMI to recover a cli'd BSP.
     mov rdi, 2
-    lea rsi, [isr_2]
+    lea rsi, [isr_nmi]
     call idt_set_entry
 
     mov rdi, 3
@@ -257,6 +262,11 @@ idt_init:
     lea rsi, [irq_15]
     call idt_set_entry
 
+    ; Tier-2 liveness: per-AP one-shot LAPIC-timer self-wake (vector 48).
+    mov rdi, AP_WD_TICK_VEC
+    lea rsi, [isr_ap_tick]
+    call idt_set_entry
+
     mov rdi, 49
     lea rsi, [irq_17]
     call idt_set_entry
@@ -264,6 +274,15 @@ idt_init:
     mov rdi, 50
     lea rsi, [irq_18]
     call idt_set_entry
+
+    ; Route the abort-class fault gates onto dedicated IST stacks (filled by
+    ; tss_init / tss_init_for_core). The IST field is byte 4 of each 16-byte
+    ; gate. Without this a kernel stack overflow re-faults on the exhausted
+    ; stack and triple-faults silently; with it the fault lands on a clean stack
+    ; so isr_8/14/13 can log it. IST1=#DF(8), IST2=#PF(14), IST3=#GP(13).
+    mov byte [IDT_ADDR + 8  * 16 + 4], 1   ; #DF -> IST1
+    mov byte [IDT_ADDR + 14 * 16 + 4], 2   ; #PF -> IST2
+    mov byte [IDT_ADDR + 13 * 16 + 4], 3   ; #GP -> IST3
 
     ; Load IDT
     lea rax, [idt_ptr]

@@ -49,6 +49,15 @@ FN_BEGIN l3_randomize_code_slide, 0, 0, FN_RET_VOID
     mov rax, rbx
     xor rdx, rdx
     div rcx                              ; rdx = rbx mod page-position-count
+    ; In randomized builds, avoid the legacy unslid placement when more than
+    ; one page position exists. A zero slide is useful for GRIT_NO_MEM_RANDOM
+    ; diagnostics, but with ASLR enabled it preserves the historical gadget map.
+    test rdx, rdx
+    jnz .lrcs_have_page
+    cmp rcx, 1
+    jbe .lrcs_have_page
+    mov edx, 1
+.lrcs_have_page:
     shl rdx, 12                          ; rdx = slide in bytes, page-aligned
     mov ecx, r8d
     mov [rel l3_slot_code_slide + rcx*8], rdx

@@ -1,0 +1,166 @@
+# ============================================================================
+# watchdog.ghl - BSP kernel liveness watchdog (Tier 1).  ZERO-ASM.
+#
+# Invariant being enforced (feedback_no_freeze_invariant): neither usermode nor
+# kernel may freeze the rest of the system, regardless of a loop or a fault. A
+# stuck operation must be abandoned and the system kept alive.
+#
+# WHAT THIS TIER COVERS
+#   A kernel infinite loop / livelock running on the BSP with interrupts ENABLED
+#   (IF=1). The PIT IRQ still fires ~100 Hz in that case, so its handler (isr.asm
+#   .irq_timer) calls kwd_check() on every ring-0 timer tick; if the BSP main
+#   loop has not made progress for KWD_STALL_TICKS, the handler longjmps back to
+#   kmain's top-level r3guard landing pad (the same recovery used for orphaned
+#   ring-3 faults) - abandoning the wedged kernel operation and resuming the main
+#   loop with input/render/timers alive. cb_orphan_recover() then strikes any
+#   in-flight app.
+#
+# WHAT THIS TIER DOES NOT COVER (Tier 2, follow-up)
+#   A stall with interrupts DISABLED (cli) - an unbounded spinlock or a lock
+#   deadlock. The PIT cannot fire there; only a non-maskable source can. Tier 2
+#   adds a cross-core NMI-IPI watchdog (a live AP watches this heartbeat and
+#   fires an NMI IPI at the BSP). Tier 2 reuses kwd_hb / kwd_check unchanged.
+#
+# PROGRESS HEARTBEAT
+#   kmain bumps kwd_hb once per main-loop iteration (kwd_bsp_tick). kwd_check
+#   trips only after the heartbeat has been frozen for KWD_STALL_TICKS PIT ticks
+#   - far longer than any legitimate single ring-0 operation (the per-callback
+#   deadman and, later, bounded locks handle the fine-grained cases), so this is
+#   a true-freeze backstop, not a scheduler.
+# ============================================================================
+
+module "watchdog";
+
+unsafe raw_mem;          # lq/sq over the heartbeat + watchdog state
+unsafe implicit_extern;  # &<symbol>
+unsafe kernel_priv;      # rdtsc() - the Tier-2 AP watcher's cli-safe progress clock
+
+global kwd_init;
+global kwd_bsp_tick;
+global kwd_check;
+global kwd_hb;               # exported so a Tier-2 AP watcher can read it
+global kwd_recovered_count;  # diagnostics (Task Manager / serial)
+
+# --- Tier 2 (cli / IF=0) cross-core NMI watchdog -----------------------------
+global kwd_ap_watch;            # called by every idle AP (~50 Hz); fires the NMI
+global kwd_nmi_should_recover;  # asked by the BSP isr_nmi stub on every NMI
+global kwd_nmi_recovered_count; # diagnostics
+
+extern tick_count;           # dq - PIT tick (100 Hz -> 10 ms/tick)
+extern cpu_tsc_per_tick;     # dq - TSC cycles per PIT tick (calibrated at boot)
+extern r3g_armed;            # dq - 1 once kmain has armed its recovery landing pad
+extern wd_send_nmi_bsp;      # () - LAPIC NMI IPI, physical-dest = the BSP (apic.asm)
+
+# 500 ticks = ~5 s with no BSP main-loop progress => the BSP is wedged. Generous
+# on purpose: below this, finer watchdogs (callback deadman, bounded locks) act.
+const KWD_STALL_TICKS = 500;
+
+data kwd_enabled: 8;            # 0 until kwd_init (gates kwd_check during boot)
+data kwd_hb: 8;                 # BSP progress heartbeat (bumped each loop iter)
+data kwd_last_hb: 8;            # last heartbeat kwd_check observed
+data kwd_last_tick: 8;         # PIT tick at which the heartbeat last advanced
+data kwd_recovered_count: 8;   # number of forced kernel-stall recoveries
+
+# Tier-2 AP-watcher window. SEPARATE from the Tier-1 window above so the BSP PIT
+# path and the AP NMI path never race on the same cells. Crucially this window is
+# measured in TSC, NOT PIT ticks: under `cli` the PIT is masked and tick_count is
+# frozen, so a tick-based deadline would never expire. The TSC keeps advancing
+# with interrupts disabled, so it is the only progress clock valid for the exact
+# case Tier 2 exists to catch (a BSP spin/deadlock under IF=0).
+data kwd_ap_last_hb: 8;         # last heartbeat the AP watcher observed
+data kwd_ap_last_tsc: 8;        # TSC at which that heartbeat last advanced
+data wd_nmi_pending: 8;         # 1 = the NMI now arriving at the BSP is ours
+data kwd_nmi_recovered_count: 8;# number of NMI-forced BSP-stall recoveries
+
+# kwd_init - arm the watchdog just before kmain enters its free-running loop.
+fn kwd_init() {
+    sq(&kwd_hb, 0);
+    sq(&kwd_last_hb, 0);
+    sq(&kwd_last_tick, lq(&tick_count));
+    sq(&kwd_recovered_count, 0);
+    # Tier-2 AP-watcher window (TSC clock).
+    sq(&kwd_ap_last_hb, 0);
+    sq(&kwd_ap_last_tsc, rdtsc());
+    sq(&wd_nmi_pending, 0);
+    sq(&kwd_nmi_recovered_count, 0);
+    sq(&kwd_enabled, 1);        # publish last
+    return 0;
+}
+
+# kwd_bsp_tick - called once per main-loop iteration. Pure progress signal.
+fn kwd_bsp_tick() {
+    sq(&kwd_hb, lq(&kwd_hb) + 1);
+    return 0;
+}
+
+# kwd_check -> 1 if the BSP main loop is wedged (heartbeat frozen past the
+# deadline), else 0. Called from the ring-0 PIT timer path. On a trip it resets
+# the window so the caller's single recovery is not immediately re-fired.
+fn kwd_check() {
+    if lq(&kwd_enabled) == 0 { return 0; }
+    let hb = lq(&kwd_hb);
+    if hb != lq(&kwd_last_hb) {
+        sq(&kwd_last_hb, hb);
+        sq(&kwd_last_tick, lq(&tick_count));
+        return 0;
+    }
+    if lq(&tick_count) - lq(&kwd_last_tick) >= KWD_STALL_TICKS {
+        sq(&kwd_last_tick, lq(&tick_count));        # re-arm the window
+        sq(&kwd_recovered_count, lq(&kwd_recovered_count) + 1);
+        return 1;
+    }
+    return 0;
+}
+
+# ============================================================================
+# TIER 2 - cross-core NMI watchdog (catches a BSP stall under cli / IF=0)
+#
+#   The PIT (Tier 1) cannot rescue a BSP that is spinning with interrupts
+#   disabled - an unbounded spinlock or a lock deadlock. Only a non-maskable
+#   source can. So a live AP, which is never under the BSP's lock and gets its
+#   own periodic wake, watches the same heartbeat the BSP bumps and, on a stall,
+#   fires an NMI IPI at the BSP. The BSP's dedicated isr_nmi stub then longjmps
+#   to kmain's r3guard landing pad - exactly as the Tier-1 PIT path does - so the
+#   wedged kernel operation is abandoned and the system stays alive.
+#
+#   Deliberately conservative: NMI recovery only ever fires when (a) an AP has
+#   actually flagged a stall (wd_nmi_pending) AND (b) kmain has a landing pad
+#   armed. Any other NMI (hardware, profiling, a legit watchdog elsewhere) is
+#   passed straight through untouched.
+# ============================================================================
+
+# kwd_ap_watch - run by every idle AP at ~50 Hz (the worker loop self-wakes via a
+# one-shot LAPIC timer before each HLT). Pure observer of the BSP heartbeat on the
+# TSC clock; the only side effect on a trip is one NMI IPI to the BSP.
+fn kwd_ap_watch() {
+    if lq(&kwd_enabled) == 0 { return 0; }
+    if lq(&r3g_armed) == 0 { return 0; }      # no landing pad yet -> nothing to do
+    let hb = lq(&kwd_hb);
+    let now = rdtsc();
+    if hb != lq(&kwd_ap_last_hb) {
+        sq(&kwd_ap_last_hb, hb);              # BSP made progress -> reset window
+        sq(&kwd_ap_last_tsc, now);
+        return 0;
+    }
+    # Heartbeat frozen: has it been frozen past the deadline? Measured in TSC so
+    # the verdict is valid even while the BSP holds cli (PIT/tick_count frozen).
+    let budget = lq(&cpu_tsc_per_tick) * KWD_STALL_TICKS;
+    if now - lq(&kwd_ap_last_tsc) >= budget {
+        sq(&kwd_ap_last_tsc, now);            # re-arm so we don't NMI-storm
+        sq(&kwd_nmi_recovered_count, lq(&kwd_nmi_recovered_count) + 1);
+        sq(&wd_nmi_pending, 1);               # publish BEFORE the IPI
+        wd_send_nmi_bsp();
+    }
+    return 0;
+}
+
+# kwd_nmi_should_recover -> 1 if THIS NMI is our stall-recovery signal and a
+# landing pad is armed (so the asm stub may longjmp), else 0 (pass the NMI on).
+# Consumes the pending flag so a single trip drives a single recovery.
+fn kwd_nmi_should_recover() {
+    if lq(&wd_nmi_pending) == 0 { return 0; }  # not ours -> legit/spurious NMI
+    sq(&wd_nmi_pending, 0);
+    if lq(&r3g_armed) == 0 { return 0; }       # nothing to recover into
+    sq(&kwd_recovered_count, lq(&kwd_recovered_count) + 1);
+    return 1;
+}

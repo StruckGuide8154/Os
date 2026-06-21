@@ -1,0 +1,284 @@
+# ============================================================================
+# enclave_phase.ghl - Track 10 USB-FPGA secure-enclave: the one-shot phase
+# machine (the P0 centerpiece, software model of the board's gateware).
+#
+# This is the host-side, CI-testable SOFTWARE MODEL of the enclave's privileged
+# one-shot. It is the exact state machine the FPGA gateware must implement; it
+# lets the boot/driver/monitor path (Phase A handoff, Phase B service) be tested
+# in CI without the real board (per docs/track10-fpga-secure-enclave-todo.md
+# "Notes / TCG limitation"). Crypto (Ed25519/X25519) and real NV/TRNG/tamper
+# are SEPARATE concerns (existing ed25519_check.ghl + future gateware); this
+# module owns ONLY the phase/latch/single-use logic, deliberately decoupled so
+# it stays small, constant-shape, and auditable.
+#
+# The whole design hangs on one irreversible hardware latch:
+#
+#   power-on -> [Phase A: PRIVILEGED, runs once] -> [LATCH 0->1, sticky]
+#                                                 -> [Phase B: LOCKED SERVICE]
+#
+#   Phase A (armed at power-on): the privileged opcode group
+#     (derive-key / raw-unseal / seal-and-lock) is reachable EXACTLY ONCE each.
+#   LATCH: a triplicated sticky 0->1 bit, majority-voted, that gates the
+#     privileged group OFF by WIRING, not policy. Auto-closes on the first of
+#     {explicit seal_and_lock, boot transaction completes, first non-boot
+#     opcode, watchdog timeout}. Resets ONLY on a real power cycle.
+#   Phase B (rest of the session): only the non-privileged allow-list
+#     (sign / rng / counter-read / attest) decodes at all; privileged opcodes
+#     return ENC_LOCKED and never touch the master-key path.
+#
+# Security properties this model makes executable (see eval_enclave.py):
+#   - privileged ops are single-use AND single-phase: a relayed duplicate
+#     inside the boot window is rejected (ENC_REPLAY); after the latch closes
+#     every privileged op is ENC_LOCKED with no host sequence re-arming it.
+#   - the latch survives a single glitched cell (majority vote), so a one-bit
+#     fault cannot re-open the privileged window.
+#   - attest reports {latch state, boot counter} so the host/peers can verify
+#     the board really locked down THIS boot.
+#   - the master root NEVER leaves the die: there is no key-export opcode; the
+#     only privileged output is a derived, measurement+counter-bound value.
+#
+# Honest boundary (kept in sync with the track doc): this models the privileged
+# WINDOW and the key/counter custody. It does not establish first-instruction
+# host integrity (the board attaches after host code runs) - that is the
+# documented open problem, out of scope here. leak != elevation.
+# ============================================================================
+
+module "enclave_phase";
+
+unsafe raw_mem;          # lb/sb/lw/sw/lq/sq over module-local state
+unsafe implicit_extern;  # &enc_* module-local data
+
+global enclave_power_on;
+global enclave_command;
+global enclave_boot_complete;
+global enclave_tick;
+global enclave_latched;
+global enclave_phase;
+global enclave_boot_counter;
+global enclave_attest_latch;
+global enclave_attest_counter;
+global enclave_derive_out;
+global enclave_priv_used_mask;
+global enclave_phase_abi_version;
+
+# ---- opcode space ----------------------------------------------------------
+# Privileged group (Phase A only, single-use each): [0x10, 0x18)
+const OP_DERIVE_KEY = 0x10;   # release KDF(master || measurement || counter)
+const OP_UNSEAL     = 0x11;   # raw unwrap of a sealed per-boot key
+const OP_SEAL_LOCK  = 0x12;   # explicit "seal and lock" -> closes the latch
+const OP_PRIV_LO    = 0x10;
+const OP_PRIV_HI    = 0x18;   # exclusive upper bound
+
+# Phase-B allow-list (the rest of the session): [0x20, 0x28)
+const OP_SIGN         = 0x20; # sign-with-session-key
+const OP_RNG          = 0x21; # board TRNG/DRBG draw
+const OP_COUNTER_READ = 0x22; # monotonic-counter read
+const OP_ATTEST       = 0x23; # signed quote of {measurement, latch, counter}
+const OP_PB_LO        = 0x20;
+const OP_PB_HI        = 0x28; # exclusive upper bound
+
+# ---- status codes (stable ABI; host driver decodes these) ------------------
+const ENC_OK     = 0;   # accepted
+const ENC_LOCKED = 1;   # privileged op refused: latch closed / Phase A over
+const ENC_REPLAY = 2;   # privileged op already consumed this boot (relay/replay)
+const ENC_BADOP  = 3;   # opcode not in either group (hard reject)
+const ENC_PHASE  = 4;   # well-formed but not allowed in the current phase
+
+# Master root placeholder. In gateware this is PUF-derived and NEVER readable;
+# here it only feeds the derive MODEL so the eval can assert determinism +
+# measurement/counter binding. It is intentionally never returned directly.
+const ENC_MASTER_MODEL = 0xA5A5C3C35A5A3C3C;
+
+# Watchdog: Phase A auto-closes after this many ticks with no boot completion,
+# so a stalled/withheld boot transaction cannot hold the window open forever.
+const ENC_WATCHDOG_TICKS = 64;
+
+# ---- volatile session state (cleared by power-on) --------------------------
+data enc_latch_a: 1;     # triplicated sticky latch cells (glitch tolerance)
+data enc_latch_b: 1;
+data enc_latch_c: 1;
+data enc_armed: 1;       # 1 = Phase A live (privileged group reachable)
+data enc_used: 1 x 4;    # bitmap of consumed privileged ops (single-use)
+data enc_wdog: 1 x 4;    # Phase-A watchdog countdown
+data enc_derive: 1 x 8;  # last derive/unseal output (model)
+data enc_powered: 1;     # 1 once power-on has run (guards command before boot)
+
+# ---- non-volatile state (survives power cycle in real HW secure NV) ---------
+# Modeled as data that enclave_power_on() bumps but never clears, mirroring a
+# board-backed monotonic counter that a host disk rollback cannot reset.
+data enc_boot_ctr: 1 x 8;
+
+fn enclave_phase_abi_version() {
+    return 1;
+}
+
+# ---- the latch ------------------------------------------------------------
+# Majority vote over three sticky cells: a single flipped cell cannot change
+# the reported state in either direction. The gate is combinational on this
+# value, not a policy check.
+fn enclave_latched() {
+    let n = lb(&enc_latch_a) + lb(&enc_latch_b) + lb(&enc_latch_c);
+    if n >= 2 { return 1; }
+    return 0;
+}
+
+# Drive 0 -> 1 (sticky). Sets all three cells and exits Phase A. There is NO
+# function that drives a cell back to 0 except enclave_power_on(); this is the
+# software stand-in for "resets only on power cycle".
+fn enc_latch_close() {
+    sb(&enc_latch_a, 1);
+    sb(&enc_latch_b, 1);
+    sb(&enc_latch_c, 1);
+    sb(&enc_armed, 0);
+    return 0;
+}
+
+fn enclave_phase() {
+    if enclave_latched() != 0 { return 1; }   # Phase B (locked-down service)
+    return 0;                                  # Phase A (boot one-shot)
+}
+
+fn enclave_boot_counter() {
+    return lq(&enc_boot_ctr);
+}
+
+# ---- power cycle ----------------------------------------------------------
+# The ONLY path that clears the latch and re-arms Phase A. Bumps the monotonic
+# boot counter (anti-replay across boots) and zeroes all volatile session
+# state. Returns the new boot counter.
+fn enclave_power_on() {
+    sb(&enc_latch_a, 0);
+    sb(&enc_latch_b, 0);
+    sb(&enc_latch_c, 0);
+    sb(&enc_armed, 1);
+    sw(&enc_used, 0);
+    sw(&enc_wdog, ENC_WATCHDOG_TICKS);
+    sq(&enc_derive, 0);
+    sb(&enc_powered, 1);
+    sq(&enc_boot_ctr, lq(&enc_boot_ctr) + 1);
+    return lq(&enc_boot_ctr);
+}
+
+# ---- opcode classification ------------------------------------------------
+fn enc_is_priv(op) {
+    if op < OP_PRIV_LO { return 0; }
+    if op >= OP_PRIV_HI { return 0; }
+    return 1;
+}
+
+fn enc_is_phaseb(op) {
+    if op < OP_PB_LO { return 0; }
+    if op >= OP_PB_HI { return 0; }
+    return 1;
+}
+
+# Single-use bookkeeping: bit (op - OP_PRIV_LO) in enc_used.
+fn enc_priv_bit(op) {
+    return 1 << (op - OP_PRIV_LO);
+}
+
+fn enclave_priv_used_mask() {
+    return lw(&enc_used);
+}
+
+# ---- privileged execution (model) -----------------------------------------
+# Derive/unseal produce a value bound to the master, the host measurement, and
+# the boot counter - so the SAME request on a later boot yields a DIFFERENT
+# output (captured Phase-A exchange is not replayable across power cycles), and
+# the master itself is never the return value.
+#
+# SECURITY NOTE: the XOR-mix below is ONLY a deterministic behavioral stand-in
+# for the eval's replay/binding checks - it is NOT the security mechanism and
+# must never be taken as one. It is algebraically INVERTIBLE (measurement is
+# caller-chosen and the boot counter is public), so on its own it would let a
+# host solve for the master from a single derive. The real export-firewall
+# guarantee lives in the gateware (src/enclave/rtl/enclave_top.py), where derive
+# returns the ONE-WAY SHA-512(master || in || boot_ctr || tag)[:64] - a preimage
+# the master cannot be recovered from. ENC_MASTER_MODEL here is a placeholder,
+# not a real secret. Do NOT port this mix to silicon as a KDF.
+fn enc_derive_exec(measurement) {
+    let mixed = ENC_MASTER_MODEL ^ measurement;
+    mixed = mixed ^ (lq(&enc_boot_ctr) * 0x9E3779B97F4A7C15);
+    mixed = mixed ^ (mixed >> 29);
+    sq(&enc_derive, mixed);
+    return ENC_OK;
+}
+
+fn enclave_derive_out() {
+    return lq(&enc_derive);
+}
+
+# ---- the single command entry point ---------------------------------------
+# Models one authenticated USB command frame. `arg` carries the host
+# measurement for derive; it is ignored by ops that do not need it. The latch
+# is consulted FIRST for privileged ops so that, exactly like the gateware
+# wiring, a closed latch is dispositive regardless of any other state.
+fn enclave_command(op, arg) {
+    if lb(&enc_powered) == 0 { return ENC_PHASE; }  # no command before power-on
+
+    if enc_is_priv(op) != 0 {
+        # Latch is authoritative: dead in silicon once closed.
+        if enclave_latched() != 0 { return ENC_LOCKED; }
+        if lb(&enc_armed) == 0 { return ENC_LOCKED; }  # Phase A already exited
+        let bit = enc_priv_bit(op);
+        if (lw(&enc_used) & bit) != 0 { return ENC_REPLAY; }  # relayed duplicate
+        sw(&enc_used, lw(&enc_used) | bit);
+
+        if op == OP_SEAL_LOCK {
+            enc_latch_close();          # explicit seal-and-lock
+            return ENC_OK;
+        }
+        if op == OP_DERIVE_KEY { return enc_derive_exec(arg); }
+        if op == OP_UNSEAL { return enc_derive_exec(arg ^ 0x5555555555555555); }
+        return ENC_BADOP;               # priv range with no handler
+    }
+
+    if enc_is_phaseb(op) != 0 {
+        # First non-boot opcode auto-closes Phase A (one of the latch triggers),
+        # so privileged ops are unreachable from the instant service begins.
+        if lb(&enc_armed) != 0 { enc_latch_close(); }
+        return ENC_OK;                  # crypto/RNG/counter exec lives elsewhere
+    }
+
+    return ENC_BADOP;
+}
+
+# ---- explicit boot-complete latch trigger ---------------------------------
+# The boot verifier calls this after the Phase-A transaction, handing a
+# locked-down device to the monitor with no window where the kernel holds a raw
+# device whose latch is still open. Idempotent.
+fn enclave_boot_complete() {
+    if lb(&enc_powered) == 0 { return ENC_PHASE; }
+    enc_latch_close();
+    return ENC_OK;
+}
+
+# ---- watchdog tick --------------------------------------------------------
+# Drives the bounded auto-close: no host action keeps Phase A open past the
+# watchdog. Returns 1 if this tick closed the latch, else 0.
+fn enclave_tick() {
+    if lb(&enc_powered) == 0 { return 0; }
+    if enclave_latched() != 0 { return 0; }
+    let w = lw(&enc_wdog);
+    if w == 0 {
+        enc_latch_close();
+        return 1;
+    }
+    sw(&enc_wdog, w - 1);
+    if w - 1 == 0 {
+        enc_latch_close();
+        return 1;
+    }
+    return 0;
+}
+
+# ---- attestation read-outs ------------------------------------------------
+# Phase-B attest reports the latch state and boot counter (signed by the board
+# in real HW). Here they are plain read-outs the eval asserts against.
+fn enclave_attest_latch() {
+    return enclave_latched();
+}
+
+fn enclave_attest_counter() {
+    return lq(&enc_boot_ctr);
+}

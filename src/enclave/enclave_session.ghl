@@ -1,0 +1,315 @@
+# ============================================================================
+# enclave_session.ghl - Track 10 USB-FPGA secure-enclave: the authenticated,
+# encrypted session channel (the P0 "close the USB-MITM hole" centerpiece,
+# software model of the board's gateware).
+#
+# This is the host-side, CI-testable SOFTWARE MODEL of the enclave's wire
+# protocol. It is the exact state machine the FPGA gateware + host driver must
+# implement so that EVERY command - Phase A and Phase B alike - is
+# authenticated and encrypted under a session key the bus never sees, with a
+# per-command monotonic sequence number, all bound to this boot. It is the
+# companion to enclave_phase.ghl: that module owns the privileged one-shot;
+# THIS module owns the channel those commands ride over.
+#
+# The real crypto is constant-time gateware (X25519 + Ed25519 + an AEAD),
+# interoperating with the existing software reference (ed25519_check.ghl). Just
+# like enclave_phase.ghl models the KDF rather than running real field math,
+# this module models ECDH / signing / AEAD with small mixing functions so the
+# PROTOCOL STATE MACHINE - handshake ordering, mutual proof, key binding,
+# replay/reorder rejection - is executable in CI. The cryptographic primitives
+# are deliberately factored out (enc_s_dh / enc_s_sign / enc_s_aead_tag) so the
+# silicon swaps them for real cores without touching the channel logic.
+#
+# What the channel must guarantee (see eval_session.py), against a USB-MITM
+# that can relay / replay / reorder / inject on the bus:
+#
+#   1. Mutual attestation: the board proves its enrolled identity AND the host
+#      proves its, both by signing the SAME handshake transcript. A spoofed
+#      board (wrong id key) or spoofed host is rejected at handshake.
+#   2. Channel-binding key: K_s = KDF(ECDH-shared || transcript || boot_ctr).
+#      Both sides reach the same K_s only if the transcript matches bit-for-bit,
+#      so a MITM that altered any handshake field gets a different key and every
+#      subsequent frame fails to open (transcript binding).
+#   3. Boot binding: K_s folds in the monotonic boot counter, so a Phase-A (or
+#      any) exchange captured on the wire cannot be replayed after a power cycle
+#      - next boot derives a different K_s and the recording is inert.
+#   4. Per-frame AEAD + strict monotonic sequence: every frame carries a tag
+#      over (K_s, seq, ciphertext); open rejects a bad tag (inject/tamper), a
+#      repeated seq (replay), and any seq that is not exactly the next expected
+#      (reorder / drop). The sequence is the on-wire anti-replay nonce.
+#
+# Honest boundary (kept in sync with the track doc): this models the PROTOCOL.
+# Confidentiality/integrity strength is the real cores' job; constant-time is a
+# gateware build-gate. The channel does not establish first-instruction host
+# integrity (the documented open problem). leak != elevation.
+# ============================================================================
+
+module "enclave_session";
+
+unsafe raw_mem;          # lb/sb/lq/sq over module-local state
+unsafe implicit_extern;  # &enc_s_* module-local data
+
+global enclave_session_abi_version;
+global enclave_session_reset;
+global enclave_session_begin;
+global enclave_session_finish;
+global enclave_session_transcript;
+global enclave_session_board_pub;
+global enclave_session_board_attest;
+global enclave_session_key;
+global enclave_session_established;
+global enclave_frame_seal;
+global enclave_frame_open;
+global enclave_frame_plain;
+global enclave_session_rx_seq;
+global enclave_session_tx_seq;
+global enc_s_dh;
+global enc_s_sign;
+global enc_s_kdf;
+
+# ---- handshake / frame status (stable ABI; host driver decodes these) -------
+const SS_OK        = 0;   # accepted
+const SS_BAD_PEER  = 1;   # peer identity proof failed (spoofed board/host)
+const SS_NO_SESS   = 2;   # frame before a session was established
+const SS_BAD_TAG   = 3;   # AEAD tag mismatch (inject / tamper / wrong key)
+const SS_BAD_SEQ   = 4;   # sequence not exactly next-expected (replay/reorder)
+const SS_STALE     = 5;   # handshake bound to a different boot (cross-boot replay)
+
+# ---- model constants -------------------------------------------------------
+# Curve base point stand-in: pub(priv) = priv * G  (model of scalar*basepoint).
+# shared = priv_self * pub_other = priv_self * priv_other * G is symmetric, so
+# host and board independently reach the same value - exactly the DH property.
+const ENC_S_G = 0x9E3779B97F4A7C15;
+
+# Enrolled identity keys (model). In gateware the board's is PUF-derived and
+# never readable; the host's enrolled pub is in the signed manifest. Here they
+# are constants so the eval can forge "wrong key" peers and watch them fail.
+const ENC_S_BOARD_ID = 0xD1CE5EA15B0A4DC0;
+const ENC_S_HOST_ID  = 0x0F1CE5EA15B0A4DC;
+
+# KDF / MAC domain separators so derive, sign, and AEAD never collide.
+const ENC_S_DOM_KDF  = 0x4B44460053455353;  # "KDF\0SESS"
+const ENC_S_DOM_SIG  = 0x5349470053455353;  # "SIG\0SESS"
+const ENC_S_DOM_AEAD = 0x4145414400534553;  # "AEAD\0SES"
+
+# 64-bit canonicalization mask. Every primitive result is reduced to 64 bits so
+# in-register values match what sq/lq store/load (and what the host computes),
+# the modular stand-in for the field/word width the real cores operate in.
+const ENC_S_M64 = 0xFFFFFFFFFFFFFFFF;
+
+# ---- volatile session state (cleared by reset / power cycle) ---------------
+data enc_s_have:    1;     # 1 once a session has been established this boot
+data enc_s_key:     1 x 8; # K_s (model) - never crosses the wire
+data enc_s_board_e: 1 x 8; # board ephemeral private (fresh per session)
+data enc_s_board_p: 1 x 8; # board ephemeral public  (= e * G), sent to host
+data enc_s_attest:  1 x 8; # board's signature over the transcript (readout)
+data enc_s_tr:      1 x 8; # transcript pending host confirmation (begin->finish)
+data enc_s_pend:    1 x 8; # 1 once begin ran, awaiting finish
+data enc_s_boot:    1 x 8; # boot counter this session is bound to
+data enc_s_rx:      1 x 8; # next inbound  frame sequence expected (board <- host)
+data enc_s_tx:      1 x 8; # next outbound frame sequence to emit  (board -> host)
+data enc_s_plain:   1 x 8; # last successfully-opened frame plaintext (readout)
+
+fn enclave_session_abi_version() {
+    return 1;
+}
+
+# ---- crypto primitives (MODEL - swapped for real cores in gateware) --------
+# A DH-style combiner: scalar * point. Real impl is X25519. Symmetric mixing so
+# board(e, host_pub) == host(host_priv, board_pub).
+fn enc_s_dh(scalar, point) {
+    return (scalar * point) & ENC_S_M64;
+}
+
+# A KDF/compression model: fold three inputs with a domain tag into 64 bits.
+# Real impl is SHA-512/HKDF over byte strings. Avalanche so any changed input
+# changes the output (transcript binding depends on this).
+fn enc_s_kdf(dom, a, b) {
+    let x = dom ^ (a * ENC_S_G);
+    x = x ^ (b + 0x165667B19E3779F9);
+    x = x ^ (x >> 31);
+    x = x * 0xFF51AFD7ED558CCD;
+    x = x ^ (x >> 29);
+    return x & ENC_S_M64;
+}
+
+# A signature/MAC model: tag = KDF(SIG-domain, id_key, message). "Verify" =
+# recompute with the claimed id key and compare; a wrong key yields a wrong tag.
+# Real impl is Ed25519 sign/verify (ed25519_check.ghl).
+fn enc_s_sign(id_key, msg) {
+    return enc_s_kdf(ENC_S_DOM_SIG, id_key, msg);
+}
+
+# AEAD tag model: bound to the session key, the frame sequence, and the
+# ciphertext, so any of {wrong key, altered seq, altered ct} fails to open.
+fn enc_s_aead_tag(seq, ct) {
+    return enc_s_kdf(ENC_S_DOM_AEAD, lq(&enc_s_key) ^ seq, ct);
+}
+
+# The handshake transcript: a deterministic fold of both ephemeral publics and
+# the boot counter. BOTH parties compute this over the SAME wire values, so a
+# MITM that flips any field makes the two transcripts - and the two derived
+# K_s, and both attestation checks - disagree.
+fn enc_s_transcript(host_pub, board_pub, boot_ctr) {
+    return enc_s_kdf(ENC_S_DOM_KDF, host_pub ^ board_pub, boot_ctr);
+}
+
+# ---- lifecycle -------------------------------------------------------------
+# Clear all session state. Models both an explicit re-handshake and the volatile
+# wipe a power cycle performs. The boot counter itself is owned by
+# enclave_phase.ghl; here we just rebind to whatever boot we are told.
+fn enclave_session_reset() {
+    sb(&enc_s_have, 0);
+    sq(&enc_s_key, 0);
+    sq(&enc_s_board_e, 0);
+    sq(&enc_s_board_p, 0);
+    sq(&enc_s_attest, 0);
+    sq(&enc_s_tr, 0);
+    sb(&enc_s_pend, 0);
+    sq(&enc_s_boot, 0);
+    sq(&enc_s_rx, 0);
+    sq(&enc_s_tx, 0);
+    sq(&enc_s_plain, 0);
+    return SS_OK;
+}
+
+# The transcript a host computes to drive its own half of the handshake. It is
+# the SAME deterministic fold the board uses, exposed so the eval (standing in
+# for the real host driver) can sign the exact bytes the board will verify.
+fn enclave_session_transcript(host_pub, board_pub, boot_ctr) {
+    return enc_s_transcript(host_pub, board_pub, boot_ctr);
+}
+
+# ---- the handshake (two-step, board-first; mutual attestation) -------------
+# Real mutual auth is a round trip: the board commits its ephemeral and proves
+# its identity FIRST, then the host proves its identity over a transcript that
+# now includes the board's contribution. Modeling it as one call would force the
+# host to sign a transcript before it could know the board ephemeral - the bug a
+# single-shot version hides. So:
+#
+#   begin(host_pub, host_seed, boot, expect_boot)
+#       board picks its ephemeral, derives K_s + transcript, SIGNS the
+#       transcript (board half of attestation), and returns {board_pub,
+#       board_attest}. Session is PENDING - no frames yet.
+#   finish(host_attest)
+#       board verifies the host's signature over that same transcript (host
+#       half); only a fully mutual handshake arms the channel.
+#
+# Inputs to begin:
+#   host_pub    - host ephemeral public (= host_priv * G)
+#   host_seed   - host-contributed entropy folded into freshness
+#   boot_ctr    - the live monotonic boot counter (from enclave_phase)
+#   expect_boot - the boot the host believes it is talking to; a mismatch means
+#                 a captured handshake replayed onto a different boot -> SS_STALE.
+fn enclave_session_begin(host_pub, host_seed, boot_ctr, expect_boot) {
+    enclave_session_reset();
+
+    # Cross-boot replay guard: refuse before deriving any keys.
+    if expect_boot != boot_ctr { return SS_STALE; }
+
+    # Board ephemeral: SECRET - folds the board identity (so a MITM that sees
+    # host_seed on the wire still cannot reconstruct it) with the boot counter
+    # and the host seed (freshness). Its public = e * G goes back to the host.
+    let board_e = enc_s_kdf(ENC_S_DOM_KDF, ENC_S_BOARD_ID ^ boot_ctr, host_seed);
+    sq(&enc_s_board_e, board_e);
+    let board_pub = enc_s_dh(board_e, ENC_S_G);
+    sq(&enc_s_board_p, board_pub);
+
+    # Transcript over BOTH publics + boot counter (channel binding). Stored so
+    # finish() verifies the host against exactly these handshake values.
+    let tr = enc_s_transcript(host_pub, board_pub, boot_ctr);
+    sq(&enc_s_tr, tr);
+
+    # Shared secret (board side): board_e * host_pub == host_priv * board_pub.
+    let shared = enc_s_dh(board_e, host_pub);
+
+    # Session key binds shared secret, transcript, AND boot counter. Captured on
+    # the wire it is inert: a different boot -> different tr+ctr -> different K_s.
+    sq(&enc_s_key, enc_s_kdf(ENC_S_DOM_KDF, shared ^ tr, boot_ctr));
+    sq(&enc_s_boot, boot_ctr);
+
+    # Board half of mutual attestation: sign the transcript with the board id.
+    sq(&enc_s_attest, enc_s_sign(ENC_S_BOARD_ID, tr));
+
+    sb(&enc_s_pend, 1);   # awaiting the host's confirming signature
+    return SS_OK;
+}
+
+# Host half: the board verifies the host's signature over the pending
+# transcript. A spoofed host (wrong id key) or a MITM that altered any handshake
+# field (changing tr) fails to match and the session is torn down. Only success
+# arms the frame sequence counters and marks the session established.
+fn enclave_session_finish(host_attest) {
+    if lb(&enc_s_pend) == 0 { return SS_NO_SESS; }
+    let tr = lq(&enc_s_tr);
+    if host_attest != enc_s_sign(ENC_S_HOST_ID, tr) {
+        enclave_session_reset();        # fail-closed: no half-open channel
+        return SS_BAD_PEER;
+    }
+    sb(&enc_s_pend, 0);
+    sq(&enc_s_rx, 1);   # frame sequences start at 1 (0 reserved = "no frame")
+    sq(&enc_s_tx, 1);
+    sb(&enc_s_have, 1);
+    return SS_OK;
+}
+
+fn enclave_session_established() {
+    return lb(&enc_s_have);
+}
+
+fn enclave_session_board_pub() {
+    return lq(&enc_s_board_p);
+}
+
+fn enclave_session_board_attest() {
+    return lq(&enc_s_attest);
+}
+
+# K_s readout exists ONLY for the eval to confirm host/board agreement; the real
+# board has no opcode that returns the session key (it never leaves the die).
+fn enclave_session_key() {
+    return lq(&enc_s_key);
+}
+
+fn enclave_session_rx_seq() {
+    return lq(&enc_s_rx);
+}
+
+fn enclave_session_tx_seq() {
+    return lq(&enc_s_tx);
+}
+
+# ---- per-frame AEAD --------------------------------------------------------
+# Board emits an outbound frame: stamps the next tx sequence and returns the
+# AEAD tag over (K_s, seq, ct). The host opens it with the mirror of this. The
+# stamped sequence is read back via enclave_session_tx_seq() before this call;
+# here we just bump it so every emitted frame has a unique, increasing nonce.
+fn enclave_frame_seal(ct) {
+    if lb(&enc_s_have) == 0 { return SS_NO_SESS; }
+    let seq = lq(&enc_s_tx);
+    let tag = enc_s_aead_tag(seq, ct);
+    sq(&enc_s_tx, seq + 1);
+    return tag;
+}
+
+# Board opens an inbound frame. This is where relay / replay / reorder / inject
+# all die:
+#   - seq must be EXACTLY the next expected (strict monotonic): a replayed old
+#     frame (seq < expected) or a reordered/dropped one (seq != expected) is
+#     SS_BAD_SEQ and never advances state.
+#   - the tag must match the recomputed AEAD tag: an injected/altered frame, or
+#     one made under a different K_s (MITM-derived), is SS_BAD_TAG.
+# Only a frame that is both in-order AND authentic advances the rx counter and
+# exposes its plaintext (model: ct is the plaintext under this stand-in cipher).
+fn enclave_frame_open(seq, ct, tag) {
+    if lb(&enc_s_have) == 0 { return SS_NO_SESS; }
+    if seq != lq(&enc_s_rx) { return SS_BAD_SEQ; }
+    if tag != enc_s_aead_tag(seq, ct) { return SS_BAD_TAG; }
+    sq(&enc_s_rx, seq + 1);
+    sq(&enc_s_plain, ct);
+    return SS_OK;
+}
+
+fn enclave_frame_plain() {
+    return lq(&enc_s_plain);
+}

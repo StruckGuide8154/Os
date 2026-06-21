@@ -1,0 +1,800 @@
+# ============================================================================
+# fat16_core.ghl - Zero-asm GritHL port of the whole FAT16 driver.
+#
+# Replaces the legacy NASM FAT16 stack (fat16.asm + fat16_init.inc +
+# fat16_io.inc + fat16_dirops.inc + fat16_nav.inc) in one GritHLK module:
+# geometry parse, FAT-table and directory cache, valid-entry counting/indexing,
+# cluster-chain file read, the write path (mkdir/rename/delete/write/flush),
+# per-slot cwd ownership (fat16_change_dir/fat16_switch_to), and the
+# SYS_FS_ENTRY_INFO->SYS_FS_READ TOCTOU snapshot (security_todo.md §5).
+#
+# Buffers are `reserve` (.bss/NOBITS) so the 64 KiB FAT cache and 64 KiB file
+# buffer cost ZERO image bytes - the primitive that unblocked this port.
+#
+# SECURITY (preserved from the asm baseline):
+#   - Every ata_read_sectors result is checked; a failed/short cache fill FAILS
+#     CLOSED instead of walking stale DRAM as directory data. This is the fix
+#     for the real-HW garbage-listing (corrupt names + ~2^32 sizes).
+#   - All cluster/sector arithmetic is range-checked against fat_entries /
+#     total_sects before any read, so a crafted on-disk image cannot steer a
+#     read outside the partition.
+#   - The root/subdir cache has a trailing guard qword (seeded from the kernel
+#     canary) verified after every ring-3-shaped cache fill.
+# ============================================================================
+
+module "fat16_core";
+
+unsafe raw_mem;          # lb/sb/lw/sw over the cache + sector buffers
+unsafe implicit_extern;  # &fat16_* module-local data, &ata_drive_sel
+
+global fat16_init;
+global fat16_file_count;
+global fat16_get_entry;
+global fat16_read_file;
+global fat16_get_file_size;
+global fat16_core_abi_version;
+global fat16_write_file;
+global fat16_delete_entry;
+global fat16_rename_entry;
+global fat16_mkdir;
+global fat16_flush_fats;
+global fat16_flush_current_dir;
+global fat16_change_dir;
+global fat16_switch_to;
+global fat16_sync_root;
+global fat16_entry_info_snapshot;
+global fat16_entry_snapshot_verify;
+global fat16_entry_snapshot_clear;
+
+extern ata_read_sectors;   # (rdi=LBA, rsi=buf, edx=count) -> 0 ok / -1 err
+extern ata_write_sectors;  # same contract
+extern ata_drive_sel;      # ata.asm: selected drive byte (0xE0 / 0xF0)
+extern kernel_canary;      # final kernel canary qword (cache-guard seed)
+extern kernel_panic_canary;  # noreturn cache-guard panic (rdi/rsi/edx ABI)
+
+# -------------------- geometry --------------------
+const FAT16_PART_LBA   = 4160;        # KERNEL_START_SECTOR(64) + KERNEL_SECTORS(4096)
+const SECT_BYTES       = 512;
+const DIR_ENTRY_SIZE   = 32;
+const ROOT_CACHE_SECTORS = 32;
+const FAT_CACHE_SECTORS  = 128;
+const ROOT_CACHE_BYTES = 16384;       # 32 * 512
+const FAT_CACHE_BYTES  = 65536;       # 128 * 512
+const FILE_BUF_BYTES   = 65536;
+const MAX_FAT_ENTRIES  = 32768;       # FAT_CACHE_SECTORS * 256
+
+# BPB offsets
+const BPB_BYTES_PER_SECT = 11;
+const BPB_SECT_PER_CLUS  = 13;
+const BPB_RESERVED_SECTS = 14;
+const BPB_NUM_FATS       = 16;
+const BPB_ROOT_ENTRIES   = 17;
+const BPB_TOTAL_SECTS16   = 19;
+const BPB_FAT_SIZE16      = 22;
+
+# Directory entry offsets
+const DIR_ATTR          = 11;
+const DIR_FIRST_CLUS_LO = 26;
+const DIR_FILE_SIZE     = 28;
+
+# Attributes
+const ATTR_VOLUME_ID    = 0x08;
+const ATTR_DIRECTORY    = 0x10;
+const ATTR_ARCHIVE      = 0x20;
+const ATTR_LFN          = 0x0F;
+const DIR_FIRST_CLUS_HI = 20;
+
+const EOC_MIN           = 0xFFF8;     # cluster >= this -> end of chain
+
+# Per-slot cwd ownership + TOCTOU snapshot (security_todo.md §5).
+const APP_SLOT_COUNT    = 12;         # src/include/boot_memory.inc
+const FAT16_SNAP_STRIDE = 17;         # name[11] | cluster_lo[2] | size[4]
+const FAT16_CACHE_OWNER_NONE = 0xFFFFFFFF;   # "no slot owns the live cache"
+
+# -------------------- buffers (zero image bytes) --------------------
+reserve fat16_sector_buf[512];
+reserve fat16_fat_cache[65536];
+reserve fat16_root_cache[16384];
+reserve fat16_root_canary[8];          # trailing guard qword for root_cache
+reserve fat16_file_buf[65536];
+
+# -------------------- per-slot cwd + snapshot (KERNEL BSS) --------------------
+# OUTSIDE the ring-3 app arena so an app cannot forge or widen its own cwd /
+# snapshot. BSS-zero defaults: every slot's cwd = cluster 0 = root, no slot
+# armed, and fat16_cache_owner = 0 = slot 0 (which owns the boot root cache).
+reserve fat16_slot_cwd[24];                          # APP_SLOT_COUNT u16 cwd clusters
+reserve fat16_cache_owner[4];                        # slot owning the live cache
+reserve fat16_entry_snap_armed[12];                  # APP_SLOT_COUNT armed bytes
+reserve fat16_entry_snap[204];                       # APP_SLOT_COUNT * FAT16_SNAP_STRIDE
+
+# -------------------- geometry state --------------------
+data f16_sect_per_clus:   1 x 4;
+data f16_reserved_sects:  1 x 4;
+data f16_num_fats:        1 x 4;
+data f16_root_entries:    1 x 4;
+data f16_fat_size:        1 x 4;
+data f16_fat_start_sect:  1 x 4;
+data f16_root_start_sect: 1 x 4;
+data f16_root_sectors:    1 x 4;
+data f16_data_start_sect: 1 x 4;
+data f16_total_sects:     1 x 4;
+data f16_fat_entries:     1 x 4;
+data f16_file_count_val:  1 x 4;
+data f16_cur_dir_cluster: 1 x 4;
+
+fn fat16_core_abi_version() { return 1; }
+
+# -------------------- little-endian helpers --------------------
+fn f16_rd_u16(p) {
+    return lb(p) | (lb(p + 1) << 8);
+}
+
+fn f16_rd_u32(p) {
+    return lb(p) | (lb(p + 1) << 8) | (lb(p + 2) << 16) | (lb(p + 3) << 24);
+}
+
+# 16-bit store (GHL has no native u16 store; sw would clobber 4 bytes and
+# corrupt the adjacent FAT entry / dir field). Used for FAT16 cache entries,
+# DIR_FIRST_CLUS_LO/HI, and other 2-byte directory fields.
+fn f16_wr_u16(p, v) {
+    sb(p, v & 255);
+    sb(p + 1, (v >> 8) & 255);
+    return 0;
+}
+
+fn f16_wr_u32(p, v) {
+    sb(p, v & 255);
+    sb(p + 1, (v >> 8) & 255);
+    sb(p + 2, (v >> 16) & 255);
+    sb(p + 3, (v >> 24) & 255);
+    return 0;
+}
+
+# -------------------- cache guard --------------------
+# Seed the trailing root-cache guard from the final kernel canary (once init
+# has the geometry); verify after every ring-3-shaped fill. A mismatch means a
+# cache fill overran the 16 KiB extent -> panic (matches the asm baseline).
+fn f16_canary_seed() {
+    sq(&fat16_root_canary, lq(&kernel_canary));
+    return 0;
+}
+
+fn f16_canary_check() {
+    if lq(&fat16_root_canary) != lq(&kernel_canary) {
+        # tag 0x46415443 = "FATC"; rdi=found, rsi=site, edx=tag (noreturn)
+        call kernel_panic_canary(rdi: lq(&fat16_root_canary),
+                                 rsi: &f16_canary_check,
+                                 rdx: 0x46415443);
+    }
+    return 0;
+}
+
+# -------------------- LBA arithmetic (range-checked) --------------------
+# Returns the absolute LBA (incl. FAT16_PART_LBA) for `cluster`, or 0 if the
+# cluster is invalid or its sectors would fall outside the partition. 0 is a
+# safe sentinel: cluster<2 is never valid, so a real data LBA is never 0 here.
+fn f16_cluster_lba(cluster) {
+    if cluster < 2 { return 0; }
+    if cluster >= EOC_MIN { return 0; }
+    if cluster >= lw(&f16_fat_entries) { return 0; }
+    let spc = lw(&f16_sect_per_clus);
+    let rel = (cluster - 2) * spc + lw(&f16_data_start_sect);
+    let end = rel + spc;
+    if end > lw(&f16_total_sects) { return 0; }
+    return rel + FAT16_PART_LBA;
+}
+
+# Next cluster in the FAT chain (16-bit entry), 0xFFFF on overrun.
+fn f16_fat_next(cluster) {
+    return f16_rd_u16(&fat16_fat_cache + cluster * 2);
+}
+
+# -------------------- init --------------------
+# Probe the data disk, validate the Grit FAT16 marker, parse the BPB, and cache
+# the FAT table + root directory. Returns 0 on success, -1 on any failure
+# (fail-closed: a rejected probe or short read leaves no trusted cache).
+fn fat16_init() {
+    sb(&ata_drive_sel, 0xE0);
+    if f16_probe_marker() == 0 {
+        # toggle drive 0xE0<->0xF0 and retry once
+        sb(&ata_drive_sel, lb(&ata_drive_sel) ^ 0x10);
+        if f16_probe_marker() == 0 { return -1; }
+    }
+    if f16_parse_bpb() != 0 { return -1; }
+
+    # Cache the FAT table. A failed/short read must fail closed.
+    if ata_read_sectors(lw(&f16_fat_start_sect) + FAT16_PART_LBA,
+                        &fat16_fat_cache, lw(&f16_fat_size)) != 0 { return -1; }
+
+    # Cache the root directory.
+    let rs = lw(&f16_root_sectors);
+    if rs > ROOT_CACHE_SECTORS { return -1; }
+    if ata_read_sectors(lw(&f16_root_start_sect) + FAT16_PART_LBA,
+                        &fat16_root_cache, rs) != 0 { return -1; }
+
+    f16_canary_seed();
+    f16_canary_check();
+    fat16_count_root_files();
+    return 0;
+}
+
+# Read the boot sector into sector_buf and validate signature + "NEXUSOS "
+# marker. Returns 1 if this drive carries the Grit FAT image, else 0.
+fn f16_probe_marker() {
+    if ata_read_sectors(FAT16_PART_LBA, &fat16_sector_buf, 1) != 0 { return 0; }
+    if f16_rd_u16(&fat16_sector_buf + 510) != 0xAA55 { return 0; }
+    if f16_rd_u32(&fat16_sector_buf + 3) != 0x5558454E { return 0; }   # "NEXU"
+    if f16_rd_u32(&fat16_sector_buf + 7) != 0x20534F53 { return 0; }   # "SOS "
+    return 1;
+}
+
+# Parse the validated BPB from sector_buf into the geometry state, computing the
+# FAT/root/data offsets. Returns 0 on success, -1 on any out-of-range field.
+fn f16_parse_bpb() {
+    let b = &fat16_sector_buf;
+    if f16_rd_u16(b + BPB_BYTES_PER_SECT) != SECT_BYTES { return -1; }
+
+    let spc = lb(b + BPB_SECT_PER_CLUS);
+    if spc == 0 { return -1; }
+    if spc > 128 { return -1; }
+    sw(&f16_sect_per_clus, spc);
+
+    let rsv = f16_rd_u16(b + BPB_RESERVED_SECTS);
+    if rsv == 0 { return -1; }
+    sw(&f16_reserved_sects, rsv);
+
+    let nf = lb(b + BPB_NUM_FATS);
+    if nf < 1 { return -1; }
+    if nf > 2 { return -1; }
+    sw(&f16_num_fats, nf);
+
+    let re = f16_rd_u16(b + BPB_ROOT_ENTRIES);
+    if re == 0 { return -1; }
+    if re > ROOT_CACHE_SECTORS * 16 { return -1; }
+    sw(&f16_root_entries, re);
+
+    let fsz = f16_rd_u16(b + BPB_FAT_SIZE16);
+    if fsz == 0 { return -1; }
+    if fsz > FAT_CACHE_SECTORS { return -1; }
+    sw(&f16_fat_size, fsz);
+
+    let tot = f16_rd_u16(b + BPB_TOTAL_SECTS16);
+    if tot == 0 { return -1; }
+    sw(&f16_total_sects, tot);
+
+    # FAT start = reserved sectors.
+    sw(&f16_fat_start_sect, rsv);
+
+    # Root dir start = reserved + num_fats * fat_size.
+    let root_start = rsv + nf * fsz;
+    if root_start >= tot { return -1; }
+    sw(&f16_root_start_sect, root_start);
+
+    # Root dir sectors = (root_entries * 32 + 511) / 512.
+    let root_sects = (re * 32 + 511) / 512;
+    sw(&f16_root_sectors, root_sects);
+
+    # Data region start = root_start + root_sectors.
+    let data_start = root_start + root_sects;
+    if data_start >= tot { return -1; }
+    sw(&f16_data_start_sect, data_start);
+
+    # fat_entries = (total - data_start) / sect_per_clus + 2, capped.
+    let fe = (tot - data_start) / spc + 2;
+    if fe > MAX_FAT_ENTRIES { fe = MAX_FAT_ENTRIES; }
+    sw(&f16_fat_entries, fe);
+    return 0;
+}
+
+# -------------------- entry enumeration --------------------
+# Count valid (non-deleted, non-LFN, non-volume-id) entries in the live cache.
+fn fat16_count_root_files() {
+    let p = &fat16_root_cache;
+    let count = 0;
+    let idx = 0;
+    let n = lw(&f16_root_entries);
+    while idx < n {
+        let first = lb(p);
+        if first == 0 { break; }              # end of directory
+        if first != 0xE5 {                    # not deleted
+            let attr = lb(p + DIR_ATTR);
+            if attr != ATTR_LFN {
+                if (attr & ATTR_VOLUME_ID) == 0 {
+                    count = count + 1;
+                }
+            }
+        }
+        p = p + DIR_ENTRY_SIZE;
+        idx = idx + 1;
+    }
+    sw(&f16_file_count_val, count);
+    return count;
+}
+
+fn fat16_file_count() {
+    fat16_count_root_files();
+    return lw(&f16_file_count_val);
+}
+
+# Return a pointer to the nth valid directory entry in the live cache, or 0 if
+# not found. Mirrors fat16_get_entry: the index counts only valid entries.
+fn fat16_get_entry(want) {
+    let p = &fat16_root_cache;
+    let valid = 0;
+    let idx = 0;
+    let n = lw(&f16_root_entries);
+    while idx < n {
+        let first = lb(p);
+        if first == 0 { return 0; }           # end of directory
+        if first != 0xE5 {
+            let attr = lb(p + DIR_ATTR);
+            if (attr & ATTR_VOLUME_ID) == 0 {
+                if attr != ATTR_LFN {
+                    if valid == want { return p; }
+                    valid = valid + 1;
+                }
+            }
+        }
+        p = p + DIR_ENTRY_SIZE;
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+fn fat16_get_file_size(ent) {
+    return f16_rd_u32(ent + DIR_FILE_SIZE);
+}
+
+# -------------------- file read --------------------
+# Read up to `max_bytes` of the file described by dir-entry `ent` into `dst`.
+# Returns bytes read, or -1 on a bad entry. Each cluster is staged through the
+# kernel file buffer so a final partial cluster cannot overrun the caller; the
+# FAT chain is bounded by fat_entries so a cyclic/corrupt chain terminates.
+fn fat16_read_file(ent, dst, max_bytes) {
+    let size = f16_rd_u32(ent + DIR_FILE_SIZE);
+    let want = max_bytes;
+    if want > size { want = size; }
+
+    let cluster = f16_rd_u16(ent + DIR_FIRST_CLUS_LO);
+    if cluster == 0 { return 0; }             # empty file
+
+    let spc = lw(&f16_sect_per_clus);
+    let clus_bytes = spc * SECT_BYTES;
+    let got = 0;
+    let guard = lw(&f16_fat_entries);
+
+    while guard > 0 {
+        guard = guard - 1;
+        let lba = f16_cluster_lba(cluster);
+        if lba == 0 { break; }
+        if ata_read_sectors(lba, &fat16_file_buf, spc) != 0 { break; }
+
+        let remain = want - got;
+        let chunk = clus_bytes;
+        if remain < chunk { chunk = remain; }
+        f16_copy(dst + got, &fat16_file_buf, chunk);
+        got = got + chunk;
+        if got >= want { break; }
+
+        cluster = f16_fat_next(cluster);
+    }
+    return got;
+}
+
+fn f16_copy(dst, src, n) {
+    let i = 0;
+    while i < n {
+        sb(dst + i, lb(src + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# -------------------- write-path helpers --------------------
+fn f16_fat_get(cluster) { return f16_rd_u16(&fat16_fat_cache + cluster * 2); }
+fn f16_fat_set(cluster, v) { return f16_wr_u16(&fat16_fat_cache + cluster * 2, v); }
+
+fn f16_name_eq(a, b) {
+    let i = 0;
+    while i < 11 {
+        if lb(a + i) != lb(b + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn f16_name_copy(dst, src) {
+    let i = 0;
+    while i < 11 {
+        sb(dst + i, lb(src + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Free an entire FAT cluster chain starting at `cluster`. Bounded by
+# fat_entries so a cyclic/corrupt chain terminates.
+fn f16_free_chain(cluster) {
+    let guard = lw(&f16_fat_entries);
+    while guard > 0 {
+        guard = guard - 1;
+        if cluster < 2 { return 0; }
+        if cluster >= EOC_MIN { return 0; }
+        if cluster >= lw(&f16_fat_entries) { return 0; }
+        let nxt = f16_fat_get(cluster);
+        f16_fat_set(cluster, 0);
+        cluster = nxt;
+    }
+    return 0;
+}
+
+# First free FAT cluster >= start, or 0 if the FAT is full.
+fn f16_find_free_cluster(start) {
+    let cl = start;
+    let fe = lw(&f16_fat_entries);
+    while cl < fe {
+        if f16_fat_get(cl) == 0 { return cl; }
+        cl = cl + 1;
+    }
+    return 0;
+}
+
+# -------------------- flush --------------------
+fn fat16_flush_fats() {
+    let len = lw(&f16_fat_size);
+    if len > FAT_CACHE_SECTORS { len = FAT_CACHE_SECTORS; }
+    ata_write_sectors(lw(&f16_fat_start_sect) + FAT16_PART_LBA, &fat16_fat_cache, len);
+    if lw(&f16_num_fats) >= 2 {
+        ata_write_sectors(lw(&f16_fat_start_sect) + lw(&f16_fat_size) + FAT16_PART_LBA,
+                          &fat16_fat_cache, len);
+    }
+    return 0;
+}
+
+# Write the live directory cache back to disk - root (contiguous) or the
+# current subdirectory's cluster. Returns 0 on success, -1 on a bad cwd.
+fn fat16_flush_current_dir() {
+    let cl = lw(&f16_cur_dir_cluster);
+    if cl == 0 {
+        let rs = lw(&f16_root_sectors);
+        if rs > ROOT_CACHE_SECTORS { return -1; }
+        ata_write_sectors(lw(&f16_root_start_sect) + FAT16_PART_LBA, &fat16_root_cache, rs);
+        return 0;
+    }
+    let lba = f16_cluster_lba(cl);
+    if lba == 0 { return -1; }
+    ata_write_sectors(lba, &fat16_root_cache, lw(&f16_sect_per_clus));
+    return 0;
+}
+
+# -------------------- delete --------------------
+# Delete a file or empty directory by cache entry pointer. A non-empty
+# directory is rejected. Returns 0 on success, -1 on error.
+fn fat16_delete_entry(ent) {
+    let first = lb(ent);
+    if first == 0 { return -1; }
+    if first == 0xE5 { return -1; }
+    let attr = lb(ent + DIR_ATTR);
+    if (attr & ATTR_DIRECTORY) != 0 {
+        let dc = f16_rd_u16(ent + DIR_FIRST_CLUS_LO);
+        if dc != 0 {
+            if f16_dir_cluster_is_empty(dc) == 0 { return -1; }
+        }
+    }
+    f16_free_chain(f16_rd_u16(ent + DIR_FIRST_CLUS_LO));
+    sb(ent, 0xE5);
+    fat16_flush_fats();
+    fat16_flush_current_dir();
+    fat16_count_root_files();
+    return 0;
+}
+
+# EBX=directory cluster. 1 if it contains only "."/".." (or empty), else 0.
+fn f16_dir_cluster_is_empty(cluster) {
+    let lba = f16_cluster_lba(cluster);
+    if lba == 0 { return 0; }
+    if ata_read_sectors(lba, &fat16_file_buf, lw(&f16_sect_per_clus)) != 0 { return 0; }
+    let p = &fat16_file_buf;
+    let cnt = lw(&f16_sect_per_clus) * 16;
+    while cnt > 0 {
+        let c0 = lb(p);
+        if c0 == 0 { return 1; }
+        if c0 != 0xE5 {
+            if c0 != 46 { return 0; }         # must be '.'
+            let c1 = lb(p + 1);
+            if c1 != 32 {
+                if c1 != 46 { return 0; }      # second byte must be ' ' or '.'
+            }
+        }
+        p = p + DIR_ENTRY_SIZE;
+        cnt = cnt - 1;
+    }
+    return 1;
+}
+
+# -------------------- rename --------------------
+# Rename `ent` to the 11-byte 8.3 name at `name`. Rejects a duplicate name in
+# the current directory. Returns 0 on success, -1 on error.
+fn fat16_rename_entry(ent, name) {
+    let first = lb(ent);
+    if first == 0 { return -1; }
+    if first == 0xE5 { return -1; }
+    let p = &fat16_root_cache;
+    let idx = 0;
+    let n = lw(&f16_root_entries);
+    while idx < n {
+        let c0 = lb(p);
+        if c0 == 0 { break; }
+        if c0 != 0xE5 {
+            if p != ent {
+                if f16_name_eq(p, name) == 1 { return -1; }
+            }
+        }
+        p = p + DIR_ENTRY_SIZE;
+        idx = idx + 1;
+    }
+    f16_name_copy(ent, name);
+    fat16_flush_current_dir();
+    return 0;
+}
+
+# -------------------- mkdir --------------------
+# Create a single-cluster directory named `name` (11-byte 8.3) in the current
+# directory, seeded with "." and "..". Returns 0 on success, -1 on error.
+fn fat16_mkdir(name) {
+    let p = &fat16_root_cache;
+    let free = 0;
+    let idx = 0;
+    let n = lw(&f16_root_entries);
+    while idx < n {
+        let c0 = lb(p);
+        if c0 == 0 {
+            if free == 0 { free = p; }
+            break;
+        }
+        if c0 == 0xE5 {
+            if free == 0 { free = p; }
+        } else {
+            if f16_name_eq(p, name) == 1 { return -1; }   # duplicate
+        }
+        p = p + DIR_ENTRY_SIZE;
+        idx = idx + 1;
+    }
+    if free == 0 { return -1; }
+
+    let cl = f16_find_free_cluster(2);
+    if cl == 0 { return -1; }
+    f16_fat_set(cl, 0xFFFF);
+
+    # Clear one directory cluster and seed "." (self) and ".." (parent).
+    let spc = lw(&f16_sect_per_clus);
+    let clus_bytes = spc * SECT_BYTES;
+    let i = 0;
+    while i < clus_bytes { sb(&fat16_file_buf + i, 0); i = i + 1; }
+
+    sb(&fat16_file_buf, 46);
+    let j = 1;
+    while j < 11 { sb(&fat16_file_buf + j, 32); j = j + 1; }
+    sb(&fat16_file_buf + DIR_ATTR, ATTR_DIRECTORY);
+    f16_wr_u16(&fat16_file_buf + DIR_FIRST_CLUS_LO, cl);
+
+    let pp = &fat16_file_buf + DIR_ENTRY_SIZE;
+    sb(pp, 46);
+    sb(pp + 1, 46);
+    j = 2;
+    while j < 11 { sb(pp + j, 32); j = j + 1; }
+    sb(pp + DIR_ATTR, ATTR_DIRECTORY);
+    f16_wr_u16(pp + DIR_FIRST_CLUS_LO, lw(&f16_cur_dir_cluster));
+
+    let lba = f16_cluster_lba(cl);
+    if lba == 0 { return -1; }
+    if ata_write_sectors(lba, &fat16_file_buf, spc) != 0 { return -1; }
+
+    f16_name_copy(free, name);
+    sb(free + DIR_ATTR, ATTR_DIRECTORY);
+    f16_wr_u16(free + DIR_FIRST_CLUS_HI, 0);
+    f16_wr_u16(free + DIR_FIRST_CLUS_LO, cl);
+    f16_wr_u32(free + DIR_FILE_SIZE, 0);
+
+    fat16_flush_fats();
+    fat16_flush_current_dir();
+    fat16_count_root_files();
+    return 0;
+}
+
+# -------------------- write file --------------------
+# Create/overwrite file `name` (11-byte 8.3) in the current directory with
+# `count` bytes from `src`. Returns 0 on success, -1 on error. A final partial
+# cluster is padded through the kernel file buffer so the disk write never
+# overreads the caller's source.
+fn fat16_write_file(name, src, count) {
+    let p = &fat16_root_cache;
+    let slot = 0;
+    let existing = 0;
+    let idx = 0;
+    let n = lw(&f16_root_entries);
+    while idx < n {
+        let c0 = lb(p);
+        if c0 == 0 {
+            if slot == 0 { slot = p; }
+            break;
+        }
+        if c0 == 0xE5 {
+            if slot == 0 { slot = p; }
+        } else {
+            if f16_name_eq(p, name) == 1 { slot = p; existing = 1; break; }
+        }
+        p = p + DIR_ENTRY_SIZE;
+        idx = idx + 1;
+    }
+    if slot == 0 { return -1; }
+
+    if existing == 1 {
+        f16_free_chain(f16_rd_u16(slot + DIR_FIRST_CLUS_LO));
+    }
+
+    f16_name_copy(slot, name);
+    sb(slot + DIR_ATTR, ATTR_ARCHIVE);
+    f16_wr_u16(slot + DIR_FIRST_CLUS_HI, 0);
+    f16_wr_u32(slot + DIR_FILE_SIZE, count);
+
+    if count == 0 {
+        f16_wr_u16(slot + DIR_FIRST_CLUS_LO, 0);
+        fat16_flush_fats();
+        fat16_flush_current_dir();
+        f16_canary_check();
+        fat16_count_root_files();
+        return 0;
+    }
+
+    let spc = lw(&f16_sect_per_clus);
+    let clus_bytes = spc * SECT_BYTES;
+    let first = f16_find_free_cluster(2);
+    if first == 0 { return -1; }
+    f16_wr_u16(slot + DIR_FIRST_CLUS_LO, first);
+
+    let cur = first;
+    let off = 0;
+    while off < count {
+        let lba = f16_cluster_lba(cur);
+        if lba == 0 { return -1; }
+        let remain = count - off;
+        if remain >= clus_bytes {
+            if ata_write_sectors(lba, src + off, spc) != 0 { return -1; }
+            off = off + clus_bytes;
+        } else {
+            let i = 0;
+            while i < clus_bytes { sb(&fat16_file_buf + i, 0); i = i + 1; }
+            i = 0;
+            while i < remain { sb(&fat16_file_buf + i, lb(src + off + i)); i = i + 1; }
+            if ata_write_sectors(lba, &fat16_file_buf, spc) != 0 { return -1; }
+            off = count;
+        }
+        if off >= count {
+            f16_fat_set(cur, 0xFFFF);
+            fat16_flush_fats();
+            fat16_flush_current_dir();
+            f16_canary_check();
+            fat16_count_root_files();
+            return 0;
+        }
+        let nxt = f16_find_free_cluster(cur + 1);
+        if nxt == 0 { return -1; }
+        f16_fat_set(cur, nxt);
+        cur = nxt;
+    }
+    return 0;
+}
+
+# -------------------- nav / cwd --------------------
+# Change the current directory: reload the live root/subdir cache for `cluster`
+# (0 = root). Always stamps fat16_cache_owner = NONE so any raw (launcher/shell,
+# non-syscall) reload forces the next ring-3 FS syscall to re-materialize its
+# own cwd via fat16_switch_to. Returns 0 on success, -1 on a bad root reload.
+fn fat16_change_dir(cluster) {
+    let rc = f16_change_dir_load(cluster);
+    sw(&fat16_cache_owner, FAT16_CACHE_OWNER_NONE);
+    return rc;
+}
+
+fn f16_change_dir_load(cluster) {
+    let cl0 = cluster & 0xFFFF;
+    sw(&f16_cur_dir_cluster, cl0);
+
+    if cl0 == 0 {
+        # Root directory is contiguous. A failed/short reload must fail closed:
+        # stale entries in the live cache would be walked as trusted data.
+        let rs = lw(&f16_root_sectors);
+        if rs > ROOT_CACHE_SECTORS { return -1; }
+        if ata_read_sectors(lw(&f16_root_start_sect) + FAT16_PART_LBA,
+                            &fat16_root_cache, rs) != 0 { return -1; }
+        f16_canary_check();
+        fat16_count_root_files();
+        return 0;
+    }
+
+    # Subdirectory: clear the cache, then walk the cluster chain into it. Bounded
+    # by fat_entries (cyclic chain terminates) and truncated at the 16 KiB extent.
+    let i = 0;
+    while i < ROOT_CACHE_BYTES { sb(&fat16_root_cache + i, 0); i = i + 1; }
+
+    let dst = &fat16_root_cache;
+    let total = 0;
+    let guard = lw(&f16_fat_entries);
+    let cl = cl0;
+    let spc = lw(&f16_sect_per_clus);
+    let bytes = spc * SECT_BYTES;
+    while guard > 0 {
+        guard = guard - 1;
+        if cl < 2 { break; }
+        if cl >= EOC_MIN { break; }
+        if cl >= lw(&f16_fat_entries) { break; }
+        let lba = f16_cluster_lba(cl);
+        if lba == 0 { break; }
+        if total + bytes > ROOT_CACHE_BYTES { break; }     # truncate, don't overrun
+        if ata_read_sectors(lba, dst + total, spc) != 0 { break; }
+        total = total + bytes;
+        cl = f16_fat_next(cl);
+    }
+    f16_canary_check();
+    fat16_count_root_files();
+    return 0;
+}
+
+# Ensure the live cache holds the calling slot's (r15) cwd. No-op when the slot
+# already owns it; otherwise reload the slot's recorded cwd cluster and claim
+# ownership. preserves(all): called as the first instruction of every FS syscall
+# handler, where r15 = the calling slot.
+fn fat16_switch_to(r15 slot) preserves(all) {
+    let s = slot & 0xFF;
+    if s >= APP_SLOT_COUNT { s = 0; }              # out-of-range -> slot 0
+    if lw(&fat16_cache_owner) == s { return 0; }   # already owns the live cache
+    let cwd = f16_rd_u16(&fat16_slot_cwd + s * 2);
+    fat16_change_dir(cwd);                         # sets owner = NONE
+    sw(&fat16_cache_owner, s);                      # claim ownership for this slot
+    return 0;
+}
+
+# Write the live directory cache back to disk (root or current subdir).
+fn fat16_sync_root() {
+    return fat16_flush_current_dir();
+}
+
+# -------------------- TOCTOU snapshot (security_todo.md §5) --------------------
+# Capture the identity (name+ext | first_cluster_lo | size) of a resolved
+# dir-entry into the slot's kernel-owned snapshot and arm it. Out-of-range slot
+# is ignored (no arm). RDI = entry, RSI = slot.
+fn fat16_entry_info_snapshot(ent, slot) {
+    if slot >= APP_SLOT_COUNT { return 0; }
+    let base = &fat16_entry_snap + slot * FAT16_SNAP_STRIDE;
+    let i = 0;
+    while i < 11 { sb(base + i, lb(ent + i)); i = i + 1; }
+    f16_wr_u16(base + 11, f16_rd_u16(ent + DIR_FIRST_CLUS_LO));
+    f16_wr_u32(base + 13, f16_rd_u32(ent + DIR_FILE_SIZE));
+    sb(&fat16_entry_snap_armed + slot, 1);
+    return 0;
+}
+
+# Verify a resolved dir-entry against the slot's armed snapshot before a read.
+# Returns 1 (allow) if the slot is unarmed (legacy/no-op) or the live entry
+# still matches the captured identity; 0 (deny, fail-closed) on any divergence.
+fn fat16_entry_snapshot_verify(ent, slot) {
+    if slot >= APP_SLOT_COUNT { return 1; }                 # bad slot -> no policy
+    if lb(&fat16_entry_snap_armed + slot) == 0 { return 1; }  # not armed -> allow
+    let base = &fat16_entry_snap + slot * FAT16_SNAP_STRIDE;
+    let i = 0;
+    while i < 11 {
+        if lb(ent + i) != lb(base + i) { return 0; }
+        i = i + 1;
+    }
+    if f16_rd_u16(ent + DIR_FIRST_CLUS_LO) != f16_rd_u16(base + 11) { return 0; }
+    if f16_rd_u32(ent + DIR_FILE_SIZE) != f16_rd_u32(base + 13) { return 0; }
+    return 1;
+}
+
+# Disarm a slot's snapshot (e.g. on slot recycle). Out-of-range slot ignored.
+fn fat16_entry_snapshot_clear(slot) {
+    if slot >= APP_SLOT_COUNT { return 0; }
+    sb(&fat16_entry_snap_armed + slot, 0);
+    return 0;
+}

@@ -24,7 +24,13 @@ FN_BEGIN scheduler_init, 0, 0, FN_RET_SCALAR
     mov dword [rbx + process_t.affinity_mask], 0xFFFFFFFF
     mov dword [rbx + process_t.home_core], 0
     mov qword [rbx + process_t.cpu_time_cycles], 0
-    
+    ; Priority manager: the kernel main loop (PID 0) runs at PRIO_KERNEL so it is
+    ; never starved by an app, but stays below PRIO_REALTIME.
+    mov dword [rbx + process_t.priority], PRIO_KERNEL
+    mov dword [rbx + process_t.base_priority], PRIO_KERNEL
+    mov dword [rbx + process_t.quantum_left], QUANTUM_TICKS_HIGH
+    mov dword [rbx + process_t.strikes], 0
+
     mov dword [current_process_id], 0
     mov dword [next_pid], 1
     
@@ -106,6 +112,13 @@ FN_BEGIN process_create, 0, 0, FN_RET_SCALAR
     ; via the auto-placer so task manager has something stable to display.
     mov dword [rbx + process_t.affinity_mask], SMP_APP_CORE_MASK
     mov qword [rbx + process_t.cpu_time_cycles], 0
+    ; Priority manager: new apps launch at PRIO_NORMAL with a full quantum and a
+    ; clean strike count. Task Manager can raise/lower this via SYS_PROC_SETPRIO;
+    ; the budget/strike engine demotes it toward PRIO_IDLE on abuse.
+    mov dword [rbx + process_t.priority], PRIO_NORMAL
+    mov dword [rbx + process_t.base_priority], PRIO_NORMAL
+    mov dword [rbx + process_t.quantum_left], QUANTUM_TICKS_NORMAL
+    mov dword [rbx + process_t.strikes], 0
     push rdi
     mov edi, SMP_APP_CORE_MASK
     call process_auto_pick_core        ; RAX = chosen core index
@@ -280,64 +293,102 @@ FN_BEGIN process_restore_context, 0, 0, FN_RET_SCALAR
     ret
 
 ; --- process_schedule ---
-; Round-Robin Scheduler
-; Returns: RAX = next PID, or -1 if none
+; Priority-aware scheduler (Stage 0 of the priority manager).
+; Picks the highest-priority READY process; round-robins within a priority level
+; by scanning candidates in rotation order starting just after the current PID
+; and keeping the FIRST (earliest-in-rotation) process at the maximum priority.
+; The currently-RUNNING process is also a candidate (so a lone running proc keeps
+; running, and an equal-or-lower-priority newcomer does not needlessly preempt).
+; Returns: RAX = chosen PID, or -1 if nothing is runnable.
+;
+; NOTE: replaces the old round-robin which masked with (MAX_PROCESSES-1); that is
+; only correct for a power-of-two pool and MAX_PROCESSES is 12. This version uses
+; a real modulo (subtract-wrap) so every slot is considered.
 FN_BEGIN process_schedule, 0, 0, FN_RET_SCALAR
     push rbx
     push rcx
-    
-    mov eax, [current_process_id]
-    mov ecx, eax
-    
-.search:
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+
+    mov r8d, [current_process_id]   ; r8d = current pid (-1 if none)
+    mov r9d, -1                     ; r9d = best pid found
+    mov esi, -1                     ; esi = best priority (signed; PRIO_MIN=0)
+
+    xor ecx, ecx                    ; ecx = rotation offset 0..MAX_PROCESSES-1
+.ps_loop:
+    cmp ecx, MAX_PROCESSES
+    jge .ps_decide
+
+    ; candidate index edx = (current + 1 + offset) mod MAX_PROCESSES.
+    ; When there is no current process, scan plain 0..N-1.
+    cmp r8d, -1
+    je .ps_no_cur
+    lea edx, [r8d + 1]
+    add edx, ecx
+    jmp .ps_wrap
+.ps_no_cur:
+    mov edx, ecx
+.ps_wrap:
+    cmp edx, MAX_PROCESSES
+    jl .ps_idx_ready
+    sub edx, MAX_PROCESSES
+    jmp .ps_wrap
+.ps_idx_ready:
+    mov eax, edx
+    imul rax, rax, 512
+    add rax, PROCESS_POOL           ; rax = candidate PCB
+    mov edi, [rax + process_t.state]
+    cmp edi, 1                      ; READY -> eligible
+    je .ps_eligible
+    cmp edi, 2                      ; RUNNING -> eligible only if it is current
+    jne .ps_next
+    cmp edx, r8d
+    jne .ps_next
+.ps_eligible:
+    mov edi, [rax + process_t.priority]
+    cmp edi, esi
+    jle .ps_next                    ; strictly-greater wins -> keeps round-robin
+    mov esi, edi
+    mov r9d, edx
+.ps_next:
     inc ecx
-    and ecx, (MAX_PROCESSES - 1)
-    
-    cmp ecx, [current_process_id] ; Full circle?
-    je .not_found_other
-    
-    imul rbx, rcx, 512
-    add rbx, PROCESS_POOL
-    cmp dword [rbx + process_t.state], 1 ; READY
-    je .found
-    jmp .search
+    jmp .ps_loop
 
-.not_found_other:
-    ; Check if current is still running/ready
-    mov ecx, [current_process_id]
-    cmp ecx, -1
-    je .no_procs
-    imul rbx, rcx, 512
-    add rbx, PROCESS_POOL
-    cmp dword [rbx + process_t.state], 1 ; READY
-    je .found
-    cmp dword [rbx + process_t.state], 2 ; RUNNING
-    je .found
+.ps_decide:
+    cmp r9d, -1
+    je .ps_none
 
-.no_procs:
-    mov rax, -1
-    jmp .done
-
-.found:
-    ; Mark old as READY if it was RUNNING
-    mov eax, [current_process_id]
-    cmp eax, -1
-    je .skip_old
+    ; Mark the outgoing process READY if it was RUNNING and is being switched out.
+    cmp r8d, -1
+    je .ps_set_new
+    cmp r8d, r9d
+    je .ps_set_new                  ; same proc keeps running; no state churn
+    mov eax, r8d
     imul rax, rax, 512
     add rax, PROCESS_POOL
-    cmp dword [rax + process_t.state], 2 ; RUNNING
-    jne .skip_old
-    mov dword [rax + process_t.state], 1 ; set READY
-.skip_old:
-
-    mov [current_process_id], ecx
-    imul rax, rcx, 512
+    cmp dword [rax + process_t.state], 2
+    jne .ps_set_new
+    mov dword [rax + process_t.state], 1
+.ps_set_new:
+    mov [current_process_id], r9d
+    mov eax, r9d
+    imul rax, rax, 512
     add rax, PROCESS_POOL
-    mov dword [rax + process_t.state], 2 ; set RUNNING
-    
-    mov rax, rcx
-
-.done:
+    mov dword [rax + process_t.state], 2   ; chosen -> RUNNING
+    mov eax, r9d
+    jmp .ps_done
+.ps_none:
+    mov eax, -1
+.ps_done:
+    movsxd rax, eax
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
     pop rcx
     pop rbx
     ret

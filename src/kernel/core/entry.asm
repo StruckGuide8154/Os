@@ -22,6 +22,7 @@ global _start
 extern kmain
 
 _start:
+%ifndef RELEASE_BUILD
     ; Serial debug: Kernel entry reached
     mov dx, 0x3F8
     mov al, '('
@@ -81,6 +82,7 @@ _start:
     out dx, al
     mov al, ')'
     out dx, al
+%endif
 
     ; Set up segment registers for long mode
     mov ax, 0x10            ; Data segment selector (GDT64_DATA_SEG)
@@ -121,6 +123,7 @@ _start:
     or ax, (1 << 9) | (1 << 10)
     mov cr4, rax
 
+%ifndef RELEASE_BUILD
     ; (!2-STACK)
     mov dx, 0x3F8
     mov al, '('
@@ -165,11 +168,13 @@ _start:
     jnz .fb_hex
     mov al, ')'
     out dx, al
+%endif
 
     ; Reload rdi from VBE info
     mov rax, VBE_INFO_ADDR
     mov rdi, [rax]           ; Get LFB address
 
+%ifndef RELEASE_BUILD
     ; (!4-PAINT)
     mov al, '('
     out dx, al
@@ -179,6 +184,7 @@ _start:
     out dx, al
     mov al, ')'
     out dx, al
+%endif
 
     ; Paint WHITE as proof of Kernel Entry
     mov rcx, SCREEN_WIDTH * SCREEN_HEIGHT  ; 1024*768 pixels
@@ -186,6 +192,7 @@ _start:
     mov eax, 0x00FFFFFF      ; WHITE
     rep stosd
 
+%ifndef RELEASE_BUILD
     ; (!5-PAINTED)
     mov dx, 0x3F8
     mov al, '('
@@ -206,6 +213,7 @@ _start:
     out dx, al
     mov al, ')'
     out dx, al
+%endif
 
     ; Call kernel main
     call kmain

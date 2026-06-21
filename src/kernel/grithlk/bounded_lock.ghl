@@ -1,0 +1,115 @@
+# ============================================================================
+# bounded_lock.ghl - recovery-safe spinlock support.  ZERO-ASM.
+#
+# Invariant being enforced (feedback_no_freeze_invariant): a stuck or abandoned
+# kernel lock must never freeze the system. Two failure modes are closed here:
+#
+#   1. WEDGED / DEAD HOLDER. The old wq_lock spun `while 1` with no deadline: if
+#      the holder died (an AP reaped mid-critical-section) or wedged, every
+#      waiter spun forever. The bounded acquire (in workqueue.ghl) gives up
+#      after a TSC deadline and STEALS the lock so a waiter always makes
+#      progress. The deadline is measured in TSC, not PIT ticks, because the
+#      contended case can run under cli where tick_count is frozen.
+#
+#   2. HOLDER ABANDONED BY RECOVERY. When the liveness watchdog longjmps the BSP
+#      out of a wedged operation (Tier-1 PIT path or Tier-2 NMI path), any lock
+#      the BSP held is silently abandoned -> a waiter would re-deadlock. This
+#      module tracks per-core held locks; the recovery pad calls
+#      blk_recover_release_bsp() to drop everything the BSP held before resuming.
+#
+# OWNERSHIP MODEL. Locks are tracked per dense core index (wd_core_index, 0=BSP)
+# so the registries for different cores live on disjoint cells and never need a
+# lock of their own. Recovery only ever unwinds the BSP, so it only releases the
+# BSP's (slot 0) held set; an AP that dies holding a lock is handled by the
+# steal-on-deadline path above, not here.
+#
+# DESIGN TRADE-OFF (deliberate, per the no-freeze directive): under a
+# pathological >0.5 s hold the lock is stolen, trading strict mutual exclusion
+# for guaranteed liveness. The guarded sections here (page alloc, framebuffer,
+# driver state, crypto scratch) are microsecond-scale, so a half-second hold
+# means a wedged holder that the watchdog is independently tearing down.
+# ============================================================================
+
+module "bounded_lock";
+
+unsafe raw_mem;          # lw/sw over caller lock words + the held registries
+unsafe implicit_extern;  # &<symbol>
+
+global blk_self_tag;             # current core's nonzero lock-owner tag
+global blk_held_push;            # record a lock this core now holds
+global blk_held_pop;             # forget a lock this core released
+global blk_recover_release_bsp;  # drop every lock the BSP held (recovery pad)
+global blk_recover_count;        # diagnostics: locks force-released by recovery
+
+extern wd_core_index;    # () -> dense core index (0 = BSP), from apic.asm
+
+# Registry geometry. BLK_DEPTH bounds nesting depth per core; an overflow simply
+# stops recording (the lock still works, it just won't be auto-released by
+# recovery - acceptable, that depth is never reached by the few named locks).
+const BLK_MAX_CORES = 64;
+const BLK_DEPTH     = 8;
+
+data blk_held: 4096;     # BLK_MAX_CORES*BLK_DEPTH*8: held lock-word ptrs, per core
+data blk_depth: 512;     # BLK_MAX_CORES*8: current nesting depth, per core
+data blk_recover_count: 8;
+
+# blk_self_tag -> nonzero owner tag for this core (dense index + 1). Stored into
+# the lock word so a steal/recover can attribute ownership; never 0 (0 = free).
+fn blk_self_tag() {
+    return wd_core_index() + 1;
+}
+
+# blk_held_push(p) - this core has just taken lock word `p`. Pushed onto its own
+# per-core stack so recovery (BSP) can release it. Disjoint per core => no lock.
+fn blk_held_push(p) {
+    let c = wd_core_index();
+    if c >= BLK_MAX_CORES { return 0; }
+    let d = lq(&blk_depth + c * 8);
+    if d >= BLK_DEPTH { return 0; }            # registry full: skip (lock still held)
+    sq(&blk_held + (c * BLK_DEPTH + d) * 8, p);
+    sq(&blk_depth + c * 8, d + 1);
+    return 0;
+}
+
+# blk_held_pop(p) - this core released `p`. Clears the matching slot; if it was
+# the top of the stack, shrinks the stack past any now-empty top entries.
+fn blk_held_pop(p) {
+    let c = wd_core_index();
+    if c >= BLK_MAX_CORES { return 0; }
+    let d = lq(&blk_depth + c * 8);
+    let i = d;
+    while i > 0 {
+        i = i - 1;
+        if lq(&blk_held + (c * BLK_DEPTH + i) * 8) == p {
+            sq(&blk_held + (c * BLK_DEPTH + i) * 8, 0);
+            i = 0;                              # done (break)
+        }
+    }
+    # Trim empty top-of-stack entries so depth stays tight.
+    let nd = lq(&blk_depth + c * 8);
+    while nd > 0 {
+        if lq(&blk_held + (c * BLK_DEPTH + (nd - 1)) * 8) != 0 { nd = 0; }   # break
+        else { sq(&blk_depth + c * 8, nd - 1); nd = nd - 1; }
+    }
+    return 0;
+}
+
+# blk_recover_release_bsp - called from the BSP recovery landing path (isr_nmi /
+# the Tier-1 PIT recover tail). Force-releases every lock the BSP (slot 0) held
+# in the operation we just abandoned, so no waiter re-deadlocks on an orphaned
+# holder. BSP-only by construction: recovery never unwinds an AP.
+fn blk_recover_release_bsp() {
+    let d = lq(&blk_depth);                    # core 0 (BSP) depth
+    let i = 0;
+    while i < d {
+        let p = lq(&blk_held + i * 8);
+        if p != 0 {
+            sw(p, 0);                           # publish the lock as free
+            sq(&blk_recover_count, lq(&blk_recover_count) + 1);
+            sq(&blk_held + i * 8, 0);
+        }
+        i = i + 1;
+    }
+    sq(&blk_depth, 0);
+    return 0;
+}

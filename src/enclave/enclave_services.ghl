@@ -1,0 +1,269 @@
+# ============================================================================
+# enclave_services.ghl - Track 10 Phase-B board service policy model.
+#
+# These services execute only after the one-shot latch has closed and only when
+# called by enclave_host's monitor-mediated async broker.  Crypto operations are
+# deterministic integer models for CI; real signatures, TRNG and secure NV are
+# gateware/HW validation work and are not claimed here.
+# ============================================================================
+
+module "enclave_services";
+
+unsafe raw_mem;
+unsafe implicit_extern;
+
+global enclave_services_begin_boot;
+global enclave_services_execute;
+global enclave_services_result;
+global enclave_services_signature;
+global enclave_services_status;
+global enclave_services_release_policy;
+global enclave_services_pcr;
+global enclave_services_floor;
+global enclave_services_audit_head;
+global enclave_services_pcr_digest;
+global enclave_services_sealed_pcr;
+global enclave_services_seal_valid;
+global enclave_services_tpm_open;
+
+const ES_OK          = 0;
+const ES_ERR_DENIED  = 1;
+const ES_ERR_REPLAY  = 2;
+const ES_ERR_ROLLBACK = 3;
+const ES_ERR_POLICY  = 4;
+const ES_ERR_STATE   = 5;
+const ES_ERR_INDEX   = 6;
+const ES_ERR_SEAL    = 7;
+
+# Host service ids. Physical opcode selection remains in enclave_host.ghl.
+const ES_SVC_CREDENTIAL_USE = 5;
+const ES_SVC_RAM_KEY_USE    = 6;
+const ES_SVC_FLOOR_READ     = 7;
+const ES_SVC_FLOOR_BUMP     = 8;
+const ES_SVC_ATTESTED_RNG   = 9;
+const ES_SVC_RELEASE_COSIGN = 10;
+const ES_SVC_REMOTE_QUOTE   = 11;
+const ES_SVC_AUDIT_APPEND   = 12;
+const ES_SVC_FIDO_SIGN      = 13;
+const ES_SVC_TPM_EXTEND     = 14;
+const ES_SVC_TPM_QUOTE      = 15;
+const ES_SVC_TPM_SEAL       = 16;
+
+const ES_SIGN_KEY = 0xB04D51A7C3E29F61;
+const ES_RNG_KEY  = 0x71C8E5D24A963BF0;
+const ES_DOM_CRED = 0x43524544;
+const ES_DOM_RAM  = 0x52414D4B;
+const ES_DOM_RNG  = 0x524E4721;
+const ES_DOM_REL  = 0x52454C53;
+const ES_DOM_QUOTE = 0x51554F54;
+const ES_DOM_AUDIT = 0x41554454;
+const ES_DOM_FIDO = 0x4649444F;
+const ES_DOM_TPM  = 0x54504D21;
+const ES_MASK64   = 0xFFFFFFFFFFFFFFFF;
+
+# Volatile per-boot state.
+data es_active:       1;
+data es_boot_ctr:     1 x 8;
+data es_boot_key:     1 x 8;
+data es_measurement:  1 x 8;
+data es_cred_used:    1;
+data es_ram_used:     1;
+data es_rng_seq:      1 x 8;
+data es_last_result:  1 x 8;
+data es_last_sig:     1 x 8;
+data es_last_status:  1 x 8;
+
+# Secure-NV model: survives enclave_services_begin_boot calls.
+data es_floors:       4 x 8;
+data es_release_ver:  1 x 8;
+data es_rel_physical: 1;
+data es_rel_pin:      1;
+data es_rel_enabled:  1;
+data es_audit_head:   1 x 8;
+data es_audit_seq:    1 x 8;
+data es_pcrs:         8 x 8;
+data es_seal_valid:   1;
+data es_seal_pcr:     1 x 8;
+data es_seal_value:   1 x 8;
+
+fn es_mix(domain, a, b) {
+    let x = ES_SIGN_KEY ^ domain;
+    x = x ^ a;
+    x = x ^ (b * 0x9E3779B97F4A7C15);
+    x = x ^ (x >> 29);
+    x = x ^ (x << 17);
+    return x & ES_MASK64;
+}
+
+fn es_sign(domain, value) {
+    return es_mix(domain, value, lq(&es_boot_ctr));
+}
+
+fn es_finish(status, result, domain) {
+    sq(&es_last_status, status);
+    sq(&es_last_result, result);
+    if status == ES_OK { sq(&es_last_sig, es_sign(domain, result)); }
+    else { sq(&es_last_sig, 0); }
+    return status;
+}
+
+# Called exactly at the successful locked Phase-A handoff. Volatile one-shot
+# use is reset for the new boot; secure-NV floors/PCRs/release version persist.
+fn enclave_services_begin_boot(boot_ctr, boot_key, measurement, latched) {
+    if latched == 0 { sb(&es_active, 0); return ES_ERR_STATE; }
+    sq(&es_boot_ctr, boot_ctr);
+    sq(&es_boot_key, boot_key);
+    sq(&es_measurement, measurement);
+    sb(&es_cred_used, 0);
+    sb(&es_ram_used, 0);
+    sq(&es_rng_seq, 0);
+    let i = 0;
+    while i < 8 {
+        sq(&es_pcrs + i * 8, 0);
+        i = i + 1;
+    }
+    sq(&es_last_result, 0);
+    sq(&es_last_sig, 0);
+    sq(&es_last_status, ES_OK);
+    sb(&es_active, 1);
+    return ES_OK;
+}
+
+# Enrollment/maintenance policy input. Release co-signing still requires a
+# monotonic version in each request; this merely models physical presence + PIN.
+fn enclave_services_release_policy(enabled, physical_present, pin_ok) {
+    sb(&es_rel_enabled, enabled != 0);
+    sb(&es_rel_physical, physical_present != 0);
+    sb(&es_rel_pin, pin_ok != 0);
+    return ES_OK;
+}
+
+fn es_floor_index(arg) { return (arg >> 56) & 3; }
+fn es_floor_value(arg) { return arg & 0x00FFFFFFFFFFFFFF; }
+fn es_pcr_index(arg) { return (arg >> 56) & 255; }
+fn es_pcr_value(arg) { return arg & 0x00FFFFFFFFFFFFFF; }
+
+fn es_pcr_digest() {
+    let d = ES_DOM_TPM;
+    let i = 0;
+    while i < 8 {
+        d = es_mix(ES_DOM_TPM ^ i, d, lq(&es_pcrs + i * 8));
+        i = i + 1;
+    }
+    return d & ES_MASK64;
+}
+
+fn enclave_services_execute(service, arg) {
+    if lb(&es_active) == 0 { return es_finish(ES_ERR_STATE, 0, 0); }
+
+    # Phase-A produced these session keys; Phase B permits one consumption of
+    # each per boot, never a derive/unseal/export operation.
+    if service == ES_SVC_CREDENTIAL_USE {
+        if lb(&es_cred_used) != 0 { return es_finish(ES_ERR_REPLAY, 0, ES_DOM_CRED); }
+        sb(&es_cred_used, 1);
+        let out = es_mix(ES_DOM_CRED, lq(&es_boot_key), arg);
+        return es_finish(ES_OK, out, ES_DOM_CRED);
+    }
+    if service == ES_SVC_RAM_KEY_USE {
+        if lb(&es_ram_used) != 0 { return es_finish(ES_ERR_REPLAY, 0, ES_DOM_RAM); }
+        sb(&es_ram_used, 1);
+        let out = es_mix(ES_DOM_RAM, lq(&es_boot_key), arg);
+        return es_finish(ES_OK, out, ES_DOM_RAM);
+    }
+
+    if service == ES_SVC_FLOOR_READ {
+        let idx = es_floor_index(arg);
+        return es_finish(ES_OK, lq(&es_floors + idx * 8), ES_DOM_QUOTE);
+    }
+    if service == ES_SVC_FLOOR_BUMP {
+        let idx = es_floor_index(arg);
+        let value = es_floor_value(arg);
+        let old = lq(&es_floors + idx * 8);
+        if value <= old { return es_finish(ES_ERR_ROLLBACK, old, ES_DOM_QUOTE); }
+        sq(&es_floors + idx * 8, value);
+        return es_finish(ES_OK, value, ES_DOM_QUOTE);
+    }
+
+    if service == ES_SVC_ATTESTED_RNG {
+        let seq = lq(&es_rng_seq) + 1;
+        sq(&es_rng_seq, seq);
+        let sample = es_mix(ES_RNG_KEY ^ ES_DOM_RNG, lq(&es_boot_ctr), seq ^ arg);
+        return es_finish(ES_OK, sample, ES_DOM_RNG);
+    }
+
+    if service == ES_SVC_RELEASE_COSIGN {
+        if lb(&es_rel_enabled) == 0 { return es_finish(ES_ERR_POLICY, 0, ES_DOM_REL); }
+        if lb(&es_rel_physical) == 0 { return es_finish(ES_ERR_POLICY, 0, ES_DOM_REL); }
+        if lb(&es_rel_pin) == 0 { return es_finish(ES_ERR_POLICY, 0, ES_DOM_REL); }
+        let version = (arg >> 48) & 0xFFFF;
+        if version <= lq(&es_release_ver) {
+            return es_finish(ES_ERR_ROLLBACK, lq(&es_release_ver), ES_DOM_REL);
+        }
+        sq(&es_release_ver, version);
+        return es_finish(ES_OK, es_mix(ES_DOM_REL, arg, version), ES_DOM_REL);
+    }
+
+    if service == ES_SVC_REMOTE_QUOTE {
+        let quote = es_mix(ES_DOM_QUOTE, lq(&es_measurement),
+                           lq(&es_boot_ctr) ^ arg);
+        return es_finish(ES_OK, quote, ES_DOM_QUOTE);
+    }
+
+    if service == ES_SVC_AUDIT_APPEND {
+        let seq = lq(&es_audit_seq) + 1;
+        let head = es_mix(ES_DOM_AUDIT, lq(&es_audit_head), arg ^ seq);
+        sq(&es_audit_seq, seq);
+        sq(&es_audit_head, head);
+        return es_finish(ES_OK, head, ES_DOM_AUDIT);
+    }
+
+    if service == ES_SVC_FIDO_SIGN {
+        let assertion = es_mix(ES_DOM_FIDO, arg, lq(&es_boot_ctr));
+        return es_finish(ES_OK, assertion, ES_DOM_FIDO);
+    }
+
+    if service == ES_SVC_TPM_EXTEND {
+        let idx = es_pcr_index(arg);
+        if idx >= 8 { return es_finish(ES_ERR_INDEX, 0, ES_DOM_TPM); }
+        let next = es_mix(ES_DOM_TPM ^ idx, lq(&es_pcrs + idx * 8), es_pcr_value(arg));
+        sq(&es_pcrs + idx * 8, next);
+        return es_finish(ES_OK, next, ES_DOM_TPM);
+    }
+    if service == ES_SVC_TPM_QUOTE {
+        return es_finish(ES_OK, es_pcr_digest(), ES_DOM_TPM);
+    }
+    if service == ES_SVC_TPM_SEAL {
+        sq(&es_seal_pcr, es_pcr_digest());
+        sq(&es_seal_value, arg);
+        sb(&es_seal_valid, 1);
+        return es_finish(ES_OK, es_mix(ES_DOM_TPM, arg, lq(&es_seal_pcr)), ES_DOM_TPM);
+    }
+    return es_finish(ES_ERR_DENIED, 0, 0);
+}
+
+fn enclave_services_result() { return lq(&es_last_result); }
+fn enclave_services_signature() { return lq(&es_last_sig); }
+fn enclave_services_status() { return lq(&es_last_status); }
+fn enclave_services_floor(index) {
+    if index < 0 { return 0; }
+    if index >= 4 { return 0; }
+    return lq(&es_floors + index * 8);
+}
+fn enclave_services_pcr(index) {
+    if index < 0 { return 0; }
+    if index >= 8 { return 0; }
+    return lq(&es_pcrs + index * 8);
+}
+fn enclave_services_audit_head() { return lq(&es_audit_head); }
+fn enclave_services_pcr_digest() { return es_pcr_digest(); }
+fn enclave_services_sealed_pcr() { return lq(&es_seal_pcr); }
+fn enclave_services_seal_valid() { return lb(&es_seal_valid); }
+
+# Board-internal seal-open semantic check. This is intentionally NOT mapped by
+# enclave_host and NOT exposed by the ring-3 driver: the public host API has no
+# unseal/derive/export operation. Real consumers are board-internal key users.
+fn enclave_services_tpm_open() {
+    if lb(&es_seal_valid) == 0 { return ES_ERR_SEAL; }
+    if es_pcr_digest() != lq(&es_seal_pcr) { return ES_ERR_SEAL; }
+    return lq(&es_seal_value);
+}

@@ -17,9 +17,24 @@ FN_BEGIN display_flip, 0, 0, FN_RET_SCALAR
     mov rdi, [fb_addr]       ; Destination: framebuffer (VRAM)
     mov rsi, [bb_addr]       ; Source: back buffer (RAM)
 
-    ; Calculate total size in bytes: pitch * height
+    ; Calculate total size in bytes: pitch * height, CLAMPED to the loader-mapped
+    ; FB span (fb_mapped_end_q - fb_addr). A display_set_mode to a taller mode
+    ; enlarges scr_height/scr_pitch without remapping VRAM, so an unclamped copy
+    ; would walk straight off the mapped framebuffer into the unmapped guard page
+    ; every frame. edx carries the clamped total through to the tail.
+    push rdx
     mov eax, [scr_pitch]
     imul eax, [scr_height]
+    mov rdx, [fb_mapped_end_q]
+    test rdx, rdx
+    jz .flip_no_clamp        ; not latched yet -> trust pitch*height
+    sub rdx, [fb_addr]       ; rdx = mapped byte span
+    sub rdx, 0x80            ; one SSE-chunk margin (see display_flip_rect)
+    cmp eax, edx
+    jbe .flip_no_clamp
+    mov eax, edx             ; clamp to what the loader mapped
+.flip_no_clamp:
+    mov edx, eax             ; edx = clamped total bytes (reused by .flip_tail)
     mov ecx, eax             ; Total bytes
 
     ; SSE2 non-temporal copy: 128 bytes per iteration (8x movntdq)
@@ -54,9 +69,10 @@ FN_BEGIN display_flip, 0, 0, FN_RET_SCALAR
     sfence
 
 .flip_tail:
-    ; Handle remaining bytes (< 128) with rep movsq
-    mov eax, [scr_pitch]
-    imul eax, [scr_height]
+    ; Handle remaining bytes (< 128) with rep movsq, using the SAME clamped total
+    ; (edx) as the SSE loop above - never the raw pitch*height (which may exceed
+    ; the mapped FB).
+    mov eax, edx
     and eax, 127             ; Remainder
     mov ecx, eax
     shr ecx, 3
@@ -65,6 +81,7 @@ FN_BEGIN display_flip, 0, 0, FN_RET_SCALAR
     and ecx, 7
     rep movsb
 
+    pop rdx
     call fbperf_flip_full_end
     pop rdi
     pop rsi
@@ -177,10 +194,47 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     ; even when scr_width/scr_height/x/y have been clobbered. r8 = fb_end; the
     ; per-row guard below stops the copy before any movntdq store could land
     ; at/after fb_end (i.e. in the adjacent VBE-MMIO BAR or off the end of RAM).
+    mov r8, [fb_mapped_end_q]   ; loader-mapped fb_end (immune to mode-set drift)
+    test r8, r8
+    jnz .fr_have_end
+    ; Fallback (display_init has not latched yet): recompute from live globals.
     mov r8, [fb_addr]
     movsxd rax, dword [fb_native_height]
     imul rax, [scr_pitch_q]
     add r8, rax              ; r8 = fb_end (exclusive)
+.fr_have_end:
+    ; Sanity-clamp r8 into a physically possible range. The loader can map at
+    ; most MAX_FB_WIDTH*MAX_FB_HEIGHT*4 bytes past fb_addr, so any larger value
+    ; in fb_mapped_end_q is corruption (a clobbered/garbage ~6 GB end was seen
+    ; defeating the per-row backstop in a debug-overlay #PF storm). Force
+    ; r8 into [fb_addr+1, fb_addr + MAX_FB_BYTES] so no corrupt bound can ever
+    ; let the row loop below walk a store past the real mapped framebuffer.
+    push rcx
+    mov rax, [fb_addr]
+    mov rcx, rax
+    add rcx, (MAX_FB_WIDTH * MAX_FB_HEIGHT * 4)   ; hard physical ceiling
+    cmp r8, rcx
+    jbe .fr_end_hi_ok
+    mov r8, rcx
+.fr_end_hi_ok:
+    cmp r8, rax              ; r8 must sit strictly above fb_addr
+    ja  .fr_end_lo_ok
+    mov r8, rcx              ; <= base (incl. 0) -> use the ceiling
+.fr_end_lo_ok:
+    pop rcx
+    ; Cap the row count to the tallest mode the loader will ever map, so a
+    ; clobbered height cannot spin the loop off the bottom of the framebuffer.
+    cmp r12d, MAX_FB_HEIGHT
+    jbe .fr_rows_ok
+    mov r12d, MAX_FB_HEIGHT
+.fr_rows_ok:
+    ; Pull the effective end bound down by one 128-byte SSE chunk. The per-row
+    ; movntdq loop copies in 64-byte chunks and rowbytes need not be 64-aligned,
+    ; so the final chunk can round up to ~0x40 past the byte-exact row end; if a
+    ; row ends exactly at the real fb_end that rounding lands in the unmapped
+    ; guard page (the per-frame ring-0 #PF storm). Bounding to fb_end-0x80 keeps
+    ; every store, including the rounded tail, strictly inside the mapped FB.
+    sub r8, 0x80
 
 .fr_row:
     ; Backstop: never start a row below fb_addr or write a row that reaches
@@ -195,7 +249,23 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     ; Copy one row using SSE2 non-temporal stores
     mov rdi, r9              ; Dest (VRAM)
     mov rsi, r10             ; Src (RAM)
-    mov ecx, r11d            ; Bytes this row
+
+    ; HARD per-row destination clamp. r8 = fb_mapped_end_q (first byte past the
+    ; mapped framebuffer; the loader leaves an unmapped guard page there). Clamp
+    ; the bytes copied this row to (r8 - r9) so a corrupt/oversized rowbytes -
+    ; whatever its origin - can NEVER drive rdi past the mapped FB into the guard
+    ; page (the per-frame ring-0 #PF storm seen in debug builds). For every
+    ; legitimate row (r8 - r9) >= rowbytes, so this is a no-op. edx holds the
+    ; clamped count for the tail copies.
+    mov rax, r8
+    sub rax, r9             ; bytes available to fb_end (signed)
+    jle .fr_row_advance     ; r9 at/after fb_end -> copy nothing this row
+    mov ecx, r11d           ; rowbytes
+    cmp ecx, eax
+    jbe .fr_clamp_ok
+    mov ecx, eax            ; clamp to available
+.fr_clamp_ok:
+    mov edx, ecx            ; clamped bytes-this-row (used by the tail paths)
 
     ; Check 16-byte alignment of destination for movntdq
     test rdi, 15
@@ -221,21 +291,22 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     jnz .fr_sse_row
 
 .fr_row_small:
-    ; Remaining bytes with qword/byte copy
-    mov ecx, r11d
+    ; Remaining bytes with qword/byte copy (clamped count in edx)
+    mov ecx, edx
     and ecx, 63
     shr ecx, 3
     rep movsq
-    mov ecx, r11d
+    mov ecx, edx
     and ecx, 7
     rep movsb
     jmp .fr_row_advance
 
 .fr_row_unaligned:
-    ; Fallback: rep movsq for unaligned rows
+    ; Fallback: rep movsq for unaligned rows (clamped count in edx)
+    mov ecx, edx
     shr ecx, 3
     rep movsq
-    mov ecx, r11d
+    mov ecx, edx
     and ecx, 7
     rep movsb
 
@@ -353,6 +424,17 @@ align 8
 raster_target_lock: db 0
 fb_native_width:  dd SCREEN_WIDTH
 fb_native_height: dd SCREEN_HEIGHT
+; Authoritative first-byte-past-the-mapped-framebuffer VA. The loader maps
+; [fb_addr, fb_addr + VBE_HEIGHT*VBE_PITCH) and leaves ONE guard page unmapped
+; right after (uefi_loader_paging_exit.inc) so an overrun faults instead of
+; clobbering the adjacent VBE-MMIO BAR. display_set_mode can later re-set
+; scr_height/scr_pitch_q to a TALLER mode WITHOUT remapping VRAM, so the flip
+; backstop must clamp to what the loader actually mapped - not to the current
+; (possibly larger) scr_* globals, which would walk a full flip straight into
+; the guard page every frame. Latched once in display_init from the SAME VBE
+; fields the loader used, so the two cannot drift. 0 = not yet latched.
+global fb_mapped_end_q
+fb_mapped_end_q: dq 0
 scr_taskbar_y:    dd (SCREEN_HEIGHT - TASKBAR_HEIGHT)
 scr_clock_x:      dd (SCREEN_WIDTH - CLOCK_WIDTH - 8)
 scr_clock_y:      dd (SCREEN_HEIGHT - TASKBAR_HEIGHT + 10)
@@ -366,14 +448,14 @@ fps_show:      db 1
 display_stretch: db 0
 last_vsync_tick: dq 0      ; PIT tick count at last vsync
 ; --- Frame pacing tunables (written by the Settings Mouse/Display tab) ---
-; target_fps : frame-rate cap when vsync is OFF. Default 60. Clamped 5..1000 by
+; target_fps : frame-rate cap when vsync is OFF. Default 180. Clamped 5..1000 by
 ;              the pacer. 0 is treated as "uncapped" (pace to PIT only).
-; vsync_hz   : target refresh used when vsync_enabled != 0. Default 60; the
+; vsync_hz   : target refresh used when vsync_enabled != 0. Default 180; the
 ;              user's real panel is 180. Clamped 5..1000 by the pacer.
 ; The pacer (frame_pacing.ghl) reads these every frame, so a live write from the
 ; settings UI takes effect on the next frame with no extra wiring.
-target_fps:    dd 60    ; frame-rate cap when vsync is OFF (clamped 5..1000)
-vsync_hz:      dd 60     ; target refresh when vsync is ON (clamped 5..1000)
+target_fps:    dd 180    ; frame-rate cap when vsync is OFF (clamped 5..1000)
+vsync_hz:      dd 180    ; target refresh when vsync is ON (clamped 5..1000)
 global last_vsync_tick
 global vsync_enabled, fps_show, target_fps, vsync_hz
 extern fps_count, last_fps, frame_count, start_tick
@@ -604,4 +686,4 @@ FN_BEGIN display_set_mode, 0, 0, FN_RET_SCALAR
     pop r12
     pop rbx
     ret
-
+

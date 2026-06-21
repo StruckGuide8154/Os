@@ -1,0 +1,159 @@
+# THREAT: a compromised ring-0 disabling the below-ring-0 floor (clear CR0.WP /
+# rewrite CR3 / patch .text), or a malicious device DMA'ing past its grant.
+# GHL-native Track 5 monitor-HAL ENFORCEMENT MODEL (`modeled` / `tested-tcg`).
+#
+# This module is the vendor-neutral half of the `mon_hal` interface: the
+# enter-root dispatch surface, the second-stage (EPT / NPT / stage-2 / G-stage)
+# identity-map + W^X + monitor carve-out MATH, and the IOMMU DMA-confinement
+# MATH. Per-vendor DETECT lives in mon_hal_detect.ghl; per-vendor root-mode
+# bring-up (VMXON/VMRUN/EL2/G-stage entry, the actual VMLAUNCH and trap exits)
+# is the `tested-accel` work tracked in Track 5 G1/G2 and is NOT here.
+#
+# HONEST MATURITY: the enforcement DECISIONS modeled here (is this access a
+# second-stage violation? does this DMA fall outside the device grant?) are pure
+# functions of (entry perms, access type) and are vendor-INDEPENDENT - that is
+# exactly the "page-table math / HAL dispatch" the Track 5 doc labels
+# `tested-tcg` (logic only). They model what the silicon must enforce; they do
+# NOT themselves trap anything. A real second-stage violation exit needs
+# `tested-accel`; a real IOMMU DMA fault needs `tested-hw`. This module compiles
+# `--forbid-asm --deny-unsafe` (no memory ops, no ambient authority): it is pure
+# policy that the live back-ends and the DMA-MON / monitor compartments call.
+
+module "security_mon_hal";
+
+global mon_hal_abi_version;
+global mon_hal_enter_root;
+global mon_hal_s2_map_perms;
+global mon_hal_s2_check;
+global mon_hal_region_is_monitor;
+global mon_hal_iommu_translate;
+
+# Keep the tier ids in lockstep with mon_hal_detect.ghl (the const-drift guard
+# in eval_mon_hal.py asserts these against the compiled module so they can't rot).
+const MONHAL_TIER_FLOOR_ONLY = 0;
+const MONHAL_TIER_INTEL_VTX = 1;
+const MONHAL_TIER_AMD_SVM = 2;
+const MONHAL_TIER_ARM_EL2 = 3;
+const MONHAL_TIER_RISCV_H = 4;
+
+fn mon_hal_abi_version() {
+    return 1;
+}
+
+# ---- enter_root dispatch ---------------------------------------------------
+# The vendor-neutral entry point the boot path calls after mon_hal_select_backend
+# picks a tier. FLOOR_ONLY is the only leg actually reachable on TCG: it reports
+# that Track 6 runs unchanged on the software floor (a distinct outcome, never an
+# error). A virtualization tier reports MODELED here - the real VMXON/VMRUN/EL2
+# entry is `tested-accel` and lives in the per-vendor back-end, not in this model.
+const MONHAL_ENTER_FLOOR = 0;     # no root mode; software floor (Track 6) stands
+const MONHAL_ENTER_MODELED = 1;   # known virt tier; real entry is tested-accel
+const MONHAL_ENTER_BADTIER = 2;   # unknown tier id (fail closed)
+
+fn mon_hal_enter_root(tier) {
+    if tier == MONHAL_TIER_FLOOR_ONLY { return MONHAL_ENTER_FLOOR; }
+    if tier == MONHAL_TIER_INTEL_VTX { return MONHAL_ENTER_MODELED; }
+    if tier == MONHAL_TIER_AMD_SVM { return MONHAL_ENTER_MODELED; }
+    if tier == MONHAL_TIER_ARM_EL2 { return MONHAL_ENTER_MODELED; }
+    if tier == MONHAL_TIER_RISCV_H { return MONHAL_ENTER_MODELED; }
+    return MONHAL_ENTER_BADTIER;
+}
+
+# ---- second-stage page-table math (EPT / NPT / stage-2 / G-stage) ----------
+# All four vendors express the same abstraction: a per-page permission set that
+# the hardware enforces UNDERNEATH the guest's own page tables. The encoding
+# differs per vendor (EPT bits 0/1/2 = R/W/X, NPT/stage-2/G-stage analogues);
+# this model uses one neutral perm set and the back-ends translate to their bits.
+const S2_PRESENT = 1;
+const S2_R = 2;
+const S2_W = 4;
+const S2_X = 8;
+
+# Access kinds a guest can attempt against a second-stage entry.
+const ACC_R = 0;
+const ACC_W = 1;
+const ACC_X = 2;
+
+# Second-stage check outcomes.
+const MONHAL_S2_OK = 0;
+const MONHAL_S2_VIOLATION = 1;
+
+# Is this guest-physical page inside the monitor / Track 6 compartment carve-out?
+# Those pages must be NOT-PRESENT in the guest's second-stage map (per Track 5
+# G1 cross-vendor rule: carved OUT, not merely read-only), so any guest touch is
+# a second-stage violation exit regardless of the guest's own page tables.
+fn mon_hal_region_is_monitor(gpa, mon_base, mon_len) {
+    if gpa < mon_base { return 0; }
+    if gpa >= (mon_base + mon_len) { return 0; }
+    return 1;
+}
+
+# The identity second-stage map's permission set for a guest-physical page.
+# Identity means hpa == gpa (behavior unchanged); the perms are where the floor
+# is enforced:
+#   - monitor / compartment pages  -> 0 (NOT PRESENT): un-disableable carve-out.
+#   - guest .text pages            -> PRESENT|R|X (never W): W^X enforced at the
+#     second stage INDEPENDENTLY of the guest, so a compromised ring-0 that
+#     clears CR0.WP and writes .text takes a second-stage violation, not a patch.
+#   - everything else (data)       -> PRESENT|R|W (never X): no W->X escalation.
+fn mon_hal_s2_map_perms(gpa, mon_base, mon_len, text_base, text_len) {
+    if mon_hal_region_is_monitor(gpa, mon_base, mon_len) != 0 { return 0; }
+    if gpa < text_base { return S2_PRESENT + S2_R + S2_W; }
+    if gpa >= (text_base + text_len) { return S2_PRESENT + S2_R + S2_W; }
+    return S2_PRESENT + S2_R + S2_X;
+}
+
+# The hardware's second-stage decision for one access. This is the combinational
+# gate the silicon runs after the guest's own translation has already permitted
+# the access: even a fully guest-permitted access faults here if the second
+# stage forbids it. Vendor-independent by construction.
+fn mon_hal_s2_check(s2_perms, access) {
+    if (s2_perms & S2_PRESENT) == 0 { return MONHAL_S2_VIOLATION; }
+    if access == ACC_R {
+        if (s2_perms & S2_R) == 0 { return MONHAL_S2_VIOLATION; }
+        return MONHAL_S2_OK;
+    }
+    if access == ACC_W {
+        if (s2_perms & S2_W) == 0 { return MONHAL_S2_VIOLATION; }
+        return MONHAL_S2_OK;
+    }
+    if access == ACC_X {
+        if (s2_perms & S2_X) == 0 { return MONHAL_S2_VIOLATION; }
+        return MONHAL_S2_OK;
+    }
+    return MONHAL_S2_VIOLATION;
+}
+
+# ---- IOMMU / device-DMA confinement math (VT-d / AMD-Vi / SMMUv3 / RV) ------
+# Every IOMMU expresses the same abstraction: a per-device translation that maps
+# only the device's granted buffer(s) and faults everything else. The grant set
+# comes from the per-artifact `allowed DMA buffers` manifest field (Track 2); the
+# DMA-MON Track 6 compartment is the only caller of mon_hal.iommu_map. This is
+# the math the four vendors share; the actual fault delivery is `tested-hw`.
+const DMA_R = 1;
+const DMA_W = 2;
+
+const MONHAL_DMA_OK = 0;
+const MONHAL_DMA_FAULT_NOGRANT = 1;   # device has no mapping at all (default-deny)
+const MONHAL_DMA_FAULT_RANGE = 2;     # access falls outside the granted buffer
+const MONHAL_DMA_FAULT_PERM = 3;      # in range but read/write not granted
+
+# Translate one device DMA descriptor [iova, iova+len) against its single grant
+# [grant_base, grant_base+grant_len) with grant_perms (DMA_R|DMA_W). A device
+# with no grant (grant_len == 0) is default-denied. This is exactly what no CPU
+# MMU can substitute for: the device bypasses the CPU, so only this remap stops
+# an out-of-grant DMA.
+fn mon_hal_iommu_translate(iova, len, grant_base, grant_len, grant_perms, access) {
+    if grant_len == 0 { return MONHAL_DMA_FAULT_NOGRANT; }
+    if iova < grant_base { return MONHAL_DMA_FAULT_RANGE; }
+    if (iova + len) > (grant_base + grant_len) { return MONHAL_DMA_FAULT_RANGE; }
+    if access == ACC_R {
+        if (grant_perms & DMA_R) == 0 { return MONHAL_DMA_FAULT_PERM; }
+        return MONHAL_DMA_OK;
+    }
+    if access == ACC_W {
+        if (grant_perms & DMA_W) == 0 { return MONHAL_DMA_FAULT_PERM; }
+        return MONHAL_DMA_OK;
+    }
+    return MONHAL_DMA_FAULT_PERM;
+}

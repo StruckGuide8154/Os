@@ -1,0 +1,32 @@
+{
+  "schema": "grit.track10-board-selection.v1",
+  "decision": "polarfire-fpga-external-ulpi",
+  "selected_family": "Microchip PolarFire FPGA",
+  "selected_class": "hardened-auth-puf-secure-nv-fpga",
+  "usb_phy": "external-ulpi-usb2-high-speed-device",
+  "configuration_root": "on-die-system-controller",
+  "external_auth_mcu": false,
+  "normal_usb_classes": ["vendor-specific-bulk"],
+  "required_capabilities": {
+    "authenticated_configuration_before_fabric": true,
+    "puf_protected_key_service": true,
+    "secure_nonvolatile_storage": true,
+    "tamper_signals": true,
+    "configuration_integrity_digest": true,
+    "locked_debug_in_deployment": true,
+    "dual_image_policy_in_project_logic": true
+  },
+  "rejected_baselines": {
+    "ecp5-plus-auth-mcu": "Adds an external mutable root and does not provide on-die enforced authentication.",
+    "unauthenticated-low-cost-fpga": "Cannot enforce the signed-bitstream requirement."
+  },
+  "physical_qualification_pending": [
+    "exact part and package",
+    "resource and timing closure",
+    "ULPI signal integrity",
+    "USB enumeration and compliance",
+    "bus-power budget and thermals",
+    "security-fuse and debug-lock verification",
+    "A/B recovery under interrupted programming"
+  ]
+}

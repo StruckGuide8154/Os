@@ -40,6 +40,7 @@
 ; authenticator folds high^low so a flip in either byte is detected (see
 ; cap_mask_sign / the dispatcher gate).
 CAP_CORE        equ 0x0001  ; print, exit, app_done, ticks, sysinfo, handles
+CAP_PROC        equ 0x0002  ; priority manager: SYS_PROC_SETPRIO (was free CAP_GUI bit)
 CAP_NET         equ 0x0008  ; ping, dhcp, dns, tcp_connect
 CAP_APP_CTRL    equ 0x0010  ; launch / open other apps
 CAP_WX          equ 0x0020  ; mprotect_wx, wx_install_manifest, wx_jit_alias
@@ -129,7 +130,7 @@ MANIFEST_SECURITY_PROBE equ 0
 %else
 MANIFEST_SECURITY_PROBE equ CAP_CORE | CAP_GUI | CAP_WX
 %endif
-MANIFEST_TASKMGR        equ CAP_CORE | CAP_GUI
+MANIFEST_TASKMGR        equ CAP_CORE | CAP_GUI | CAP_PROC | CAP_APP_CTRL
 MANIFEST_PING           equ CAP_CORE | CAP_GUI | CAP_NET
 MANIFEST_MEDIA          equ CAP_CORE | CAP_GUI | CAP_FS | CAP_MEDIA
 

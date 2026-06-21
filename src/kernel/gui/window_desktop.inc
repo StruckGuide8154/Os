@@ -143,7 +143,7 @@ FN_BEGIN wm_draw_desktop_background, 0, 0, FN_RET_VOID
     mov edi, [wallpaper_process_id]
     test edi, edi
     jle .render_unavailable
-    lea rsi, [rel wallpaper_render_job]
+    mov esi, 5                         ; WQ_JOB_WALLPAPER (wq_job_table[5], workqueue.ghl)
     xor edx, edx
     xor r8d, r8d                       ; low priority background work
     call process_submit_job
@@ -207,6 +207,7 @@ FN_BEGIN wm_poll_wallpaper_render, 0, 0, FN_RET_VOID
 ; shared ring-3 page-table isolation is active; dispatch_app_callback therefore
 ; refuses to wait on this lock while wallpaper_render_active is set, keeping the
 ; BSP compositor and input loop responsive during this long AP job.
+global wallpaper_render_job            ; wq_job_table[5] (grithlk/workqueue.ghl)
 wallpaper_render_job:
     push rbx
     push r12
