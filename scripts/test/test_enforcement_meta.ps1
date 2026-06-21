@@ -14,9 +14,11 @@
 #      (new-legacy-extension).
 #   2. A bogus inventory line for a nonexistent file makes -InventoryGuard report
 #      a stale entry (stale-inventory-entry).
-#   3. A bad %include "evil.asm" in a NEW build script fails
+#   3. A migrating inventory row without a real replacement file fails
+#      -InventoryGuard (missing-migration-replacement).
+#   4. A bad %include "evil.asm" in a NEW build script fails
 #      check_build_integrity.ps1 (new-arch-build-asm-include).
-#   4. Property test: the guard's file enumeration covers UNTRACKED working-tree
+#   5. Property test: the guard's file enumeration covers UNTRACKED working-tree
 #      files (a planted untracked .asm is seen by -InventoryGuard).
 # =============================================================================
 
@@ -86,7 +88,35 @@ finally {
 }
 
 # -----------------------------------------------------------------------------
-# Test 3: plant a NEW build script with a bad %include "evil.asm"; the
+# Test 3a: append a migrating inventory line with TBD replacement; the inventory
+# guard must reject it rather than letting fake migration accounting pass.
+# -----------------------------------------------------------------------------
+$inventoryBackup = Get-Content -LiteralPath $InventoryFile -Raw
+try {
+    Add-Content -LiteralPath $InventoryFile -Value 'src/kernel/core/entry.asm | kernel-core | high | migrating | TBD'
+    Assert-GuardFails -Name 'migrating inventory entry with TBD replacement rejected' `
+        -Script $NoAsmGuard -GuardArgs @('-InventoryGuard')
+}
+finally {
+    Set-Content -LiteralPath $InventoryFile -Value $inventoryBackup -NoNewline -Encoding ASCII
+}
+
+# -----------------------------------------------------------------------------
+# Test 3b: append a migrating inventory line with a concrete but missing
+# replacement path; the guard must reject it too.
+# -----------------------------------------------------------------------------
+$inventoryBackup = Get-Content -LiteralPath $InventoryFile -Raw
+try {
+    Add-Content -LiteralPath $InventoryFile -Value 'src/kernel/core/entry.asm | kernel-core | high | migrating | src/kernel/grithlk/_meta_missing_replacement.ghl'
+    Assert-GuardFails -Name 'migrating inventory entry with missing replacement rejected' `
+        -Script $NoAsmGuard -GuardArgs @('-InventoryGuard')
+}
+finally {
+    Set-Content -LiteralPath $InventoryFile -Value $inventoryBackup -NoNewline -Encoding ASCII
+}
+
+# -----------------------------------------------------------------------------
+# Test 4: plant a NEW build script with a bad %include "evil.asm"; the
 # build-integrity guard must FAIL (new-arch-build-asm-include).
 # -----------------------------------------------------------------------------
 $plantedBuild = Join-Path $Root 'scripts\build\_meta_evil_build.ps1'

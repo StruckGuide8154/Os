@@ -18,7 +18,7 @@ User app calls `SYS_WM_CREATE(x, y, w, h, title_ptr)` - syscall rax=8, rdi=x, rs
 
 | # | Action |
 |---|---|
-| 4 | iterate `window_pool[0..MAX_WINDOWS]` - find first slot with `WIN_OFF_FLAGS & WF_ACTIVE == 0` |
+| 4 | choose a randomized start slot in `1..MAX_WINDOWS-1`, then scan/wrap through `window_pool` for a slot with `WIN_OFF_FLAGS & WF_ACTIVE == 0` (`-NoMemRandom` uses deterministic slot 1 first) |
 | 5 | If none: return -1 (full) |
 | 6 | Slot pointer = `WINDOW_POOL_ADDR + slot_idx * WINDOW_STRUCT_SIZE` |
 | 7 | Write fields: WIN_OFF_X/Y/W/H, WIN_OFF_TITLE (memcpy 32 bytes from r8), WIN_OFF_OWNER_PID = current process, WIN_OFF_FLAGS = WF_ACTIVE \| WF_VISIBLE |

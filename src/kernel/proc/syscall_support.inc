@@ -378,6 +378,22 @@ syscall_table:
     ;   each axis clamped to [1,50] = 0.1x..5.0x. Settings Mouse tab uses these.
     SYSCALL_ENTRY syscall_entry.sc_mouse_sense,      0, 0,                          CAP_GUI_DISPLAY
     SYSCALL_ENTRY syscall_entry.sc_set_mouse_sense,  1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DISPLAY
+    ; SYS_PROC_SETPRIO(process_index, priority) - priority manager write path.
+    ; CAP_PROC so only Task Manager (its manifest grants CAP_PROC) can retune a
+    ; process. Both args are scalars (no pointers), clamped/validated in-handler.
+    SYSCALL_ENTRY syscall_entry.sc_proc_setprio,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_PROC
+    ; gui2 retained-mode library (syscall_handlers_gui2.inc).
+    ; SYS_GUI_BATCH(buf_ptr, record_count) -> #primitives drawn. The buffer is
+    ; record_count * 64 bytes; arg_desc ties PTR arg 1's length to scalar arg 2
+    ; (* GUI_REC_SIZE done in-handler) so the dispatcher range-checks before the
+    ; record walk. STRICT denies an unmigrated PTR nibble.
+    SYSCALL_ENTRY syscall_entry.sc_gui_batch,        2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(0, 2), SC_FLAG_STRICT
+    ; SYS_GUI_PRESENT(damage_ptr, rect_count) -> rect count. damage is
+    ; rect_count * 32 bytes (4 quads each); arg_desc ties PTR arg 1 to scalar 2.
+    SYSCALL_ENTRY syscall_entry.sc_gui_present,      2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(0, 2), SC_FLAG_STRICT
+    ; SYS_GUI_GLYPH_BAKE(codepoint, fg, bg) -> atlas cell index or -1. All
+    ; scalars; returns GLYPH_NONE (-1) for now (no atlas surface yet).
+    SYSCALL_ENTRY syscall_entry.sc_gui_glyph_bake,   3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
 syscall_table_end:
 syscall_table_count equ (syscall_table_end - syscall_table) / SYSCALL_ENTRY_SIZE
 

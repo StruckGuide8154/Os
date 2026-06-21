@@ -65,6 +65,7 @@ extern ser_print_hex64
 extern process_kill_window
 extern process_create
 extern l3_slot_base
+extern l3_release_slot
 extern cap_mask_store
 extern desktop_draw_icons
 extern nx_icon_close_16

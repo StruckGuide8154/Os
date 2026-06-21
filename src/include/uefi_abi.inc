@@ -141,6 +141,11 @@ UEFI_APP_PT_PHYS      equ 0x75000       ; first of 12 app-arena 4 KiB PTs
 ; page-table region (see nk_monitor.asm NK_PT_REGION_HI).
 UEFI_FB_PD_PHYS       equ 0x83000       ; PDPT0[fb>>30] -> PD over that 1 GiB
 UEFI_FB_PT_PHYS       equ 0x84000       ; PD[fb>>21] -> 4 KiB PT around fb_end
+UEFI_FB_SINK_PHYS     equ 0x85000       ; dead RAM sink page (just outside the NK
+                                        ; PT region) the fb_end page maps to, so a
+                                        ; single-chunk render-blit overrun lands
+                                        ; harmlessly instead of #PF-flooding every
+                                        ; frame; the runaway trap stays at fb_end+4K.
 ; W^X kernel-text window expressed as 4 KiB PTE indices (0x100000..0x200000).
 UEFI_KTEXT_START_PAGE equ 0x100
 UEFI_KTEXT_END_PAGE   equ 0x200

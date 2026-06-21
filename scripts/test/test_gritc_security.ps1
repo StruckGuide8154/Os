@@ -77,6 +77,67 @@ if ($LASTEXITCODE -ne 0) {
     throw 'raw_mem fixture failed to compile with the raw_mem capability declared'
 }
 
+Write-Host '[gritc-security] === Track-8 G1: --target driver holds no ambient HW authority ===' -ForegroundColor Cyan
+# A driver-host process must reach hardware ONLY through the broker. The driver
+# target forces --forbid-asm + --deny-unsafe and, being ring-3, cannot emit any
+# privileged intrinsic. Prove: (a) a clean broker-only driver compiles, (b) a raw
+# port write is rejected, (c) a raw MMIO/raw_mem boundary declaration is rejected.
+
+Write-Host '[gritc-security] driver target: clean broker-only driver compiles' -ForegroundColor Yellow
+python $Compiler `
+    (Join-Path $Root 'tests\ghl_kernel\driver_target_ok.ghl') `
+    -o (Join-Path $OutDir 'driver_target_ok.asm') `
+    -L $LibDir --target driver
+if ($LASTEXITCODE -ne 0) {
+    throw 'driver target rejected a clean broker-only driver (G1 gate too strict)'
+}
+
+Write-Host '[gritc-security] driver target: reject raw port I/O' -ForegroundColor Yellow
+$OldEAPd1 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\ghl_kernel\driver_target_no_io.ghl') `
+    -o (Join-Path $OutDir 'driver_target_no_io.asm') `
+    -L $LibDir --target driver *> $null
+$DrvIoExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAPd1
+if ($DrvIoExit -eq 0) {
+    throw 'driver target accepted outb() (G1 violated: a driver gained direct port authority)'
+}
+
+Write-Host '[gritc-security] driver target: reject raw MMIO / raw_mem boundary' -ForegroundColor Yellow
+$OldEAPd2 = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+python $Compiler `
+    (Join-Path $Root 'tests\ghl_kernel\driver_target_no_mmio.ghl') `
+    -o (Join-Path $OutDir 'driver_target_no_mmio.asm') `
+    -L $LibDir --target driver *> $null
+$DrvMmioExit = $LASTEXITCODE
+$ErrorActionPreference = $OldEAPd2
+if ($DrvMmioExit -eq 0) {
+    throw 'driver target accepted an unsafe raw_mem declaration (G1 violated: a driver could map MMIO)'
+}
+
+Write-Host '[gritc-security] driver target: HDA class driver compiles broker-only' -ForegroundColor Yellow
+python $Compiler `
+    (Join-Path $Root 'src\drivers\audio\hda.ghl') `
+    -o (Join-Path $OutDir 'hda.asm') `
+    -L $LibDir --target driver
+if ($LASTEXITCODE -ne 0) {
+    throw 'HDA class driver failed to compile under --target driver'
+}
+
+Write-Host '[gritc-security] driver target: Rung 2/3 drivers compile broker-only' -ForegroundColor Yellow
+foreach ($t8drv in @('src\drivers\acpi_ec\battery.ghl', 'src\drivers\net\rtl8156.ghl')) {
+    python $Compiler `
+        (Join-Path $Root $t8drv) `
+        -o (Join-Path $OutDir ([System.IO.Path]::GetFileNameWithoutExtension($t8drv) + '.asm')) `
+        -L $LibDir --target driver
+    if ($LASTEXITCODE -ne 0) {
+        throw "Track-8 driver failed to compile under --target driver: $t8drv"
+    }
+}
+
 Write-Host '[gritc-security] reject an unknown unsafe capability declaration' -ForegroundColor Yellow
 # Proves the unsafe-capability namespace is a closed allowlist: a typo'd or
 # invented authority is a hard parse error, never a silently-ignored gate.
@@ -317,6 +378,70 @@ fn probe(x) {
     }
 } finally {
     Remove-Item -Recurse -Force $DiffDir -ErrorAction SilentlyContinue
+}
+
+Write-Host '[gritc-security] reserve NAME[N] is zero-cost (.bss/NOBITS, no image bytes)' -ForegroundColor Yellow
+# The `reserve` primitive must lower a large uninitialized arena into `.bss`
+# (NOBITS) so it costs ZERO output bytes - this is what makes a multi-MiB
+# per-slot XML DOM hostable in zero-asm GHL without bloating KERNEL.BIN.
+$ReserveDir = Join-Path ([IO.Path]::GetTempPath()) ("gritc_reserve_" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $ReserveDir -Force | Out-Null
+try {
+    $rsrc = Join-Path $ReserveDir 'reserve.ghl'
+    $rasm = Join-Path $ReserveDir 'reserve.asm'
+    @'
+module "rsv";
+unsafe raw_mem;
+unsafe implicit_extern;
+reserve big[3145728];
+fn rsv_touch(i) {
+    sb(&big + i, 7);
+    return lb(&big + i);
+}
+'@ | Set-Content -Encoding ascii $rsrc
+    python $Compiler $rsrc -o $rasm -L $LibDir --target kernel --embed --forbid-asm
+    if ($LASTEXITCODE -ne 0) { throw 'reserve fixture failed to compile under --target kernel --forbid-asm' }
+    $rout = Get-Content $rasm -Raw
+    if ($rout -notmatch '(?m)^\s*section \.bss') {
+        throw 'reserve did not emit a .bss section'
+    }
+    if ($rout -notmatch '(?m)resb 3145728') {
+        throw 'reserve did not emit `resb 3145728` into .bss (must be uninitialized/NOBITS)'
+    }
+    if ($rout -match '(?m)times 3145728 db 0') {
+        throw 'reserve emitted initialized image bytes (`times N db 0`) instead of NOBITS .bss'
+    }
+    # Prove zero-cost: assemble with NASM -f bin and confirm the binary is far
+    # smaller than the 3 MiB arena (it occupies address space, not file bytes).
+    if (Test-Path $Nasm) {
+        $rbin = Join-Path $ReserveDir 'reserve.bin'
+        # Embed output has no `bits/section` preamble; wrap it for a standalone -f bin build.
+        $rwrap = Join-Path $ReserveDir 'reserve_wrap.asm'
+        @"
+bits 64
+section .text
+%include "$($rasm -replace '\\','/')"
+"@ | Set-Content -Encoding ascii $rwrap
+        & $Nasm -f bin -o $rbin $rwrap
+        if ($LASTEXITCODE -ne 0) { throw 'reserve fixture failed to assemble with NASM -f bin' }
+        $rsz = (Get-Item $rbin).Length
+        if ($rsz -ge 3145728) {
+            throw "reserve arena bloated the binary to $rsz bytes (>= 3 MiB); .bss is not zero-cost"
+        }
+        Write-Host "  OK - 3 MiB reserve -> $rsz byte binary (zero image cost)" -ForegroundColor Green
+    }
+    # Negative: `reserve` must be rejected for --target boot (no .bss in a flat
+    # boot sector / org-based layout).
+    $OldEAPr = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    python $Compiler $rsrc -o (Join-Path $ReserveDir 'reserve_boot.asm') -L $LibDir --target boot --embed *> $null
+    $ReserveBootExit = $LASTEXITCODE
+    $ErrorActionPreference = $OldEAPr
+    if ($ReserveBootExit -eq 0) {
+        throw 'reserve was accepted under --target boot'
+    }
+} finally {
+    Remove-Item -Recurse -Force $ReserveDir -ErrorAction SilentlyContinue
 }
 
 Write-Host '[gritc-security] PASS' -ForegroundColor Green

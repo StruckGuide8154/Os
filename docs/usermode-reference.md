@@ -40,15 +40,26 @@ Each active user callback runs inside a per-slot arena:
 
 - `APP_DATA_ADDR + slot * APP_SLOT_SIZE`
 
+Normal app windows use slots `1..MAX_WINDOWS-1`; slot 0 is reserved for the
+hidden wallpaper runtime. In randomized builds the window allocator starts its
+free-slot scan at a fresh RDTSC/RDRAND-derived slot and wraps once, so a new
+app launch does not predictably land at the lowest free user VA. `-NoMemRandom`
+keeps the old deterministic slot order for diagnostics.
+
 The automated serial gate for this path is `scripts/test/test_l3_app_markers.ps1`.
 
 That slot holds:
 
 - app-owned code/data copied or referenced by the trampoline
 - a shadow copy of the current window struct
-- per-slot user stack
+- per-slot user stack with a randomized top offset
 - per-slot syscall stack
 - per-slot runtime frame (`l3_runtime`)
+
+The copied app blob is page-slid within the slot (`l3_slot_code_slide[]`) before
+callbacks are translated. Strict W^X manifests are stored after applying that
+slide, so executable page permissions and code hashing cover the relocated code
+range rather than the unslid build-time offsets.
 
 ## Ring-3 Callback Flow
 

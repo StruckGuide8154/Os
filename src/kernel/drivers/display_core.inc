@@ -41,6 +41,21 @@ FN_BEGIN display_init, 0, 0, FN_RET_SCALAR
     mov eax, [scr_height]
     mov [fb_native_height], eax
 
+    ; Latch the loader's actual mapped framebuffer end. The loader sized the FB
+    ; mapping and placed the unmapped guard page from VBE_HEIGHT*VBE_PITCH in the
+    ; VBE_INFO block (uefi_loader_paging_exit.inc). Read those SAME fields here -
+    ; NOT scr_height/scr_pitch_q, which the kernel may round/re-set independently
+    ; and let drift above the mapped extent - so the flip backstop and the loader
+    ; mapping cannot disagree by even one byte. See fb_mapped_end_q.
+    mov eax, [abs VBE_INFO_ADDR + VBE_HEIGHT_OFF]
+    mov ecx, [abs VBE_INFO_ADDR + VBE_PITCH_OFF]
+    imul rax, rcx
+    test rax, rax
+    jz .fb_mapped_skip            ; degenerate VBE geometry -> leave 0 (fallback)
+    add rax, [fb_addr]
+    mov [fb_mapped_end_q], rax
+.fb_mapped_skip:
+
     ; Set back buffer address
     mov rax, [abs VBE_INFO_ADDR + VBE_BACKBUF_OFF]
     test rax, rax

@@ -1,0 +1,207 @@
+# ============================================================================
+# enclave_boot.ghl - Track 10 USB-FPGA secure-enclave: the Phase-A SECURE BOOT
+# transaction (the P0 "boot-time attestation & trust anchoring" centerpiece,
+# software model of the board's gateware orchestration).
+#
+# This is the piece that turns the two primitives into an actual secure USB
+# boot. It composes:
+#   - enclave_phase.ghl   : the privileged one-shot / latch (single-use derive,
+#                           lockdown, attestable latch+counter).
+#   - enclave_session.ghl : the authenticated+encrypted channel the boot
+#                           transaction must ride over (mutual attestation,
+#                           channel+boot binding, per-frame AEAD nonce).
+# into the board-side Phase-A boot handler:
+#
+#   power-on (phase) -> mutual session handshake (session) -> the board judges
+#   the host MEASUREMENT against its OWN SEALED POLICY -> on a match it releases
+#   a derived, measurement+counter-bound boot key (the master NEVER leaves the
+#   die) -> it SEALS AND LOCKS (latch 0->1) -> hands a locked-down device to the
+#   monitor for Phase-B service.
+#
+# Two security properties this model makes executable (see eval_enclave_boot.py),
+# beyond what the two primitives already prove:
+#
+#   1. BOARD-SEALED POLICY, not a host text file. The required-vs-optional
+#      decision and the expected measurement live in the board's sealed policy.
+#      A host that flips BOOTCFG required->optional on disk does NOT downgrade
+#      the board: enclave_boot_run ignores the host's CLAIMED mode and judges by
+#      the sealed policy. (The track doc's "downgrade test".)
+#   2. NO BOOT WITHOUT THE AUTHENTICATED CHANNEL, and the boot key is released
+#      ONLY on a measurement that matches the sealed policy; a mismatch in
+#      required-mode is FAIL-CLOSED (latch still closes, no key), in
+#      optional-mode DEGRADES (no key, boot continues) - the trust decision is
+#      the board's either way. The whole transaction is single-shot per power
+#      cycle (it runs inside the one-shot window and closes it).
+#
+# Honest boundary (kept in sync with the track doc): this models the board's
+# boot ORCHESTRATION and key custody. It does NOT establish first-instruction
+# host integrity - the host measures itself and the board judges what it reports
+# (the documented open problem). leak != elevation.
+# ============================================================================
+
+module "enclave_boot";
+
+unsafe raw_mem;          # lb/sb/lq/sq over module-local state
+unsafe implicit_extern;  # &enc_b_* module-local data
+
+# ---- phase machine (enclave_phase.ghl) -------------------------------------
+extern enclave_power_on;
+extern enclave_command;
+extern enclave_boot_complete;
+extern enclave_latched;
+extern enclave_derive_out;
+extern enclave_boot_counter;
+extern enclave_attest_latch;
+extern enclave_attest_counter;
+
+# ---- session channel (enclave_session.ghl) ---------------------------------
+extern enclave_session_established;
+
+global enclave_boot_abi_version;
+global enclave_boot_seal_policy;
+global enclave_boot_policy_sealed;
+global enclave_boot_run;
+global enclave_boot_key;
+global enclave_boot_locked;
+global enclave_boot_quote_latch;
+global enclave_boot_quote_counter;
+
+# Mirror of enclave_phase's privileged opcodes (kept in lockstep; the eval's
+# const-drift guard asserts these against enclave_phase.ghl so they can't rot).
+const BOP_DERIVE_KEY = 0x10;
+
+# ---- boot status (stable ABI; the host boot verifier decodes these) --------
+const BOOT_OK          = 0;  # measurement matched policy; boot key released
+const BOOT_NO_POLICY   = 1;  # board has no sealed policy (refuse to boot)
+const BOOT_NO_SESSION  = 2;  # no authenticated channel established first
+const BOOT_FAIL_CLOSED = 3;  # required-mode + measurement mismatch -> HALT
+const BOOT_DEGRADED    = 4;  # optional-mode + mismatch: no key, boot continues
+const BOOT_REPLAY      = 5;  # Phase A already consumed this power cycle
+
+# Sealed-policy "required" flag values.
+const POLICY_OPTIONAL = 0;
+const POLICY_REQUIRED = 1;
+
+# ---- board-sealed policy (NV in real HW; set once at enrollment) ------------
+# This is the authoritative boot policy. In gateware it lives in secure NV and
+# is itself a signed/sealed artifact; here it is module-local data set once by
+# enclave_boot_seal_policy(). The HOST cannot rewrite it at boot - that is the
+# whole point of moving the policy off the host's plaintext BOOTCFG.TXT.
+data enc_b_sealed: 1;       # 1 once a policy has been sealed
+data enc_b_expect: 1 x 8;   # expected host measurement (seal-to-state)
+data enc_b_required: 1;     # POLICY_REQUIRED / POLICY_OPTIONAL
+
+# ---- per-boot result (volatile) --------------------------------------------
+data enc_b_key: 1 x 8;      # released boot key (model), 0 if none this boot
+data enc_b_ran: 1;          # 1 once enclave_boot_run consumed Phase A this cycle
+
+fn enclave_boot_abi_version() {
+    return 1;
+}
+
+# ---- policy sealing (enrollment-time, one-shot) ----------------------------
+# Seal the authoritative boot policy. Modeled as settable once: once sealed it
+# cannot be silently rewritten (a re-seal attempt is refused), mirroring secure
+# NV that an at-boot host compromise cannot edit. Returns BOOT_OK or
+# BOOT_REPLAY if a policy is already sealed.
+fn enclave_boot_seal_policy(expected_meas, required) {
+    if lb(&enc_b_sealed) != 0 { return BOOT_REPLAY; }
+    sq(&enc_b_expect, expected_meas);
+    if required != 0 { sb(&enc_b_required, POLICY_REQUIRED); }
+    else { sb(&enc_b_required, POLICY_OPTIONAL); }
+    sb(&enc_b_sealed, 1);
+    return BOOT_OK;
+}
+
+fn enclave_boot_policy_sealed() {
+    return lb(&enc_b_sealed);
+}
+
+# ---- the Phase-A secure-boot transaction -----------------------------------
+# Run ONCE per power cycle, after a mutual session handshake, to judge the host
+# measurement against the sealed policy and (on a match) release the boot key
+# and lock down.
+#
+# Arguments:
+#   measurement        - the host image measurement, delivered to the board over
+#                        the authenticated channel (KERNEL.ENV measured handoff).
+#   host_claimed_req   - what the HOST's BOOTCFG claims the mode is. Recorded as
+#                        a downgrade-attempt witness but DELIBERATELY NOT used to
+#                        decide: the board judges by its OWN sealed policy. A host
+#                        flipping required->optional gets no leniency.
+#
+# Ordering of the guards mirrors the gateware: session first (no boot off an
+# unauthenticated bus), then one-shot (Phase A consumed once), then policy.
+fn enclave_boot_run(measurement, host_claimed_req) {
+    # No boot off an unauthenticated channel.
+    if enclave_session_established() == 0 { return BOOT_NO_SESSION; }
+
+    # One-shot per power cycle: if Phase A already closed (by us or anything
+    # else), the boot transaction cannot re-run. The latch is authoritative.
+    if enclave_latched() != 0 { return BOOT_REPLAY; }
+    if lb(&enc_b_ran) != 0 { return BOOT_REPLAY; }
+
+    # A board with no sealed policy refuses to release anything (fail-closed):
+    # close the window and report. An unprovisioned board is not a boot oracle.
+    if lb(&enc_b_sealed) == 0 {
+        enclave_boot_complete();        # latch the privileged window shut anyway
+        sb(&enc_b_ran, 1);
+        return BOOT_NO_POLICY;
+    }
+
+    sb(&enc_b_ran, 1);
+    sq(&enc_b_key, 0);
+
+    # Judge the measurement against the BOARD's sealed expectation. The host's
+    # claimed mode is intentionally ignored here (downgrade resistance).
+    if measurement != lq(&enc_b_expect) {
+        # Mismatch. The board's OWN required flag decides, not host_claimed_req.
+        enclave_boot_complete();        # close the one-shot regardless
+        if lb(&enc_b_required) == POLICY_REQUIRED { return BOOT_FAIL_CLOSED; }
+        return BOOT_DEGRADED;           # optional: no key, but boot may continue
+    }
+
+    # Match: release a derived, measurement+counter-bound boot key through the
+    # phase machine's single-use privileged path (NOT a raw master read - the
+    # master never leaves the die; enclave_phase guarantees the output is a
+    # KDF, not the master, and that it differs across boots).
+    let rc = enclave_command(BOP_DERIVE_KEY, measurement);
+    if rc != 0 {
+        # The privileged op was unexpectedly refused (e.g. already consumed):
+        # fail closed rather than booting without a key.
+        enclave_boot_complete();
+        return BOOT_FAIL_CLOSED;
+    }
+    sq(&enc_b_key, enclave_derive_out());
+
+    # Seal and lock: hand a locked-down device to the monitor. boot_complete is
+    # idempotent and drives the same triplicated sticky latch.
+    enclave_boot_complete();
+    return BOOT_OK;
+}
+
+# The released per-boot key (model). 0 when no key was released this boot. The
+# real board hands this to the per-boot disk/credential unseal; it is the one
+# Phase-A output and is itself never the master root.
+fn enclave_boot_key() {
+    return lq(&enc_b_key);
+}
+
+# True once the privileged window is shut for this power cycle (latch closed) -
+# the host/monitor checks this before trusting it is in Phase B.
+fn enclave_boot_locked() {
+    return enclave_latched();
+}
+
+# ---- attestation quote pass-through ----------------------------------------
+# The board-signed Phase-B quote reports {latch state, boot counter} so the host
+# and remote peers can verify this boot really locked down. Here they pass
+# through to the phase machine's attest read-outs (the board-signed wrapper is
+# the remaining attestation-section TODO).
+fn enclave_boot_quote_latch() {
+    return enclave_attest_latch();
+}
+
+fn enclave_boot_quote_counter() {
+    return enclave_attest_counter();
+}

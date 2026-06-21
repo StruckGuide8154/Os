@@ -277,12 +277,23 @@ app_reset_explorer_slot:
 ; keep treating rax as the slot id and continue its post-create work.
 extern kernel_apply_app_manifest
 extern app_segment_verify
+extern wm_close_window
 %macro APPLY_MANIFEST 1
     push rax
     push rdi
     push rsi
     mov rdi, %1
     call app_segment_verify
+    test rax, rax
+    jnz %%verified
+    mov rdi, [rsp + 16]
+    call wm_close_window
+    pop rsi
+    pop rdi
+    pop rax
+    mov rax, -1
+    jmp .done
+%%verified:
     mov rdi, [rsp + 16]
     mov rsi, %1
     call kernel_apply_app_manifest

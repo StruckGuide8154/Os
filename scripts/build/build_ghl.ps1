@@ -50,6 +50,14 @@ Get-ChildItem -Path $APP_DIR -Filter '*.ghl' | ForEach-Object {
     # Embed mode: strips bits/default/section so the output can be %include'd
     # directly from apps.asm without fighting the kernel's section layout.
     $CompilerArgs = @($in, '-o', $asm, '-L', $LIB_DIR, '--prefix', $name, '--embed', '--emit-sigs')
+    # Debug builds emit a per-app memory-layout manifest of compiler-managed
+    # `buffer` scratch arenas (sizes/offsets/budget) for easy debugging. The
+    # sidecar never affects the generated asm, so release builds skip it to keep
+    # the artifact set minimal and byte-identity reasoning simple.
+    if (-not $Release) {
+        $memmap = Join-Path $OUT_DIR ($name + '.memmap.json')
+        $CompilerArgs += @('--memmap', $memmap)
+    }
     if ($O0) { $CompilerArgs += '--O0' }
     if ($O2) { $CompilerArgs += '--O2' }
     if ($O3) { $CompilerArgs += '--O3' }

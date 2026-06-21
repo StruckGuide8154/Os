@@ -55,11 +55,13 @@ keyboard_handler:
     je .done
     ; (al already loaded)
     movzx eax, al
+%ifndef RELEASE_BUILD
     push rax
     mov dx, 0x3F8
     mov al, 'K'
     out dx, al
     pop rax
+%endif
 
     ; Check for extended scancode prefix
     cmp al, 0xE0

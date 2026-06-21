@@ -1,0 +1,85 @@
+# ============================================================================
+# GritHL GUI v2 - atlas.ghl
+# Glyph atlas: rasterize each glyph once, then blit cached cells.
+# ============================================================================
+
+use core
+
+const SYS_GUI_GLYPH_BAKE = 79   # bake(codepoint, fg, bg) -> atlas cell index
+
+# Font cell metrics match the kernel bitmap font.
+const ATLAS_CELL_W = 8
+const ATLAS_CELL_H = 12
+const ATLAS_COLS   = 32
+const ATLAS_ROWS   = 16
+
+# Direct codepoint -> cell map (one quad per codepoint). -1 = not baked.
+# Compiler-managed scratch replaces magic VAs GLYPH_MAP=0x00BFD000 (256 quads)
+# / GLYPH_GEN=0x00BFCFF0.
+buffer glyph_map[2048];           # 256 quads
+buffer glyph_gen[16];             # palette generation, quad 0
+const GLYPH_NONE  = -1
+
+fn atlas_reset() {
+    let i = 0;
+    while i < 256 {
+        sq(glyph_map + i * 8, GLYPH_NONE);
+        i = i + 1;
+    }
+    sq(glyph_gen + 0, 0);
+}
+
+fn atlas_invalidate(gen) {
+    sq(glyph_gen + 0, gen);
+    atlas_reset();
+}
+
+fn atlas_cell(codepoint, fg, bg) {
+    if codepoint < 0 { return GLYPH_NONE; }
+    if codepoint >= 256 { return GLYPH_NONE; }
+    let slot = glyph_map + codepoint * 8;
+    let cell = lq(slot);
+    if cell != GLYPH_NONE { return cell; }
+    cell = syscall(SYS_GUI_GLYPH_BAKE, codepoint, fg, bg);
+    sq(slot, cell);
+    return cell;
+}
+
+fn atlas_cell_x(cell) {
+    return (cell % ATLAS_COLS) * ATLAS_CELL_W;
+}
+
+fn atlas_cell_y(cell) {
+    return (cell / ATLAS_COLS) * ATLAS_CELL_H;
+}
+
+extern cmd_glyph;
+extern cmd_text;
+
+# Length of a NUL-terminated string. GritHL string literals (and fmt_* helpers)
+# are NUL-terminated byte runs - NOT length-prefixed - which is also what the
+# kernel OP_TEXT path (draw_string) consumes. The atlas measures/draws in that
+# same format so a literal label and a formatted value render identically.
+fn slen(p) {
+    let n = 0;
+    while lb(p + n) != 0 { n = n + 1; }
+    return n;
+}
+
+fn atlas_draw_text(x, y, str_ptr, fg, bg) {
+    # Per-glyph atlas caching is not active yet (SYS_GUI_GLYPH_BAKE is a stub
+    # that returns GLYPH_NONE for every codepoint, so atlas_cell would never
+    # produce a cached cell). Emit the whole string as a single OP_TEXT run,
+    # which the kernel renders via draw_string in one go. When real glyph baking
+    # lands, switch back to a per-character loop that blits cached cells
+    # (cmd_glyph) and only falls back to cmd_text for uncached codepoints.
+    let n = slen(str_ptr);
+    if n != 0 {
+        cmd_text(x, y, str_ptr, n, fg, bg);
+    }
+    return n * ATLAS_CELL_W;
+}
+
+fn atlas_text_w(str_ptr) {
+    return slen(str_ptr) * ATLAS_CELL_W;
+}

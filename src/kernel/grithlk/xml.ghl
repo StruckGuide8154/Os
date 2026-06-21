@@ -1,0 +1,1435 @@
+# ============================================================================
+# xml.ghl - Grit XML 1.0 parser, compact DOM subset. Zero-asm GritHLK port of
+# the legacy src/kernel/lib/xml{,_access,_parse,_query,_selftest}.asm/.inc.
+#
+# DESIGN CHANGE vs the asm: the legacy code kept ONE live per-slot state block
+# and rep-movsb-swapped a ~256 KiB block in/out on every public call (keyed off
+# r15). This port instead gives every slot its OWN slice of one big arena and
+# indexes off `slot * XML_STATE_SIZE`, eliminating the swap entirely. The arena
+# lives in `.bss` via the `reserve` primitive, so the ~3.1 MiB pool costs ZERO
+# image bytes (the whole reason this port was previously blocked). `.bss` is
+# zeroed by the loader, which matches the asm's BSS-zero == "empty DOM" contract:
+# doc_live == 0 for a slot that has never parsed -> xml_root reports none.
+#
+# Public ABI is byte-for-byte the same as the asm: System-V-ish args in
+# rdi/rsi/rdx/rcx/r8, result in rax/eax, r15 = current slot. All raw DOM access
+# goes through unsafe raw_mem (lb/sb 8-bit, lw/sw 32-bit, lq/sq 64-bit) against
+# &xml_pool + computed offsets. lw is movsxd (sign-extending); 32-bit fields are
+# masked with & M32 where their unsigned value matters.
+# ============================================================================
+
+module "xml";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over the DOM arena
+unsafe implicit_extern;  # &xml_pool
+
+global xml_parse;
+global xml_root;
+global xml_tag;
+global xml_tag_name;
+global xml_first_child;
+global xml_next_sibling;
+global xml_parent;
+global xml_attr;
+global xml_text;
+global xml_free;
+global xml_last_error;
+global xml_node_count;
+global xml_text_run;
+global xml_text_runs;
+global xml_namespace;
+global xml_node_namespace;
+global xml_entity_value;
+global xml_self_test;
+
+extern debug_print;      # (rsi = NUL-terminated msg)
+extern serial_putc;      # (rdi = byte) - matches boot_diag.ghl convention
+
+const XML_MAX_NODES = 8192;
+const XML_NODE_SIZE = 32;
+const XML_MAX_DEPTH = 64;
+const XML_MAX_ENT   = 64;
+const XML_NIL       = -1;        # 0xFFFFFFFF as a sign-extended dword
+const M32           = 0xFFFFFFFF;
+
+# Per-node field byte offsets (within a 32-byte node record).
+const N_TAG_OFF = 0;
+const N_TAG_LEN = 4;
+const N_PARENT  = 8;
+const N_CHILD   = 12;
+const N_SIB     = 16;
+const N_TAG_END = 20;
+const N_CEND    = 24;     # offset of '<' of this element's closing tag
+const N_PEND    = 28;     # offset just past the whole element
+
+# Per-slot state-block layout (byte offsets from the slot base).
+const NODES_OFF     = 0;                              # XML_MAX_NODES * 32
+const NODES_BYTES   = 262144;                         # 8192 * 32
+const NODE_N_OFF    = 262144;                         # q
+const ROOT_IDX_OFF  = 262152;                         # d
+const ERR_OFF       = 262156;                         # d
+const ERR_OFF_OFF   = 262160;                         # q  (err offset)
+const DOC_LIVE_OFF  = 262168;                         # d
+const BASE_OFF      = 262176;                         # q  (8-aligned)
+const END_OFF       = 262184;                         # q
+const ATTR_TE_OFF   = 262192;                         # d
+const STACK_OFF     = 262196;                         # XML_MAX_DEPTH * 4 = 256
+const STACK_N_OFF   = 262452;                         # d
+const ENT_NAME_OFF_OFF = 262456;                      # XML_MAX_ENT * 4 = 256
+const ENT_NAME_LEN_OFF = 262712;                      # 256
+const ENT_VAL_OFF_OFF  = 262968;                      # 256
+const ENT_VAL_LEN_OFF  = 263224;                      # 256
+const ENT_N_OFF        = 263480;                      # d
+const NS_SCRATCH_OFF   = 263484;                      # 64 bytes
+const XML_STATE_SIZE   = 263552;                      # round up past ns_scratch (8-aligned)
+
+const APP_SLOT_COUNT = 12;
+# 12 * 263552 = 3162624 bytes (~3.02 MiB), all in .bss -> zero image cost.
+reserve xml_pool[3162624];
+
+# ----------------------------------------------------------------------------
+# Slot base: &xml_pool + clamp(slot) * XML_STATE_SIZE. Replaces xml_switch_to.
+# ----------------------------------------------------------------------------
+fn xml_slot_base(slot) {
+    let s = slot & 255;
+    if s >= APP_SLOT_COUNT {
+        s = 0;
+    }
+    return &xml_pool + (s * XML_STATE_SIZE);
+}
+
+# node record address for index `n` within slot `sb`.
+fn xml_node_addr(sb, n) {
+    return (sb + NODES_OFF) + (n * XML_NODE_SIZE);
+}
+
+# unsigned 32-bit load (lw sign-extends; mask back to 32 bits).
+fn xml_ld32(p) {
+    return lw(p) & M32;
+}
+
+# ----------------------------------------------------------------------------
+# Field accessors (per slot).
+# ----------------------------------------------------------------------------
+fn xml_node_n(sb)        { return lq(sb + NODE_N_OFF); }
+fn xml_set_node_n(sb, v) { sq(sb + NODE_N_OFF, v); return 0; }
+fn xml_base_ptr(sb)      { return lq(sb + BASE_OFF); }
+fn xml_end_ptr(sb)       { return lq(sb + END_OFF); }
+
+fn xml_is_ws(c) {
+    if c == 32 { return 1; }
+    if c == 9  { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    return 0;
+}
+
+# ----------------------------------------------------------------------------
+# xml_free / xml_free_inner - reset the slot's DOM to empty.
+# ----------------------------------------------------------------------------
+fn xml_free(r15d slot) preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    xml_free_at(xml_slot_base(slot));
+}
+
+fn xml_free_at(sb) {
+    sq(sb + NODE_N_OFF, 0);
+    sw(sb + ERR_OFF, 0);
+    sq(sb + ERR_OFF_OFF, 0);
+    sw(sb + DOC_LIVE_OFF, 0);
+    sw(sb + STACK_N_OFF, 0);
+    sw(sb + ENT_N_OFF, 0);
+    sw(sb + ROOT_IDX_OFF, XML_NIL);
+    return 0;
+}
+
+fn xml_last_error(r15d slot) preserves(rbx, rcx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let sb = xml_slot_base(slot);
+    # Return code in rax; the asm also returned the input offset in rdx. Callers
+    # in syscall_handlers_xml_draw consume only eax (the error code).
+    return lw(sb + ERR_OFF) & M32;
+}
+
+# ----------------------------------------------------------------------------
+# xml_node_count - rax = number of parsed nodes.
+# ----------------------------------------------------------------------------
+fn xml_node_count(r15d slot) preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let sb = xml_slot_base(slot);
+    return lq(sb + NODE_N_OFF);
+}
+
+# ----------------------------------------------------------------------------
+# xml_set_error - record (code, input offset). Returns 0 (asm xor eax,eax).
+#   p = input pointer; offset = p - base.
+# ----------------------------------------------------------------------------
+fn xml_set_error(sb, code, p) {
+    sw(sb + ERR_OFF, code);
+    sq(sb + ERR_OFF_OFF, p - lq(sb + BASE_OFF));
+    return 0;
+}
+
+# ----------------------------------------------------------------------------
+# xml_root - rax = root node index, or -1 if no live document.
+# ----------------------------------------------------------------------------
+fn xml_root(r15d slot) preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    return xml_root_at(xml_slot_base(slot));
+}
+
+fn xml_root_at(sb) {
+    if (lw(sb + DOC_LIVE_OFF) & M32) == 0 {
+        return -1;
+    }
+    let r = lw(sb + ROOT_IDX_OFF);
+    if r == XML_NIL {
+        return -1;
+    }
+    return r & M32;
+}
+
+# chk_node: returns 1 if node index < node_n, else 0.
+fn xml_chk_node(sb, n) {
+    if n < lq(sb + NODE_N_OFF) {
+        if n >= 0 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# name_eq_off: compare `len` bytes at base+a vs base+b. 1 if equal.
+fn xml_name_eq_off(sb, a, b, len) {
+    let base = lq(sb + BASE_OFF);
+    let i = 0;
+    while i < len {
+        if lb(base + a + i) != lb(base + b + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# user_name_eq: input slice (base+ioff, ilen) vs user buffer (uptr, ulen).
+fn xml_user_name_eq(sb, ioff, ilen, uptr, ulen) {
+    if ilen != ulen {
+        return 0;
+    }
+    let base = lq(sb + BASE_OFF);
+    let i = 0;
+    while i < ulen {
+        if lb(base + ioff + i) != lb(uptr + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# xml_first_child / xml_next_sibling / xml_parent
+# ----------------------------------------------------------------------------
+fn xml_first_child(rdi node, r15d slot) preserves(rbx, rcx, rdx, rsi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let v = lw(xml_node_addr(sb, node) + N_CHILD);
+    if v == XML_NIL {
+        return -1;
+    }
+    return v & M32;
+}
+
+fn xml_next_sibling(rdi node, r15d slot) preserves(rbx, rcx, rdx, rsi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let v = lw(xml_node_addr(sb, node) + N_SIB);
+    if v == XML_NIL {
+        return -1;
+    }
+    return v & M32;
+}
+
+fn xml_parent(rdi node, r15d slot) preserves(rbx, rcx, rdx, rsi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let sb = xml_slot_base(slot);
+    return xml_parent_at(sb, node);
+}
+
+fn xml_parent_at(sb, node) {
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let v = lw(xml_node_addr(sb, node) + N_PARENT);
+    if v == XML_NIL {
+        return -1;
+    }
+    return v & M32;
+}
+
+# ----------------------------------------------------------------------------
+# xml_tag - a stable per-document tag identity (first matching tag idx + 1).
+# ----------------------------------------------------------------------------
+fn xml_tag(rdi node, r15d slot) preserves(rsi, rdi, r8, r9, r10, r11, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return 0;
+    }
+    let np = xml_node_addr(sb, node);
+    let toff = xml_ld32(np + N_TAG_OFF);
+    let tlen = xml_ld32(np + N_TAG_LEN);
+    let n = lq(sb + NODE_N_OFF);
+    let i = 0;
+    while i < n {
+        let p = xml_node_addr(sb, i);
+        if xml_ld32(p + N_TAG_LEN) == tlen {
+            if xml_name_eq_off(sb, toff, xml_ld32(p + N_TAG_OFF), tlen) == 1 {
+                return i + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return toff + 1;
+}
+
+# ----------------------------------------------------------------------------
+# xml_tag_name - copy a node's tag name into (out, max). rax = bytes copied.
+# ----------------------------------------------------------------------------
+fn xml_tag_name(rdi node, rsi out, rdx max, r15d slot) preserves(r8, r9, r10, r11, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let np = xml_node_addr(sb, node);
+    let toff = xml_ld32(np + N_TAG_OFF);
+    let tlen = xml_ld32(np + N_TAG_LEN);
+    let cnt = tlen;
+    if max < tlen {
+        cnt = max;
+    }
+    let src = lq(sb + BASE_OFF) + toff;
+    let i = 0;
+    while i < cnt {
+        sb(out + i, lb(src + i));
+        i = i + 1;
+    }
+    return cnt;
+}
+
+# ----------------------------------------------------------------------------
+# xml_text - copy an element's leading text (or single CDATA) into (out, max).
+# ----------------------------------------------------------------------------
+fn xml_text(rdi node, rsi out, rdx max, r15d slot) preserves(r9, r10, r11, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let np = xml_node_addr(sb, node);
+    let base = lq(sb + BASE_OFF);
+    let endp = lq(sb + END_OFF);
+    let cur = base + (xml_ld32(np + N_TAG_END) + 1);
+    if cur >= endp {
+        return 0;
+    }
+    let off = cur - base;        # byte offset of run start
+    let run = 0;
+    if lb(cur) == 60 {           # '<'
+        # maybe CDATA
+        if xml_match_cdata_open(cur, endp) == 0 {
+            return 0;
+        }
+        cur = cur + 9;
+        off = cur - base;
+        run = 0;
+        while cur < endp {
+            if xml_match_cdata_close(cur, endp) == 1 {
+                cur = endp;       # break
+            } else {
+                cur = cur + 1;
+                run = run + 1;
+            }
+        }
+    } else {
+        run = 0;
+        while cur < endp {
+            if lb(cur) == 60 {    # '<'
+                cur = endp;       # break
+            } else {
+                cur = cur + 1;
+                run = run + 1;
+            }
+        }
+    }
+    let cnt = run;
+    if max < run {
+        cnt = max;
+    }
+    let src = base + off;
+    let i = 0;
+    while i < cnt {
+        sb(out + i, lb(src + i));
+        i = i + 1;
+    }
+    return cnt;
+}
+
+# does (p, end) begin with "<![CDATA[" ? returns 1/0.
+fn xml_match_cdata_open(p, endp) {
+    if (p + 9) > endp { return 0; }
+    if lb(p + 0) != 60  { return 0; }   # '<'
+    if lb(p + 1) != 33  { return 0; }   # '!'
+    if lb(p + 2) != 91  { return 0; }   # '['
+    if lb(p + 3) != 67  { return 0; }   # 'C'
+    if lb(p + 4) != 68  { return 0; }   # 'D'
+    if lb(p + 5) != 65  { return 0; }   # 'A'
+    if lb(p + 6) != 84  { return 0; }   # 'T'
+    if lb(p + 7) != 65  { return 0; }   # 'A'
+    if lb(p + 8) != 91  { return 0; }   # '['
+    return 1;
+}
+
+# does (p, end) begin with "]]>" ? returns 1/0.
+fn xml_match_cdata_close(p, endp) {
+    if (p + 3) > endp { return 0; }
+    if lb(p + 0) != 93 { return 0; }    # ']'
+    if lb(p + 1) != 93 { return 0; }    # ']'
+    if lb(p + 2) != 62 { return 0; }    # '>'
+    return 1;
+}
+
+# ----------------------------------------------------------------------------
+# xml_link_node - attach new node `idx` under parent `par` (or as root).
+#   returns 0 ok, 9 = multiple roots.
+# ----------------------------------------------------------------------------
+fn xml_link_node(sb, idx, par) {
+    if par == XML_NIL {
+        if (lw(sb + ROOT_IDX_OFF)) != XML_NIL {
+            return 9;
+        }
+        sw(sb + ROOT_IDX_OFF, idx);
+        return 0;
+    }
+    let pp = xml_node_addr(sb, par);
+    if lw(pp + N_CHILD) == XML_NIL {
+        sw(pp + N_CHILD, idx);
+        return 0;
+    }
+    let c = xml_ld32(pp + N_CHILD);
+    while 1 == 1 {
+        let cp = xml_node_addr(sb, c);
+        let nx = lw(cp + N_SIB);
+        if nx == XML_NIL {
+            sw(cp + N_SIB, idx);
+            return 0;
+        }
+        c = nx & M32;
+    }
+    return 0;
+}
+
+# ============================================================================
+# xml_parse - build the DOM for (buf, len) into the calling slot.
+#   rdi = buf, rsi = len, r15 = slot. rax = 1 ok, 0 fail.
+# ============================================================================
+fn xml_parse(rdi buf, rsi len, r15d slot) preserves(r15) {
+    return xml_parse_core(buf, len, xml_slot_base(slot));
+}
+
+fn xml_parse_core(buf, len, sb) {
+    # xml_free_inner equivalent (slot already resolved).
+    xml_free_at(sb);
+
+    sq(sb + BASE_OFF, buf);
+    let endp = buf + len;
+    sq(sb + END_OFF, endp);
+
+    let p = buf;
+    while p < endp {
+        let c = lb(p);
+        if c == 60 {                 # '<'
+            let p1 = p + 1;
+            if p1 >= endp {
+                xml_set_error(sb, 1, p);
+                return 0;
+            }
+            let c1 = lb(p1);
+            if c1 == 47 {            # '/' close tag
+                p = xml_parse_close(sb, p, endp);
+                if p == 0 { return 0; }
+            } else {
+                if c1 == 33 {        # '!' bang
+                    p = xml_parse_bang(sb, p, endp);
+                    if p == 0 { return 0; }
+                } else {
+                    if c1 == 63 {    # '?' PI
+                        p = xml_parse_pi(sb, p, endp);
+                        if p == 0 { return 0; }
+                    } else {
+                        p = xml_parse_open(sb, p, endp);
+                        if p == 0 { return 0; }
+                    }
+                }
+            }
+        } else {
+            if c == 38 {             # '&' entity
+                p = xml_parse_entity(sb, p, endp);
+                if p == 0 { return 0; }
+            } else {
+                p = p + 1;
+            }
+        }
+    }
+    # finish
+    if (lw(sb + STACK_N_OFF) & M32) != 0 {
+        xml_set_error(sb, 3, p);     # unclosed
+        return 0;
+    }
+    if (lw(sb + ROOT_IDX_OFF)) == XML_NIL {
+        xml_set_error(sb, 1, p);     # eof / empty
+        return 0;
+    }
+    sw(sb + DOC_LIVE_OFF, 1);
+    return 1;
+}
+
+# Parse handlers return the new input pointer on success, or 0 on error (the
+# error code + offset has already been recorded via xml_set_error). 0 can never
+# be a valid in-document pointer (buffers live well above NULL), matching the
+# asm's `.fail` paths.
+
+# ---- '&' entity reference --------------------------------------------------
+fn xml_parse_entity(sb, p, endp) {
+    let start = p + 1;
+    let semi = xml_find_byte(start, endp, 59);   # ';'
+    if semi < 0 {
+        xml_set_error(sb, 8, p);
+        return 0;
+    }
+    if xml_entity_ok(sb, start, semi) == 1 {
+        return semi + 1;
+    }
+    xml_set_error(sb, 8, p);
+    return 0;
+}
+
+# find first byte `b` in [from,end); return its address or -1.
+fn xml_find_byte(from, endp, b) {
+    let q = from;
+    while q < endp {
+        if lb(q) == b {
+            return q;
+        }
+        q = q + 1;
+    }
+    return -1;
+}
+
+# validate the entity name in [start, semi). returns 1 ok / 0 bad.
+fn xml_entity_ok(sb, start, semi) {
+    if lb(start) == 35 {            # '#' numeric char ref
+        return xml_entity_num_ok(start, semi);
+    }
+    let len = semi - start;
+    if len == 2 {
+        if lb(start) == 108 {       # 'l' -> "lt"
+            if lb(start + 1) == 116 { return 1; }
+        }
+        if lb(start) == 103 {       # 'g' -> "gt"
+            if lb(start + 1) == 116 { return 1; }
+        }
+    }
+    if len == 3 {
+        if lb(start) == 97 {        # 'a' -> "amp"
+            if lb(start + 1) == 109 {
+                if lb(start + 2) == 112 { return 1; }
+            }
+        }
+    }
+    if len == 4 {
+        if lb(start) == 113 {       # 'q' -> "quot"
+            if lb(start + 1) == 117 {
+                if lb(start + 2) == 111 {
+                    if lb(start + 3) == 116 { return 1; }
+                }
+            }
+        }
+        if lb(start) == 97 {        # 'a' -> "apos"
+            if lb(start + 1) == 112 {
+                if lb(start + 2) == 111 {
+                    if lb(start + 3) == 115 { return 1; }
+                }
+            }
+        }
+    }
+    return xml_entity_custom_ok(sb, start, semi);
+}
+
+# numeric char ref &#NN; or &#xHH; - [start='#'.. semi). 1 ok / 0 bad.
+fn xml_entity_num_ok(start, semi) {
+    let q = start + 1;
+    if q >= semi {
+        return 0;
+    }
+    let c = lb(q);
+    if c == 120 { return xml_entity_hex_ok(q + 1, semi); }   # 'x'
+    if c == 88  { return xml_entity_hex_ok(q + 1, semi); }   # 'X'
+    # decimal
+    while q < semi {
+        let d = lb(q);
+        if d < 48 { return 0; }
+        if d > 57 { return 0; }
+        q = q + 1;
+    }
+    return 1;
+}
+
+fn xml_entity_hex_ok(from, semi) {
+    if from >= semi {
+        return 0;
+    }
+    let q = from;
+    while q < semi {
+        let d = lb(q);
+        let ok = 0;
+        if d >= 48 {
+            if d <= 57 { ok = 1; }
+        }
+        if d >= 97 {
+            if d <= 102 { ok = 1; }
+        }
+        if d >= 65 {
+            if d <= 70 { ok = 1; }
+        }
+        if ok == 0 { return 0; }
+        q = q + 1;
+    }
+    return 1;
+}
+
+# custom internal-DTD entity name match. 1 ok / 0 bad.
+fn xml_entity_custom_ok(sb, start, semi) {
+    let n = lw(sb + ENT_N_OFF) & M32;
+    if n == 0 {
+        return 0;
+    }
+    let want = semi - start;
+    let base = lq(sb + BASE_OFF);
+    let i = 0;
+    while i < n {
+        let nlen = xml_ld32((sb + ENT_NAME_LEN_OFF) + (i * 4));
+        if nlen == want {
+            let noff = xml_ld32((sb + ENT_NAME_OFF_OFF) + (i * 4));
+            let src = base + noff;
+            let k = 0;
+            let eq = 1;
+            while k < want {
+                if lb(src + k) != lb(start + k) {
+                    eq = 0;
+                    k = want;       # break
+                } else {
+                    k = k + 1;
+                }
+            }
+            if eq == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- '?' processing instruction --------------------------------------------
+fn xml_parse_pi(sb, p, endp) {
+    let q = p + 2;
+    while q < endp {
+        if lb(q) == 63 {            # '?'
+            if (q + 1) < endp {
+                if lb(q + 1) == 62 {  # '>'
+                    return q + 2;
+                }
+            }
+        }
+        q = q + 1;
+    }
+    xml_set_error(sb, 1, q);        # eof
+    return 0;
+}
+
+# ---- '!' bang: comment / CDATA / DOCTYPE -----------------------------------
+fn xml_parse_bang(sb, p, endp) {
+    let c2 = lb(p + 2);
+    if c2 == 91 {                   # '[' -> CDATA
+        return xml_parse_cdata(sb, p, endp);
+    }
+    if c2 == 68 {                   # 'D' -> DOCTYPE
+        return xml_parse_doctype(sb, p, endp);
+    }
+    if c2 != 45 {                   # '-'
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
+    if lb(p + 3) != 45 {
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
+    # comment: scan to "-->"
+    let q = p + 4;
+    while q < endp {
+        if lb(q) == 45 {
+            if lb(q + 1) == 45 {
+                if lb(q + 2) == 62 {  # '>'
+                    return q + 3;
+                }
+            }
+        }
+        q = q + 1;
+    }
+    xml_set_error(sb, 7, q);        # unterminated comment
+    return 0;
+}
+
+fn xml_parse_cdata(sb, p, endp) {
+    if xml_match_cdata_open(p, endp) == 0 {
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
+    let q = p + 9;
+    while q < endp {
+        if xml_match_cdata_close(q, endp) == 1 {
+            return q + 3;
+        }
+        q = q + 1;
+    }
+    xml_set_error(sb, 7, q);
+    return 0;
+}
+
+# DOCTYPE: verify keyword, parse-and-skip (with internal subset).
+fn xml_parse_doctype(sb, p, endp) {
+    # "<!DOCTYPE"
+    if lb(p + 3) != 79 { xml_set_error(sb, 2, p); return 0; }   # 'O'
+    if lb(p + 4) != 67 { xml_set_error(sb, 2, p); return 0; }   # 'C'
+    if lb(p + 5) != 84 { xml_set_error(sb, 2, p); return 0; }   # 'T'
+    if lb(p + 6) != 89 { xml_set_error(sb, 2, p); return 0; }   # 'Y'
+    if lb(p + 7) != 80 { xml_set_error(sb, 2, p); return 0; }   # 'P'
+    if lb(p + 8) != 69 { xml_set_error(sb, 2, p); return 0; }   # 'E'
+    let q = p + 9;
+    while q < endp {
+        let c = lb(q);
+        if c == 62 {                # '>'
+            return q + 1;
+        }
+        if c == 91 {                # '[' -> internal subset
+            q = xml_dt_subset(sb, q + 1, endp);
+            if q == 0 { return 0; }
+            # after subset we are positioned just past ']'; continue scanning to '>'
+        } else {
+            q = q + 1;
+        }
+    }
+    xml_set_error(sb, 1, q);
+    return 0;
+}
+
+# internal subset: from just past '[' to just past ']'. returns ptr past ']'.
+fn xml_dt_subset(sb, p, endp) {
+    let q = p;
+    while q < endp {
+        let c = lb(q);
+        if c == 93 {                # ']'
+            return q + 1;
+        }
+        if c == 60 {                # '<' markup decl
+            q = xml_dt_markup(sb, q, endp);
+            if q == 0 { return 0; }
+        } else {
+            q = q + 1;
+        }
+    }
+    xml_set_error(sb, 1, q);
+    return 0;
+}
+
+fn xml_dt_markup(sb, p, endp) {
+    let c1 = lb(p + 1);
+    if c1 == 63 {                   # '?' PI
+        let q = p + 2;
+        while q < endp {
+            if lb(q) == 63 {
+                if lb(q + 1) == 62 { return q + 2; }
+            }
+            q = q + 1;
+        }
+        xml_set_error(sb, 1, q);
+        return 0;
+    }
+    if c1 != 33 {                   # '!'
+        return xml_dt_skipgt(sb, p, endp);
+    }
+    if lb(p + 2) == 45 {            # '-' comment
+        if lb(p + 3) != 45 { xml_set_error(sb, 2, p); return 0; }
+        let q = p + 4;
+        while q < endp {
+            if lb(q) == 45 {
+                if lb(q + 1) == 45 {
+                    if lb(q + 2) == 62 { return q + 3; }
+                }
+            }
+            q = q + 1;
+        }
+        xml_set_error(sb, 7, q);
+        return 0;
+    }
+    # <!ENTITY ...> ?
+    if xml_dt_is_entity(p, endp) == 1 {
+        return xml_dt_entity(sb, p, endp);
+    }
+    return xml_dt_skipgt(sb, p, endp);
+}
+
+fn xml_dt_is_entity(p, endp) {
+    if (p + 8) > endp { return 0; }
+    if lb(p + 2) != 69 { return 0; }   # 'E'
+    if lb(p + 3) != 78 { return 0; }   # 'N'
+    if lb(p + 4) != 84 { return 0; }   # 'T'
+    if lb(p + 5) != 73 { return 0; }   # 'I'
+    if lb(p + 6) != 84 { return 0; }   # 'T'
+    if lb(p + 7) != 89 { return 0; }   # 'Y'
+    return 1;
+}
+
+fn xml_dt_skipgt(sb, p, endp) {
+    let q = p;
+    while q < endp {
+        if lb(q) == 62 {            # '>'
+            return q + 1;
+        }
+        q = q + 1;
+    }
+    xml_set_error(sb, 1, q);
+    return 0;
+}
+
+# <!ENTITY name "value"> - record into the internal-DTD table, skip to past '>'.
+fn xml_dt_entity(sb, p, endp) {
+    let base = lq(sb + BASE_OFF);
+    let r12 = xml_skip_ws(p + 8, endp);
+    if r12 >= endp {
+        xml_set_error(sb, 1, r12);
+        return 0;
+    }
+    if lb(r12) == 37 {              # '%' parameter entity -> abort/skip
+        return xml_dt_skipgt(sb, r12, endp);
+    }
+    let r13 = xml_scan_name_end(r12, endp);
+    if r13 >= endp {
+        xml_set_error(sb, 1, r13);
+        return 0;
+    }
+    # A '>' right after the name (no value) -> abort/skip.
+    if lb(r13) == 62 {
+        return xml_dt_skipgt(sb, r13, endp);
+    }
+    let name_end = r13;
+    # skip ws after name
+    let r = xml_skip_ws(r13, endp);
+    if r >= endp {
+        xml_set_error(sb, 1, r);
+        return 0;
+    }
+    let qc = lb(r);
+    if qc != 34 {                   # '"'
+        if qc != 39 {               # 39 = '\''
+            return xml_dt_skipgt(sb, r, endp);
+        }
+    }
+    let vstart = r + 1;
+    let vend = xml_find_byte(vstart, endp, qc);
+    if vend < 0 {
+        xml_set_error(sb, 1, endp);
+        return 0;
+    }
+    # record if room
+    let n = lw(sb + ENT_N_OFF) & M32;
+    if n < XML_MAX_ENT {
+        sw((sb + ENT_NAME_OFF_OFF) + (n * 4), r12 - base);
+        sw((sb + ENT_NAME_LEN_OFF) + (n * 4), name_end - r12);
+        sw((sb + ENT_VAL_OFF_OFF) + (n * 4), vstart - base);
+        sw((sb + ENT_VAL_LEN_OFF) + (n * 4), vend - vstart);
+        sw(sb + ENT_N_OFF, n + 1);
+    }
+    return xml_dt_skipgt(sb, vend, endp);
+}
+
+fn xml_skip_ws(p, endp) {
+    let q = p;
+    while q < endp {
+        if xml_is_ws(lb(q)) == 0 {
+            return q;
+        }
+        q = q + 1;
+    }
+    return endp;
+}
+
+# scan to first ws or '>' (the name terminator); returns that address.
+fn xml_scan_name_end(p, endp) {
+    let q = p;
+    while q < endp {
+        if lb(q) == 62 {            # '>'
+            return q;
+        }
+        if xml_is_ws(lb(q)) == 1 {
+            return q;
+        }
+        q = q + 1;
+    }
+    return endp;
+}
+
+# ---- '<' open tag ----------------------------------------------------------
+fn xml_parse_open(sb, p, endp) {
+    let base = lq(sb + BASE_OFF);
+    let tstart = p + 1;
+    # tag name end: '>' '/' or whitespace
+    let tend = xml_scan_tag_name_end(tstart, endp);
+    if tend >= endp {
+        xml_set_error(sb, 1, tend);
+        return 0;
+    }
+    if tend == tstart {
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
+    # find '>'
+    let gt = xml_find_byte(tend, endp, 62);
+    if gt < 0 {
+        xml_set_error(sb, 1, endp);
+        return 0;
+    }
+    let selfclose = 0;
+    if gt > p {
+        if lb(gt - 1) == 47 {       # '/'
+            selfclose = 1;
+        }
+    }
+    let n = lq(sb + NODE_N_OFF);
+    if n >= XML_MAX_NODES {
+        xml_set_error(sb, 5, p);    # arena
+        return 0;
+    }
+    let idx = n;
+    sq(sb + NODE_N_OFF, n + 1);
+    let np = xml_node_addr(sb, idx);
+    sw(np + N_TAG_OFF, tstart - base);
+    sw(np + N_TAG_LEN, tend - tstart);
+    sw(np + N_CHILD, XML_NIL);
+    sw(np + N_SIB, XML_NIL);
+    sw(np + N_TAG_END, gt - base);
+    let cend = (gt - base) + 1;
+    sw(np + N_CEND, cend);
+    sw(np + N_PEND, cend);
+    # parent = top of stack or NIL
+    let par = XML_NIL;
+    let sn = lw(sb + STACK_N_OFF) & M32;
+    if sn != 0 {
+        par = xml_ld32((sb + STACK_OFF) + ((sn - 1) * 4));
+    }
+    sw(np + N_PARENT, par);
+    if xml_link_node(sb, idx, par) == 9 {
+        xml_set_error(sb, 9, p);    # multi-root
+        return 0;
+    }
+    if selfclose == 0 {
+        if sn >= XML_MAX_DEPTH {
+            xml_set_error(sb, 5, p);
+            return 0;
+        }
+        sw((sb + STACK_OFF) + (sn * 4), idx);
+        sw(sb + STACK_N_OFF, sn + 1);
+    }
+    return gt + 1;
+}
+
+fn xml_scan_tag_name_end(p, endp) {
+    let q = p;
+    while q < endp {
+        let c = lb(q);
+        if c == 62 { return q; }    # '>'
+        if c == 47 { return q; }    # '/'
+        if c == 32 { return q; }
+        if c == 9  { return q; }
+        if c == 10 { return q; }
+        if c == 13 { return q; }
+        q = q + 1;
+    }
+    return endp;
+}
+
+# ---- '</' close tag --------------------------------------------------------
+fn xml_parse_close(sb, p, endp) {
+    let base = lq(sb + BASE_OFF);
+    let nstart = p + 2;
+    let nend = xml_find_byte(nstart, endp, 62);   # '>'
+    if nend < 0 {
+        xml_set_error(sb, 1, endp);
+        return 0;
+    }
+    let sn = lw(sb + STACK_N_OFF) & M32;
+    if sn == 0 {
+        xml_set_error(sb, 4, p);    # mismatch
+        return 0;
+    }
+    let top = xml_ld32((sb + STACK_OFF) + ((sn - 1) * 4));
+    sw(sb + STACK_N_OFF, sn - 1);
+    let np = xml_node_addr(sb, top);
+    let tlen = xml_ld32(np + N_TAG_LEN);
+    let clen = nend - nstart;
+    if tlen != clen {
+        xml_set_error(sb, 4, p);
+        return 0;
+    }
+    if xml_name_eq_off(sb, xml_ld32(np + N_TAG_OFF), nstart - base, tlen) == 0 {
+        xml_set_error(sb, 4, p);
+        return 0;
+    }
+    sw(np + N_CEND, p - base);
+    sw(np + N_PEND, (nend + 1) - base);
+    return nend + 1;
+}
+
+# ============================================================================
+# xml_text_runs - number of text runs in an element's mixed content.
+# ============================================================================
+fn xml_text_runs(rdi node, r15d slot) preserves(rsi, rdi, r8, r9, r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let np = xml_node_addr(sb, node);
+    let cstart = xml_ld32(np + N_TAG_END) + 1;
+    let cendv = xml_ld32(np + N_CEND);
+    if cendv <= cstart {
+        return 0;
+    }
+    let child = lw(np + N_CHILD);
+    let count = 1;
+    while child != XML_NIL {
+        let cp = xml_node_addr(sb, child & M32);
+        child = lw(cp + N_SIB);
+        count = count + 1;
+    }
+    return count;
+}
+
+# ============================================================================
+# xml_text_run - copy the Nth text run of an element's mixed content.
+#   rdi=node, esi=run index, rcx=out, r8=max. rax=bytes copied, -1 if bad.
+# ============================================================================
+fn xml_text_run(rdi node, esi run, rcx out, r8 max, r15d slot) preserves(r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let np = xml_node_addr(sb, node);
+    let cstart = xml_ld32(np + N_TAG_END) + 1;     # content start offset
+    let cendv = xml_ld32(np + N_CEND);             # content end offset
+    if cendv <= cstart {
+        return -1;
+    }
+    let left = cstart;
+    let right = cendv;
+    let child = lw(np + N_CHILD);
+    let pos = 0;
+    let want_left = run - 1;
+    while child != XML_NIL {
+        let ci = child & M32;
+        let cp = xml_node_addr(sb, ci);
+        if pos == run {
+            right = xml_ld32(cp + N_TAG_OFF) - 1;  # '<' of child at run index
+        }
+        if pos == want_left {
+            left = xml_ld32(cp + N_PEND);          # end of preceding child
+        }
+        child = lw(cp + N_SIB);
+        pos = pos + 1;
+    }
+    if run > pos {
+        return -1;
+    }
+    let dlen = right - left;
+    if dlen < 0 {
+        return -1;
+    }
+    let base = lq(sb + BASE_OFF);
+    let src = base + left;
+    # unwrap a single CDATA section
+    if dlen >= 9 {
+        if xml_match_cdata_open(src, src + dlen) == 1 {
+            let inner = src + 9;
+            let ilen = dlen - 9;
+            let k = 0;
+            let found = 0;
+            while k < ilen {
+                if xml_match_cdata_close(inner + k, inner + ilen) == 1 {
+                    dlen = k;
+                    src = inner;
+                    found = 1;
+                    k = ilen;       # break
+                } else {
+                    k = k + 1;
+                }
+            }
+            if found == 0 {
+                # no closing ]]> within run: copy raw inner
+                src = inner;
+                dlen = ilen;
+            }
+        }
+    }
+    let cnt = dlen;
+    if max < dlen {
+        cnt = max;
+    }
+    let i = 0;
+    while i < cnt {
+        sb(out + i, lb(src + i));
+        i = i + 1;
+    }
+    return cnt;
+}
+
+# ============================================================================
+# xml_attr - look up attribute `name` on a node; copy its value into (out,omax).
+#   rdi=node, rsi=name, rdx=nlen, rcx=out, r8=omax. rax=bytes, -1 if missing.
+# ============================================================================
+fn xml_attr(rdi node, rsi name, rdx nlen, rcx out, r8 omax, r15d slot) preserves(r15) {
+    let sb = xml_slot_base(slot);
+    return xml_attr_at(sb, node, name, nlen, out, omax);
+}
+
+fn xml_attr_at(sb, node, name, nlen, out, omax) {
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let base = lq(sb + BASE_OFF);
+    let endp = lq(sb + END_OFF);
+    let np = xml_node_addr(sb, node);
+    let tagend = xml_ld32(np + N_TAG_END);
+    let cur = xml_ld32(np + N_TAG_OFF) + xml_ld32(np + N_TAG_LEN);   # byte offset
+    return xml_attr_scan(sb, name, nlen, out, omax, cur, tagend, base, endp);
+}
+
+# Iterative attribute scanner over the tag's attribute region [cur0, tagend).
+fn xml_attr_scan(sb, name, nlen, out, omax, cur0, tagend, base, endp) {
+    let cur = cur0;
+    while cur < tagend {
+        if xml_is_ws(lb(base + cur)) == 1 {
+            cur = cur + 1;
+        } else {
+            let ac = lb(base + cur);
+            if ac == 47 { return -1; }
+            if ac == 62 { return -1; }
+            let nstart = cur;
+            cur = xml_attr_name_end(base, cur, tagend);
+            if cur >= tagend { return -1; }
+            let aname_len = cur - nstart;
+            cur = xml_attr_skip_to_eq(base, cur, tagend);
+            if cur >= tagend { return -1; }
+            if lb(base + cur) != 61 { return -1; }
+            cur = cur + 1;
+            cur = xml_attr_skip_ws_off(base, cur, tagend);
+            if cur >= tagend { return -1; }
+            let qc = lb(base + cur);
+            if qc != 34 {
+                if qc != 39 { return -1; }
+            }
+            cur = cur + 1;
+            let vstart = cur;
+            let vend = -1;
+            while (base + cur) < endp {
+                if lb(base + cur) == qc {
+                    vend = cur;
+                    cur = endp + 1;  # break (cur becomes > anything)
+                } else {
+                    cur = cur + 1;
+                }
+            }
+            if vend < 0 { return -1; }
+            if xml_user_name_eq(sb, nstart, aname_len, name, nlen) == 1 {
+                return xml_copy_off(base, vstart, vend, out, omax);
+            }
+            cur = vend + 1;
+        }
+    }
+    return -1;
+}
+
+fn xml_attr_name_end(base, cur0, tagend) {
+    let cur = cur0;
+    while cur < tagend {
+        let c = lb(base + cur);
+        if c == 61 { return cur; }   # '='
+        if c == 32 { return cur; }
+        if c == 9  { return cur; }
+        cur = cur + 1;
+    }
+    return tagend;
+}
+
+fn xml_attr_skip_to_eq(base, cur0, tagend) {
+    let cur = cur0;
+    while cur < tagend {
+        let c = lb(base + cur);
+        if c == 61 { return cur; }   # '='
+        if c == 32 { cur = cur + 1; }
+        else { if c == 9 { cur = cur + 1; }
+        else { return tagend; } }    # anything else: malformed
+    }
+    return tagend;
+}
+
+fn xml_attr_skip_ws_off(base, cur0, tagend) {
+    let cur = cur0;
+    while cur < tagend {
+        let c = lb(base + cur);
+        if c == 32 { cur = cur + 1; }
+        else { if c == 9 { cur = cur + 1; }
+        else { return cur; } }
+    }
+    return tagend;
+}
+
+# copy bytes [vstart, vend) (offsets) into (out, omax). rax = bytes copied.
+fn xml_copy_off(base, vstart, vend, out, omax) {
+    let dlen = vend - vstart;
+    let cnt = dlen;
+    if omax < dlen {
+        cnt = omax;
+    }
+    let src = base + vstart;
+    let i = 0;
+    while i < cnt {
+        sb(out + i, lb(src + i));
+        i = i + 1;
+    }
+    return cnt;
+}
+
+# ============================================================================
+# xml_namespace - resolve a namespace prefix to its URI on a node or ancestor.
+#   rdi=node, rsi=prefix, rdx=plen (0 = default xmlns), rcx=out, r8=omax.
+# ============================================================================
+fn xml_namespace(rdi node, rsi prefix, rdx plen, rcx out, r8 omax, r15d slot) preserves(r15) {
+    let sb = xml_slot_base(slot);
+    return xml_namespace_at(sb, node, prefix, plen, out, omax);
+}
+
+fn xml_namespace_at(sb, node, prefix, plen, out, omax) {
+    let scr = sb + NS_SCRATCH_OFF;
+    sb(scr + 0, 120);   # 'x'
+    sb(scr + 1, 109);   # 'm'
+    sb(scr + 2, 108);   # 'l'
+    sb(scr + 3, 110);   # 'n'
+    sb(scr + 4, 115);   # 's'
+    let nlen = 5;
+    if plen != 0 {
+        sb(scr + 5, 58);   # ':'
+        nlen = 6;
+        let pc = plen;
+        if pc > 56 { pc = 56; }
+        let i = 0;
+        while i < pc {
+            sb(scr + nlen, lb(prefix + i));
+            nlen = nlen + 1;
+            i = i + 1;
+        }
+    }
+    let cur = node;
+    while cur >= 0 {
+        let r = xml_attr_at(sb, cur, scr, nlen, out, omax);
+        if r >= 0 {
+            return r;
+        }
+        cur = xml_parent_at(sb, cur);
+    }
+    return -1;
+}
+
+# ============================================================================
+# xml_node_namespace - resolve the URI of a node's own tag prefix.
+# ============================================================================
+fn xml_node_namespace(rdi node, rcx out, r8 omax, r15d slot) preserves(r15) {
+    let sb = xml_slot_base(slot);
+    if xml_chk_node(sb, node) == 0 {
+        return -1;
+    }
+    let np = xml_node_addr(sb, node);
+    let toff = xml_ld32(np + N_TAG_OFF);
+    let tlen = xml_ld32(np + N_TAG_LEN);
+    let base = lq(sb + BASE_OFF);
+    let tag = base + toff;
+    let i = 0;
+    let colon = -1;
+    while i < tlen {
+        if lb(tag + i) == 58 {      # ':'
+            colon = i;
+            i = tlen;               # break
+        } else {
+            i = i + 1;
+        }
+    }
+    if colon < 0 {
+        return xml_namespace_at(sb, node, 0, 0, out, omax);
+    }
+    return xml_namespace_at(sb, node, tag, colon, out, omax);
+}
+
+# ============================================================================
+# xml_entity_value - copy the replacement text of an internal-DTD entity.
+#   rsi=name, rdx=nlen, rcx=out, r8=omax. rax=bytes, -1 if no such entity.
+# ============================================================================
+fn xml_entity_value(rsi name, rdx nlen, rcx out, r8 omax, r15d slot) preserves(r15) {
+    let sb = xml_slot_base(slot);
+    let n = lw(sb + ENT_N_OFF) & M32;
+    let base = lq(sb + BASE_OFF);
+    let i = 0;
+    while i < n {
+        let elen = xml_ld32((sb + ENT_NAME_LEN_OFF) + (i * 4));
+        if elen == nlen {
+            let eoff = xml_ld32((sb + ENT_NAME_OFF_OFF) + (i * 4));
+            let src = base + eoff;
+            let k = 0;
+            let eq = 1;
+            while k < nlen {
+                if lb(src + k) != lb(name + k) {
+                    eq = 0;
+                    k = nlen;       # break
+                } else {
+                    k = k + 1;
+                }
+            }
+            if eq == 1 {
+                let vlen = xml_ld32((sb + ENT_VAL_LEN_OFF) + (i * 4));
+                let voff = xml_ld32((sb + ENT_VAL_OFF_OFF) + (i * 4));
+                return xml_copy_off(base, voff, voff + vlen, out, omax);
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+# ============================================================================
+# xml_self_test - runs embedded fixtures, prints "[XML] PASS=N FAIL=M" via
+# debug_print + COM1. Zero-asm port of xml_selftest.inc. Safe to call once at
+# boot (debug builds only; gated by `cfg !"RELEASE_BUILD"` at the call site).
+# ============================================================================
+
+# Embedded fixtures (byte arrays; lengths exact, no NUL).
+data xt_f1: 33 = [60,114,111,111,116,62,60,99,104,105,108,100,62,104,101,108,108,111,60,47,99,104,105,108,100,62,60,47,114,111,111,116,62];
+data xt_f4: 37 = [60,97,62,60,98,62,60,99,62,60,100,62,100,101,101,112,60,47,100,62,60,47,99,62,60,47,98,62,60,98,50,47,62,60,47,97,62];
+data xt_f5: 48 = [60,115,118,103,58,112,97,116,104,32,115,118,103,58,102,105,108,108,61,34,114,101,100,34,62,60,115,118,103,58,99,104,105,108,100,47,62,60,47,115,118,103,58,112,97,116,104,62];
+data xt_f6: 27 = [60,33,68,79,67,84,89,80,69,32,100,111,99,62,60,100,111,99,62,111,107,60,47,100,111,99,62];
+data xt_f7: 66 = [60,33,68,79,67,84,89,80,69,32,100,111,99,32,91,60,33,69,78,84,73,84,89,32,98,114,97,110,100,32,34,71,114,105,116,34,62,93,62,10,60,100,111,99,62,77,97,100,101,32,98,121,32,38,98,114,97,110,100,59,60,47,100,111,99,62];
+data xt_f8: 22 = [60,100,111,99,62,97,60,98,47,62,99,60,98,47,62,100,60,47,100,111,99,62];
+data xt_b1: 14 = [60,97,62,38,98,111,103,117,115,59,60,47,97,62];
+data xt_b2: 8 = [60,97,47,62,60,98,47,62];
+data xt_b3: 10 = [60,97,62,60,98,62,60,47,97,62];
+data xt_b4: 6 = [60,97,62,60,98,62];
+data xt_b5: 11 = [60,97,62,60,33,45,45,32,98,97,100];
+data xt_b6: 12 = [60,97,62,38,35,122,122,59,60,47,97,62];
+data xt_b7: 18 = [60,97,62,38,117,110,100,101,102,105,110,101,100,59,60,47,97,62];
+
+data xt_msg: 32;     # "[XML] PASS=NN FAIL=NN\0" scratch
+
+# Run one fixture. Returns 1 (pass) / 0 (fail). expect_ok=1 means parse must
+# succeed and root != -1; expect_ok=0 means parse must fail, and if expect_err
+# != 0 the error code must match.
+fn xml_st_case(buf, len, expect_ok, expect_err) {
+    # Self-test always exercises slot 0's arena directly via the plain-arg cores
+    # (the public regabi entries read r15, which is not a fixed value at boot).
+    let sb = &xml_pool;
+    xml_free_at(sb);
+    let r = xml_parse_core(buf, len, sb);
+    if expect_ok != 0 {
+        if r != 1 { return 0; }
+        if xml_root_at(sb) < 0 { return 0; }
+        return 1;
+    }
+    if r != 0 { return 0; }     # should NOT have succeeded
+    if expect_err == 0 { return 1; }
+    if (lw(sb + ERR_OFF) & M32) != expect_err { return 0; }
+    return 1;
+}
+
+# Append the decimal of `v` (0..99) into xt_msg at offset `off`. Returns the
+# next write offset.
+fn xml_st_dec(off, v) {
+    if v >= 10 {
+        sb(&xt_msg + off, 48 + (v / 10));
+        sb(&xt_msg + off + 1, 48 + (v % 10));
+        return off + 2;
+    }
+    sb(&xt_msg + off, 48 + v);
+    return off + 1;
+}
+
+fn xml_st_emit_serial(off) {
+    let i = 0;
+    while i < off {
+        call serial_putc(rdi: lb(&xt_msg + i));
+        i = i + 1;
+    }
+    call serial_putc(rdi: 13);
+    call serial_putc(rdi: 10);
+    return 0;
+}
+
+fn xml_self_test() preserves(all) {
+    let pass = 0;
+    let fail = 0;
+    # positive fixtures
+    pass = pass + xml_st_case(&xt_f1, 33, 1, 0);
+    pass = pass + xml_st_case(&xt_f4, 37, 1, 0);
+    pass = pass + xml_st_case(&xt_f5, 48, 1, 0);
+    pass = pass + xml_st_case(&xt_f6, 27, 1, 0);
+    pass = pass + xml_st_case(&xt_f7, 66, 1, 0);
+    pass = pass + xml_st_case(&xt_f8, 22, 1, 0);
+    # negative fixtures
+    pass = pass + xml_st_case(&xt_b1, 14, 0, 8);
+    pass = pass + xml_st_case(&xt_b2, 8, 0, 9);
+    pass = pass + xml_st_case(&xt_b3, 10, 0, 4);
+    pass = pass + xml_st_case(&xt_b4, 6, 0, 0);
+    pass = pass + xml_st_case(&xt_b5, 11, 0, 0);
+    pass = pass + xml_st_case(&xt_b6, 12, 0, 8);
+    pass = pass + xml_st_case(&xt_b7, 18, 0, 8);
+    fail = 13 - pass;
+
+    # build "[XML] PASS=" prefix
+    sb(&xt_msg + 0, 91);   # '['
+    sb(&xt_msg + 1, 88);   # 'X'
+    sb(&xt_msg + 2, 77);   # 'M'
+    sb(&xt_msg + 3, 76);   # 'L'
+    sb(&xt_msg + 4, 93);   # ']'
+    sb(&xt_msg + 5, 32);   # ' '
+    sb(&xt_msg + 6, 80);   # 'P'
+    sb(&xt_msg + 7, 65);   # 'A'
+    sb(&xt_msg + 8, 83);   # 'S'
+    sb(&xt_msg + 9, 83);   # 'S'
+    sb(&xt_msg + 10, 61);  # '='
+    let off = xml_st_dec(11, pass);
+    sb(&xt_msg + off, 32);     # ' '
+    sb(&xt_msg + off + 1, 70); # 'F'
+    sb(&xt_msg + off + 2, 65); # 'A'
+    sb(&xt_msg + off + 3, 73); # 'I'
+    sb(&xt_msg + off + 4, 76); # 'L'
+    sb(&xt_msg + off + 5, 61); # '='
+    off = off + 6;
+    off = xml_st_dec(off, fail);
+    sb(&xt_msg + off, 0);      # NUL for debug_print
+    call debug_print(rsi: &xt_msg);
+    xml_st_emit_serial(off);
+    return 0;
+}

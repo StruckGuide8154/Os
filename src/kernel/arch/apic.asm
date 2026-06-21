@@ -8,6 +8,7 @@ bits 64
 %include "arch_regs.inc"
 
 section .data
+global lapic_base               ; isr_ap_tick (isr.asm) EOIs through this base
 lapic_base dq LAPIC_DEFAULT_BASE
 
 section .text
@@ -31,7 +32,9 @@ FN_BEGIN apic_init, 0, 0, FN_RET_SCALAR
     mov ecx, 0x1B
     rdmsr                   ; EAX = low 32 bits of APIC_BASE
     
-    ; Debug: Print the MSR value bits 11:8 (bit 10 is x2apic)
+%ifndef RELEASE_BUILD
+    ; Debug: Print the MSR value bits 11:8 (bit 10 is x2apic). Raw OUT, so the
+    ; whole block (not just the SER glyphs) must be release-gated.
     push rax
     push rdx
     SER 'M'
@@ -46,6 +49,7 @@ FN_BEGIN apic_init, 0, 0, FN_RET_SCALAR
     out dx, al           ; Output bit pattern (e.g. '8'=xAPIC, 'L'=x2APIC?)
     pop rdx
     pop rax
+%endif
 
     ; Ensure APIC is enabled (bit 11) and x2APIC is disabled (bit 10) for now
     ; to keep the MMIO-based driver working.
@@ -124,6 +128,81 @@ apic_wake_workers:
     mov dword [rdi + 0x300], LAPIC_ICR_WAKE_WORKERS ; all-excluding-self, assert, vector 49
     pop rdi
     pop rcx
+    pop rax
+    ret
+
+; --- Tier-2 liveness watchdog: cross-core NMI + per-AP self-wake -------------
+; (feedback_no_freeze_invariant / kernel_liveness_watchdog). Policy is in
+; watchdog.ghl; these are the irreducible LAPIC/MMIO primitives it calls.
+
+; wd_send_nmi_bsp() - deliver an NMI IPI to the BSP (physical destination). An
+; idle AP calls this when the BSP heartbeat has been frozen past the deadline;
+; NMI is non-maskable so it lands even while the BSP holds cli. The BSP apic id
+; is madt_lapic_ids[0] (the boot processor is always enumerated first).
+global wd_send_nmi_bsp
+wd_send_nmi_bsp:
+    push rax
+    push rcx
+    push rdi
+    mov rdi, [lapic_base]
+    mov ecx, 100000                  ; bounded wait for any pending IPI to drain
+.wd_nmi_wait:
+    mov eax, [rdi + 0x300]
+    test eax, 0x1000                 ; delivery status pending?
+    jz .wd_nmi_send
+    pause
+    loop .wd_nmi_wait
+.wd_nmi_send:
+    movzx eax, byte [madt_lapic_ids] ; BSP apic id
+    shl eax, 24
+    mov [rdi + 0x310], eax           ; ICR high = dest << 24
+    mov dword [rdi + 0x300], LAPIC_ICR_NMI_PHYS
+    pop rdi
+    pop rcx
+    pop rax
+    ret
+
+; wd_core_index() -> eax dense core index (0 = BSP). Maps this CPU's LAPIC id to
+; its slot in madt_lapic_ids; on a miss (shouldn't happen) returns 0. Used by the
+; bounded-lock registry to track per-core lock ownership without a per-CPU base.
+global wd_core_index
+wd_core_index:
+    push rcx
+    push rdx
+    mov rdx, [lapic_base]
+    mov edx, [rdx + 0x20]            ; LAPIC ID register
+    shr edx, 24                      ; this core's apic id
+    xor ecx, ecx
+.wd_ci_scan:
+    cmp ecx, [madt_enabled_cpu_count]
+    jae .wd_ci_miss
+    movzx eax, byte [madt_lapic_ids + rcx]
+    cmp eax, edx
+    je .wd_ci_found
+    inc ecx
+    jmp .wd_ci_scan
+.wd_ci_miss:
+    xor ecx, ecx                     ; default to BSP slot
+.wd_ci_found:
+    mov eax, ecx
+    pop rdx
+    pop rcx
+    ret
+
+; wd_arm_ap_tick() - arm a one-shot LAPIC timer (vector AP_WD_TICK_VEC) so this
+; idle AP self-wakes from HLT at a bounded cadence and re-runs kwd_ap_watch.
+; Divide-by-128; a fixed initial count gives a sub-second period on any plausible
+; bus clock - far tighter than the ~5 s stall deadline, so the exact period is
+; non-critical. One-shot: the worker loop re-arms before each HLT.
+global wd_arm_ap_tick
+wd_arm_ap_tick:
+    push rax
+    push rdi
+    mov rdi, [lapic_base]
+    mov dword [rdi + 0x3E0], 0x0A    ; divide configuration = /128
+    mov dword [rdi + 0x320], AP_WD_TICK_VEC ; LVT timer: one-shot, unmasked
+    mov dword [rdi + 0x380], 0x00200000     ; initial count -> one-shot fire
+    pop rdi
     pop rax
     ret
 

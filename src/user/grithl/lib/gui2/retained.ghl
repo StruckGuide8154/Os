@@ -1,0 +1,128 @@
+# ============================================================================
+# GritHL GUI v2 - retained.ghl
+# Retained-mode node tree + content-hash diff: only repaint what changed.
+# ============================================================================
+
+use core
+
+# Node arena. Fixed-size nodes (layout.ghl::N_SIZE = 128 bytes) bump-allocated
+# from a compiler-managed scratch arena (replaces magic VAs NODE_POOL=
+# 0x00B00000 / NODE_HEAD=0x00AFFFF0).
+const NODE_CAP   = 2048
+buffer node_pool[262144];           # NODE_CAP * 128
+buffer node_head[16];               # bump cursor (node index), quad 0
+
+# Extra node field layered on top of the layout offsets.
+const N_HASH     = 120              # content hash from the last stamp
+
+# Visual data lives in a parallel band, indexed by node id (replaces magic
+# VA NVZ_BAND = 0x00A80000).
+const NVZ_COLOR  = 0
+const NVZ_FG     = 8
+const NVZ_BG     = 16
+const NVZ_STR    = 24
+buffer nvz_band[65536];             # NODE_CAP * 32
+
+extern dmg_node;
+extern cmd_rect;
+extern atlas_draw_text;
+
+fn node_reset() {
+    sq(node_head + 0, 0);
+}
+
+# Allocate a node, zeroed. Returns its base address.
+fn node_new(kind) {
+    let n = lq(node_head + 0);
+    if n >= NODE_CAP { return 0; }
+    sq(node_head + 0, n + 1);
+    let p = node_pool + n * 128;
+    let q = 0;
+    while q < 16 { sq(p + q * 8, 0); q = q + 1; }
+    sq(p + N_KIND, kind);
+    return p;
+}
+
+fn node_id(node) {
+    return (node - node_pool) / 128;
+}
+
+fn vz(node) {
+    return nvz_band + node_id(node) * 32;
+}
+
+# Link `child` as the last child of `parent`.
+fn node_add(parent, child) {
+    let c = lq(parent + N_CHILD);
+    if c == 0 { sq(parent + N_CHILD, child); return; }
+    while lq(c + N_NEXT) != 0 { c = lq(c + N_NEXT); }
+    sq(c + N_NEXT, child);
+}
+
+# --- Content hashing. ------------------------------------------------------
+fn hash_mix(h, v) {
+    h = h ^ v;
+    h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF;
+    return h;
+}
+
+fn node_content_hash(node) {
+    let h = 1469598103934665603;
+    h = hash_mix(h, lq(node + N_KIND));
+    h = hash_mix(h, lq(node + N_X));
+    h = hash_mix(h, lq(node + N_Y));
+    h = hash_mix(h, lq(node + N_W));
+    h = hash_mix(h, lq(node + N_H));
+    let v = vz(node);
+    h = hash_mix(h, lq(v + NVZ_COLOR));
+    h = hash_mix(h, lq(v + NVZ_FG));
+    h = hash_mix(h, lq(v + NVZ_STR));
+    return h;
+}
+
+# --- Stamps: set a node's visual content for this frame. -------------------
+fn stamp_fill(node, color) {
+    let v = vz(node);
+    sq(v + NVZ_COLOR, color);
+}
+
+fn stamp_text(node, str_ptr, fg, bg) {
+    let v = vz(node);
+    sq(v + NVZ_STR, str_ptr);
+    sq(v + NVZ_FG, fg);
+    sq(v + NVZ_BG, bg);
+}
+
+# --- Emit one node's primitives into the batch (called only when dirty). ---
+fn node_emit(node) {
+    let v = vz(node);
+    let color = lq(v + NVZ_COLOR);
+    if color != 0 {
+        cmd_rect(lq(node + N_X), lq(node + N_Y), lq(node + N_W), lq(node + N_H), color);
+    }
+    let str_ptr = lq(v + NVZ_STR);
+    if str_ptr != 0 {
+        atlas_draw_text(lq(node + N_X) + 4, lq(node + N_Y) + 3,
+                        str_ptr, lq(v + NVZ_FG), lq(v + NVZ_BG));
+    }
+}
+
+# --- The frame diff. -------------------------------------------------------
+fn diff_node(node) {
+    if node == 0 { return; }
+    let h = node_content_hash(node);
+    if h != lq(node + N_HASH) {
+        sq(node + N_HASH, h);
+        dmg_node(lq(node + N_X), lq(node + N_Y), lq(node + N_W), lq(node + N_H));
+        node_emit(node);
+    }
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        diff_node(c);
+        c = lq(c + N_NEXT);
+    }
+}
+
+fn node_dirty(node) {
+    sq(node + N_HASH, 0);
+}

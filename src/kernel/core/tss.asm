@@ -38,6 +38,19 @@ tss_init:
     lea rax, [rel tss_rsp0_stack_end]
     mov [rel tss64_rsp0], rax
 
+    ; Debug instrumentation: dedicated IST stacks for the abort-class faults so a
+    ; kernel stack overflow lands on a clean stack and the handler can LOG it
+    ; (KREC/register dump) instead of the CPU re-faulting on the exhausted stack
+    ; -> #DF (SP=0) -> silent triple-fault. IST1=#DF, IST2=#PF, IST3=#GP. The
+    ; matching IDT gates get these IST indices in idt_init. TSS IST fields are at
+    ; tss64 + 36/44/52 (after the 4-byte resv, RSP0..2, and an 8-byte resv).
+    lea rax, [rel ist1_df_stack_end]
+    mov [rel tss64 + 36], rax              ; IST1
+    lea rax, [rel ist2_pf_stack_end]
+    mov [rel tss64 + 44], rax              ; IST2
+    lea rax, [rel ist3_gp_stack_end]
+    mov [rel tss64 + 52], rax              ; IST3
+
     ; Get TSS address
     lea rax, [tss64]
     
@@ -95,6 +108,24 @@ tss_rsp0_stack:
     resb 16384
 tss_rsp0_stack_end:
 
+; Dedicated IST stacks for the BSP's abort-class fault gates (#DF/#PF/#GP).
+alignb 16
+ist1_df_stack:
+    resb 16384
+ist1_df_stack_end:
+ist2_pf_stack:
+    resb 16384
+ist2_pf_stack_end:
+ist3_gp_stack:
+    resb 16384
+ist3_gp_stack_end:
+
+; Per-AP IST stacks: 3 * 16 KB per AP (the app callback / its syscalls can run
+; on an AP, so an AP's syscall-stack overflow must also land on a clean stack).
+alignb 16
+ap_ist_stacks:
+    resb 16384 * 3 * (SMP_MAX_CORES - 1 + 1)
+
 alignb 16
 ; Per-AP TSS structures. Each is 104 bytes per the SDM; we round to 112 for
 ; alignment. Slot N is used by AP with core index (N + 1) - slot 0 here is
@@ -151,6 +182,19 @@ tss_init_for_core:
 
     ; Fill TSS.RSP0 at offset 4 of the TSS.
     mov [rbx + 4], rsi
+
+    ; Dedicated IST stacks for this AP (IST1=#DF, IST2=#PF, IST3=#GP), mirroring
+    ; the BSP. Base for AP slot ecx = ap_ist_stacks + ecx * (3 * 16384).
+    mov eax, ecx
+    imul rax, 16384 * 3
+    lea rdx, [rel ap_ist_stacks]
+    add rdx, rax                        ; rdx = this AP's IST block base
+    lea rax, [rdx + 16384]              ; IST1 top (#DF)
+    mov [rbx + 36], rax
+    lea rax, [rdx + 16384 * 2]          ; IST2 top (#PF)
+    mov [rbx + 44], rax
+    lea rax, [rdx + 16384 * 3]          ; IST3 top (#GP)
+    mov [rbx + 52], rax
 
     ; I/O-map base outside the TSS = no I/O permission map.
     mov word [rbx + 102], 104

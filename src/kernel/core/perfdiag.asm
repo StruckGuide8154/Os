@@ -166,6 +166,61 @@ perfdiag_print_memory:
     mov rdi, [rel l3_app_arena_base_v]
     call ser_print_hex64
     call serial_crlf
+%ifndef RELEASE_BUILD
+    lea rdi, [rel msg_ramdump]
+    call serial_puts
+    mov rdi, SYSTEM_RESERVED_END
+    call ser_print_hex64
+    SER ' '
+    lea rdi, [rel msg_bb]
+    call serial_puts
+    mov rdi, BACK_BUFFER_ADDR
+    call ser_print_hex64
+    SER '+'
+    mov rdi, BOOT_BACK_BUFFER_SIZE
+    call ser_print_hex64
+    SER ' '
+    lea rdi, [rel msg_slots]
+    call serial_puts
+    mov rdi, APP_DATA_ADDR
+    call ser_print_hex64
+    SER '+'
+    mov rdi, APP_SLOT_SIZE * APP_SLOT_COUNT
+    call ser_print_hex64
+    call serial_crlf
+
+    lea rdi, [rel msg_ramdump2]
+    call serial_puts
+    mov rdi, WALLPAPER_CACHE0_ADDR
+    call ser_print_hex64
+    SER '/'
+    mov rdi, WALLPAPER_CACHE1_ADDR
+    call ser_print_hex64
+    SER '/'
+    mov rdi, WALLPAPER_CACHE2_ADDR
+    call ser_print_hex64
+    SER '+'
+    mov rdi, WALLPAPER_CACHE_BYTES
+    call ser_print_hex64
+    call serial_crlf
+
+    lea rdi, [rel msg_ramdump3]
+    call serial_puts
+    mov rdi, BACK_BUFFER_SAVE_ADDR
+    call ser_print_hex64
+    SER '+'
+    mov rdi, BOOT_BACK_BUFFER_SIZE
+    call ser_print_hex64
+    SER ' '
+    lea rdi, [rel msg_bootanim]
+    call serial_puts
+    mov rdi, BOOT_ANIM_BUF_ADDR
+    call ser_print_hex64
+    SER '+'
+    mov rdi, BOOT_ANIM_BUF_SIZE
+    call ser_print_hex64
+    call serial_crlf
+%endif
     pop rdi
     ret
 
@@ -463,6 +518,12 @@ serial_crlf:
     ret
 
 serial_putc:
+%ifdef RELEASE_BUILD
+    ; Release images carry no debug serial. This is the COM1 byte leaf the
+    ; perfdiag profile (CPU:/CACHE:/MEMCAP:/SMP:), fbperf, and display-shape
+    ; dumps funnel through; no-op it so none of that reaches the wire.
+    ret
+%endif
     push rdx
     push rax
     mov dx, 0x3F8 + 5
@@ -495,6 +556,12 @@ msg_freq:   db 'FREQ:', 0
 msg_memcap: db 'MEMCAP:', 0
 msg_gui:    db 'GUI:', 0
 msg_app:    db 'APP:', 0
+msg_ramdump: db 'RAMDUMP:END:', 0
+msg_bb:     db 'BB:', 0
+msg_slots:  db 'SLOTS:', 0
+msg_ramdump2: db 'RAMDUMP:WALL:', 0
+msg_ramdump3: db 'RAMDUMP:SAVE:', 0
+msg_bootanim: db 'BOOTANIM:', 0
 msg_smp:    db 'SMP:', 0
 msg_gpu780m: db 'GPU780M:', 0
 msg_gpu_count: db 'DISP:', 0

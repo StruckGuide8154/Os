@@ -17,6 +17,8 @@
     call fbperf_get
     jmp .si_store
 .si_check_sec:
+    cmp rdi, 241
+    je .si_ram_dump
     ; Selectors 200..240 reserved for the security-feature status inventory
     ; (security_status.asm) consumed by the Settings Security tab.
     cmp rdi, 240
@@ -25,6 +27,14 @@
     call security_status_query
     jmp .si_store
 .si_legacy:
+    ; Selectors 50..57 = per-process priority-manager fields (read-only). rsi =
+    ; process index (0..MAX_PROCESSES-1). Task Manager polls these to render the
+    ; priority/CPU columns. Fail-soft: out-of-range index returns 0.
+    cmp rdi, 50
+    jb .si_legacy_classic
+    cmp rdi, 57
+    jbe .si_proc
+.si_legacy_classic:
     cmp rdi, 0
     je .si_fps
     cmp rdi, 1
@@ -39,6 +49,8 @@
     je .si_core_util
     cmp rdi, 6
     je .si_core_mhz
+    cmp rdi, 7
+    je .si_ram_managed
     cmp rdi, 16
     je .si_gpu_provider
     cmp rdi, 17
@@ -72,6 +84,10 @@
     jnz .si_ram_max_have
     mov rax, [boot_free_pages]
 .si_ram_max_have:
+    shl rax, 2
+    jmp .si_store
+.si_ram_managed:
+    mov rax, [boot_free_pages]
     shl rax, 2
     jmp .si_store
 .si_cpu_mhz:
@@ -128,7 +144,102 @@
 .si_gpu_active:
     movzx eax, byte [amd_display_active]
     jmp .si_store
+.si_proc:
+    ; rsi = process index. Bounds-check, then map (selector-50) to a PCB field.
+    xor eax, eax
+    cmp rsi, MAX_PROCESSES
+    jae .si_store
+    mov rax, rsi
+    imul rax, rax, 512
+    add rax, PROCESS_POOL            ; rax = PCB pointer
+    sub edi, 50                      ; edi = field index 0..7
+    cmp edi, 0
+    je .sip_prio
+    cmp edi, 1
+    je .sip_base
+    cmp edi, 2
+    je .sip_cpu
+    cmp edi, 3
+    je .sip_state
+    cmp edi, 4
+    je .sip_strikes
+    cmp edi, 5
+    je .sip_winid
+    cmp edi, 6
+    je .sip_slot
+    cmp edi, 7
+    je .sip_id
+    xor eax, eax
+    jmp .si_store
+.sip_prio:
+    mov eax, [rax + process_t.priority]
+    jmp .si_store
+.sip_base:
+    mov eax, [rax + process_t.base_priority]
+    jmp .si_store
+.sip_cpu:
+    mov rax, [rax + process_t.cpu_time_cycles]
+    jmp .si_store
+.sip_state:
+    mov eax, [rax + process_t.state]
+    jmp .si_store
+.sip_strikes:
+    mov eax, [rax + process_t.strikes]
+    jmp .si_store
+.sip_winid:
+    mov eax, [rax + process_t.win_id]
+    jmp .si_store
+.sip_slot:
+    mov eax, [rax + process_t.slot]
+    jmp .si_store
+.sip_id:
+    mov eax, [rax + process_t.id]
+    jmp .si_store
+.si_ram_dump:
+%ifndef RELEASE_BUILD
+    extern perfdiag_print_memory
+    call perfdiag_print_memory
+%endif
+    xor eax, eax
+    jmp .si_store
+
 .si_store:
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+
+.sc_proc_setprio:
+    ; SYS_PROC_SETPRIO(process_index, new_priority). Priority manager write path
+    ; (cap-gated CAP_PROC; only Task Manager's manifest grants it). Clamps the
+    ; requested priority to [PRIO_IDLE, PRIO_HIGH] - PRIO_REALTIME stays kernel-
+    ; reserved and is unreachable from ring 3. Sets both effective and base
+    ; priority and clears the strike count (an explicit retune is a fresh start).
+    ; rdi = process index, rsi = priority. Returns 0 on success, -1 on bad index
+    ; or an EMPTY slot.
+    mov rax, -1
+    cmp rdi, MAX_PROCESSES
+    jae .sps_store
+    mov edx, esi                      ; requested priority (signed clamp below)
+    cmp edx, PRIO_IDLE
+    jge .sps_lo_ok
+    mov edx, PRIO_IDLE
+.sps_lo_ok:
+    cmp edx, PRIO_HIGH
+    jle .sps_hi_ok
+    mov edx, PRIO_HIGH
+.sps_hi_ok:
+    mov rax, rdi
+    imul rax, rax, 512
+    add rax, PROCESS_POOL             ; rax = PCB pointer
+    cmp dword [rax + process_t.state], 0   ; EMPTY slot -> reject
+    je .sps_fail
+    mov [rax + process_t.priority], edx
+    mov [rax + process_t.base_priority], edx
+    mov dword [rax + process_t.strikes], 0
+    xor eax, eax
+    jmp .sps_store
+.sps_fail:
+    mov rax, -1
+.sps_store:
     mov [rsp + ALL_RAX], rax
     jmp .done
 
@@ -330,15 +441,6 @@
 ; FAT16 metadata) and copies them out by value, so ring 3 never observes
 ; a kernel address.
 .sc_fs_entry_info:
-    push rdi
-    push rdx
-    SER 'F'
-    SER 'I'
-    call ser_print_hex64
-    SER 13
-    SER 10
-    pop rdx
-    pop rdi
     cmp rdx, FS_ENTRY_INFO_SIZE
     jb .sc_fs_entry_info_reject
     push rdi                              ; save handle
@@ -380,10 +482,6 @@
     mov [rsp + ALL_RAX], rax
     jmp .done
 .sc_fs_entry_info_reject:
-    SER 'F'
-    SER 'X'
-    SER 13
-    SER 10
     mov qword [rsp + ALL_RAX], -1
     jmp .done
 

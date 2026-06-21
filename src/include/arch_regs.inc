@@ -45,6 +45,12 @@ CR0_PG                  equ 0x80000000
 ; All-excluding-self shorthand (bits 19:18=11b), Fixed delivery, level=assert,
 ; vector 0x31 (49) - used to wake idle AP workqueue workers.
 LAPIC_ICR_WAKE_WORKERS  equ 0x000C4031
+; NMI IPI, physical destination (ICR high = dest apic id << 24), delivery mode
+; NMI (100b @ bits 10:8 = 0x400), level=assert (0x4000). Used by the Tier-2
+; cross-core liveness watchdog to punch through a cli'd BSP. SDM Vol.3 §10.6.1.
+LAPIC_ICR_NMI_PHYS      equ 0x00004400
+; Per-AP one-shot LAPIC-timer self-wake vector (idle-AP heartbeat watcher).
+AP_WD_TICK_VEC          equ 48
 ; AP startup IPI sequence (SDM Vol.3 §10.6.1 / §8.4.4 INIT-SIPI-SIPI):
 ;   INIT assert (delivery mode 101b, level=assert, trigger=level)
 LAPIC_ICR_INIT_ASSERT   equ 0x00004500

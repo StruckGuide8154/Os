@@ -45,13 +45,20 @@
     mov [rbx + L3_RT_SYSCALL_NUM], rax
     mov [rbx + L3_RT_ARG0], rdi
     mov [rbx + L3_RT_ARG1], rsi
+    ; [rsp+8] and [rsp] read back the rdx/r10 we pushed onto the USER stack
+    ; above; with SMAP enforced (FMASK clears EFLAGS.AC on SYSCALL entry) these
+    ; supervisor reads of a PTE.U page #PF (e=0001) unless bracketed by stac.
+    ; They sat in the unbracketed gap between the push/pop USER_ACCESS regions,
+    ; so the very first ring-3 syscall faulted -> the app-open "empty window then
+    ; freeze". Bracket the user-stack reads (kernel-mem stores below are fine
+    ; under stac too).
+    USER_ACCESS_BEGIN
     mov rdx, [rsp + 8]
     mov [rbx + L3_RT_USER_RDX], rdx
     mov [rbx + L3_RT_USER_R8], r8
     mov [rbx + L3_RT_USER_R9], r9
     mov rdx, [rsp]
     mov [rbx + L3_RT_USER_R10], rdx
-    USER_ACCESS_BEGIN
     pop r10
     pop rdx
     pop rbx

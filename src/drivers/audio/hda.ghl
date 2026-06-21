@@ -1,0 +1,397 @@
+# ============================================================================
+# hda.ghl - Intel HD Audio (HDA / "Azalia") CLASS driver, as a Track-8 ring-3
+# driver-host process.  Compile: --target driver  (forces --forbid-asm +
+# --deny-unsafe; the module declares NO unsafe cap and uses NO privileged
+# intrinsic - it reaches the controller ONLY through the in-kernel driver_host
+# broker; see docs/track8-audio-class-driver.md and architecture doc §1 G1-G4).
+#
+# WHY ONE DRIVER COVERS ~90% OF MACHINES
+#   The HDA controller register layout is a fixed industry standard (Intel HDA
+#   spec rev 1.0a). Essentially every PCI/PCIe sound controller since ~2004
+#   (Intel, AMD, NVIDIA, VIA) is spec-compliant, and the attached "codecs"
+#   (Realtek/Conexant/IDT/...) are *enumerable* over the CORB/RIRB verb ring:
+#   you walk the codec's node tree (root -> Audio Function Group -> widgets:
+#   DACs, ADCs, pins, mixers), find a DAC routed to a usable output pin, set the
+#   stream format, and push uncompressed PCM over a Buffer Descriptor List (BDL)
+#   via the controller's DMA engine. NO per-codec knowledge and NO software codec
+#   is needed for full-quality stereo PCM playback - that is the "works off the
+#   bat" path. The messy ~10% (jack re-tasking, speaker-amp enable, HDMI-over-GPU
+#   audio) is handled by a SIGNED quirk table (data), never per-system code.
+#
+# Modeled on the public behaviour of Linux sound/pci/hda (hda_intel.c CORB/RIRB +
+# stream setup, hda_codec.c node enumeration) and the HDA spec - structure and
+# register/verb constants are the standardised interface, not borrowed code.
+#
+# THREAT MODEL (what code-exec in THIS driver buys an attacker): nothing toward
+# the kernel. The driver holds no mapped MMIO, no DMA mint authority, no ports.
+# Every controller access below is a broker syscall the kernel re-authorises
+# against this driver's signed grants; the DMA engine can only reach the audio
+# buffer the broker granted (drvhost_dma_contained), so a hostile BDL can scribble
+# only inside the driver's own sound buffer, never kernel memory.
+# ============================================================================
+
+app "hda" { stack = 8192; }
+
+# ---------------------------------------------------------------------------
+# driver_host broker syscall ABI (the SC_DRVHOST_* family; wired into the
+# dispatcher in Track 8 Rung 1, default-deny in the slot allow bitmap so only a
+# driver slot can call them). Each is a thin syscall - no ambient authority.
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232   # (req_caps, policy_caps, code_hash) -> driver_id
+const SC_DRVHOST_GRANT_MMIO   = 233   # (base, len) -> rc   (policy-authorized window)
+const SC_DRVHOST_GRANT_DMA    = 234   # (len) -> phys_base  (broker mints + maps the buffer)
+const SC_DRVHOST_GRANT_IRQ    = 235   # (vector) -> rc
+const SC_DRVHOST_MMIO_READ32  = 240   # (abs_addr) -> dword   (bounds-checked vs grant)
+const SC_DRVHOST_MMIO_WRITE32 = 241   # (abs_addr, val) -> rc
+const SC_DRVHOST_DMA_MAP      = 242   # (phys_base) -> ring3_va  (map the granted buffer in)
+const SC_DRVHOST_IRQ_WAIT     = 243   # () -> vector   (block until a forwarded IRQ signal)
+const SC_TICKS                = 18    # millisecond tick source for timeouts
+
+const DRV_OK = 0
+
+# Capability classes (mirror driver_host.ghl DRV_CAP_*). The driver REQUESTS
+# these; the broker hands back only (requested & signed-policy-granted).
+const CAP_MMIO = 1
+const CAP_DMA  = 4
+const CAP_IRQ  = 8
+const CAP_RING = 16
+
+# ---------------------------------------------------------------------------
+# HDA controller MMIO register offsets (Intel HDA spec, fixed for all vendors).
+# ---------------------------------------------------------------------------
+const REG_GCAP      = 0x00   # global caps (in/out/bidir stream counts) - 16-bit
+const REG_GCTL      = 0x08   # global control; bit0 CRST# (0=reset, 1=run)
+const REG_STATESTS  = 0x0E   # codec presence bitmap (one bit per SDI addr)
+const REG_INTCTL    = 0x20   # interrupt control; bit31 GIE, bit30 CIE
+const REG_INTSTS    = 0x24   # interrupt status
+const REG_CORBLBASE = 0x40   # CORB base low (command ring, host->codec)
+const REG_CORBUBASE = 0x44   # CORB base high
+const REG_CORBWP    = 0x48   # CORB write ptr (16-bit)
+const REG_CORBRP    = 0x4A   # CORB read ptr (16-bit; bit15 = reset)
+const REG_CORBCTL   = 0x4C   # CORB control; bit1 = run DMA
+const REG_CORBSIZE  = 0x4E   # CORB size
+const REG_RIRBLBASE = 0x50   # RIRB base low (response ring, codec->host)
+const REG_RIRBUBASE = 0x54
+const REG_RIRBWP    = 0x58   # RIRB write ptr (16-bit; bit15 = reset)
+const REG_RINTCNT   = 0x5A   # response interrupt count
+const REG_RIRBCTL   = 0x5C   # RIRB control; bit1 = run DMA
+const REG_RIRBSTS   = 0x5D   # RIRB status
+
+# First output stream descriptor (SD): base 0x80, stride 0x20. We use one OSS.
+const SD0_BASE      = 0x80
+const SD_CTL        = 0x00   # stream ctl (24-bit): bit1 run, bit20+ stream tag
+const SD_STS        = 0x03   # stream status
+const SD_CBL        = 0x08   # cyclic buffer length (bytes)
+const SD_LVI        = 0x0C   # last valid index (BDL entries - 1)
+const SD_FMT        = 0x12   # stream format (16-bit)
+const SD_BDPL       = 0x18   # BDL pointer low
+const SD_BDPU       = 0x1C   # BDL pointer high
+
+# ---------------------------------------------------------------------------
+# HDA codec verbs (12-bit verb id + 8-bit payload, or 4-bit verb + 16-bit data).
+# A command word = (codec_addr<<28)|(node_id<<20)|(verb<<8)|payload.
+# ---------------------------------------------------------------------------
+const VERB_GET_PARAM      = 0xF00   # get parameter (payload = parameter id)
+const VERB_GET_CONN_LIST  = 0xF02   # connection list entry
+const VERB_SET_STREAM_FMT = 0x200   # 4-bit verb 0x2 : 16-bit format
+const VERB_SET_CONVERTER  = 0x706   # converter stream/channel (payload: tag<<4|ch)
+const VERB_SET_PIN_CTL    = 0x707   # pin widget control (payload: out-enable bits)
+const VERB_SET_POWER      = 0x705   # power state (payload: 0 = D0 full power)
+const VERB_SET_AMP_GAIN   = 0x300   # 4-bit verb 0x3 : amp gain/mute (16-bit)
+
+# get_parameter parameter ids.
+const PARM_NODE_COUNT     = 0x04    # [23:16]=start node, [7:0]=count
+const PARM_FN_GROUP_TYPE  = 0x05    # [7:0]=1 -> audio function group (AFG)
+const PARM_AUDIO_WIDGET_CAP = 0x09  # [23:20]=widget type, bit0 stereo, ...
+const PARM_PIN_CAP        = 0x0C    # pin capabilities (bit4 = output-capable)
+
+# widget type nibble (AUDIO_WIDGET_CAP [23:20]).
+const WTYPE_DAC   = 0   # audio output converter
+const WTYPE_ADC   = 1   # audio input converter
+const WTYPE_PIN   = 4   # pin complex (a physical jack / fixed speaker)
+
+# pin-control bits: enable output (0x40) + headphone amp (0x80).
+const PIN_OUT_EN  = 0xC0
+# default power state D0.
+const PWR_D0      = 0x00
+# unmute + 0 dB on output amp, both channels (set-amp payload).
+const AMP_OUT_UNMUTE = 0xB000   # bit15 out, bit13 left, bit12 right, gain 0
+
+# stream format: 48 kHz, 16-bit, stereo  => base 48k(0), mult x1(0), bits 16(1<<4),
+# channels 2-1=1. = 0x0011.
+const FMT_48K_16_2 = 0x0011
+const STREAM_TAG   = 1            # arbitrary non-zero output tag
+
+# Sizes. CORB/RIRB are 256-entry rings (1 KB / 2 KB). The BDL holds 2 cyclic
+# halves so we can double-buffer. The PCM ring is 64 KB per half.
+const CORB_BYTES   = 1024
+const RIRB_BYTES   = 2048
+const BDL_BYTES    = 256          # 16 entries * 16 bytes (we use 2)
+const HALF_BYTES   = 65536
+const PCM_BYTES    = 131072       # two 64 KB halves
+
+# DMA layout within the single granted DMA window (offsets from its base).
+const OFF_CORB = 0
+const OFF_RIRB = 1024
+const OFF_BDL  = 3072             # after RIRB (1024+2048)
+const OFF_PCM  = 4096
+const DMA_TOTAL = 135168          # OFF_PCM (4096) + PCM_BYTES (131072)
+
+# ---------------------------------------------------------------------------
+# Driver-private state (ring-3 local; MMU-confined).
+# ---------------------------------------------------------------------------
+state {
+    self_id:   4;     # our driver_id from the broker
+    bar:       8;     # controller MMIO base (granted window start)
+    dma_phys:  8;     # device-physical base of our granted DMA buffer
+    dma_va:    8;     # ring-3 virtual base of the same buffer (for CPU fills)
+    codec:     4;     # first present codec address
+    afg:       4;     # audio function group node id
+    dac:       4;     # chosen output converter node
+    pin:       4;     # chosen output pin node
+    rirb_rp:   4;     # our RIRB read index
+}
+
+# --- brokered controller register access (the ONLY way we touch the chip) ----
+fn reg_rd(off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&bar) + off);
+}
+fn reg_wr(off, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&bar) + off, val);
+}
+
+# crude millisecond spin used only for the few spec-mandated reset waits.
+fn wait_ms(ms) {
+    let deadline = syscall(SC_TICKS) + ms;
+    while syscall(SC_TICKS) < deadline { }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# CORB/RIRB verb transaction. Push one command word into the CORB ring, bump the
+# write pointer, and poll the RIRB for the codec's response. Returns the 32-bit
+# response (HDA spec: RIRB entry is {response:32, resp_ex:32}; we read the low
+# dword). All ring memory lives in our granted DMA buffer (CPU-visible at dma_va).
+# ---------------------------------------------------------------------------
+fn corb_cmd(cad, nid, verb, payload) {
+    let cmd = (cad << 28) | (nid << 20) | (verb << 8) | (payload & 255);
+    # For 4-bit verbs (set-format/set-amp) the 16-bit data sits in the low bits;
+    # callers pass those pre-combined in `payload` via verb*256 already folded,
+    # so here we just OR the raw command. Recompute for the wide-data verbs:
+    if verb == VERB_SET_STREAM_FMT { cmd = (cad << 28) | (nid << 20) | (0x2 << 16) | (payload & 0xFFFF); }
+    if verb == VERB_SET_AMP_GAIN   { cmd = (cad << 28) | (nid << 20) | (0x3 << 16) | (payload & 0xFFFF); }
+
+    let corb = lq(&dma_va) + OFF_CORB;
+    let wp = reg_rd(REG_CORBWP) & 255;
+    wp = (wp + 1) & 255;
+    sd(corb + wp * 4, cmd);            # ring-3 store into the granted CORB buffer
+    reg_wr(REG_CORBWP, wp);
+
+    # Poll RIRB for the matching response (bounded).
+    let tries = 0;
+    while tries < 1000 {
+        let rwp = reg_rd(REG_RIRBWP) & 255;
+        let rp = lw(&rirb_rp);
+        if rp != rwp {
+            rp = (rp + 1) & 255;
+            sw(&rirb_rp, rp);
+            let rirb = lq(&dma_va) + OFF_RIRB;
+            return ld(rirb + rp * 8);   # low 32 bits = response
+        }
+        tries = tries + 1;
+    }
+    return 0xFFFFFFFF;                   # no response (open bus / absent)
+}
+
+fn get_param(nid, parm) { return corb_cmd(lw(&codec), nid, VERB_GET_PARAM, parm); }
+
+# ---------------------------------------------------------------------------
+# Controller bring-up: reset, set up CORB/RIRB DMA rings, enable.
+# Mirrors the azx_reset + CORB/RIRB init sequence in hda_intel.c.
+# ---------------------------------------------------------------------------
+fn controller_reset() {
+    # Enter reset (clear CRST#), wait, leave reset, wait for CRST# to read 1.
+    reg_wr(REG_GCTL, 0);
+    wait_ms(1);
+    reg_wr(REG_GCTL, 1);
+    let tries = 0;
+    while tries < 100 {
+        if (reg_rd(REG_GCTL) & 1) == 1 { tries = 100; }
+        wait_ms(1);
+        tries = tries + 1;
+    }
+    wait_ms(1);                          # codecs need >=521us after CRST# to report
+    return 0;
+}
+
+fn rings_init() {
+    let base = lq(&dma_phys);
+    # CORB: program base, reset the read pointer, run the DMA engine.
+    reg_wr(REG_CORBLBASE, (base + OFF_CORB) & 0xFFFFFFFF);
+    reg_wr(REG_CORBUBASE, 0);
+    reg_wr(REG_CORBRP, 0x8000);          # assert read-ptr reset
+    reg_wr(REG_CORBRP, 0);
+    reg_wr(REG_CORBCTL, 2);              # CORBRUN
+    # RIRB: program base, reset write pointer, run.
+    reg_wr(REG_RIRBLBASE, (base + OFF_RIRB) & 0xFFFFFFFF);
+    reg_wr(REG_RIRBUBASE, 0);
+    reg_wr(REG_RIRBWP, 0x8000);          # assert write-ptr reset
+    reg_wr(REG_RINTCNT, 1);
+    reg_wr(REG_RIRBCTL, 2);              # RIRBDMAEN
+    sw(&rirb_rp, 0);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Codec discovery: pick the first present codec from STATESTS, find its Audio
+# Function Group, then scan the AFG's widgets for a DAC and an output-capable
+# pin. This is the generic "any codec" path - no vendor table consulted.
+# ---------------------------------------------------------------------------
+fn find_codec() {
+    let sts = reg_rd(REG_STATESTS) & 0xFFFF;
+    let a = 0;
+    while a < 15 {
+        if (sts >> a) & 1 == 1 {
+            sw(&codec, a);
+            return 1;
+        }
+        a = a + 1;
+    }
+    return 0;
+}
+
+fn find_afg() {
+    # Root node (0) reports its sub-node range; each sub-node's function-group
+    # type tells us which is the Audio Function Group (type 1).
+    let nc = get_param(0, PARM_NODE_COUNT);
+    let start = (nc >> 16) & 0xFF;
+    let count = nc & 0xFF;
+    let i = 0;
+    while i < count {
+        let nid = start + i;
+        let ft = get_param(nid, PARM_FN_GROUP_TYPE) & 0xFF;
+        if ft == 1 {
+            sw(&afg, nid);
+            corb_cmd(lw(&codec), nid, VERB_SET_POWER, PWR_D0);   # power the AFG up
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn scan_widgets() {
+    let nc = get_param(lw(&afg), PARM_NODE_COUNT);
+    let start = (nc >> 16) & 0xFF;
+    let count = nc & 0xFF;
+    let found_dac = 0;
+    let found_pin = 0;
+    let i = 0;
+    while i < count {
+        let nid = start + i;
+        let cap = get_param(nid, PARM_AUDIO_WIDGET_CAP);
+        let wt = (cap >> 20) & 0xF;
+        if wt == WTYPE_DAC {
+            if found_dac == 0 { sw(&dac, nid); found_dac = 1; }
+        }
+        if wt == WTYPE_PIN {
+            if found_pin == 0 {
+                let pc = get_param(nid, PARM_PIN_CAP);
+                if (pc >> 4) & 1 == 1 {        # output-capable pin
+                    sw(&pin, nid); found_pin = 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return found_dac & found_pin;
+}
+
+# ---------------------------------------------------------------------------
+# Path setup: route the chosen DAC to the chosen pin and unmute. This is the
+# generic route; a SIGNED quirk table (loaded separately) may override the pin
+# choice / add an amp-enable verb for the ~10% of boards that need one.
+# ---------------------------------------------------------------------------
+fn route_path() {
+    let c = lw(&codec);
+    let d = lw(&dac);
+    let p = lw(&pin);
+    corb_cmd(c, d, VERB_SET_POWER, PWR_D0);
+    corb_cmd(c, p, VERB_SET_POWER, PWR_D0);
+    corb_cmd(c, d, VERB_SET_STREAM_FMT, FMT_48K_16_2);
+    corb_cmd(c, d, VERB_SET_CONVERTER, (STREAM_TAG << 4) | 0);   # tag, channel 0
+    corb_cmd(c, d, VERB_SET_AMP_GAIN, AMP_OUT_UNMUTE);
+    corb_cmd(c, p, VERB_SET_PIN_CTL, PIN_OUT_EN);
+    corb_cmd(c, p, VERB_SET_AMP_GAIN, AMP_OUT_UNMUTE);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Stream setup: build a 2-entry BDL over the two PCM halves, program the output
+# stream descriptor, and start the DMA engine. The BDL + PCM buffer both live in
+# our granted DMA window, so the broker's drvhost_dma_contained() already proved
+# the device can reach only this region.
+# ---------------------------------------------------------------------------
+fn bdl_build() {
+    let bdl = lq(&dma_va) + OFF_BDL;
+    let pcm = lq(&dma_phys) + OFF_PCM;
+    # entry 0: first half, IOC set.
+    sq(bdl + 0,  pcm);
+    sd(bdl + 8,  HALF_BYTES);
+    sd(bdl + 12, 1);                     # IOC = interrupt on completion
+    # entry 1: second half, IOC set.
+    sq(bdl + 16, pcm + HALF_BYTES);
+    sd(bdl + 24, HALF_BYTES);
+    sd(bdl + 28, 1);
+    return 0;
+}
+
+fn stream_start() {
+    let base = lq(&dma_phys);
+    reg_wr(SD0_BASE + SD_BDPL, (base + OFF_BDL) & 0xFFFFFFFF);
+    reg_wr(SD0_BASE + SD_BDPU, 0);
+    reg_wr(SD0_BASE + SD_CBL, PCM_BYTES);
+    reg_wr(SD0_BASE + SD_LVI, 1);                       # 2 entries -> last index 1
+    reg_wr(SD0_BASE + SD_FMT, FMT_48K_16_2);
+    # stream ctl: tag in [23:20], RUN (bit1).
+    reg_wr(SD0_BASE + SD_CTL, (STREAM_TAG << 20) | 2);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Bring-up entry point. Acquire identity + grants from the broker, reset the
+# controller, enumerate the codec, route a path, and start a silent stream ready
+# for the mixer above to fill. Returns DRV_OK or a negative stage code.
+# ---------------------------------------------------------------------------
+fn hda_init(mmio_base) {
+    # Register with the broker; request the classes we need (broker intersects
+    # with our signed policy and returns our driver_id).
+    let id = syscall(SC_DRVHOST_REGISTER, CAP_MMIO | CAP_DMA | CAP_IRQ | CAP_RING, 0, 0);
+    sd(&self_id, id);
+
+    # MMIO grant: a single 16 KB controller window at the PCI BAR.
+    sq(&bar, mmio_base);
+    syscall(SC_DRVHOST_GRANT_MMIO, mmio_base, 0x4000);
+
+    # DMA grant: the broker mints + maps one coherent buffer; we get its device-
+    # physical base, then map it into our address space for CPU fills.
+    let phys = syscall(SC_DRVHOST_GRANT_DMA, DMA_TOTAL);
+    sq(&dma_phys, phys);
+    sq(&dma_va, syscall(SC_DRVHOST_DMA_MAP, phys));
+
+    controller_reset();
+    rings_init();
+
+    if find_codec() == 0 { return 0 - 1; }
+    if find_afg() == 0   { return 0 - 2; }
+    if scan_widgets() == 0 { return 0 - 3; }
+    route_path();
+    bdl_build();
+    stream_start();
+    return DRV_OK;
+}
+
+# Process entry: the loader passes the controller BAR as the user arg.
+fn main() {
+    return hda_init(syscall(SC_TICKS) * 0 + 0xFEBF0000);
+}

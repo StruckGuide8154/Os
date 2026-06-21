@@ -1,0 +1,99 @@
+# ============================================================================
+# Example app: System Monitor, ported to GritHL GUI v2.
+#
+# Shows the v2 shape: build the tree ONCE, keep handles, re-stamp only the
+# live values each frame, call g2_frame. The CPU/RAM bars change every frame
+# so only those nodes repaint; the labels, panel and layout are diffed clean.
+# ============================================================================
+
+use core
+use theme
+use gui2
+
+# Retained handles, built once (per-slot state; node base addresses).
+state {
+    g_root:    8;
+    g_cpu_bar: 8;
+    g_cpu_val: 8;
+    g_ram_bar: 8;
+    g_ram_val: 8;
+}
+
+# Scratch strings. fmt_pct writes into these. Replaces magic VAs
+# STR_CPU=0x00A70000 / STR_RAM=0x00A70100.
+buffer str_cpu[64];
+buffer str_ram[64];
+
+# Format "NN%" as a NUL-terminated string into `buf`; returns `buf`. This is the
+# same format GritHL string literals use and the format the gui2 atlas / kernel
+# OP_TEXT path (draw_string) consumes, so formatted values render exactly like
+# literal labels. Handles 0..999.
+fn fmt_pct(buf, n) {
+    let len = 0;
+    if n < 0 { n = 0; }
+    if n > 999 { n = 999; }
+    # emit decimal digits (no leading zeros)
+    let h = n / 100;
+    let t = (n / 10) % 10;
+    let o = n % 10;
+    let started = 0;
+    if h != 0 { sb(buf + len, 48 + h); len = len + 1; started = 1; }
+    if started != 0 { sb(buf + len, 48 + t); len = len + 1; }
+    else { if t != 0 { sb(buf + len, 48 + t); len = len + 1; started = 1; } }
+    sb(buf + len, 48 + o); len = len + 1;
+    sb(buf + len, 37);          # '%'
+    len = len + 1;
+    sb(buf + len, 0);           # NUL terminator
+    return buf;
+}
+
+fn build_ui(win) {
+    let root = g2_window(win);
+    sq(&g_root, root);
+
+    let col = g2_panel(root, g2_col(TC_BG_BASE));
+
+    # CPU row: caption + value + bar track + bar fill.
+    let cpu_head = g2_hstack(col);
+    g2_label(cpu_head, "CPU", g2_col(TC_TEXT_MUTED), g2_col(TC_BG_BASE));
+    sq(&g_cpu_val, g2_label(cpu_head, "0%", g2_col(TC_TEXT), g2_col(TC_BG_BASE)));
+    let cpu_track = g2_panel(col, g2_col(TC_SURFACE_2));
+    sq(cpu_track + N_H, 8);
+    sq(&g_cpu_bar, g2_panel(cpu_track, g2_col(TC_ACCENT)));
+
+    # RAM row, same shape.
+    let ram_head = g2_hstack(col);
+    g2_label(ram_head, "Memory", g2_col(TC_TEXT_MUTED), g2_col(TC_BG_BASE));
+    sq(&g_ram_val, g2_label(ram_head, "0%", g2_col(TC_TEXT), g2_col(TC_BG_BASE)));
+    let ram_track = g2_panel(col, g2_col(TC_SURFACE_2));
+    sq(ram_track + N_H, 8);
+    sq(&g_ram_bar, g2_panel(ram_track, g2_col(TC_ACCENT)));
+
+    g2_mount(root, win);
+}
+
+# Called by the WM ~once per frame (entry point: app_hl_monitor2_draw).
+# Builds the retained tree lazily on the first frame, then re-stamps only the
+# live values. (This OS launches apps by calling the drawfn directly; there is
+# no app-side SYS_WM_CREATE/SYS_WM_HANDLERS registration.)
+fn draw(win) {
+    if lq(&g_root) == 0 {
+        g2_init();
+        build_ui(win);
+    }
+
+    let cpu = sys_core_util(0);
+    let max_kb = sys_ram_max_kb();
+    let ram = 0;
+    if max_kb != 0 { ram = (max_kb - sys_ram_free_kb()) * 100 / max_kb; }
+
+    g2_set_label(lq(&g_cpu_val), fmt_pct(str_cpu, cpu));
+    g2_set_label(lq(&g_ram_val), fmt_pct(str_ram, ram));
+
+    # Bar width tracks the value; a changed width re-emits just that rect.
+    sq(lq(&g_cpu_bar) + N_INTRIN_W, cpu);
+    sq(lq(&g_ram_bar) + N_INTRIN_W, ram);
+    layout_bump();
+
+    g2_frame(lq(&g_root));
+}

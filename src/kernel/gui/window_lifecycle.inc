@@ -116,17 +116,61 @@ wm_do_create:
     jmp .unfocus_loop
 .unfocus_done:
 
-    ; Find free slot
-    mov rbx, WINDOW_POOL_ADDR + WINDOW_STRUCT_SIZE
+    ; Find free slot. Under normal builds, start the scan at a randomized
+    ; user slot and wrap once. The slot id is part of the user VA
+    ; (slot_base = arena_base + slot * 2 MiB), so first-free allocation made
+    ; the outer app address predictable even though the blob and stack are
+    ; slid inside the slot. GRIT_NO_MEM_RANDOM keeps diagnostics stable.
+%ifdef GRIT_NO_MEM_RANDOM
     mov ecx, 1
+%else
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov r10, rax
+    mov eax, 1
+    cpuid
+    test ecx, 1 << 30
+    jz .slot_no_rdrand
+    mov ecx, 8
+.slot_try_rdrand:
+    rdrand rax
+    jc .slot_have_rdrand
+    dec ecx
+    jnz .slot_try_rdrand
+    jmp .slot_no_rdrand
+.slot_have_rdrand:
+    xor r10, rax
+.slot_no_rdrand:
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    xor r10, rax
+    mov rax, r10
+    xor edx, edx
+    mov ecx, MAX_WINDOWS - 1
+    div rcx                              ; rdx = 0..MAX_WINDOWS-2
+    lea ecx, [edx + 1]                   ; user slots are 1..MAX_WINDOWS-1
+%endif
+    mov r11d, ecx                        ; randomized start slot
+    mov r10d, MAX_WINDOWS - 1            ; number of user slots to probe
+    mov rax, rcx
+    imul rax, WINDOW_STRUCT_SIZE
+    lea rbx, [WINDOW_POOL_ADDR + rax]
 .find_loop:
-    cmp ecx, MAX_WINDOWS
-    je .fail
     test qword [rbx + WIN_OFF_FLAGS], WF_ACTIVE
     jz .found_slot
-    add rbx, WINDOW_STRUCT_SIZE
     inc ecx
-    jmp .find_loop
+    cmp ecx, MAX_WINDOWS
+    jb .find_next_ready
+    mov ecx, 1
+.find_next_ready:
+    mov rax, rcx
+    imul rax, WINDOW_STRUCT_SIZE
+    lea rbx, [WINDOW_POOL_ADDR + rax]
+    dec r10d
+    jnz .find_loop
+    jmp .fail
 
 .found_slot:
     ; Zero entire slot first
@@ -208,6 +252,7 @@ FN_BEGIN wm_close_window, 1, 0, FN_RET_VOID
     push rax
     push rbx
     call process_kill_window
+    call l3_release_slot
     mov rax, rdi
     mov rbx, WINDOW_STRUCT_SIZE
     imul rax, rbx

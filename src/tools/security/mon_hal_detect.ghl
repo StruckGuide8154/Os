@@ -20,6 +20,7 @@ global mon_hal_vmx_usable;
 global mon_hal_svm_usable;
 global mon_hal_arm_el2_usable;
 global mon_hal_riscv_h_usable;
+global mon_hal_iommu_usable;
 global mon_hal_status;
 
 # Architecture tags fed in by the live boot probe (it already knows the ISA).
@@ -112,6 +113,29 @@ const MISA_H_BIT = 0x80;
 
 fn mon_hal_riscv_h_usable(misa) {
     if (misa & MISA_H_BIT) != 0 { return 1; }
+    return 0;
+}
+
+# G2 - IOMMU / device-DMA confinement DETECT. The IOMMU is discovered from a
+# vendor-specific ACPI table whose presence the live boot probe reports as a
+# boolean: Intel VT-d via DMAR, AMD-Vi via IVRS, ARM SMMUv3 via IORT, RISC-V via
+# its IOMMU node. An IOMMU is usable on the running ISA when that table exists;
+# without it, G2 stays the honest "residual: undefended" cell in the matrix (no
+# CPU-side software substitute for DMA remapping exists). `modeled`.
+fn mon_hal_iommu_usable(arch, dmar, ivrs, iort_smmuv3, riscv_iommu) {
+    if arch == MONHAL_ARCH_X86 {
+        if dmar != 0 { return 1; }
+        if ivrs != 0 { return 1; }
+        return 0;
+    }
+    if arch == MONHAL_ARCH_ARM {
+        if iort_smmuv3 != 0 { return 1; }
+        return 0;
+    }
+    if arch == MONHAL_ARCH_RISCV {
+        if riscv_iommu != 0 { return 1; }
+        return 0;
+    }
     return 0;
 }
 

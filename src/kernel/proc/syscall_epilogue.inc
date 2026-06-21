@@ -15,7 +15,7 @@
 %endif
     POP_ALL
     DBG_EVT EVT_APP_DONE, r15, rax, rcx, rdx, 0, 0, 0
-%ifdef ENABLE_DEBUG_SERIAL
+%ifdef ENABLE_L3_CALL_TRACE
     ; DEBUG (L3 app-done diagnosis): this is the final kernel point before
     ; handing a ring-3 callback back to call_app_l3_return. Surface the saved
     ; syscall-stack footer and the active runtime record before the canary
@@ -78,7 +78,7 @@
     mov rax, [rsp + 8]
     cmp rax, [rel kernel_canary]
     jne .app_done_canary_bad
-    jmp call_app_l3_return
+    jmp l3_return_guard                   ; KERNEL_RSP!=0 check, then call_app_l3_return
 .app_done_canary_bad:
     mov rdi, rax
     lea rsi, [rel .app_done_canary_bad]

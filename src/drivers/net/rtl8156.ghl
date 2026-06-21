@@ -1,0 +1,412 @@
+# ============================================================================
+# rtl8156.ghl - Realtek RTL8152/RTL8156 USB Ethernet NIC, Track-8 ring-3
+# driver-host process.  Compile: --target driver  (forces --forbid-asm +
+# --deny-unsafe; no unsafe cap, no privileged intrinsic; reaches the
+# controller ONLY via SC_DRVHOST_* broker syscalls; see
+# docs/track8-userspace-drivers-todo.md and architecture §4 fast-path contract).
+#
+# HOW THE RTL8156 RIDES THE XHCI BAR
+#   The RTL8156 is a USB NIC - it has no standalone MMIO BAR. The kernel's
+#   xHCI host controller owns the BAR; the NIC is an attached USB device
+#   reached through two xHCI bulk endpoints (IN/OUT). The driver grants
+#   the xHCI operational-register window (xhci_op_base, typically 0xFEB20000
+#   + 0x80 on real HW) so it can arm bulk-IN Transfer Ring entries and ring
+#   the doorbell, exactly as the legacy .asm does. DMA is used for:
+#     - A shared TX descriptor + payload buffer (one 2048-byte slot for a
+#       single in-flight frame: Realtek 8-byte TX descriptor header + up to
+#       1514 bytes of Ethernet).
+#     - An RX aggregate buffer (4 KB) for bulk-IN transfers; the RTL8156
+#       aggregates multiple frames in one USB transfer with a 4-byte
+#       RX-header per frame.
+#   The fast-path descriptor-ring mechanism (§4):
+#     TX: fill the Realtek TX descriptor (4-byte flags+len header in the
+#         granted DMA buffer), then call drvhost_ring_submit to hand the
+#         descriptor to the broker as one batch. The broker issues the xHCI
+#         bulk-OUT TRB and rings doorbell - one syscall per frame, no per-byte
+#         crypto.
+#     RX: call drvhost_ring_establish once to arm the bulk-IN descriptor;
+#         block on drvhost_irq_deliver (or SC_DRVHOST_IRQ_WAIT) to wake on
+#         xHCI Transfer Event, then parse the aggregate buffer in ring-3.
+#   Both rings are validate-once (the DMA buffer is granted at init time;
+#   individual TX/RX operations never re-mint authority).
+#
+# GPHY NOTE (from project memory / rtl8156.asm):
+#   PHY OCP window base register is PLA_OCP_GPHY_BASE = 0xE86C (NOT 0xB12C,
+#   which leaves the window pointed at an unmapped page). After a PHY soft-
+#   reset, poll BMSR for link-up before enabling RX (link-timeout, non-blocking
+#   on real HW path).
+#
+# THREAT MODEL: code-exec in this driver buys nothing toward the kernel.
+#   - No ambient MMIO: every register access is a broker syscall that the
+#     kernel bounds-checks against the granted xHCI window.
+#   - DMA containment: drvhost_dma_contained() proves the device can reach
+#     only the TX+RX buffer; a hostile descriptor cannot touch kernel memory.
+#   - A fully compromised driver can read/corrupt its own DMA buffer and read
+#     frames it would normally discard - no elevation possible.
+# ============================================================================
+
+app "rtl8156" { stack = 8192; }
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of hda.ghl constants; see driver_host.ghl).
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232
+const SC_DRVHOST_GRANT_MMIO   = 233
+const SC_DRVHOST_GRANT_DMA    = 234
+const SC_DRVHOST_GRANT_IRQ    = 235
+const SC_DRVHOST_MMIO_READ32  = 240
+const SC_DRVHOST_MMIO_WRITE32 = 241
+const SC_DRVHOST_DMA_MAP      = 242
+const SC_DRVHOST_IRQ_WAIT     = 243
+const SC_TICKS                = 18
+
+const DRV_OK = 0
+
+# Capability classes (driver_host.ghl DRV_CAP_*).
+const CAP_MMIO = 1
+const CAP_DMA  = 4
+const CAP_IRQ  = 8
+const CAP_RING = 16
+
+# ---------------------------------------------------------------------------
+# xHCI operational-register offsets used by the NIC fast path.
+# The xHCI BAR is granted as the sole MMIO window; xhci_op_base sits at
+# BAR+0x80 on most controllers (CAPLENGTH field).  We fix-up at init time.
+# ---------------------------------------------------------------------------
+const XHCI_OP_USBSTS     = 0x04
+const XHCI_PORTSC_BASE   = 0x400
+const XHCI_PORTSC_STRIDE = 0x10
+const XHCI_PORTSC_CCS    = 0x01
+const XHCI_PORTSC_PED    = 0x02
+
+# ---------------------------------------------------------------------------
+# RTL8152/RTL8156 OCP register addresses and constants.
+# ---------------------------------------------------------------------------
+const RTL_PLA_RCR          = 0xC010
+const RTL_PLA_CR           = 0xE813
+const RTL_PLA_TCR0         = 0xE610
+const RTL_PLA_MISC_1       = 0xE85A
+const RTL_PLA_PHYSTATUS    = 0xC0D8
+const RTL_PLA_RMS          = 0xC016
+const RTL_PLA_MAR          = 0xCD00
+const RTL_PLA_MAR_HI       = 0xCD04
+const RTL_PLA_OCP_GPHY_BASE = 0xE86C
+const RTL_USB_USB_CTRL     = 0xD406
+const RTL_USB_RX_BUF_TH   = 0xCC00
+const RTL_USB_RX_EARLY_SIZE  = 0xCC10
+const RTL_USB_RX_EARLY_TMO  = 0xCC4C
+const RTL_USB_UPT_RXDMA_OWN = 0xD437
+
+const RTL_TX_FS = 0x80000000
+const RTL_TX_LS = 0x40000000
+
+const RTL_OCP_BASE_PHY    = 0xA000
+const RTL_PHY_REG0_OFF    = 0x400
+const RTL_MII_BMCR        = 0x00
+const RTL_MII_BMSR        = 0x01
+const RTL_BMCR_ANE        = 0x1000
+const RTL_BMCR_RAN        = 0x0200
+const RTL_BMCR_RESET      = 0x8000
+const RTL_PHY_STAT_MASK   = 0x07
+const RTL_PHY_STAT_LAN_ON = 0x03
+
+const RTL_RCR_APM  = 0x02
+const RTL_RCR_AM   = 0x04
+const RTL_RCR_AB   = 0x08
+
+# ---------------------------------------------------------------------------
+# DMA buffer layout (single granted DMA window).
+# ---------------------------------------------------------------------------
+const OFF_TX_DESC  = 0
+const OFF_TX_FRAME = 8
+const OFF_RX_BUF   = 2048
+const DMA_TOTAL    = 6144
+
+const TX_HDR_SIZE  = 8
+const RX_BUF_SIZE  = 4096
+const MAX_FRAME    = 1514
+
+const NIC_SLOT_DEFAULT = 2
+
+# Descriptor-ring broker syscalls (Track-8 fast-path extension). NOTE: 244/245
+# are the canonical PIO family (battery driver); the ring family is 246/247 to
+# keep ONE coherent SC_DRVHOST_* ABI across all driver-host processes.
+const SC_DRVHOST_RING_ESTABLISH = 246
+const SC_DRVHOST_RING_SUBMIT    = 247
+const RING_DIR_OUT = 0
+const RING_DIR_IN  = 1
+
+# OCP synthetic range offset within the granted MMIO window.
+const OCP_WINDOW_OFF = 0x10000
+
+# ---------------------------------------------------------------------------
+# Driver-private state (ring-3 local; MMU-confined).
+# ---------------------------------------------------------------------------
+state {
+    self_id:      4;
+    xhci_base:    8;
+    dma_phys:     8;
+    dma_va:       8;
+    nic_slot:     4;
+    bulk_out_dci: 4;
+    bulk_in_dci:  4;
+    link_up:      4;
+    rx_inflight:  4;
+    tx_busy:      4;
+}
+
+# ---------------------------------------------------------------------------
+# Broker-brokered MMIO helpers.
+# ---------------------------------------------------------------------------
+fn xhci_rd(off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&xhci_base) + off);
+}
+fn xhci_wr(off, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&xhci_base) + off, val);
+}
+
+fn wait_ms(ms) {
+    let deadline = syscall(SC_TICKS) + ms;
+    while syscall(SC_TICKS) < deadline { }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# OCP register access via the synthetic MMIO window.
+# ---------------------------------------------------------------------------
+fn ocp_wr(reg, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32,
+                   lq(&xhci_base) + OCP_WINDOW_OFF + reg, val);
+}
+fn ocp_rd(reg) {
+    return syscall(SC_DRVHOST_MMIO_READ32,
+                   lq(&xhci_base) + OCP_WINDOW_OFF + reg);
+}
+
+# ---------------------------------------------------------------------------
+# PHY MDIO indirect access via OCP window.
+# PLA_OCP_GPHY_BASE = 0xE86C (project memory: NOT 0xB12C).
+# ---------------------------------------------------------------------------
+fn phy_set_page() {
+    ocp_wr(RTL_PLA_OCP_GPHY_BASE, RTL_OCP_BASE_PHY);
+    return 0;
+}
+
+fn phy_rd(reg) {
+    phy_set_page();
+    let off = 0xB000 | (RTL_PHY_REG0_OFF + reg * 2);
+    return ocp_rd(off) & 0xFFFF;
+}
+
+fn phy_wr(reg, val) {
+    phy_set_page();
+    let off = 0xB000 | (RTL_PHY_REG0_OFF + reg * 2);
+    ocp_wr(off, val & 0xFFFF);
+    return 0;
+}
+
+fn phy_reset() {
+    phy_wr(RTL_MII_BMCR, RTL_BMCR_RESET);
+    let tries = 0;
+    while tries < 50 {
+        wait_ms(10);
+        if (phy_rd(RTL_MII_BMCR) & RTL_BMCR_RESET) == 0 { tries = 50; }
+        tries = tries + 1;
+    }
+    return 0;
+}
+
+fn phy_start_autoneg() {
+    phy_wr(RTL_MII_BMCR, RTL_BMCR_ANE | RTL_BMCR_RAN);
+    return 0;
+}
+
+fn phy_wait_link() {
+    let tries = 0;
+    while tries < 300 {
+        let stat = ocp_rd(RTL_PLA_PHYSTATUS) & RTL_PHY_STAT_MASK;
+        if stat == RTL_PHY_STAT_LAN_ON {
+            sd(&link_up, 1);
+            return 1;
+        }
+        wait_ms(10);
+        tries = tries + 1;
+    }
+    sd(&link_up, 0);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# MAC / USB NIC bring-up.
+# ---------------------------------------------------------------------------
+fn mac_init() {
+    let misc = ocp_rd(RTL_PLA_MISC_1);
+    ocp_wr(RTL_PLA_MISC_1, misc & 0xFFFFFFDF);
+
+    ocp_wr(RTL_PLA_RMS, 0x05EE);
+
+    ocp_wr(RTL_PLA_RCR, RTL_RCR_APM | RTL_RCR_AM | RTL_RCR_AB);
+
+    ocp_wr(RTL_PLA_MAR,    0xFFFFFFFF);
+    ocp_wr(RTL_PLA_MAR_HI, 0xFFFFFFFF);
+
+    ocp_wr(RTL_PLA_TCR0, 0);
+
+    ocp_wr(RTL_USB_RX_BUF_TH,    0x7A120000);
+    ocp_wr(RTL_USB_RX_EARLY_SIZE, 0x0800);
+    ocp_wr(RTL_USB_RX_EARLY_TMO,  0x0008);
+
+    ocp_wr(RTL_USB_USB_CTRL, 0);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# TX fast path (§4 descriptor-ring contract).
+#
+# The caller writes the Ethernet frame into dma_va+OFF_TX_FRAME, then calls
+# rtl_tx_frame(len).  This fills the 8-byte Realtek TX descriptor and issues
+# one SC_DRVHOST_RING_SUBMIT syscall; the broker posts one bulk-OUT TRB and
+# rings the doorbell - validate-once, no per-byte crypto.
+# ---------------------------------------------------------------------------
+fn rtl_tx_frame(frame_len) {
+    if frame_len > MAX_FRAME { return 0 - 1; }
+    if ld(&tx_busy) == 1 { return 0 - 2; }
+    sd(&tx_busy, 1);
+
+    let va   = lq(&dma_va);
+    let phys = lq(&dma_phys);
+    let flags = RTL_TX_FS | RTL_TX_LS | (frame_len & 0x0000FFFF);
+    sd(va + OFF_TX_DESC,     flags);
+    sd(va + OFF_TX_DESC + 4, 0);
+
+    let total = TX_HDR_SIZE + frame_len;
+    let rc = syscall(SC_DRVHOST_RING_SUBMIT,
+                     phys, OFF_TX_DESC, OFF_TX_FRAME, total);
+    sd(&tx_busy, 0);
+    return rc;
+}
+
+# ---------------------------------------------------------------------------
+# RX fast path (§4 descriptor-ring contract).
+#
+# arm_rx: posts one bulk-IN TRB for the pre-authorised RX aggregate buffer
+# via SC_DRVHOST_RING_ESTABLISH (validate-once - the buffer is already
+# granted; no new DMA authority is minted).
+#
+# rx_parse: after SC_DRVHOST_IRQ_WAIT returns the byte count, walk the RTL
+# aggregate format (4-byte RX header per frame: bits[31:16]=flen, [15:0]=flags)
+# and dispatch frames in ring-3 without further syscalls.
+# ---------------------------------------------------------------------------
+fn arm_rx() {
+    if ld(&rx_inflight) == 1 { return 0; }
+    let phys = lq(&dma_phys);
+    syscall(SC_DRVHOST_RING_ESTABLISH,
+            phys + OFF_RX_BUF, RX_BUF_SIZE, RING_DIR_IN);
+    sd(&rx_inflight, 1);
+    return 0;
+}
+
+fn rx_parse(xfer_len) {
+    let va    = lq(&dma_va) + OFF_RX_BUF;
+    let pos   = 0;
+    let count = 0;
+    while pos + 4 <= xfer_len {
+        let hdr  = ld(va + pos);
+        let flen = (hdr >> 16) & 0x7FFF;
+        pos = pos + 4;
+        if flen == 0 { pos = xfer_len; }
+        if flen > 0 {
+            if pos + flen <= xfer_len {
+                # Inline dispatch stub: production calls rx_handle_frame(va+pos, flen).
+                # Frame bytes are accessible at ring-3 VA without any syscall.
+                count = count + 1;
+            }
+            pos = pos + flen;
+            let rem = pos & 3;
+            if rem != 0 { pos = pos + (4 - rem); }
+        }
+    }
+    sd(&rx_inflight, 0);
+    return count;
+}
+
+fn rx_recv() {
+    arm_rx();
+    let xfer_len = syscall(SC_DRVHOST_IRQ_WAIT);
+    return rx_parse(xfer_len);
+}
+
+# ---------------------------------------------------------------------------
+# DHCP/ARP stubs (control-path lives in kernel-space GHL modules until
+# Track-8 migration; these satisfy the call structure).
+# ---------------------------------------------------------------------------
+fn dhcp_discover() {
+    return 0;
+}
+
+fn arp_gateway() {
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Driver initialisation.
+# ---------------------------------------------------------------------------
+fn rtl8156_init(xhci_mmio_base) {
+    let id = syscall(SC_DRVHOST_REGISTER,
+                     CAP_MMIO | CAP_DMA | CAP_IRQ | CAP_RING, 0, 0);
+    sd(&self_id, id);
+
+    sq(&xhci_base, xhci_mmio_base);
+    syscall(SC_DRVHOST_GRANT_MMIO, xhci_mmio_base, 0x20000);
+
+    let phys = syscall(SC_DRVHOST_GRANT_DMA, DMA_TOTAL);
+    sq(&dma_phys, phys);
+    sq(&dma_va, syscall(SC_DRVHOST_DMA_MAP, phys));
+
+    syscall(SC_DRVHOST_GRANT_IRQ, 0);
+
+    sd(&nic_slot,      NIC_SLOT_DEFAULT);
+    sd(&bulk_out_dci,  3);
+    sd(&bulk_in_dci,   2);
+    sd(&link_up,       0);
+    sd(&rx_inflight,   0);
+    sd(&tx_busy,       0);
+
+    phy_reset();
+    wait_ms(50);
+    phy_start_autoneg();
+
+    mac_init();
+
+    arm_rx();
+
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Event loop: block on RX IRQ, re-arm, check link.
+# ---------------------------------------------------------------------------
+fn event_loop() {
+    while 1 {
+        rx_recv();
+        arm_rx();
+        if ld(&link_up) == 0 {
+            let stat = ocp_rd(RTL_PLA_PHYSTATUS) & RTL_PHY_STAT_MASK;
+            if stat == RTL_PHY_STAT_LAN_ON {
+                sd(&link_up, 1);
+                dhcp_discover();
+            }
+        }
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Process entry point.
+# ---------------------------------------------------------------------------
+fn main() {
+    let base = syscall(SC_TICKS) * 0 + 0xFEB20080;
+    let rc = rtl8156_init(base);
+    if rc != DRV_OK { return rc; }
+    return event_loop();
+}

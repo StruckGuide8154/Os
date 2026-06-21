@@ -242,14 +242,22 @@ setup_paging:
     dec ecx
     jnz .fb_guard_pt_loop
 
-    ; Clear PRESENT on the guard PTE = (guard >> 12) & 0x1FF.
+    ; The fb_end page maps to a dead RAM sink (present+writable) so a single-chunk
+    ; SSE blit overrun (movntdq rounding past a non-64-aligned row end, or an AP
+    ; flip racing the BSP's geometry) is absorbed harmlessly instead of taking a
+    ; ring-0 #PF every frame (which floods the int log and tanks render perf). The
+    ; runaway trap that still catches genuinely wild writes stays one page out at
+    ; fb_end+0x1000 (left non-present).
     mov rax, r9
     shr rax, 12
-    and rax, 0x1FF
+    and rax, 0x1FF                      ; rax = fb_end PTE index
     lea rdi, [UEFI_FB_PT_PHYS + rax*8]
-    mov rax, [rdi]
-    and rax, ~UEFI_PAGE_PRESENT
-    mov [rdi], rax
+    mov qword [rdi], UEFI_FB_SINK_PHYS | (UEFI_PAGE_PRESENT | UEFI_PAGE_WRITABLE)
+    cmp rax, 0x1FF                      ; if fb_end is the last PTE in this PT the
+    jae .fb_guard_done                  ; next page is a 2 MiB large page; skip.
+    mov rdx, [rdi + 8]                  ; fb_end+0x1000 PTE = runaway trap
+    and rdx, ~UEFI_PAGE_PRESENT
+    mov [rdi + 8], rdx
 .fb_guard_done:
 
     ; PDPT1[0..511]: 1 GB identity pages starting at 512 GB, supervisor-only, NX.

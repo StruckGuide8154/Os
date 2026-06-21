@@ -1,0 +1,459 @@
+# ============================================================================
+# callback_dispatch.ghl - ring-3 callback dispatch + deadman + priority manager,
+# pure GHLK.
+#
+# Zero-asm replacement for src/kernel/proc/process_callbacks.inc and its backing
+# data src/kernel/proc/process_data.inc. Same global symbols, same behaviour:
+#
+#   dispatch_app_callback   - route an app's click/draw callback to its home-core
+#                             AP (work queue) or run it inline on the BSP, behind
+#                             a per-slot in-flight guard + a wallpaper-busy guard.
+#   cb_run_guarded          - inline BSP run wrapped by a reentrancy lock and a
+#                             tick-budget deadman (setjmp/longjmp landing pad).
+#   cb_deadman_check        - PIT/IRQ-side detection: over-budget -> strike+abort.
+#   l3_return_guard         - shared guarded prologue for every jmp into
+#                             call_app_l3_return; recovers (longjmp) instead of
+#                             swapping to a zero kernel rsp on an unmatched return.
+#   pm_strike_and_maybe_kill / pm_clean_window / pm_tick_quantum
+#                           - Windows-style demote-then-kill priority manager.
+#   media_draw_dispatch     - route the kernel-context media blit onto an AP.
+#   process_get_affinity    - PCB affinity-mask reader.
+#
+# SECURITY / SPEED
+#   * The deadman longjmp is the ONLY non-local control transfer, expressed with
+#     the audited save_landing/jump_landing intrinsic pair (no raw asm).
+#   * l3_return_guard reaches call_app_l3_return via tail_jump (a direct jmp to a
+#     single named label - no function pointer), preserving the [rsp]=slot ABI.
+#   * AP routing submits to the secure work queue by JOB-ID (WQ_JOB_*), never a
+#     function pointer, and never spins the BSP: a wedged AP trips the bounded
+#     workqueue_wait_timeout and auto-disables routing for the rest of the boot.
+# ============================================================================
+
+module "callback_dispatch";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over PCBs, slot flags, the arg pack
+unsafe kernel_priv;      # save_landing/jump_landing/tail_jump, cbd_ser outb-free path
+unsafe kernel_io;        # outb (the rare '!T' AP-dead marker + debug serial)
+unsafe implicit_extern;  # &module-local data + extern kernel symbols
+
+global current_process_id;
+global next_pid;
+global cb_deadman_armed;
+global cb_deadman_start_tick;
+global cb_deadman_budget;
+global cb_in_callback;
+global cb_deadman_pid;
+global l3_slot_in_flight;
+global app_callback_lock;
+global ring3_ap_enabled;
+global cb_deadman_check;
+global dispatch_app_callback;
+global cb_run_guarded;
+global media_draw_dispatch;
+global process_get_affinity;
+global pm_strike_and_maybe_kill;
+global pm_clean_window;
+global pm_tick_quantum;
+global l3_return_guard;
+global cb_orphan_recover;
+
+extern tick_count;            # dq - PIT tick counter
+extern l3_app_arena_base_v;   # dq - per-slot arena base VA
+extern l3_app_arena_size_v;   # dq - total arena size (diag)
+extern smp_alive_cores;       # dd - alive core count
+extern wallpaper_render_active;  # db - 1 while an AP rasterises the wallpaper
+extern l3_runtime_ptr;        # (slot) -> rax = &L3 runtime struct for slot
+extern process_find_by_window;  # (edi=window id) -> eax = pid (0 if none)
+extern call_app_l3;           # (rdi=fn, rsi=win, rdx=a1, rcx=a2) -> rax
+extern call_app_l3_return;    # naked kernel-resume label ([rsp]=slot); tail_jump target
+extern app_media_draw;        # (rdi=win) kernel-context media blit
+extern workqueue_submit_to;   # (jobid, arg, prio, target, proc) -> handle (media offload)
+extern workqueue_wait_timeout;  # (handle, budget) -> result; sets workqueue_wait_timed_out
+extern workqueue_wait_timed_out;  # dd - 1 if the last wait_timeout timed out
+
+const PROCESS_POOL  = extern;
+const MAX_PROCESSES = extern;
+const MAX_WINDOWS   = extern;
+const PRIO_IDLE            = extern;
+const PRIO_HIGH            = extern;
+const PRIO_STRIKES_TO_KILL = extern;
+const QUANTUM_TICKS_NORMAL = extern;
+const QUANTUM_TICKS_HIGH   = extern;
+
+const PCB_STRIDE   = 512;
+const PT_STATE     = 0x98;
+const PT_AFFINITY  = 0xC0;
+const PT_HOME_CORE = 0xC4;
+const PT_PRIORITY  = 0xD0;
+const PT_BASE_PRIO = 0xD4;
+const PT_QUANTUM   = 0xD8;
+const PT_STRIKES   = 0xDC;
+const PROC_TERMINATED = 4;
+
+const WIN_OFF_ID        = 0;
+const L3IF_APPDATA_OFF  = 136;   # WIN_OFF_APPDATA (src/include/window_layout.inc)
+const L3_RT_KERNEL_RSP  = 32;    # src/include/l3_runtime.inc
+
+# Secure work-queue job IDs (must match wq_job_table in workqueue.ghl).
+const WQ_JOB_MEDIA   = 2;     # media blit (the only AP offload left in this module)
+const WQ_PRIO_NORMAL = 1;
+const WQ_INVALID     = -1;
+
+# AP "presumed dead" budget for the media blit. The blit is NON-ordered (the BSP
+# keeps compositing while it runs), so blocking-with-timeout here is acceptable;
+# a wedged AP trips this bound and auto-disables routing for the rest of the boot.
+const MEDIA_DEAD_BUDGET  = 1500;
+
+# --- general scheduler state (was process_data.inc) --------------------------
+data current_process_id: 1 x 4 = -1;
+data next_pid: 1 x 4 = 0;
+
+# --- ring-3 callback deadman + reentrancy guard (BSP-only) -------------------
+align 64;
+data cb_deadman_armed: 4;
+data cb_in_callback: 4;
+data cb_deadman_pid: 4;
+# Deadman budget = RING-3 ticks a callback may burn before it's treated as a
+# runaway loop (the PIT IRQ only counts ticks that interrupt ring 3 - see
+# isr.asm .irq_timer). This is a HANG detector, NOT a frame-time budget: a
+# legitimately-heavy app frame (first paint on open, full redraw on drag-release)
+# can easily spend >250 ms in ring 3, and the old 25-tick (~250 ms) budget
+# aborted those mid-frame and let the priority manager strike -> demote -> kill
+# the app, so apps opened slowly / drag-release froze (release only: under
+# ENABLE_DEBUG_SERIAL the callback spends most of its time in ring-0 serial,
+# which the ring-3-gated deadman never counts, masking the bug). 300 ticks (~3 s)
+# still catches a genuine infinite loop within a few seconds while letting every
+# real frame complete cleanly (pm_clean_window then clears its strikes).
+data cb_deadman_budget: 1 x 4 = 300;    # ~3 s of RING-3 time at the ~100 Hz PIT tick
+data cb_deadman_start_tick: 1 x 8;
+# setjmp/longjmp landing pad captured by cb_run_guarded (rsp, rbx, rbp, rip).
+data cb_landing_buf: 4 x 8;
+# naked l3_return_guard slot-id scratch (no frame for `let`).
+data lrg_slot: 1 x 8;
+
+# --- per-slot ring-3 callback in-flight flags (1 while a slot's cb runs) ------
+align 64;
+data l3_slot_in_flight: 12 x 8;          # MAX_WINDOWS slots
+
+# --- cross-core dispatch lock ------------------------------------------------
+# Still exported: the wallpaper SVG raster job (gui/window_desktop.inc) holds it
+# while it rewrites shared ring-3 page-table isolation. The ring-3 click/draw
+# callback path no longer uses it (those run inline on the BSP).
+align 64;
+data app_callback_lock: 4;
+
+# --- AP routing master switch (auto-disabled on a wedged AP) -----------------
+data ring3_ap_enabled: 1 x 4 = 1;
+
+# Raw COM1 byte (only reached on the rare AP-dead marker or under debug cfg).
+fn cbd_ser(ch) {
+    outb(0x3F8, ch);
+}
+
+# ===========================================================================
+# Priority manager (Windows-style demote-then-kill + quantum bookkeeping).
+# ===========================================================================
+
+# pm_strike_and_maybe_kill(pid): +1 strike, demote priority one step toward
+# PRIO_IDLE (halve, floored), TERMINATE at PRIO_STRIKES_TO_KILL. -> 1 if killed.
+# pid 0 (kernel) is never struck.
+fn pm_strike_and_maybe_kill(pid) {
+    if pid == 0 { return 0; }
+    let pcb = PROCESS_POOL + pid * PCB_STRIDE;
+    let s = lw(pcb + PT_STRIKES) + 1;
+    sw(pcb + PT_STRIKES, s);
+    let pr = lw(pcb + PT_PRIORITY) >> 1;
+    if pr < PRIO_IDLE { pr = PRIO_IDLE; }
+    sw(pcb + PT_PRIORITY, pr);
+    if s >= PRIO_STRIKES_TO_KILL {
+        sw(pcb + PT_STATE, PROC_TERMINATED);
+        return 1;
+    }
+    return 0;
+}
+
+# pm_clean_window(pid): a callback that returned within budget -> restore base
+# priority (never above it) and clear the strike count. pid 0 ignored.
+fn pm_clean_window(pid) {
+    if pid == 0 { return 0; }
+    let pcb = PROCESS_POOL + pid * PCB_STRIDE;
+    let base = lw(pcb + PT_BASE_PRIO);
+    if lw(pcb + PT_PRIORITY) < base {
+        sw(pcb + PT_PRIORITY, base);
+    }
+    sw(pcb + PT_STRIKES, 0);
+    return 0;
+}
+
+# pm_tick_quantum(): decrement the RUNNING process's quantum each PIT tick;
+# refill by class at 0. Accounting only - never itself switches. Called from PIT.
+fn pm_tick_quantum() {
+    let id = lw(&current_process_id);
+    if id == -1 { return 0; }
+    if id >= MAX_PROCESSES { return 0; }
+    let pcb = PROCESS_POOL + id * PCB_STRIDE;
+    let q = lw(pcb + PT_QUANTUM);
+    if q != 0 {
+        sw(pcb + PT_QUANTUM, q - 1);
+        return 0;
+    }
+    let refill = QUANTUM_TICKS_NORMAL;
+    if lw(pcb + PT_PRIORITY) >= PRIO_HIGH {
+        refill = QUANTUM_TICKS_HIGH;
+    }
+    sw(pcb + PT_QUANTUM, refill);
+    return 0;
+}
+
+# ===========================================================================
+# cb_orphan_recover() - called from kmain after r3guard_arm longjmps the BSP back
+# to the main loop following an ORPHANED ring-3 fault (one with no in-flight
+# callback slot to unwind through - the app-open freeze path). The interrupted
+# ring-3 excursion left the callback bookkeeping mid-flight, so clear it all so
+# the next dispatch is not permanently refused, and STRIKE the running process so
+# a repeat offender is demoted/killed by the priority manager instead of
+# re-faulting every frame forever. The OS stays fully alive throughout.
+# ===========================================================================
+fn cb_orphan_recover() {
+    sw(&cb_in_callback, 0);
+    sw(&cb_deadman_armed, 0);
+    let i = 0;
+    while i < MAX_WINDOWS {
+        sq(&l3_slot_in_flight + i * 8, 0);
+        i = i + 1;
+    }
+    let id = lw(&current_process_id);
+    if id > 0 {
+        pm_strike_and_maybe_kill(id);
+    }
+    return 0;
+}
+
+# ===========================================================================
+# cb_deadman_check() -> 1 if a runaway-callback abort is requested, else 0.
+# Called from the timer IRQ AFTER EOI, ONLY when the interrupted CS was ring 3.
+# Pure detection: disarms (fires once), runs the strike/kill engine, returns 1 so
+# the IRQ stub performs the clean call_app_l3_return unwind. NEVER longjmps from
+# interrupt context.
+# ===========================================================================
+fn cb_deadman_check() {
+    if lw(&cb_deadman_armed) == 0 { return 0; }
+    let elapsed = lq(&tick_count) - lq(&cb_deadman_start_tick);
+    if elapsed < lw(&cb_deadman_budget) { return 0; }
+    sw(&cb_deadman_armed, 0);
+    # UNCONDITIONAL diag marker (NOT gated by ENABLE_DEBUG_SERIAL): a deadman
+    # fire is rare (only a real runaway should reach it now that the budget is
+    # ~3 s), and seeing "DMF p<pid>" in the serial log is the conclusive signal
+    # that a callback was aborted as a runaway - i.e. that the freeze/slow-open
+    # is the deadman, not something else.
+    cbd_ser(68); cbd_ser(77); cbd_ser(70); cbd_ser(32); cbd_ser(112);  # "DMF p"
+    call ser_print_hex64(rdi: lw(&cb_deadman_pid));
+    cbd_ser(13); cbd_ser(10);
+    pm_strike_and_maybe_kill(lw(&cb_deadman_pid));
+    return 1;
+}
+
+# ===========================================================================
+# cb_run_guarded(fn, win, arg1, arg2) -> callback result, or -1.
+# The only inline (BSP) call_app_l3 site. (B0) per-slot in-flight guard, (B)
+# global reentrancy guard, (A) tick-budget deadman via a setjmp/longjmp landing
+# pad: save_landing returns 0 on the direct path (arm + run); l3_return_guard's
+# unmatched-return recovery jump_landing's back here, making save_landing return
+# 1 (strike + report failure).
+# ===========================================================================
+fn cb_run_guarded(cbfn, win, arg1, arg2) {
+    # (B0) per-slot in-flight guard (covers AP-run callbacks too).
+    if win != 0 {
+        let off = lq(win + L3IF_APPDATA_OFF) - lq(&l3_app_arena_base_v);
+        if off >= 0 {
+            let idx = off >> 21;
+            if idx < MAX_WINDOWS {
+                if lq(&l3_slot_in_flight + idx * 8) != 0 { return WQ_INVALID; }
+            }
+        }
+    }
+    # (B) reentrancy guard.
+    if lw(&cb_in_callback) != 0 { return WQ_INVALID; }
+    sw(&cb_in_callback, 1);
+
+    # Resolve the pid for the slot (0 if none) so the deadman can mark it.
+    let pid = 0;
+    if win != 0 {
+        pid = process_find_by_window(lw(win + WIN_OFF_ID));
+    }
+    sw(&cb_deadman_pid, pid);
+
+    # (A) setjmp landing pad, then arm + run.
+    if save_landing(&cb_landing_buf) == 0 {
+        sw(&cb_deadman_armed, 1);
+        sq(&cb_deadman_start_tick, lq(&tick_count));
+        let res = call_app_l3(cbfn, win, arg1, arg2);
+        # Normal return (whether or not the IRQ deadman fired + unwound here):
+        # credit the process, disarm, release the reentrancy lock.
+        sw(&cb_deadman_armed, 0);
+        pm_clean_window(lw(&cb_deadman_pid));
+        sw(&cb_in_callback, 0);
+        return res;
+    }
+    # Longjmp recovery (unmatched return via l3_return_guard): strike + fail.
+    sw(&cb_deadman_armed, 0);
+    pm_strike_and_maybe_kill(lw(&cb_deadman_pid));
+    sw(&cb_in_callback, 0);
+    return WQ_INVALID;
+}
+
+# ===========================================================================
+# dispatch_app_callback(fn, win, arg1, arg2) -> result.
+# Route a ring-3 click/draw callback to its home-core AP via the secure work
+# queue, else run it inline (cb_run_guarded). Per-slot in-flight + wallpaper-busy
+# guards return 0 (keep cursor/input/timers alive) instead of recursing.
+# ===========================================================================
+fn dispatch_app_callback(cbfn, win, arg1, arg2) {
+    # Per-slot in-flight guard: refuse a re-entrant dispatch for a slot already
+    # running its ring-3 callback (BSP or AP) BEFORE routing or submitting.
+    if win != 0 {
+        let off = lq(win + L3IF_APPDATA_OFF) - lq(&l3_app_arena_base_v);
+        if off >= 0 {
+            let idx = off >> 21;
+            if idx < MAX_WINDOWS {
+                if lq(&l3_slot_in_flight + idx * 8) != 0 { return 0; }
+            }
+        }
+    }
+    # Full-quality wallpaper SVG raster owns the global ring-3 lock; never spin
+    # the BSP on it - return busy and let the AP finish.
+    if lb(&wallpaper_render_active) != 0 { return 0; }
+
+    # ORDERED ring-3 click/draw callbacks run INLINE on the BSP.
+    #
+    # The old AP-routing path (gated GRIT_ENABLE_RING3_AP) submitted the callback
+    # to the owning app's home-core AP and then BLOCKED the BSP in
+    # workqueue_wait_timeout until the AP finished -
+    # up to cb_deadman_budget * CB_AP_DEADMAN_MULT (~1500 ticks ~= 15 s) if that
+    # AP was slow to wake (HLT + IPI) or busy. While the BSP spins there it draws
+    # no frames and pumps no input -> the visible app-open / window-drag-release
+    # freeze. For an ORDERED callback (the compositor needs the result before it
+    # presents the frame) this cross-core handoff is pure loss: the BSP waits
+    # either way, so routing only adds wake/pickup latency, the global
+    # app_callback_lock, and the 15 s timeout tail - it never makes the BSP more
+    # responsive. Runaway protection still comes from cb_run_guarded's deadman
+    # (~250 ms strike/demote/kill), and the per-slot in-flight guard above stops
+    # re-entrant recursion. Heavy NON-ordered work that DOES let the BSP keep
+    # compositing (media blit, wallpaper SVG raster) still offloads to APs via
+    # media_draw_dispatch / wallpaper_render_job - that path is untouched.
+    let res = cb_run_guarded(cbfn, win, arg1, arg2);
+    cfg "ENABLE_L3_CALL_TRACE" {
+        cbd_ser(68); cbd_ser(82); cbd_ser(69); cbd_ser(84); cbd_ser(32);   # "DRET "
+        cbd_ser(97);                                                    # 'a'
+        call ser_print_hex64(rdi: res);
+        cbd_ser(32); cbd_ser(114);                                       # " r"
+        call ser_print_hex64(rdi: cbfn);
+        cbd_ser(47); call ser_print_hex64(rdi: win);
+        cbd_ser(47); call ser_print_hex64(rdi: arg1);
+        cbd_ser(47); call ser_print_hex64(rdi: arg2);
+        cbd_ser(13); cbd_ser(10);
+    }
+    return res;
+}
+
+# ===========================================================================
+# media_draw_dispatch(win): route the kernel-side media blit (app_media_draw)
+# onto the owning app's home-core AP, else draw inline. A wedged AP trips the
+# bounded wait and auto-disables routing. app_media_draw is NOT a ring-3 callback
+# (kernel context, writes the shared backbuffer), so it is a plain job.
+# ===========================================================================
+fn media_draw_dispatch(win) {
+    let routed = 0;
+    cfg "GRIT_ENABLE_RING3_AP" {
+        if lw(&ring3_ap_enabled) != 0 {
+            if lw(&smp_alive_cores) >= 2 {
+                let pid = process_find_by_window(lw(win + WIN_OFF_ID));
+                if pid != 0 {
+                    let home = lw(PROCESS_POOL + pid * PCB_STRIDE + PT_HOME_CORE);
+                    if home != 0 {
+                        let h = workqueue_submit_to(WQ_JOB_MEDIA, win, WQ_PRIO_NORMAL, home, pid);
+                        if h != WQ_INVALID {
+                            workqueue_wait_timeout(h, MEDIA_DEAD_BUDGET);
+                            if lw(&workqueue_wait_timed_out) != 0 {
+                                sw(&ring3_ap_enabled, 0);
+                            } else {
+                                routed = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if routed == 0 {
+        app_media_draw(win);
+    }
+    return 0;
+}
+
+# ===========================================================================
+# process_get_affinity(pid) -> affinity mask (0 if pid invalid / empty slot).
+# ===========================================================================
+fn process_get_affinity(pid) {
+    if pid < 0 { return 0; }
+    if pid >= MAX_PROCESSES { return 0; }
+    let pcb = PROCESS_POOL + pid * PCB_STRIDE;
+    if lw(pcb + PT_STATE) == 0 { return 0; }
+    return lw(pcb + PT_AFFINITY);
+}
+
+# ===========================================================================
+# l3_return_guard - shared prologue for EVERY jmp into call_app_l3_return.
+# Entered by `jmp l3_return_guard` with the per-slot id at [rsp] (left by the
+# SYS_APP_DONE epilogue / the two ring-3 abort unwinds in isr.asm). If the slot
+# recorded a matching kernel frame (KERNEL_RSP != 0) fall straight through to
+# call_app_l3_return (tail_jump, [rsp]=slot preserved). Otherwise the saved rsp is
+# 0 and call_app_l3_return would push onto rsp=0 and livelock; recover instead via
+# the armed cb_run_guarded landing pad (jump_landing), or park with no pad.
+# naked: it owns the stack-arg ABI; the slot lives in lrg_slot, not a `let`.
+# ===========================================================================
+fn l3_return_guard() naked {
+    # Pop the slot id off [rsp] into lrg_slot (a naked fn has no `let`); clamp
+    # out-of-range to 0 (matches the asm `cmp/jb/xor`; value is a zero-extended
+    # dword). On the normal path it is re-pushed so call_app_l3_return - which
+    # pops [rsp] itself - sees the same ABI.
+    pop_to_mem(&lrg_slot);
+    sq(&lrg_slot, lq(&lrg_slot) & 0xFFFFFFFF);
+    if lq(&lrg_slot) >= MAX_WINDOWS {
+        sq(&lrg_slot, 0);
+    }
+    # Matching kernel frame present -> normal resume (restore [rsp]=slot first).
+    if lq(l3_runtime_ptr(lq(&lrg_slot)) + L3_RT_KERNEL_RSP) != 0 {
+        push_val(lq(&lrg_slot));
+        tail_jump(call_app_l3_return);
+    }
+    # --- unmatched: recover instead of swapping to a zero kernel rsp ----------
+    sq(&l3_slot_in_flight + lq(&lrg_slot) * 8, 0);
+    cfg "ENABLE_DEBUG_SERIAL" {
+        cbd_ser(90); cbd_ser(82); cbd_ser(83); cbd_ser(80); cbd_ser(32);   # "ZRSP "
+        cbd_ser(115);                                                   # 's'
+        call ser_print_hex64(rdi: lq(&lrg_slot));
+        cbd_ser(32); cbd_ser(97);                                       # " a" arena base
+        call ser_print_hex64(rdi: lq(&l3_app_arena_base_v));
+        cbd_ser(32); cbd_ser(122);                                      # " z" arena size
+        call ser_print_hex64(rdi: lq(&l3_app_arena_size_v));
+        cbd_ser(13); cbd_ser(10);
+    }
+    # Gate the landing-pad recovery on cb_in_callback, NOT cb_deadman_armed:
+    # cb_deadman_check() (IRQ) clears cb_deadman_armed the instant it fires, so by
+    # the time this abort unwind runs the flag is already 0 - gating on it skipped
+    # the landing pad and fell through to the cli/hlt park below, freezing the BSP
+    # (the observed taskmgr-open "empty window then frozen mouse"). cb_in_callback
+    # is set together with cb_landing_buf in cb_run_guarded and is NOT cleared by
+    # the deadman, so it is true exactly when the landing buffer is valid.
+    if lw(&cb_in_callback) != 0 {
+        sw(&cb_deadman_armed, 0);
+        sw(&cb_in_callback, 0);
+        jump_landing(&cb_landing_buf);    # restores rbx/rbp/rsp -> cb_run_guarded (==1)
+    }
+    # No landing pad (should not happen on the inline path): park this core.
+    cli();
+    while 1 != 0 {
+        hlt();
+    }
+}

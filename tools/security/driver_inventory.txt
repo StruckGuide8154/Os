@@ -1,0 +1,40 @@
+# ============================================================================
+# driver_inventory.txt - FROZEN in-kernel driver quarantine (Track 8 / G2).
+#
+# This is the complete, authoritative list of the device drivers that are
+# ALLOWED to exist as in-kernel `.asm` under src/kernel/drivers/. It is
+# MONOTONIC-SHRINK ONLY:
+#
+#   * test_userspace_drivers.ps1 fails if ANY `*.asm` appears under
+#     src/kernel/drivers/ whose basename is NOT on this list  -> a NEW
+#     in-kernel driver is impossible to add (guarantee G2). New device code
+#     must be a ring-3 driver-host process (docs/track8-userspace-drivers-todo).
+#
+#   * When a driver is migrated to a user-space process, its `.asm` is DELETED
+#     and its line is REMOVED from this file. The guard fails if a listed entry
+#     no longer has a file (so the list cannot silently drift) and it fails if
+#     the count ever grows. The end state is an empty device-driver set.
+#
+# One basename (without the .asm extension) per line. Comments start with '#'.
+# ============================================================================
+acpi_ec
+acpi_pci
+amd_display
+ata
+battery
+display
+driver_debug
+fbperf
+hid_parser
+i2c_hid
+keyboard
+mouse
+pci
+ramdisk
+rtl8139
+rtl8156
+spi
+spi_hid
+usb
+usb_hid
+xhci

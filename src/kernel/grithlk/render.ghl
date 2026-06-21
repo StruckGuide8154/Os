@@ -1,0 +1,322 @@
+# ============================================================================
+# render.ghl - GUI render front-end + dirty-rectangle bookkeeping.  ZERO-ASM.
+#
+# Structured GritHLK port of the former hand-written src/kernel/gui/render.asm.
+# Keeps the EXACT same global symbol names and the System-V register ABI each
+# caller binds to (rdi/rsi/rdx/rcx/r8 in, rax out), so the kernel's asm draw
+# paths (window_draw.inc, taskbar_draw.inc, klog.asm) and the GritHLK frame
+# presenter (frame_present.ghl) link unchanged. There is ZERO assembly here.
+#
+# WHAT THIS OWNS
+#   * The dirty-rectangle list the GUI marks each frame, plus the full-redraw
+#     flag, and the snapshot/flush handshake that hands the backbuffer->FB blit
+#     to an Application Processor through the secure work queue.
+#   * The saved-backbuffer save/restore fast paths (full-screen + per-dirty-rect)
+#     used by the cursor / window-drag live-refresh code.
+#
+# ASYNC FLIP MODEL (unchanged from the asm)
+#   The BSP snapshots the live dirty list into the job-owned flip_* shadows,
+#   submits WQ_JOB_FLIP to the work queue, and returns to interactive work while
+#   an AP does the backbuffer->FB copy. At most one job is in flight: the
+#   previous frame's job is drained (timeout-guarded - a wedged AP leaks the slot
+#   rather than freezing the GUI) before the shadows are rewritten, so an AP
+#   never reads them mid-update. Single-core builds degrade cleanly because
+#   workqueue_submit runs the job inline.
+#
+# FIDELITY NOTES (semantics preserved exactly vs the asm)
+#   * render_save/restore_backbuffer: the asm did a 128-byte SSE (movdqa) bulk
+#     copy + a `rep movsb` remainder. Here rep_movsq copies the qword bulk and a
+#     <=7-byte scalar tail finishes - identical bytes, no XMM clobber. The byte
+#     count is the active framebuffer span (scr_pitch_q * scr_height).
+#   * The per-dirty-rect save/restore loops keep the same clip-then-row-copy
+#     shape; each row is a `rep movsd` of `width` dwords, as before.
+#   * flip_job_handle / flip_count / dirty_count round-trip through sw/lw
+#     (movsxd on read), so the -1 "no pending job" sentinel compares as -1.
+# ============================================================================
+
+module "render";
+
+unsafe raw_mem;          # lb/lw/lq/sb/sw/sq over the dirty list, shadows + FB
+unsafe kernel_priv;      # rep_movsq / rep_movsd block-move intrinsics
+unsafe implicit_extern;  # &<symbol> over module-local data + extern deps
+
+global render_init;
+global render_rect;
+global render_text;
+global render_line;
+global render_get_backbuffer;
+global render_mark_dirty;
+global render_mark_full;
+global render_flush;
+global render_flip_job;
+global render_save_backbuffer;
+global render_restore_backbuffer;
+global render_restore_dirty_backbuffer;
+global render_save_dirty_backbuffer;
+
+# Display driver leaves (drivers/display_*.inc).
+extern display_flip_rect;   # (edi x, esi y, edx w, ecx h) blit one rect bb->FB
+extern display_flip;        # () blit the whole active framebuffer bb->FB
+extern fill_rect;           # (edi x, esi y, edx w, ecx h, r8d color)
+extern draw_string;         # (rdi x, rsi y, rdx str, rcx fg, r8 bg)
+
+# Shared scanout geometry (core_runtime_state.asm) - all read-only here.
+extern bb_addr;             # dq - backbuffer base
+extern scr_width;           # dd - active width  (px)
+extern scr_height;          # dd - active height (px)
+extern scr_pitch_q;         # dq - framebuffer pitch (bytes/row)
+
+# SMP work queue (workqueue.ghl) - the flip blit runs on an AP.
+extern workqueue_submit;        # (jobid, arg, prio) -> handle or -1
+extern workqueue_wait_timeout;  # (handle, budget_ticks) -> result (0 on timeout)
+
+# Saved-backbuffer base (boot_memory.inc).
+const BACK_BUFFER_SAVE_ADDR = extern;
+
+const MAX_DIRTY_RECTS = 32;
+const RECT_BYTES      = 16;          # x,y,w,h dwords
+const DIRTY_BYTES     = 512;         # MAX_DIRTY_RECTS * RECT_BYTES
+
+# Rect field offsets (within a 16-byte entry).
+const R_X = 0;
+const R_Y = 4;
+const R_W = 8;
+const R_H = 12;
+
+# Secure work-queue job id for the flip blit (workqueue.ghl wq_job_table[3]).
+const WQ_JOB_FLIP   = 3;
+const WQ_PRIO_HIGH  = 2;
+const WQ_INVALID    = -1;
+const FLIP_BUDGET    = 50;           # PIT-tick drain budget (never raw counter)
+
+# ---------------------------------------------------------------------------
+# State (was render.asm's section .data).
+# ---------------------------------------------------------------------------
+data dirty_count: 4;
+data full_redraw: 1;
+align 16;
+data dirty_rects: 512;               # MAX_DIRTY_RECTS * 16
+
+# Async-flip shadow state: written by the BSP in render_flush (only while no job
+# is in flight), read by the AP running render_flip_job.
+data flip_job_handle: 4 = [255, 255, 255, 255];   # -1 (no pending job)
+data flip_count: 4;
+data flip_full: 1;
+align 16;
+data flip_rects: 512;
+
+# ---------------------------------------------------------------------------
+# render_init - first frame is a full redraw; no dirty rects yet.
+# ---------------------------------------------------------------------------
+fn render_init() {
+    sw(&dirty_count, 0);
+    sb(&full_redraw, 1);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Thin passthrough wrappers (were `jmp fill_rect` / `jmp draw_string`).
+# ---------------------------------------------------------------------------
+fn render_rect(rdi x, rsi y, rdx w, rcx h, r8 color) {
+    fill_rect(x, y, w, h, color);
+    return 0;
+}
+
+fn render_text(rdi x, rsi y, rdx s, rcx fg, r8 bg) {
+    draw_string(x, y, s, fg, bg);
+    return 0;
+}
+
+# render_line was a no-op stub in the asm (reserved; nothing drew lines here).
+fn render_line() {
+    return 0;
+}
+
+fn render_get_backbuffer() {
+    return lq(&bb_addr);
+}
+
+# ---------------------------------------------------------------------------
+# render_mark_dirty(edi x, esi y, edx w, ecx h) - append a dirty rect; once the
+# list overflows MAX_DIRTY_RECTS, fall back to a whole-screen redraw.
+# ---------------------------------------------------------------------------
+fn render_mark_dirty(edi x, esi y, edx w, ecx h) {
+    let n = lw(&dirty_count);
+    if n >= MAX_DIRTY_RECTS {
+        sb(&full_redraw, 1);
+        return 0;
+    }
+    let r = &dirty_rects + n * RECT_BYTES;
+    sw(r + R_X, x);
+    sw(r + R_Y, y);
+    sw(r + R_W, w);
+    sw(r + R_H, h);
+    sw(&dirty_count, n + 1);
+    return 0;
+}
+
+# render_mark_full - force a whole-screen redraw next flush.
+fn render_mark_full() {
+    sb(&full_redraw, 1);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# render_flush - publish this frame's dirty state to an AP and return.
+# ---------------------------------------------------------------------------
+fn render_flush() {
+    # Drain the previous flip job (normally DONE already => near-zero wait).
+    # Timeout-guarded: if the owning AP wedged, leak the slot and carry on rather
+    # than freezing the GUI.
+    let h = lw(&flip_job_handle);
+    if h != WQ_INVALID {
+        workqueue_wait_timeout(h, FLIP_BUDGET);
+        sw(&flip_job_handle, WQ_INVALID);
+    }
+
+    # Anything to do this frame?
+    if lb(&full_redraw) == 0 {
+        if lw(&dirty_count) == 0 { return 0; }
+    }
+
+    # Snapshot dirty state into the job-owned shadows, then reset the live list so
+    # the BSP can mark new rects while the AP blits these.
+    sb(&flip_full, lb(&full_redraw));
+    let cnt = lw(&dirty_count);
+    sw(&flip_count, cnt);
+    rep_movsd(&flip_rects, &dirty_rects, cnt * 4);   # 4 dwords per rect
+    sw(&dirty_count, 0);
+    sb(&full_redraw, 0);
+
+    # Hand the blit to an AP through the secure job-ID allow-list (not a raw fn
+    # pointer). High priority so app jobs cannot starve frames. Queue full ->
+    # blit on the BSP so a frame is never dropped.
+    let handle = workqueue_submit(WQ_JOB_FLIP, 0, WQ_PRIO_HIGH);
+    if handle == WQ_INVALID {
+        render_flip_job();
+        return 0;
+    }
+    sw(&flip_job_handle, handle);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# render_flip_job(rdi unused) -> 0. Runs on an AP (or inline). Blits the
+# snapshotted rects (or the whole screen) backbuffer -> FB. Reads only the
+# flip_* shadows the BSP published before the job (x86 TSO makes them visible
+# together with the PENDING status word). wq_job_table[3]. The single rdi job
+# argument is part of the work-queue ABI but unused (the shadows are static).
+# ---------------------------------------------------------------------------
+fn render_flip_job() {
+    if lb(&flip_full) != 0 {
+        display_flip();
+        sb(&flip_full, 0);
+        return 0;
+    }
+    let n = lw(&flip_count);
+    let i = 0;
+    while i < n {
+        let r = &flip_rects + i * RECT_BYTES;
+        display_flip_rect(lw(r + R_X), lw(r + R_Y), lw(r + R_W), lw(r + R_H));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# copy_active_fb(dst, src) - copy the active framebuffer span (pitch * height)
+# dst <- src. qword bulk + <=7-byte tail (was a 128-byte SSE loop + rep movsb).
+# ---------------------------------------------------------------------------
+fn copy_active_fb(dst, src) {
+    let bytes = lq(&scr_pitch_q) * lw(&scr_height);
+    let q = bytes >> 3;
+    rep_movsq(dst, src, q);
+    let done = q * 8;
+    let tail = bytes & 7;
+    let i = 0;
+    while i < tail {
+        sb(dst + done + i, lb(src + done + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# render_save_backbuffer    - backbuffer -> saved snapshot (RAM->RAM).
+fn render_save_backbuffer() {
+    copy_active_fb(BACK_BUFFER_SAVE_ADDR, lq(&bb_addr));
+    return 0;
+}
+
+# render_restore_backbuffer - saved snapshot -> backbuffer (RAM->RAM).
+fn render_restore_backbuffer() {
+    copy_active_fb(lq(&bb_addr), BACK_BUFFER_SAVE_ADDR);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# copy_dirty_rect(dstbase, srcbase, rect) - clip one dirty rect to the screen,
+# then copy it row-by-row dst <- src (both are FB-layout buffers: bb_addr and
+# BACK_BUFFER_SAVE_ADDR). Shared by the save/restore dirty-rect fast paths.
+# ---------------------------------------------------------------------------
+fn copy_dirty_rect(dstbase, srcbase, rect) {
+    let x = lw(rect + R_X);
+    let y = lw(rect + R_Y);
+    let w = lw(rect + R_W);
+    let h = lw(rect + R_H);
+
+    # Clip left / top (shrink width/height as the origin is clamped to 0).
+    if x < 0 { w = w + x; x = 0; }
+    if y < 0 { h = h + y; y = 0; }
+    if w <= 0 { return 0; }
+    if h <= 0 { return 0; }
+
+    # Clip right / bottom against the active screen.
+    let maxw = lw(&scr_width) - x;
+    if w > maxw { w = maxw; }
+    let maxh = lw(&scr_height) - y;
+    if h > maxh { h = maxh; }
+    if w <= 0 { return 0; }
+    if h <= 0 { return 0; }
+
+    # Row starts: base + y*pitch + x*4 (32bpp).
+    let pitch = lq(&scr_pitch_q);
+    let off = y * pitch + x * 4;
+    let dst = dstbase + off;
+    let src = srcbase + off;
+    let row = h;
+    while row > 0 {
+        rep_movsd(dst, src, w);
+        dst = dst + pitch;
+        src = src + pitch;
+        row = row - 1;
+    }
+    return 0;
+}
+
+# render_restore_dirty_backbuffer - restore only the current dirty rects from the
+# saved snapshot (used during titlebar drag so each mouse move touches just the
+# old + new outline areas instead of the whole framebuffer).
+fn render_restore_dirty_backbuffer() {
+    let n = lw(&dirty_count);
+    let i = 0;
+    while i < n {
+        copy_dirty_rect(lq(&bb_addr), BACK_BUFFER_SAVE_ADDR,
+                        &dirty_rects + i * RECT_BYTES);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# render_save_dirty_backbuffer - save only the current dirty rects into the saved
+# snapshot so later cursor/drag restores see the newest pixels without copying
+# the whole screen.
+fn render_save_dirty_backbuffer() {
+    let n = lw(&dirty_count);
+    let i = 0;
+    while i < n {
+        copy_dirty_rect(BACK_BUFFER_SAVE_ADDR, lq(&bb_addr),
+                        &dirty_rects + i * RECT_BYTES);
+        i = i + 1;
+    }
+    return 0;
+}

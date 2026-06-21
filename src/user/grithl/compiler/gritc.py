@@ -12,12 +12,32 @@ KEYWORDS = {
     "use","app","module","fn","let","if","else","while","for","return",
     "str","i8","i16","i32","i64","u8","u16","u32","u64","ptr","void","bool",
     "true","false","asm","syscall","extern","const","struct","state","break","continue",
-    "global","data","table","naked","align","unsafe",
+    "global","data","table","naked","align","unsafe","buffer","reserve",
+    # Blocking-effect type system: a fn may be declared `blocking` (it can
+    # spin/wait/acquire-a-lock) or `nonblocking` (an interactive / IRQ entry
+    # point that must never stall). The compiler rejects a blocking call from a
+    # nonblocking context at compile time. See _enforce_blocking_effects.
+    "blocking","nonblocking",
     # Kernel-mode explicit-register ABI:
     #   preserves(...) - callee-save contract (see gen_kernel_fn)
     #   call           - register-annotated call statement `call f(al: x);`
     "preserves","call"
 }
+
+# Per-app budget for compiler-managed `buffer` scratch arenas. They live in the
+# app's .data blob inside its 2 MiB (0x200000) slot, alongside the code blob and
+# the per-slot stack/shadow window, so this is capped well under the slot size.
+# Exceeding it is a hard compile error (see the `buffer` lowering) - that is the
+# point: scratch sizing is checked at build time, never silently overlapping.
+BUFFER_REGION_CAP = 0x100000   # 1 MiB
+
+# Set by compile_unit; consumed by main() to write the debug memory-layout
+# manifest sidecar (parallel to LAST_SIGS).
+LAST_MEMMAP = {"buffers": [], "used": 0, "cap": BUFFER_REGION_CAP}
+
+# Set by compile_unit; consumed by main() to write a safety manifest sidecar.
+# This is intentionally metadata-only: it must never affect generated assembly.
+LAST_SAFETY = {}
 
 # ---------------------------------------------------------------------------
 # Kernel-mode explicit-register ABI register table.
@@ -214,8 +234,17 @@ def parse(toks,path):
             p.eat(); nm=p.eat("id").v; p.match(";")
             decls.append(node("global",name=nm))
         elif t.v=="extern":
-            p.eat(); nm=p.eat("id").v; p.match(";")
-            decls.append(node("extern",name=nm))
+            # `extern NAME;` imports a symbol. `extern blocking NAME;` additionally
+            # declares that the imported routine can spin/wait/block - so the
+            # blocking-effect checker treats any call to it as a blocking effect
+            # (this is how an imported primitive like workqueue_wait is tagged
+            # across module boundaries, where its body isn't visible).
+            p.eat()
+            blk=False
+            if p.peek().v=="blocking":
+                p.eat(); blk=True
+            nm=p.eat("id").v; p.match(";")
+            decls.append(node("extern",name=nm,blocking=blk))
         elif t.v=="cfg":
             # Top-level build-config guard: `cfg "NAME" { <data decls> }` wraps
             # the contained top-level `data` declarations in `%ifdef NAME ...
@@ -336,8 +365,46 @@ def parse(toks,path):
                 p.match(";")
                 fields.append((nm,sz))
             decls.append(node("state",fields=fields))
+        elif t.v=="buffer":
+            # `buffer NAME[BYTES];` - a compiler-managed scratch arena. Unlike a
+            # hand-picked magic address, the compiler bump-allocates it inside the
+            # app's own .data blob (slot-correct + KASLR-correct, see the lowering
+            # pass), bounds-checks every index into it for free (it rides the
+            # `state` machinery), and records it in the debug memory-layout
+            # manifest. The size may be a literal or a previously-defined const.
+            p.eat(); nm=p.eat("id").v; p.eat("[")
+            if p.peek().k=="num":
+                szt=("num", p.eat("num").v)
+            else:
+                szt=("ident", p.eat("id").v)
+            p.eat("]"); p.match(";")
+            decls.append(node("buffer",name=nm,size=szt))
+        elif t.v=="reserve":
+            # `reserve NAME[BYTES];` - like `buffer`, a compiler-managed,
+            # bounds-checked, RIP-relative scratch arena, but UNINITIALIZED:
+            # it lowers into a `.bss`/NOBITS section (`resb`) instead of the
+            # .data blob, so it costs ZERO image bytes. The kernel's `-f bin`
+            # build places .bss after all emitted sections, so a multi-MiB
+            # reserve does not grow KERNEL.BIN. This is the primitive that makes
+            # large per-slot arenas (e.g. the XML DOM) hostable in zero-asm GHL.
+            p.eat(); nm=p.eat("id").v; p.eat("[")
+            if p.peek().k=="num":
+                szt=("num", p.eat("num").v)
+            else:
+                szt=("ident", p.eat("id").v)
+            p.eat("]"); p.match(";")
+            decls.append(node("reserve",name=nm,size=szt))
         elif t.v=="fn":
             decls.append(parse_fn(p))
+        elif t.v in ("blocking","nonblocking"):
+            # Blocking-effect annotation on a function definition:
+            #   blocking fn workqueue_wait_timeout() { ... }
+            #   nonblocking fn dispatch_app_callback() { ... }
+            eff=t.v; p.eat()
+            if p.peek().v!="fn":
+                p.err(f"`{eff}` must be followed by `fn`")
+            fn=parse_fn(p); fn["block_effect"]=eff
+            decls.append(fn)
         else:
             p.err(f"unexpected top-level {t.v!r}")
     return decls
@@ -571,6 +638,7 @@ _NULLARY_INTRINSICS={
     "read_cr2":["mov rax, cr2"],
     "read_cr3":["mov rax, cr3"],
     "read_cr4":["mov rax, cr4"],
+    "str_sel":["str ax","movzx rax, ax"],   # store TR selector (VMX guest capture)
     # naked/raw-stack primitives (for `naked` fns, e.g. the SYSCALL trampoline)
     "read_rsp":["mov rax, rsp"],      # current stack pointer
     "pop_val":["pop rax"],            # pop top of stack into rax
@@ -588,7 +656,7 @@ def rbpoff(o):
 
 class CG:
     def __init__(s,app_prefix,kernel=False):
-        s.text=[]; s.rodata=[]; s.data=[]
+        s.text=[]; s.rodata=[]; s.data=[]; s.bss=[]
         s.lbl=0
         s.kernel=kernel
         s.target="kernel" if kernel else "user"
@@ -611,6 +679,15 @@ class CG:
         s.loops=[]  # (brk_lbl, cont_lbl)
         s.sigs=[]
         s.need_oob=False      # an out-of-bounds trap stub is referenced
+        # --- Compiler-managed scratch buffers (`buffer NAME[BYTES];`) ----------
+        # Each declared buffer is bump-allocated, 8-byte aligned, within a single
+        # per-app scratch region that physically lives in the app's `.data`
+        # section (so it is part of the RIP-relative blob copied into the slot -
+        # automatically slot-correct and W^X-classified as W+NX data). The list
+        # feeds the debug memory-layout manifest; s.buffer_used tracks the running
+        # aligned total so the build fails loudly before the slot would overflow.
+        s.buffers=[]          # ordered [(name, size, aligned_off)] for the manifest
+        s.buffer_used=0       # running aligned scratch total in bytes
     def L(s,base="L"):
         s.lbl+=1; return f".{base}{s.lbl}"
     def oob(s):
@@ -2184,6 +2261,392 @@ def _enforce_no_asm(decls, why):
         more="" if len(offenders)<=8 else f" (+{len(offenders)-8} more)"
         raise SyntaxError(f"{why}: inline asm is forbidden in {names}{more}")
 
+# Function-level safety inference. This is deliberately conservative: unknown
+# extern calls are surfaced as contract debt instead of being assumed safe.
+_MEM_READ_BUILTINS={"lb","lw","lq"}
+_MEM_WRITE_BUILTINS={"sb","sw","sq"}
+_USER_MEM_BUILTINS={"smap_open","smap_close","rep_movsq","rep_movsd"}
+_SERIAL_NAMES={"serial_putc","serial_puts","serial_crlf","svg_dump_putc","ser_print_hex64","debug_print"}
+_FRAMEBUFFER_NAMES={
+    "render_text","render_rect","render_flush","render_mark_dirty","render_mark_full",
+    "render_save_backbuffer","render_save_dirty_backbuffer","render_restore_dirty_backbuffer",
+    "display_flip","display_flip_rect","cursor_draw","cursor_hide","wm_draw_window",
+    "wm_draw_desktop","tb_draw","tb_draw_submenu","ctx_menu_draw","klog_render_overlay",
+}
+# Externs with a narrow, GHL-facing contract. These are still emitted in
+# extern_calls for visibility, but they are not ABI debt in the safety budget.
+_CONTRACTED_EXTERN_NAMES={
+    "render_flush",
+    "render_mark_dirty",
+    "render_mark_full",
+    "usb_debug_overlay_prime",
+}
+_WORKQUEUE_NAMES={"workqueue_submit","workqueue_wait","workqueue_wait_timeout","workqueue_init"}
+_HID_NAMES={
+    "usb_poll_mouse","usb_hid_init","usb_hid_init_same_ctrl","usb_queue_mouse_read",
+    "usb_queue_mouse_read2","usb_hid_requeue_slot1_reads","usb_hid_requeue_slot1_one",
+    "i2c_hid_init","i2c_hid_poll","spi_hid_init","process_mouse",
+}
+_IRQ_NAMES={"idt_init","pic_init","pit_init","apic_init","ioapic_init","sti","cli","hlt"}
+_INTRINSIC_NAMES=(
+    _MEM_READ_BUILTINS | _MEM_WRITE_BUILTINS | _USER_MEM_BUILTINS |
+    {
+        "cli","sti","hlt","swapgs","sysretq","iretq","ud2","ret_naked","lfence",
+        "mfence","sfence","pause","wbinvd","nop","smap_open","smap_close",
+        "rdtsc","rdrand","read_rsp","pop_val",
+        "inb","outb","inw","outw","ind","outd","rdmsr","wrmsr","wrmsr_split",
+        "write_cr0","write_cr3","write_cr4","read_cr0","read_cr2","read_cr3","read_cr4",
+        "invlpg","lgdt","lidt","ltr","intn","load_ds","load_es","load_fs","load_gs","load_ss",
+        "xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","xmm_bcast32","isqrt",
+        "rep_movsq","rep_movsd","rep_stosd","atomic_xchg","atomic_cmpxchg","atomic_add",
+        "syscall_raw","call_table",
+        "cpuid_eax","cpuid_ebx","cpuid_ecx","cpuid_edx","write_rsp","push_val","pop_val",
+        "pop_to_mem","save_rsp","save_flags","write_flags","push_reg","pop_reg","set_reg",
+        "save_landing","jump_landing","tail_jump",
+        "vmxon","vmxoff","vmclear","vmptrld","vmwrite","vmread","vmlaunch","vmresume",
+        "sgdt","sidt","str_sel",
+    }
+)
+
+def _call_effects(name):
+    effects=set()
+    if name in _FRAMEBUFFER_NAMES or name.startswith(("render_","display_","cursor_","wm_draw","tb_draw","ctx_menu")):
+        effects.add("framebuffer")
+    if name in _WORKQUEUE_NAMES or name.startswith("workqueue_"):
+        effects.add("workqueue")
+    if name in _HID_NAMES or name.startswith(("usb_","i2c_hid","spi_hid","hid_")):
+        effects.add("hid_state")
+    if name in _SERIAL_NAMES or name.startswith(("serial_","ser_","svg_dump")):
+        effects.add("serial")
+    if name in _IRQ_NAMES:
+        effects.add("irq_state")
+    if name in ("rtl8156_dhcp_pump","rtl8139_dhcp_pump","net_nic_poll_rx") or name.startswith(("rtl8156_","rtl8139_","net_")):
+        effects.add("net_state")
+    if name in ("smap_open","smap_close"):
+        effects.add("user_mem")
+    return effects
+
+def _walk_expr_contract(e, ctx):
+    if not e:
+        return
+    k=e.get("k")
+    if k=="call":
+        name=e["name"]
+        ctx["calls"].add(name)
+        ctx["effects"].update(_call_effects(name))
+        if name in _MEM_READ_BUILTINS:
+            ctx["effects"].update(("raw_mem","kernel_mem_read"))
+            ctx["address_spaces"].add("KernelPtr")
+            ctx["global_reads"].add("*raw")
+        elif name in _MEM_WRITE_BUILTINS:
+            ctx["effects"].update(("raw_mem","kernel_mem_write"))
+            ctx["address_spaces"].add("KernelPtr")
+            ctx["global_writes"].add("*raw")
+        elif name in ("inb","inw","ind","outb","outw","outd"):
+            ctx["effects"].update(("kernel_io","mmio_or_port_io"))
+            ctx["address_spaces"].add("IoPort")
+        elif name in ("rdmsr","wrmsr","wrmsr_split","write_cr0","write_cr3","write_cr4","read_cr0","read_cr2","read_cr3","read_cr4","invlpg"):
+            ctx["effects"].update(("kernel_priv","cpu_control"))
+        elif name in ("lgdt","lidt","ltr","load_ds","load_es","load_fs","load_gs","load_ss","intn",
+                      "sgdt","sidt","str_sel"):
+            ctx["effects"].update(("kernel_priv","descriptor_or_interrupt_state"))
+        elif name in ("vmxon","vmxoff","vmclear","vmptrld","vmwrite","vmread","vmlaunch","vmresume"):
+            ctx["effects"].update(("kernel_vmx","cpu_control","root_mode"))
+        elif name in _USER_MEM_BUILTINS:
+            ctx["effects"].add("user_mem")
+            ctx["address_spaces"].add("UserPtr")
+        elif name in ("xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","rep_movsq","rep_movsd","rep_stosd"):
+            ctx["effects"].update(("raw_mem","bulk_memory"))
+        elif name in ("atomic_xchg","atomic_cmpxchg","atomic_add"):
+            ctx["effects"].update(("kernel_priv","shared_state_sync"))
+        elif name in ("save_landing","jump_landing","tail_jump"):
+            ctx["effects"].update(("kernel_priv","nonlocal_control"))
+        elif name in ("call_table",):
+            ctx["effects"].add("indirect_call")
+        for a in e.get("args") or []:
+            _walk_expr_contract(a, ctx)
+    elif k=="syscall":
+        ctx["effects"].update(("syscall","user_mem"))
+        for a in [e.get("num")] + list(e.get("args") or []):
+            _walk_expr_contract(a, ctx)
+    elif k=="addr":
+        n=e["name"]
+        if n in ctx["externs"] or n not in ctx["known_names"]:
+            ctx["effects"].add("implicit_extern")
+            ctx["extern_refs"].add(n)
+        if n in ctx["states"]:
+            ctx["global_reads"].add(n)
+    elif k=="ident":
+        n=e["name"]
+        if n in ctx["states"]:
+            ctx["global_reads"].add(n)
+    elif k=="index":
+        tgt=e.get("target") or {}
+        if tgt.get("k")=="ident" and tgt.get("name") in ctx["states"]:
+            ctx["global_reads"].add(tgt.get("name"))
+            ctx["effects"].add("bounds_checked_slice")
+        _walk_expr_contract(tgt, ctx)
+        _walk_expr_contract(e.get("idx"), ctx)
+    elif k in ("bin",):
+        _walk_expr_contract(e.get("lhs"), ctx)
+        _walk_expr_contract(e.get("rhs"), ctx)
+    elif k in ("neg","not"):
+        _walk_expr_contract(e.get("expr"), ctx)
+
+def _walk_stmt_contract(s, ctx):
+    if not s:
+        return
+    k=s.get("k")
+    if k=="asm":
+        ctx["inline_asm"]=True
+        ctx["effects"].add("inline_asm")
+    elif k=="let":
+        _walk_expr_contract(s.get("expr"), ctx)
+    elif k=="assign":
+        lhs=s.get("lhs") or {}
+        if lhs.get("k")=="ident" and lhs.get("name") in ctx["states"]:
+            ctx["global_writes"].add(lhs.get("name"))
+        elif lhs.get("k")=="index":
+            tgt=lhs.get("target") or {}
+            if tgt.get("k")=="ident" and tgt.get("name") in ctx["states"]:
+                ctx["global_writes"].add(tgt.get("name"))
+                ctx["effects"].add("bounds_checked_slice")
+            _walk_expr_contract(lhs, ctx)
+        _walk_expr_contract(s.get("rhs"), ctx)
+    elif k=="exprstmt":
+        _walk_expr_contract(s.get("expr"), ctx)
+    elif k=="return":
+        _walk_expr_contract(s.get("expr"), ctx)
+    elif k=="regcall":
+        tgt=s.get("target")
+        if tgt:
+            ctx["calls"].add(tgt)
+            ctx["effects"].update(_call_effects(tgt))
+            ctx["effects"].add("custom_reg_abi")
+        for _r,e in s.get("regargs") or []:
+            _walk_expr_contract(e, ctx)
+    elif k in ("if","while","cfg"):
+        _walk_expr_contract(s.get("cond"), ctx)
+        for st in s.get("then") or []:
+            _walk_stmt_contract(st, ctx)
+        for st in s.get("body") or []:
+            _walk_stmt_contract(st, ctx)
+        for st in s.get("els") or []:
+            _walk_stmt_contract(st, ctx)
+
+def _analyze_fn_contracts(decls, cg):
+    states=set(cg.state_defs.keys())
+    externs=set(cg.externs)
+    local_fns={d["name"] for d in decls if d.get("k")=="fn"}
+    known_names=(states | externs | local_fns | set(cg.consts.keys()) |
+                 set(cg.symconsts) | set(cg.str_defs.keys()) | set(cg.table_counts.keys()))
+
+    def collect_lets(stmts, out):
+        for st in stmts or []:
+            if st.get("k")=="let":
+                out.add(st.get("name"))
+            collect_lets(st.get("then"), out)
+            collect_lets(st.get("body"), out)
+            collect_lets(st.get("els"), out)
+
+    out=[]
+    for d in decls:
+        if d.get("k")!="fn":
+            continue
+        locals_for_fn=set(d.get("params") or [])
+        locals_for_fn.update(n for _r,n in (d.get("regparams") or []))
+        collect_lets(d.get("body") or [], locals_for_fn)
+        ctx={
+            "states": states,
+            "externs": externs,
+            "known_names": known_names | locals_for_fn,
+            "calls": set(),
+            "effects": set(),
+            "address_spaces": set(),
+            "global_reads": set(),
+            "global_writes": set(),
+            "extern_refs": set(),
+            "inline_asm": False,
+        }
+        for st in d.get("body") or []:
+            _walk_stmt_contract(st, ctx)
+        regparams=[{"register": r, "name": n} for r,n in (d.get("regparams") or [])]
+        calls=sorted(ctx["calls"])
+        extern_calls=sorted(c for c in calls if c not in local_fns and c not in _INTRINSIC_NAMES)
+        contracted_extern_calls=sorted(c for c in extern_calls if c in _CONTRACTED_EXTERN_NAMES)
+        unknown_extern_calls=sorted(c for c in extern_calls if c not in _CONTRACTED_EXTERN_NAMES)
+        out.append({
+            "name": d.get("name"),
+            "line": d.get("line"),
+            "params": list(d.get("params") or []),
+            "regparams": regparams,
+            "preserves": d.get("preserves"),
+            "naked": bool(d.get("naked")),
+            "inline_asm": bool(ctx["inline_asm"]),
+            "effects": sorted(ctx["effects"]),
+            "calls": calls,
+            "extern_calls": extern_calls,
+            "extern_contract_satisfied": contracted_extern_calls,
+            "extern_contract_required": unknown_extern_calls,
+            "global_reads": sorted(ctx["global_reads"]),
+            "global_writes": sorted(ctx["global_writes"]),
+            "extern_refs": sorted(ctx["extern_refs"]),
+            "address_spaces": sorted(ctx["address_spaces"]),
+        })
+    return out
+
+# ---------------------------------------------------------------------------
+# Blocking-effect type system.
+#
+# The highest-value liveness guard (see memory ghl_liveness_protection_gap): a
+# function that can spin, busy-wait, or block on a lock/work-item is a *blocking*
+# effect. An interactive or IRQ entry point that must keep the system live is
+# *nonblocking*. The compiler rejects, at build time, any path that reaches a
+# blocking effect from a nonblocking context.
+#
+# This would have been a build error for the release-only app-open freeze:
+# dispatch_app_callback (the interactive path) calling workqueue_wait_timeout
+# (blocking) would simply not compile.
+#
+# Effect sources, in order:
+#   1. explicit `blocking fn` annotation, or `extern blocking NAME;`
+#   2. a call to a known blocking primitive (workqueue_wait / wq_lock / ...)
+#   3. an unbounded spin/wait loop (`while true { ... }` with no `break`)
+#   4. transitively, a call to any local fn that is itself blocking
+# A fn is checked only when it is annotated `nonblocking`; everything else is
+# left to inference (unknown externs are assumed nonblocking - tag the blocking
+# ones explicitly with `extern blocking`).
+# ---------------------------------------------------------------------------
+_BLOCKING_PRIMITIVES={
+    "workqueue_wait","workqueue_wait_timeout",
+    "wq_lock","wq_lock_acquire","lock_acquire","mutex_lock","spin_lock","sem_wait",
+}
+
+def _is_blocking_primitive(name):
+    # workqueue_wait, workqueue_wait_timeout and any future workqueue_wait* are
+    # blocking by construction (they park the caller until a job completes).
+    return name in _BLOCKING_PRIMITIVES or name.startswith("workqueue_wait")
+
+def _block_has_break(stmts):
+    # Is there a `break` bound to the *current* loop? Do not descend into nested
+    # `while`/`for` (their `break` targets the inner loop, not this one).
+    for s in stmts or []:
+        k=s.get("k")
+        if k=="break":
+            return True
+        if k=="if":
+            if _block_has_break(s.get("then")) or _block_has_break(s.get("els")):
+                return True
+        if k=="cfg":
+            if _block_has_break(s.get("body")) or _block_has_break(s.get("els")):
+                return True
+    return False
+
+def _stmt_has_spin(stmts):
+    # An unbounded `while true { ... }` (constant-true condition, no break that
+    # leaves it) is a spin/wait loop = a blocking effect. Bounded loops and any
+    # loop with an escape hatch are fine.
+    for s in stmts or []:
+        k=s.get("k")
+        if k=="while":
+            cond=s.get("cond") or {}
+            if cond.get("k")=="int" and cond.get("val") not in (0,None):
+                if not _block_has_break(s.get("body")):
+                    return True
+            if _stmt_has_spin(s.get("body")):
+                return True
+        elif k=="if":
+            if _stmt_has_spin(s.get("then")) or _stmt_has_spin(s.get("els")):
+                return True
+        elif k=="cfg":
+            if _stmt_has_spin(s.get("body")) or _stmt_has_spin(s.get("els")):
+                return True
+    return False
+
+def _blocking_path(start, fns, calls_of, direct, extern_blocking):
+    # BFS the local call graph from `start` to the nearest blocking effect, for a
+    # readable error chain. Local fns are graph nodes; a blocking primitive /
+    # blocking extern is a terminal leaf.
+    from collections import deque
+    prev={start:None}
+    dq=deque([start])
+    end=None; end_reason=None
+    while dq and end is None:
+        n=dq.popleft()
+        if direct.get(n):                       # n is itself directly blocking
+            end=n; end_reason=direct[n]; break
+        for c in sorted(calls_of.get(n, ())):
+            if _is_blocking_primitive(c) or c in extern_blocking:
+                prev[c]=n; end=c
+                end_reason=("blocking primitive" if _is_blocking_primitive(c)
+                            else "declared `extern blocking`")
+                break
+            if c in fns and c not in prev:
+                prev[c]=n; dq.append(c)
+    chain=[]
+    n=end
+    while n is not None:
+        chain.append(n); n=prev.get(n)
+    chain.reverse()
+    return " -> ".join(f"`{c}`" for c in chain)+f"   [{end}: {end_reason}]"
+
+def _enforce_blocking_effects(decls, fn_safety, src):
+    fns={d["name"]:d for d in decls if d.get("k")=="fn"}
+    safety_by={f["name"]:f for f in fn_safety}
+    extern_blocking={d["name"] for d in decls
+                     if d.get("k")=="extern" and d.get("blocking")}
+
+    # Directly-blocking reason per local fn (annotation / primitive / spin loop),
+    # ignoring transitive local calls.
+    direct={}
+    calls_of={}
+    for name,d in fns.items():
+        calls=set(safety_by.get(name,{}).get("calls") or [])
+        calls_of[name]=calls
+        reason=None
+        if d.get("block_effect")=="blocking":
+            reason="declared `blocking`"
+        if reason is None:
+            for c in sorted(calls):
+                if _is_blocking_primitive(c):
+                    reason=f"calls blocking primitive `{c}`"; break
+                if c in extern_blocking:
+                    reason=f"calls `extern blocking` `{c}`"; break
+        if reason is None and _stmt_has_spin(d.get("body")):
+            reason="contains an unbounded spin/wait loop (`while true` with no `break`)"
+        direct[name]=reason
+
+    # Fixpoint: blocking if directly blocking or it calls a blocking local fn.
+    blocking={n:bool(r) for n,r in direct.items()}
+    changed=True
+    while changed:
+        changed=False
+        for name in fns:
+            if blocking[name]:
+                continue
+            for c in calls_of[name]:
+                if c in fns and blocking[c]:
+                    blocking[name]=True; changed=True; break
+
+    # Enforce: a nonblocking-declared fn must reach no blocking effect.
+    for name,d in fns.items():
+        if d.get("block_effect")=="nonblocking" and blocking[name]:
+            path=_blocking_path(name, fns, calls_of, direct, extern_blocking)
+            loc=f"{src}:{d.get('line')}" if src else f"line {d.get('line')}"
+            raise SyntaxError(
+                f"{loc}: nonblocking fn `{name}` reaches a blocking effect:\n"
+                f"    {path}\n"
+                f"  An interactive/IRQ entry point may not spin, wait, or block. "
+                f"Make the call asynchronous (submit + poll) or drop the "
+                f"`nonblocking` contract.")
+
+    # Annotate the safety manifest (metadata only; never affects codegen).
+    for f in fn_safety:
+        nm=f["name"]
+        f["block_effect"]=fns.get(nm,{}).get("block_effect")
+        f["blocking"]=bool(blocking.get(nm))
+    return blocking
+
 _VALID_UNSAFE_CAPS={
     "raw_mem",
     "implicit_extern",
@@ -2204,13 +2667,15 @@ _VALID_UNSAFE_CAPS={
     "kernel_pgtable",  # page-table / TLB authority (write_cr3, invlpg)
     "kernel_dtable",   # descriptor-table loads (lgdt, ltr)
     "kernel_idtable",  # interrupt-table loads (lidt)
+    "kernel_vmx",      # VT-x root-mode (vmxon/vmclear/vmptrld/vmwrite/vmread/
+                       # vmlaunch/vmresume/vmxoff) - Track 5 G1 monitor back-end
 }
 
 # Narrow kernel caps that the broad `kernel_priv` is allowed to stand in for, so
 # splitting an intrinsic off kernel_priv does not break modules that still
 # declare the broad cap.
 _KERNEL_PRIV_SUBSUMES={
-    "kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable",
+    "kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable","kernel_vmx",
 }
 
 def _require_cap(cg, cap, what):
@@ -2223,7 +2688,7 @@ def _require_cap(cg, cap, what):
     raise SyntaxError(f"{what} requires `unsafe {cap};`")
 
 def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user",forbid_asm=False,deny_unsafe=False,optimize=True,regalloc=False,o3=False,o4=False):
-    global LAST_SIGS
+    global LAST_SIGS, LAST_MEMMAP, LAST_SAFETY
     if forbid_asm:
         _enforce_no_asm(decls, "--forbid-asm")
     if target=="boot":
@@ -2235,6 +2700,11 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if deny_unsafe and declared_caps:
         caps=", ".join(d["cap"] for d in declared_caps[:8])
         raise SyntaxError(f"--deny-unsafe rejects unsafe capability declarations: {caps}")
+    safety_module=app_prefix
+    for d in decls:
+        if d.get("k") in ("module","app"):
+            safety_module=d.get("name") or safety_module
+            break
     cg=CG(app_prefix,kernel=kernel)
     cg.deny_unsafe=deny_unsafe
     cg.unsafe_caps={d["cap"] for d in declared_caps}
@@ -2365,6 +2835,70 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             cg.data.append(f"{nm}: times {count} {directive} {initval}")
             cg.state_sizes[nm]=count*w     # byte size for bounds checks
             cg.state_widths[nm]=w
+        elif d["k"]=="buffer":
+            # Compiler-managed scratch arena. We bump-allocate it (8-byte aligned)
+            # inside the app's .data blob and expose NAME as its base address.
+            # Because it is a label in the blob - not a magic absolute VA - it is
+            # resolved RIP-relative (`lea NAME, [rel ...]`, see the `state` path),
+            # so it is automatically correct in every slot and under KASLR. We
+            # register it in the `state_*` maps so indexing is bounds-checked
+            # against its declared size (the security win over a raw const addr).
+            if kernel or target=="boot":
+                raise SyntaxError("`buffer` is a ring-3 app scratch arena; not valid for --target kernel/boot (use `data`/`state`)")
+            nm=d["name"]
+            szt=d["size"]
+            if szt[0]=="num":
+                size=szt[1]
+            elif szt[1] in cg.consts:
+                size=cg.consts[szt[1]]
+            else:
+                raise SyntaxError(f"buffer {nm}: size must be a literal or const, got {szt[1]!r}")
+            if not isinstance(size,int) or size<=0:
+                raise SyntaxError(f"buffer {nm}: size must be a positive integer, got {size!r}")
+            if nm in cg.state_defs:
+                raise SyntaxError(f"buffer {nm}: name already declared")
+            asize=(size+7)&~7                       # 8-byte align the slot
+            off=cg.buffer_used
+            cg.buffer_used+=asize
+            if cg.buffer_used>BUFFER_REGION_CAP:
+                raise SyntaxError(
+                    f"buffer {nm}: app scratch arenas total {cg.buffer_used} bytes, "
+                    f"over the {BUFFER_REGION_CAP}-byte per-app budget. Shrink a "
+                    f"buffer or raise BUFFER_REGION_CAP (slot is {0x200000} bytes; "
+                    f"blob + stack must also fit).")
+            lbl=f"{app_prefix}_buf_{nm}"
+            cg.state_defs[nm]=lbl
+            cg.state_sizes[nm]=size                 # declared size drives OOB trap
+            cg.state_widths[nm]=1
+            cg.data.append("align 8")
+            cg.data.append(f"{lbl}: times {size} db 0")
+            cg.buffers.append({"name":nm,"size":size,"aligned_size":asize,
+                               "region_offset":off,"label":lbl})
+        elif d["k"]=="reserve":
+            # Uninitialized scratch arena. Lowers into `.bss` (`resb`) so it
+            # costs no image bytes, while still being bounds-checked and
+            # RIP-relative (it rides the same `state_*` machinery as `state`).
+            # Unlike `buffer`, this is allowed for --target kernel (the whole
+            # point: zero-cost multi-MiB per-slot DOM arenas). `.bss` is zeroed
+            # by the loader/at boot, matching `state`'s zero-init contract.
+            nm=d["name"]
+            szt=d["size"]
+            if szt[0]=="num":
+                size=szt[1]
+            elif szt[1] in cg.consts:
+                size=cg.consts[szt[1]]
+            else:
+                raise SyntaxError(f"reserve {nm}: size must be a literal or const, got {szt[1]!r}")
+            if not isinstance(size,int) or size<=0:
+                raise SyntaxError(f"reserve {nm}: size must be a positive integer, got {size!r}")
+            if nm in cg.state_defs:
+                raise SyntaxError(f"reserve {nm}: name already declared")
+            lbl=f"{app_prefix}_bss_{nm}"
+            cg.state_defs[nm]=lbl
+            cg.state_sizes[nm]=size                 # declared size drives OOB trap
+            cg.state_widths[nm]=1
+            cg.bss.append("alignb 16")
+            cg.bss.append(f"{lbl}: resb {size}")
         elif d["k"]=="align":
             if not kernel:
                 raise SyntaxError("`align` declaration requires --target kernel or --target boot")
@@ -2415,6 +2949,11 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # collect local fn names (so calls resolve to prefixed symbols)
     cg.local_fns={d["name"] for d in decls if d["k"]=="fn"}
     cg.fn_argc={d["name"]:len(d["params"]) for d in decls if d["k"]=="fn"}
+    fn_safety=_analyze_fn_contracts(decls, cg)
+    # Blocking-effect type check: reject a blocking call from a `nonblocking`
+    # entry point at compile time (raises SyntaxError on violation). Also tags
+    # fn_safety with block_effect/blocking for the safety manifest sidecar.
+    _enforce_blocking_effects(decls, fn_safety, src)
     # --O4 inline table: a fn whose entire body is a single `return EXPR;` is an
     # "expression wrapper" and can be inlined by substituting its params. Built
     # only for the USER target (kernel/boot codegen stays byte-identical).
@@ -2523,7 +3062,48 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
         if target!="boot" and (not embed or kernel):
             out.append("section .data")
         out.extend(cg.data)
+    # Uninitialized `reserve` arenas. Emitted LAST and into `.bss` (NOBITS) so
+    # under the kernel's `-f bin` single-TU link they occupy address space but
+    # contribute zero file bytes - a multi-MiB reserve does not grow KERNEL.BIN.
+    if cg.bss:
+        if target=="boot":
+            raise SyntaxError("`reserve` is not valid for --target boot")
+        out.append("section .bss")
+        out.extend(cg.bss)
     LAST_SIGS=cg.sigs
+    LAST_MEMMAP={"buffers":cg.buffers,"used":cg.buffer_used,"cap":BUFFER_REGION_CAP}
+    broad_caps={"raw_mem","implicit_extern","kernel_priv"}
+    privileged_caps={
+        "boot_call","boot_int","boot_io","boot_lgdt","kernel_priv","kernel_io",
+        "kernel_int","kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable",
+    }
+    LAST_SAFETY={
+        "schema": "gritc-safety-manifest-v1",
+        "source": src,
+        "target": target,
+        "module": safety_module,
+        "forbid_asm": bool(forbid_asm),
+        "deny_unsafe": bool(deny_unsafe),
+        "unsafe": {
+            "declared": [{"cap": d["cap"], "line": d.get("line")} for d in declared_caps],
+            "broad": sorted({d["cap"] for d in declared_caps if d["cap"] in broad_caps}),
+            "privileged": sorted({d["cap"] for d in declared_caps if d["cap"] in privileged_caps}),
+        },
+        "symbols": {
+            "externs": sorted(cg.externs),
+            "globals": sorted(cg.globals),
+            "data": sorted(cg.state_defs.keys()),
+            "symbolic_consts": sorted(cg.symconsts),
+        },
+        "functions": fn_safety,
+        "generated": {
+            "bytes": len("\n".join(out)+"\n"),
+            "needs_oob_trap": bool(cg.need_oob),
+            "buffers": list(cg.buffers),
+            "buffer_used": cg.buffer_used,
+            "buffer_cap": BUFFER_REGION_CAP,
+        },
+    }
     return "\n".join(out)+"\n"
 
 def _boot_regs(bits):
@@ -4157,7 +4737,13 @@ def gen_expr(st,e):
         name=e["name"]
         # Builtins: memory load/store - compile inline, no actual call.
         if name in ("lb","lw","lq","sb","sw","sq"):
-            if getattr(cg,"target","user")!="user":
+            # Ring-3 targets (user apps AND Track-8 driver-host processes) may use
+            # the load/store builtins without a capability: the MMU confines every
+            # such access to the process's own mapped pages, so they can never
+            # reach kernel memory (that is the ring boundary's job, not the
+            # compiler's). In kernel/boot targets the same builtins touch unchecked
+            # physical addresses, so there they stay gated behind `unsafe raw_mem`.
+            if getattr(cg,"target","user") not in ("user","driver"):
                 _require_cap(cg,"raw_mem",f"{cg.target} raw memory builtin {name}()")
             if name in ("lb","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
             if name in ("sb","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
@@ -4205,6 +4791,22 @@ def gen_expr(st,e):
             cg.emit(f"    lea rcx, [rel {tname}]")
             cg.emit("    call [rcx + rax*8]")
             return
+        if name=="tail_jump":
+            # tail_jump(SYMBOL): an unconditional `jmp` to a NAMED kernel label
+            # (bare identifier, never a pointer), transferring control without a
+            # return and WITHOUT disturbing the current stack - so a custom
+            # stack-arg ABI (e.g. l3_return_guard's [rsp]=slot) survives into the
+            # target. Safer than call_table (no indirection at all); the only
+            # reachable target is the single symbol named here. Never returns.
+            # kernel_priv.
+            if not getattr(cg,"kernel",False):
+                raise SyntaxError("tail_jump() requires --target kernel")
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv","kernel intrinsic tail_jump()")
+            if len(args)!=1 or args[0].get("k")!="ident":
+                raise SyntaxError("tail_jump takes a single bare symbol name")
+            cg.emit(f"    jmp {args[0]['name']}")
+            return
         # Builtins: privileged / raw CPU instruction intrinsics (kernel mode
         # only). They let the syscall entry/exit trampoline and other ring-0
         # code be written in structured GHLK without dropping to an `asm{}`
@@ -4236,6 +4838,58 @@ def gen_expr(st,e):
             if pick!="eax":
                 cg.emit(f"    mov eax, {pick}")
             cg.emit("    mov eax, eax")        # zero-extend result into rax
+            return
+        if name in ("vmxon","vmxoff","vmclear","vmptrld","vmwrite","vmread","vmlaunch","vmresume"):
+            # Intel VT-x root-mode intrinsics (Track 5 G1 monitor back-end). Each
+            # emits exactly the named VMX instruction - no asm{} escape. VMX
+            # instructions report failure in RFLAGS: CF=1 = VMfailInvalid (no
+            # current VMCS), ZF=1 = VMfailValid (error in VM-instruction-error
+            # field); success is CF=0 AND ZF=0 (`seta`). The value-producing forms
+            # return 0 on success / 1 on VMfail so the GHL caller branches on it;
+            # vmread returns the field value; vmxoff returns 0. Region/pointer
+            # operands (vmxon/vmclear/vmptrld take an m64 holding the region's
+            # PHYSICAL address) are staged on the stack so the instruction's memory
+            # operand is [rsp] - no caller-visible scratch buffer. kernel_vmx.
+            if not getattr(cg,"kernel",False):
+                raise SyntaxError(f"{name}() intrinsic requires --target kernel")
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_vmx",f"kernel intrinsic {name}()")
+            if name in ("vmxon","vmclear","vmptrld"):
+                if len(args)!=1:
+                    raise SyntaxError(f"{name} takes 1 arg (region physical address)")
+                gen_expr(st,args[0])                 # region PA -> rax
+                cg.emit("    push rax")              # m64 operand at [rsp]
+                cg.emit(f"    {name} [rsp]")
+                cg.emit("    seta al")               # 1 iff CF=0 and ZF=0 (success)
+                cg.emit("    movzx rax, al")
+                cg.emit("    xor rax, 1")            # 0 = success, 1 = VMfail
+                cg.emit("    add rsp, 8")
+                return
+            if name=="vmwrite":
+                if len(args)!=2:
+                    raise SyntaxError("vmwrite takes 2 args (field encoding, value)")
+                gen_expr(st,args[0]); cg.emit("    push rax")   # field encoding
+                gen_expr(st,args[1])                            # value -> rax
+                cg.emit("    pop rcx")                           # field -> rcx
+                cg.emit("    vmwrite rcx, rax")                 # VMWRITE field, value
+                cg.emit("    seta al"); cg.emit("    movzx rax, al"); cg.emit("    xor rax, 1")
+                return
+            if name=="vmread":
+                if len(args)!=1:
+                    raise SyntaxError("vmread takes 1 arg (field encoding)")
+                gen_expr(st,args[0])                            # field encoding -> rax
+                cg.emit("    vmread rax, rax")                  # dest=rax <- field(rax)
+                return                                          # value left in rax
+            # nullary control forms: vmlaunch / vmresume / vmxoff.
+            if args:
+                raise SyntaxError(f"{name}() takes no args")
+            cg.emit(f"    {name}")
+            if name=="vmxoff":
+                cg.emit("    xor rax, rax")
+            else:
+                # vmlaunch/vmresume only RETURN here on failure; on success control
+                # transfers to the guest and never falls through. Report VMfail.
+                cg.emit("    seta al"); cg.emit("    movzx rax, al"); cg.emit("    xor rax, 1")
             return
         if name in ("write_rsp","push_val"):
             if not getattr(cg,"kernel",False):
@@ -4461,6 +5115,73 @@ def gen_expr(st,e):
             cg.emit("    xchg dword [rax], ecx")              # atomic: ecx <- old *addr
             cg.emit("    mov eax, ecx")                       # old value -> rax (zero-extended)
             return
+        if name=="atomic_cmpxchg" and getattr(cg,"kernel",False):
+            # atomic_cmpxchg(addr, expected, new) -> rax = the OLD dword at *addr.
+            # `lock cmpxchg` compares EAX(=expected) with *addr: on a match it stores
+            # `new` and leaves EAX=expected; on a mismatch it loads EAX=*addr. Either
+            # way EAX ends up holding the value that WAS at *addr, so the caller
+            # detects success with `old == expected`. This is the lock-free claim
+            # primitive behind the work-queue slot status word. kernel_priv.
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv","kernel intrinsic atomic_cmpxchg()")
+            if len(args)!=3: raise SyntaxError("atomic_cmpxchg takes 3 args (addr, expected, new)")
+            gen_expr(st,args[0]); cg.emit("    push rax")     # addr
+            gen_expr(st,args[1]); cg.emit("    push rax")     # expected
+            gen_expr(st,args[2]); cg.emit("    mov ecx, eax") # new -> ecx
+            cg.emit("    pop rax")                            # expected -> eax
+            cg.emit("    pop rdx")                            # addr -> rdx
+            cg.emit("    lock cmpxchg dword [rdx], ecx")      # eax := old *addr
+            cg.emit("    mov eax, eax")                       # zero-extend old dword
+            return
+        if name=="atomic_add" and getattr(cg,"kernel",False):
+            # atomic_add(addr, val64): *addr += val64 atomically (`lock add`, 64-bit).
+            # Used to bill a worker's TSC delta into a process_t.cpu_time_cycles
+            # counter that the BSP also reads. kernel_priv.
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv","kernel intrinsic atomic_add()")
+            if len(args)!=2: raise SyntaxError("atomic_add takes 2 args (addr, val64)")
+            gen_expr(st,args[0]); cg.emit("    push rax")     # addr
+            gen_expr(st,args[1]); cg.emit("    mov rcx, rax") # val64 -> rcx
+            cg.emit("    pop rax")                            # addr -> rax
+            cg.emit("    lock add [rax], rcx")                # atomic 64-bit add
+            cg.emit("    xor rax, rax")
+            return
+        if name=="save_landing" and getattr(cg,"kernel",False):
+            # save_landing(buf) -> rax: setjmp. Captures rsp/rbx/rbp and the address
+            # of the JOIN point (the instruction right after this intrinsic) into the
+            # 4-qword `buf` ([0]=rsp [8]=rbx [16]=rbp [24]=rip). Returns 0 on the
+            # direct call; a later jump_landing(buf) restores that context and makes
+            # this expression evaluate to 1, exactly like setjmp/longjmp. The ONLY
+            # sanctioned non-local control transfer in GHL - used by the ring-3
+            # callback deadman to unwind a runaway callback frame. kernel_priv.
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv","kernel intrinsic save_landing()")
+            if len(args)!=1: raise SyntaxError("save_landing takes 1 arg (buf)")
+            join=cg.L("landjoin")
+            gen_expr(st,args[0]); cg.emit("    mov rdx, rax")  # rdx = &buf
+            cg.emit(f"    lea rax, [rel {join}]")
+            cg.emit("    mov [rdx + 24], rax")                 # saved rip = join
+            cg.emit("    mov [rdx + 0], rsp")
+            cg.emit("    mov [rdx + 8], rbx")
+            cg.emit("    mov [rdx + 16], rbp")
+            cg.emit("    xor eax, eax")                        # direct path returns 0
+            cg.emit(f"{join}:")                                # longjmp lands here, eax=1
+            return
+        if name=="jump_landing" and getattr(cg,"kernel",False):
+            # jump_landing(buf): longjmp. Restores rsp/rbx/rbp from `buf` and jumps
+            # to the saved rip, making the matching save_landing(buf) evaluate to 1.
+            # Never returns to its own caller. kernel_priv.
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv","kernel intrinsic jump_landing()")
+            if len(args)!=1: raise SyntaxError("jump_landing takes 1 arg (buf)")
+            gen_expr(st,args[0])                               # rax = &buf
+            cg.emit("    mov rbx, [rax + 8]")
+            cg.emit("    mov rbp, [rax + 16]")
+            cg.emit("    mov rdx, [rax + 24]")                 # target rip (before rsp swap)
+            cg.emit("    mov rsp, [rax + 0]")
+            cg.emit("    mov eax, 1")                          # save_landing() -> 1
+            cg.emit("    jmp rdx")
+            return
         if name=="syscall_raw":
             # syscall_raw(num): issue a syscall with a RAW immediate number - NO
             # APP_SYSNO fixup record. For kernel-resident code that runs in ring 3
@@ -4484,6 +5205,7 @@ def gen_expr(st,e):
             return
         if name in ("rdmsr","write_cr0","write_cr3","write_cr4","invlpg",
                     "inb","outb","inw","outw","ind","outd","wrmsr","wrmsr_split","lgdt","lidt","ltr",
+                    "sgdt","sidt",
                     "intn","load_ds","load_es","load_fs","load_gs","load_ss"):
             if not getattr(cg,"kernel",False):
                 raise SyntaxError(f"{name}() intrinsic requires --target kernel")
@@ -4496,8 +5218,10 @@ def gen_expr(st,e):
                     _require_cap(cg,"kernel_creg",f"kernel intrinsic {name}()")
                 elif name in ("write_cr3","invlpg"):
                     _require_cap(cg,"kernel_pgtable",f"kernel intrinsic {name}()")
-                elif name in ("lgdt","ltr"):
+                elif name in ("lgdt","ltr","sgdt"):
                     _require_cap(cg,"kernel_dtable",f"kernel intrinsic {name}()")
+                elif name=="sidt":
+                    _require_cap(cg,"kernel_idtable","kernel intrinsic sidt()")
                 elif name=="lidt":
                     _require_cap(cg,"kernel_idtable","kernel intrinsic lidt()")
                 else:
@@ -4548,6 +5272,13 @@ def gen_expr(st,e):
             elif name=="ltr":
                 if len(args)!=1: raise SyntaxError("ltr takes 1 arg (selector)")
                 gen_expr(st,args[0]); cg.emit("    ltr ax"); cg.emit("    xor rax, rax")
+            elif name in ("sgdt","sidt"):
+                # sgdt(addr) / sidt(addr): store the 10-byte GDTR/IDTR pseudo-
+                # descriptor (limit:2, base:8) to [addr]. The Track 5 VMX back-end
+                # uses these to CAPTURE the live kernel GDTR/IDTR base+limit for the
+                # guest-state VMCS fields. addr -> rax (stack-balanced), then store.
+                if len(args)!=1: raise SyntaxError(f"{name} takes 1 arg (10-byte dest address)")
+                gen_expr(st,args[0]); cg.emit(f"    {name} [rax]"); cg.emit("    xor rax, rax")
             elif name.startswith("load_"):
                 if len(args)!=1: raise SyntaxError(f"{name} takes 1 arg (selector)")
                 seg=name[-2:]
@@ -4704,11 +5435,28 @@ def main():
                     help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives, strings inline in .text")
     ap.add_argument("--emit-sigs",action="store_true",
                     help="write a .sig.json sidecar next to the generated assembly")
-    ap.add_argument("--target",choices=["user","kernel","boot"],default="user",
+    ap.add_argument("--memmap",default=None,metavar="PATH",
+                    help="write a JSON memory-layout manifest of the app's compiler-managed "
+                         "`buffer` scratch arenas (name/size/offset within the per-app region, "
+                         "and the region's used/cap budget). Intended for debug builds.")
+    ap.add_argument("--safety-manifest",default=None,metavar="PATH",
+                    help="write a JSON safety manifest for this unit: declared unsafe "
+                         "capabilities, broad/privileged temporary overrides, exported/imported "
+                         "symbols, function ABI shape, and generated-code metadata. This is a "
+                         "migration aid and does not affect emitted assembly.")
+    ap.add_argument("--target",choices=["user","kernel","boot","driver"],default="user",
                     help="user (default): emit a ring-3 app blob with syscall wrappers. "
                          "kernel: emit plain NASM for %%include into kernel_build.asm - "
                          "bare labels, direct in-unit calls, no app framing, no syscall wrappers. "
-                         "boot: emit guarded boot-layout NASM with bits/org support and no inline asm.")
+                         "boot: emit guarded boot-layout NASM with bits/org support and no inline asm. "
+                         "driver: a ring-3 driver-host process (Track 8 / guarantee G1). Codegen is "
+                         "identical to a `user` app blob, but the target carries a NON-OVERRIDABLE "
+                         "contract: --forbid-asm and --deny-unsafe are forced ON, so the module can "
+                         "declare NO unsafe capability (no kernel_io/kernel_priv/raw MMIO/DMA boundary) "
+                         "and emit no inline asm. Combined with the ring-3 privilege gate (privileged "
+                         "intrinsics inb/outb/write_cr*/lgdt/... already require --target kernel), a "
+                         "driver binary provably holds ZERO ambient hardware authority: it reaches "
+                         "hardware only by syscalling the in-kernel driver_host broker.")
     ap.add_argument("--forbid-asm",action="store_true",
                     help="reject any inline asm block. Use for new code and migration gates.")
     ap.add_argument("--deny-unsafe",action="store_true",
@@ -4740,6 +5488,14 @@ def main():
                          "apps. Implies -O3/-O2/-O1. Changes emitted bytes (and app sigs) by "
                          "design; O0 remains the byte-identity reference.")
     args=ap.parse_args()
+    # --target driver (Track 8 / G1): a ring-3 driver-host process. Force the
+    # hardening contract ON and refuse to let it be relaxed - a driver may NOT
+    # declare an unsafe capability and may NOT use inline asm, full stop. The
+    # ring-3 privilege gate (privileged intrinsics require --target kernel) does
+    # the rest, so the binary cannot name any direct hardware authority.
+    if args.target=="driver":
+        args.forbid_asm=True
+        args.deny_unsafe=True
     optimize=not args.no_opt
     # --O2 is the explicit opt-in for the function optimizer + register allocator.
     # It no longer depends on the global default switch (which gates -O1 builds);
@@ -4766,6 +5522,26 @@ def main():
         with open(sig_path,"w",encoding="utf-8",newline="\n") as f:
             json.dump(sigs,f,indent=2)
             f.write("\n")
+    if args.memmap:
+        # Memory-layout manifest (debug aid). The blob-relative VA of each buffer
+        # is resolved by NASM/the loader (slot base + KASLR slide), so we report
+        # the build-time facts: declared/aligned size and offset within the app's
+        # scratch region, plus the region budget. Emitting it never changes the
+        # generated asm, so it is safe to omit on release builds for byte-identity.
+        mm=dict(LAST_MEMMAP)
+        mm["app"]=os.path.splitext(os.path.basename(args.input))[0]
+        mm["slot_bytes"]=0x200000
+        with open(args.memmap,"w",encoding="utf-8",newline="\n") as f:
+            json.dump(mm,f,indent=2); f.write("\n")
+    if args.safety_manifest:
+        sm=dict(LAST_SAFETY)
+        sm["input"]=args.input
+        sm["output"]=args.output
+        parent=os.path.dirname(os.path.abspath(args.safety_manifest))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(args.safety_manifest,"w",encoding="utf-8",newline="\n") as f:
+            json.dump(sm,f,indent=2); f.write("\n")
     print(f"[gritc] {args.input} -> {args.output} ({len(asm)} bytes)")
 
 if __name__=="__main__":

@@ -9,8 +9,8 @@
 #   app_segment_verify
 #   mb_digest
 #
-# Scratch state is global and intentionally single-threaded: these routines run
-# during kernel boot before ring-3 dispatch and before concurrent callers exist.
+# Scratch state is global, so runtime app-launch verification serializes SHA
+# use with crypto_lock. Boot-time callers run before concurrency exists.
 # ============================================================================
 
 module "crypto";
@@ -34,6 +34,8 @@ extern app_integrity_table;
 extern kernel_panic_canary;
 extern svg_dump_putc;     # serial putc (al) - diagnostic
 extern ser_print_hex64;   # serial print rdi as 16 hex digits - diagnostic
+extern wq_lock;
+extern wq_unlock;
 
 const MASK32 = 0xFFFFFFFF;
 const SHA256_BLOCK = 64;
@@ -97,6 +99,7 @@ data mb_blob_sig_marker: 16 = [
 data mb_blob_sig_expected: 32;
 data mb_blob_sig_fixup_count: 1 x 4;
 data mb_blob_sig_fixups: 128 x 4;
+data crypto_lock: 1 x 4;
 
 data sha_self_empty: 32 = [
     0xE3,0xB0,0xC4,0x42,0x98,0xFC,0x1C,0x14,
@@ -113,6 +116,7 @@ data sha_self_abc: 32 = [
 ];
 
 fn mask32(x) { return x & MASK32; }
+
 fn sha_ch(x, y, z) { return (x & y) ^ ((x ^ MASK32) & z); }
 fn maj(x, y, z) { return (x & y) ^ (x & z) ^ (y & z); }
 fn bsig0(x) { return ror32(x, 2) ^ ror32(x, 13) ^ ror32(x, 22); }
@@ -434,6 +438,13 @@ fn app_manifest_verify() {
 }
 
 fn app_segment_verify(app_id) {
+    wq_lock(&crypto_lock);
+    let ok = app_segment_verify_locked(app_id);
+    wq_unlock(&crypto_lock);
+    return ok;
+}
+
+fn app_segment_verify_locked(app_id) {
     app_manifest_verify();
 
     let blob_base = lq(&app_blob_base_v);
@@ -449,13 +460,13 @@ fn app_segment_verify(app_id) {
             let seg_size = lw(ent + 8) & MASK32;
             let seg_end = seg_off + seg_size;
             if seg_size == 0 {
-                kernel_panic_canary(app_id, &app_segment_verify, 0x41503030);
+                return 0;
             }
             if seg_end < seg_off {
-                kernel_panic_canary(app_id, &app_segment_verify, 0x41504F46);
+                return 0;
             }
             if seg_end > blob_size {
-                kernel_panic_canary(app_id, &app_segment_verify, 0x41504244);
+                return 0;
             }
             sha256_blob_segment_canonical(blob_base, seg_off, seg_size, &sha_tmp_digest);
             if !digest_eq(&sha_tmp_digest, ent + 12, SHA256_DIGEST) {
@@ -503,13 +514,13 @@ fn app_segment_verify(app_id) {
                     call svg_dump_putc(al: 13);
                     call svg_dump_putc(al: 10);
                 }
-                kernel_panic_canary(app_id, &app_segment_verify, 0x41485041);
+                return 0;
             }
-            return;
+            return 1;
         }
         i = i + 1;
     }
-    kernel_panic_canary(app_id, &app_segment_verify, 0x41504D49);
+    return 0;
 }
 
 # app_blob_verify_signature (whole-blob HMAC with the shipped "ISBOLBRG" key)

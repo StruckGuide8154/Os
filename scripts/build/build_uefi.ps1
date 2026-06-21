@@ -198,13 +198,19 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor
 $GritcPy   = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
 $NxhLibDir = Join-Path $Root 'src\user\grithl\lib'
 $NxhkOutDir = Join-Path $Root 'build\ghl'
+$SafetyOutDir = Join-Path $NxhkOutDir 'safety'
 New-Item -Path $NxhkOutDir -ItemType Directory -Force | Out-Null
+New-Item -Path $SafetyOutDir -ItemType Directory -Force | Out-Null
 $KernelModules = @(
     @{ src = 'src\kernel\grithlk\kernel_console.ghl'; out = 'build\ghl\kernel_console.asm' },
     @{ src = 'src\kernel\grithlk\context_menu.ghl'; out = 'build\ghl\context_menu.asm' },
     @{ src = 'src\kernel\grithlk\kernel_lifecycle.ghl'; out = 'build\ghl\kernel_lifecycle.asm' },
     @{ src = 'src\kernel\grithlk\serial_poll.ghl'; out = 'build\ghl\serial_poll.asm' },
     @{ src = 'src\kernel\grithlk\input_dispatch.ghl'; out = 'build\ghl\input_dispatch.asm' },
+    @{ src = 'src\kernel\grithlk\render.ghl'; out = 'build\ghl\render.asm' },
+    @{ src = 'src\kernel\grithlk\usermode_translate.ghl'; out = 'build\ghl\usermode_translate.asm' },
+    @{ src = 'src\kernel\grithlk\watchdog.ghl'; out = 'build\ghl\watchdog.asm' },
+    @{ src = 'src\kernel\grithlk\bounded_lock.ghl'; out = 'build\ghl\bounded_lock.asm' },
     @{ src = 'src\kernel\grithlk\frame_present.ghl'; out = 'build\ghl\frame_present.asm' },
     @{ src = 'src\kernel\grithlk\frame_pacing.ghl'; out = 'build\ghl\frame_pacing.asm' },
     @{ src = 'src\kernel\grithlk\boot_anim.ghl'; out = 'build\ghl\boot_anim.asm' },
@@ -218,6 +224,7 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\crypto.ghl'; out = 'build\ghl\crypto.asm' },
     @{ src = 'src\kernel\grithlk\ram_volatile.ghl'; out = 'build\ghl\ram_volatile.asm' },
     @{ src = 'src\kernel\grithlk\ram_atrest.ghl'; out = 'build\ghl\ram_atrest.asm' },
+    @{ src = 'src\kernel\grithlk\mon_hal_vmx_backend.ghl'; out = 'build\ghl\mon_hal_vmx_backend.asm' },
     @{ src = 'src\kernel\grithlk\syscall_validate.ghl'; out = 'build\ghl\syscall_validate.asm' },
     @{ src = 'src\kernel\grithlk\syscall_secure.ghl'; out = 'build\ghl\syscall_secure.asm' },
     @{ src = 'src\kernel\grithlk\wm_helpers.ghl'; out = 'build\ghl\wm_helpers.asm' },
@@ -232,6 +239,15 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\boot_features.ghl'; out = 'build\ghl\boot_features.asm' },
     @{ src = 'src\kernel\grithlk\cursor.ghl'; out = 'build\ghl\cursor.asm' },
     @{ src = 'src\kernel\grithlk\eth.ghl'; out = 'build\ghl\eth.asm' },
+    @{ src = 'src\kernel\grithlk\arp.ghl'; out = 'build\ghl\arp.asm' },
+    @{ src = 'src\kernel\grithlk\ip.ghl'; out = 'build\ghl\ip.asm' },
+    @{ src = 'src\kernel\grithlk\udp.ghl'; out = 'build\ghl\udp.asm' },
+    @{ src = 'src\kernel\grithlk\math.ghl'; out = 'build\ghl\math.asm' },
+    @{ src = 'src\kernel\grithlk\string.ghl'; out = 'build\ghl\string.asm' },
+    @{ src = 'src\kernel\grithlk\font.ghl'; out = 'build\ghl\font.asm' },
+    # Zero-asm XML 1.0 parser (ported from lib/xml*.asm/.inc). ~3 MiB per-slot
+    # DOM lives in `.bss` via the compiler `reserve` primitive (zero image cost).
+    @{ src = 'src\kernel\grithlk\xml.ghl'; out = 'build\ghl\xml.asm' },
     # Track 2 signed-envelope enforcement: the structural + semantic policy
     # kernels (shared with the host checker fixtures) and the in-kernel reader
     # that walks envelope bytes and calls them (envelope_verify).
@@ -249,16 +265,171 @@ $KernelModules = @(
     # Track 2 artifact admission gate: binds envelope_verify_signed into the
     # boot-chain (SYSSIG.ENV) + update-path (KUPDATE.ENV) call sites, with the
     # verified-artifact hash cache in front of the Ed25519 crypto.
-    @{ src = 'src\kernel\grithlk\envelope_gate.ghl'; out = 'build\ghl\envelope_gate.asm' }
+    @{ src = 'src\kernel\grithlk\envelope_gate.ghl'; out = 'build\ghl\envelope_gate.asm' },
+    # Zero-asm FAT16 filesystem driver (replaces fat16.asm + 4 .inc). Big FAT/
+    # root/file caches live in `.bss` via `reserve` (zero image bytes). Provides
+    # the SYS_FS_* worker globals + per-slot cwd ownership and TOCTOU snapshot.
+    @{ src = 'src\kernel\grithlk\fat16_core.ghl'; out = 'build\ghl\fat16_core.asm' },
+    # Zero-asm SMP work queue (replaces proc/workqueue.asm + workqueue_api.inc +
+    # workqueue_worker.inc). Lock-free atomic_cmpxchg claim, APERF/MPERF MHz
+    # accounting, and a SECURE job-ID allow-list (wq_job_table) dispatched via the
+    # bounds-checked call_table - no raw function pointers on the queue.
+    @{ src = 'src\kernel\grithlk\workqueue.ghl'; out = 'build\ghl\workqueue.asm' },
+    # Zero-asm ring-3 callback dispatch + deadman + priority manager (replaces
+    # proc/process_callbacks.inc + process_data.inc). save_landing/jump_landing
+    # deadman, tail_jump l3_return_guard, AP routing by job ID through the queue.
+    @{ src = 'src\kernel\grithlk\callback_dispatch.ghl'; out = 'build\ghl\callback_dispatch.asm' }
 )
 foreach ($m in $KernelModules) {
     $mSrc = Join-Path $Root $m.src
     $mOut = Join-Path $Root $m.out
+    $mSafety = Join-Path $SafetyOutDir (([IO.Path]::GetFileNameWithoutExtension($m.out)) + '.safety.json')
     Write-Host "  compile (kernel) $($m.src)" -ForegroundColor Yellow
     # --forbid-asm enforces the zero-asm invariant: every GritHLK kernel module
     # is fully structured. A reintroduced `asm`/`asm{}` escape fails the build.
-    & python $GritcPy $mSrc -o $mOut -L $NxhLibDir --embed --target kernel --forbid-asm
+    & python $GritcPy $mSrc -o $mOut -L $NxhLibDir --embed --target kernel --forbid-asm --safety-manifest $mSafety
     if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHLK kernel-module compile' -ForegroundColor Red; exit 1 }
+}
+
+$SafetyManifests = @(Get-ChildItem -Path $SafetyOutDir -Filter '*.safety.json' -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-Content -Raw -Path $_.FullName | ConvertFrom-Json
+})
+if ($SafetyManifests.Count -gt 0) {
+    $SafetySummaryPath = Join-Path $SafetyOutDir 'kernel-safety-summary.json'
+    $UnsafeModules = @($SafetyManifests | Where-Object { $_.unsafe.declared.Count -gt 0 })
+    $BroadModules = @($SafetyManifests | Where-Object { $_.unsafe.broad.Count -gt 0 })
+    $PrivModules = @($SafetyManifests | Where-Object { $_.unsafe.privileged.Count -gt 0 })
+    $AllEffects = @($SafetyManifests | ForEach-Object { $_.functions | ForEach-Object { $_.effects } } | Where-Object { $_ } | Sort-Object -Unique)
+    $ExternContracts = @($SafetyManifests | ForEach-Object {
+        $moduleName = $_.module
+        $_.functions | ForEach-Object {
+            $fnName = $_.name
+            $_.extern_contract_required | ForEach-Object {
+                [pscustomobject]@{ module = $moduleName; function = $fnName; target = $_ }
+            }
+        }
+    })
+    $LegacyInventoryPath = Join-Path $Root 'tools\security\legacy_asm_inventory.txt'
+    $LegacyInventory = @()
+    if (Test-Path $LegacyInventoryPath) {
+        $LegacyInventory = @(Get-Content -Path $LegacyInventoryPath | ForEach-Object {
+            $line = $_.Trim()
+            if (-not $line -or $line.StartsWith('#')) { return }
+            $parts = @($line -split '\|' | ForEach-Object { $_.Trim() })
+            if ($parts.Count -lt 4) { return }
+            [pscustomobject]@{
+                path = $parts[0]
+                domain = $parts[1]
+                risk = $parts[2]
+                status = $parts[3]
+                target = if ($parts.Count -ge 5) { $parts[4] } else { '' }
+            }
+        })
+    }
+    $UnmigratedLegacy = @($LegacyInventory | Where-Object { $_.status -eq 'legacy' })
+    $MigratingLegacy = @($LegacyInventory | Where-Object { $_.status -eq 'migrating' })
+    $UnmigratedHigh = @($UnmigratedLegacy | Where-Object { $_.risk -eq 'high' })
+    $UnmigratedByDomain = @($UnmigratedLegacy | Group-Object domain | Sort-Object Name | ForEach-Object {
+        [pscustomobject]@{ domain = $_.Name; count = $_.Count }
+    })
+    $UnmigratedByRisk = @($UnmigratedLegacy | Group-Object risk | Sort-Object Name | ForEach-Object {
+        [pscustomobject]@{ risk = $_.Name; count = $_.Count }
+    })
+    $Summary = [pscustomobject]@{
+        schema = 'gritc-kernel-safety-summary-v1'
+        generatedBy = 'scripts/build/build_uefi.ps1'
+        moduleCount = $SafetyManifests.Count
+        unsafeModuleCount = $UnsafeModules.Count
+        broadOverrideModuleCount = $BroadModules.Count
+        privilegedOverrideModuleCount = $PrivModules.Count
+        effectCount = $AllEffects.Count
+        effects = $AllEffects
+        externContractCount = $ExternContracts.Count
+        externContracts = $ExternContracts
+        legacyInventory = [pscustomobject]@{
+            source = $LegacyInventoryPath
+            total = $LegacyInventory.Count
+            unmigratedCount = $UnmigratedLegacy.Count
+            migratingCount = $MigratingLegacy.Count
+            highRiskUnmigratedCount = $UnmigratedHigh.Count
+            unmigratedByDomain = $UnmigratedByDomain
+            unmigratedByRisk = $UnmigratedByRisk
+            unmigrated = $UnmigratedLegacy
+            migrating = $MigratingLegacy
+        }
+        modules = @($SafetyManifests | Sort-Object module | ForEach-Object {
+            $moduleEffects = @($_.functions | ForEach-Object { $_.effects } | Where-Object { $_ } | Sort-Object -Unique)
+            $moduleExternContracts = @($_.functions | ForEach-Object { $_.extern_contract_required } | Where-Object { $_ } | Sort-Object -Unique)
+            [pscustomobject]@{
+                module = $_.module
+                source = $_.input
+                unsafe = @($_.unsafe.declared | ForEach-Object { $_.cap })
+                broad = @($_.unsafe.broad)
+                privileged = @($_.unsafe.privileged)
+                effects = $moduleEffects
+                externContracts = $moduleExternContracts
+                externCount = $_.symbols.externs.Count
+                globalCount = $_.symbols.globals.Count
+                functionCount = $_.functions.Count
+            }
+        })
+    }
+    $ascii = [System.Text.Encoding]::ASCII
+    [System.IO.File]::WriteAllBytes($SafetySummaryPath, $ascii.GetBytes((($Summary | ConvertTo-Json -Depth 6) + [Environment]::NewLine)))
+    Write-Host ("  GritHLK safety: {0}/{1} modules declare temporary unsafe caps; broad={2}, privileged={3}" -f `
+        $UnsafeModules.Count, $SafetyManifests.Count, $BroadModules.Count, $PrivModules.Count) -ForegroundColor Yellow
+    Write-Host ("  GritHLK effects: {0} inferred effect kind(s); extern ABI contracts needed={1}" -f `
+        $AllEffects.Count, $ExternContracts.Count) -ForegroundColor Yellow
+    if ($LegacyInventory.Count -gt 0) {
+        Write-Host ("  Legacy migration: {0}/{1} unmigrated; migrating={2}; high-risk unmigrated={3}" -f `
+            $UnmigratedLegacy.Count, $LegacyInventory.Count, $MigratingLegacy.Count, $UnmigratedHigh.Count) -ForegroundColor Yellow
+        $RiskText = @($UnmigratedByRisk | ForEach-Object { "$($_.risk)=$($_.count)" }) -join ', '
+        if ($RiskText) {
+            Write-Host "  Legacy migration by risk: $RiskText" -ForegroundColor DarkYellow
+        }
+    }
+    Write-Host "  Safety summary: $SafetySummaryPath" -ForegroundColor DarkGray
+    $SafetyBudgetPath = Join-Path $Root 'tools\security\ghlk_safety_budget.json'
+    if (Test-Path $SafetyBudgetPath) {
+        $Budget = Get-Content -Raw -Path $SafetyBudgetPath | ConvertFrom-Json
+        $BudgetFailures = @()
+        if ($UnsafeModules.Count -gt $Budget.maxUnsafeModuleCount) {
+            $BudgetFailures += "unsafe modules $($UnsafeModules.Count) > budget $($Budget.maxUnsafeModuleCount)"
+        }
+        if ($BroadModules.Count -gt $Budget.maxBroadOverrideModuleCount) {
+            $BudgetFailures += "broad overrides $($BroadModules.Count) > budget $($Budget.maxBroadOverrideModuleCount)"
+        }
+        if ($PrivModules.Count -gt $Budget.maxPrivilegedOverrideModuleCount) {
+            $BudgetFailures += "privileged overrides $($PrivModules.Count) > budget $($Budget.maxPrivilegedOverrideModuleCount)"
+        }
+        if ($AllEffects.Count -gt $Budget.maxEffectCount) {
+            $BudgetFailures += "effect kinds $($AllEffects.Count) > budget $($Budget.maxEffectCount)"
+        }
+        if ($ExternContracts.Count -gt $Budget.maxExternContractCount) {
+            $BudgetFailures += "extern ABI contracts $($ExternContracts.Count) > budget $($Budget.maxExternContractCount)"
+        }
+        if ($BudgetFailures.Count -gt 0) {
+            Write-Host '  FAILED GritHLK safety budget:' -ForegroundColor Red
+            foreach ($failure in $BudgetFailures) { Write-Host "    $failure" -ForegroundColor Red }
+            exit 1
+        }
+        Write-Host "  GritHLK safety budget: PASS ($SafetyBudgetPath)" -ForegroundColor Green
+    }
+    $Preview = @($UnsafeModules | Sort-Object module | Select-Object -First 10)
+    foreach ($sm in $Preview) {
+        $caps = @($sm.unsafe.declared | ForEach-Object { $_.cap }) -join ','
+        Write-Host ("    unsafe {0}: {1}" -f $sm.module, $caps) -ForegroundColor DarkYellow
+    }
+    if ($UnsafeModules.Count -gt $Preview.Count) {
+        Write-Host ("    ... {0} more unsafe module(s) in summary" -f ($UnsafeModules.Count - $Preview.Count)) -ForegroundColor DarkYellow
+    }
+    $UnmigratedPreview = @($UnmigratedLegacy | Sort-Object @{Expression={ if ($_.risk -eq 'high') { 0 } elseif ($_.risk -eq 'medium') { 1 } else { 2 } }}, domain, path | Select-Object -First 10)
+    foreach ($entry in $UnmigratedPreview) {
+        Write-Host ("    unmigrated {0}/{1}: {2}" -f $entry.risk, $entry.domain, $entry.path) -ForegroundColor DarkYellow
+    }
+    if ($UnmigratedLegacy.Count -gt $UnmigratedPreview.Count) {
+        Write-Host ("    ... {0} more unmigrated legacy file(s) in safety summary" -f ($UnmigratedLegacy.Count - $UnmigratedPreview.Count)) -ForegroundColor DarkYellow
+    }
 }
 $CoverageTool = Join-Path $Root 'tools\check_coverage.py'
 if (Test-Path $CoverageTool) {

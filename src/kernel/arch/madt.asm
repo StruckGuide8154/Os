@@ -119,6 +119,8 @@ madt_init:
     jne .next
     
     ; Found Timer ISO
+%ifndef RELEASE_BUILD
+    ; Raw OUT diagnostic (also clobbers rdx); release builds emit nothing.
     SER 'I'
     SER 'S'
     SER 'O'
@@ -126,6 +128,7 @@ madt_init:
     add al, '0'
     mov edx, 0x3F8
     out dx, al
+%endif
     jmp .next
 
 .next:

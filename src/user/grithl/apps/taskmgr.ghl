@@ -12,11 +12,21 @@ use gui
 # ---- tabs -------------------------------------------------------------
 const TAB_PROC = 0
 const TAB_PERF = 1
+const TAB_PRIO = 2            # live process / priority-manager view
 const TAB_Y    = 40
-const TAB_W    = 118
+const TAB_W    = 112
 const TAB_H    = 20
 const TAB_X0   = 8
-const TAB_X1   = 130          # TAB_X0 + TAB_W + 4
+const TAB_X1   = 124          # TAB_X0 + TAB_W + 4
+const TAB_X2   = 240          # TAB_X1 + TAB_W + 4
+
+# ---- priority tab -----------------------------------------------------
+const PRIO_LIST_Y = 86
+const PRIO_ROW_H  = 14
+const PRIO_NAME_X = 14
+const PRIO_STAT_X = 120
+const PRIO_PRI_X  = 210
+const PRIO_CPU_X  = 280
 
 const HEADER_H = 34
 const C_ACCENT = 0x002A6FFF
@@ -48,6 +58,7 @@ const CMHZ_X     = 290
 state {
     tm_tab: 4;
     tm_sel: 4;
+    pr_sel: 4;
     numbuf: 16;
     numbuf2: 16;
     numbuf3: 16;
@@ -56,6 +67,21 @@ state {
 str title       = "Task Manager";
 str tab_proc    = "Processes";
 str tab_perf    = "Performance";
+str tab_prio    = "Priority";
+
+str col_slot    = "Process";
+str col_pri     = "Priority";
+str col_cpu     = "CPU";
+str st_empty    = "-";
+str st_run      = "Running";
+str st_sleep    = "Sleeping";
+str st_term     = "Killed";
+str pri_idle    = "Idle";
+str pri_low     = "Low";
+str pri_norm    = "Normal";
+str pri_high    = "High";
+str slot_word   = "Slot ";
+str hint_prio   = "Up/Down select  +/- change priority";
 
 str col_name    = "Process";
 str col_status  = "Status";
@@ -143,6 +169,7 @@ fn draw_header(win) {
 fn draw_tab(win, index, label) {
     let x = TAB_X0;
     if index == TAB_PERF { x = TAB_X1; }
+    if index == TAB_PRIO { x = TAB_X2; }
     let fill = UI_COL_SURFACE_2;
     let fg = UI_COL_TEXT_MUTED;
     if lw(&tm_tab) == index {
@@ -286,15 +313,82 @@ fn draw_performance(win) {
     }
 }
 
+# ------------------------------------------------------------------
+# Priority tab - live process / priority-manager view
+# ------------------------------------------------------------------
+fn state_name(s) {
+    if s == PROC_ST_RUN   { return &st_run; }
+    if s == PROC_ST_READY { return &st_run; }
+    if s == PROC_ST_SLEEP { return &st_sleep; }
+    if s == PROC_ST_TERM  { return &st_term; }
+    return &st_empty;
+}
+
+fn pri_name(p) {
+    if p <= PRIO_IDLE   { return &pri_idle; }
+    if p <= PRIO_LOW    { return &pri_low; }
+    if p <= PRIO_NORMAL { return &pri_norm; }
+    return &pri_high;
+}
+
+fn draw_priority(win) {
+    let w = ui_win_w(win) - UI_BORDER * 2;
+
+    # Column header strip.
+    ui_rect_at(win, 0, PRIO_LIST_Y - 18, w, 18, UI_COL_SURFACE_2);
+    ui_text_at(win, PRIO_NAME_X, PRIO_LIST_Y - 16, &col_slot, UI_COL_TEXT, UI_COL_SURFACE_2);
+    ui_text_at(win, PRIO_STAT_X, PRIO_LIST_Y - 16, &col_status, UI_COL_TEXT, UI_COL_SURFACE_2);
+    ui_text_at(win, PRIO_PRI_X,  PRIO_LIST_Y - 16, &col_pri, UI_COL_TEXT, UI_COL_SURFACE_2);
+    ui_text_at(win, PRIO_CPU_X,  PRIO_LIST_Y - 16, &col_cpu, UI_COL_TEXT, UI_COL_SURFACE_2);
+
+    let sel = lw(&pr_sel);
+    let i = 0;
+    while i < PROC_MAX_SLOTS {
+        let y = PRIO_LIST_Y + i * PRIO_ROW_H;
+        let st = sys_proc_state(i);
+        let bg = UI_COL_BG_BASE;
+        let fg = UI_COL_TEXT;
+        if i == sel {
+            bg = C_ACCENT;
+            fg = UI_COL_TEXT_INVERT;
+        }
+        ui_rect_at(win, 0, y, w, PRIO_ROW_H, bg);
+
+        # "Slot n" label.
+        let p = put_str(&numbuf, &slot_word);
+        p = put_uint(p, i);
+        sb(p, 0);
+        let lblfg = fg;
+        if st == PROC_ST_EMPTY { lblfg = UI_COL_TEXT_MUTED; }
+        ui_text_at(win, PRIO_NAME_X, y + 2, &numbuf, lblfg, bg);
+
+        if st != PROC_ST_EMPTY {
+            ui_text_at(win, PRIO_STAT_X, y + 2, state_name(st), fg, bg);
+            ui_text_at(win, PRIO_PRI_X,  y + 2, pri_name(sys_proc_priority(i)), fg, bg);
+            # CPU time: raw cycles scaled down so the number stays readable.
+            p = put_uint(&numbuf2, sys_proc_cputime(i) / 1000000);
+            sb(p, 0);
+            ui_text_at(win, PRIO_CPU_X, y + 2, &numbuf2, fg, bg);
+        } else {
+            ui_text_at(win, PRIO_STAT_X, y + 2, &st_empty, lblfg, bg);
+        }
+        i = i + 1;
+    }
+}
+
 fn draw(win) {
     ui_fill_client_below(win, 0, UI_COL_BG_BASE);
     draw_header(win);
     draw_tab(win, TAB_PROC, &tab_proc);
     draw_tab(win, TAB_PERF, &tab_perf);
+    draw_tab(win, TAB_PRIO, &tab_prio);
 
     if lw(&tm_tab) == TAB_PERF {
         draw_performance(win);
         ui_status_bar(win, &hint_perf, UI_COL_SURFACE_2);
+    } else if lw(&tm_tab) == TAB_PRIO {
+        draw_priority(win);
+        ui_status_bar(win, &hint_prio, UI_COL_SURFACE_2);
     } else {
         draw_processes(win);
         ui_status_bar(win, &hint_proc, UI_COL_SURFACE_2);
@@ -313,6 +407,9 @@ fn tab_at(x, y) {
     if x >= TAB_X1 {
         if x < TAB_X1 + TAB_W { return TAB_PERF; }
     }
+    if x >= TAB_X2 {
+        if x < TAB_X2 + TAB_W { return TAB_PRIO; }
+    }
     return -1;
 }
 
@@ -323,10 +420,44 @@ fn proc_row_at(y) {
     return r;
 }
 
+# Priority-tab row hit-test -> slot index, or -1.
+fn prio_row_at(y) {
+    if y < PRIO_LIST_Y { return -1; }
+    let r = (y - PRIO_LIST_Y) / PRIO_ROW_H;
+    if r >= PROC_MAX_SLOTS { return -1; }
+    return r;
+}
+
+# Apply a +/- step to the selected slot's priority via the cap-gated kernel
+# write path. The kernel clamps to [PRIO_IDLE, PRIO_HIGH] and rejects empty
+# slots, so we only need to compute a sane target and forward it. We step
+# between the named classes so the UI matches the four labels it renders.
+fn prio_step(slot, dir) {
+    if sys_proc_state(slot) == PROC_ST_EMPTY { return; }
+    let cur = sys_proc_priority(slot);
+    let next = cur;
+    if dir > 0 {
+        if cur < PRIO_LOW { next = PRIO_LOW; }
+        else if cur < PRIO_NORMAL { next = PRIO_NORMAL; }
+        else { next = PRIO_HIGH; }
+    } else {
+        if cur > PRIO_NORMAL { next = PRIO_NORMAL; }
+        else if cur > PRIO_LOW { next = PRIO_LOW; }
+        else { next = PRIO_IDLE; }
+    }
+    sys_proc_setprio(slot, next);
+}
+
 fn click(win, x, y) {
     let t = tab_at(x, y);
     if t >= 0 {
         sw(&tm_tab, t);
+        return;
+    }
+    if lw(&tm_tab) == TAB_PRIO {
+        let pr = prio_row_at(y);
+        if pr < 0 { return; }
+        sw(&pr_sel, pr);
         return;
     }
     if lw(&tm_tab) != TAB_PROC { return; }
@@ -339,12 +470,30 @@ fn click(win, x, y) {
 fn key(win, k) {
     let sc = k & 0xFF;
     let ch = (k >> 8) & 0xFF;
-    # Tab toggles between the two tabs; Left/Right arrows pick one directly.
+    # Tab cycles through the three tabs (Processes -> Performance -> Priority).
     if ch == 9 {
-        if lw(&tm_tab) == TAB_PROC { sw(&tm_tab, TAB_PERF); }
-        else { sw(&tm_tab, TAB_PROC); }
+        let nt = lw(&tm_tab) + 1;
+        if nt > TAB_PRIO { nt = TAB_PROC; }
+        sw(&tm_tab, nt);
         return;
     }
+
+    # Priority tab: Up/Down move the slot selection, +/- retune its priority.
+    if lw(&tm_tab) == TAB_PRIO {
+        let psel = lw(&pr_sel);
+        if sc == 0xC8 {
+            if psel > 0 { sw(&pr_sel, psel - 1); }
+            return;
+        }
+        if sc == 0xD0 {
+            if psel < PROC_MAX_SLOTS - 1 { sw(&pr_sel, psel + 1); }
+            return;
+        }
+        if ch == 43 { prio_step(psel, 1); return; }   # '+' raise
+        if ch == 45 { prio_step(psel, 0 - 1); return; } # '-' lower
+        return;
+    }
+
     if sc == 0xCB { sw(&tm_tab, TAB_PROC); return; }
     if sc == 0xCD { sw(&tm_tab, TAB_PERF); return; }
 

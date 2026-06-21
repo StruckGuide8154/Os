@@ -208,5 +208,68 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     pop rcx
     ret
 
+; l3_release_slot - retire per-launch state for a closed app slot.
+; EDI = slot. This is the lifecycle counterpart to l3_copy_app_blob_to_slot:
+; it clears kernel-owned per-slot metadata and scrubs the user arena. The
+; current paging model still uses fixed slot VAs, so this is not a physical
+; decommit yet; it makes the slot non-live and removes the previous tenant's
+; bytes before the next launch chooses a fresh code slide / stack top / syscall
+; permutation.
+FN_BEGIN l3_release_slot, 1, 0, FN_RET_VOID
+    push rax
+    push rcx
+    push rdi
+    push r8
+
+    cmp edi, MAX_WINDOWS
+    jae .release_done
+    test edi, edi
+    jz .release_done                  ; slot 0 is the hidden wallpaper runtime
+
+    mov r8d, edi
+    cmp r8, r15
+    je .release_clear_meta            ; do not erase code under an active syscall
+    call l3_slot_base
+    mov rdi, rax
+    xor eax, eax
+    cld
+    mov rcx, L3_SLOT_USER_STACK_GUARD_OFF / 8
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+
+    mov edi, r8d
+    call l3_slot_base
+    lea rdi, [rax + L3_SLOT_USER_STACK_GUARD_OFF + 0x1000]
+    mov rcx, (APP_SLOT_SIZE - L3_SLOT_USER_STACK_GUARD_OFF - 0x1000) / 8
+    xor eax, eax
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+
+.release_clear_meta:
+    mov ecx, r8d
+    xor eax, eax
+    mov [l3_slot_live + rcx*8], rax
+    mov [l3_wx_manifest_ver + rcx*8], rax
+    mov [l3_wx_code_start + rcx*8], rax
+    mov [l3_wx_code_end + rcx*8], rax
+    mov [rel l3_slot_ustack_off + rcx*8], rax
+    mov [rel l3_slot_code_slide + rcx*8], rax
+    mov [l3_code_hash + rcx*8], rax
+    mov byte [l3_code_hash_valid + rcx], 0
+    mov [l3_slot_key + rcx*8], rax
+%ifdef ENABLE_SYSCALL_PERM
+    lea rax, [rel sc_slot_perm_committed]
+    mov byte [rax + rcx], 0
+%endif
+
+.release_done:
+    pop r8
+    pop rdi
+    pop rcx
+    pop rax
+    ret
+
 ; l3_slot_resolve_app_ptr
 ; EDI = slot, RSI = kernel pointer inside the built-in user blob

@@ -62,6 +62,11 @@ const HEX_BASE    = 10;   # nibbles 0..9 are digits, 10..15 are 'A'..'F'
 # al = character -> COM1.  Preserves all registers.  Pure OUT leaf: the byte
 # in al is written to the COM1 data port via the privileged outb() intrinsic.
 fn svg_dump_putc(al ch) preserves(all) {
+    # Release images carry NO debug serial. This is the single COM1 byte leaf
+    # every GritHLK diagnostic (boot markers, [BOOTTIME] report, env-gate/dns/
+    # crypto traces) funnels through, so gating it here compiles out all of them
+    # while keeping the symbol defined for callers. See build_uefi.ps1 -Release.
+    cfg "RELEASE_BUILD" { return; }
     outb(COM1, ch);
 }
 

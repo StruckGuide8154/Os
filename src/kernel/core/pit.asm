@@ -198,6 +198,13 @@ pit_handler:
 
     inc qword [tick_count]
 
+    ; --- Priority manager (Stage 2): quantum bookkeeping ---------------------
+    ; Decrement the running process's time-slice each tick; refill by class at 0.
+    ; rax/rcx/rdx are saved by the pit_handler prologue, which pm_tick_quantum
+    ; relies on. (Defined in process_callbacks.inc, where process_t is in scope.)
+    extern pm_tick_quantum
+    call pm_tick_quantum
+
     ; --- Syscall rate-limit refill (security_todo.md §2) ---------------------
     ; Restore every slot's token bucket to SC_BUDGET_PER_TICK. Slots that
     ; drained their budget this tick are throttled (dispatcher denies -1) until

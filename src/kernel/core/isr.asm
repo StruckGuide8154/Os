@@ -16,6 +16,7 @@ extern mouse_handler
 extern i2c_hid_poll
 extern spi_hid_poll
 extern apic_eoi
+extern lapic_base               ; isr_ap_tick EOI (Tier-2 AP self-wake timer)
 extern render_frame
 extern process_mouse
 extern keyboard_repeat_tick
@@ -29,6 +30,7 @@ extern trace_dump_screen
 extern l3_app_arena_base_v
 extern l3_app_arena_size_v
 extern l3_syscall_stacks
+extern l3_slot_in_flight
 extern kernel_canary
 extern kernel_panic_canary
 extern tick_count, frame_count, fps_count, last_fps, start_tick
@@ -413,6 +415,57 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     cmp rax, [rel kernel_canary]
     jne .isr_r3_canary_bad
     add rsp, 32              ; Pop canary, pad, errcode, int#; RSP now at user RIP.
+    ; Recover via the slot whose ring-3 callback is actually IN FLIGHT, NOT the
+    ; slot derived from the faulting RIP. The BSP runs one inline callback at a
+    ; time, so exactly one l3_slot_in_flight entry is set while a callback runs,
+    ; and that slot has a saved kernel frame (call_app_l3 recorded KERNEL_RSP) so
+    ; l3_return_guard can cleanly unwind back to cb_run_guarded. Deriving the slot
+    ; from the faulting RIP is WRONG whenever ring-3 branched out of its slot -
+    ; e.g. into an un-slid kernel-blob VA (the notepad-click freeze): that RIP is
+    ; below the arena, so the old code picked slot 0, which has no live callback
+    ; frame, so l3_return_guard parked the BSP with cli;hlt -> whole-OS freeze.
+    xor ecx, ecx
+.exc_r3_inflight_scan:
+    cmp ecx, MAX_WINDOWS
+    jae .exc_r3_orphan                  ; none in flight -> no callback frame to unwind
+    cmp qword [rel l3_slot_in_flight + rcx*8], 0
+    je .exc_r3_inflight_next
+    mov eax, ecx                        ; recover via the in-flight callback slot
+    jmp .exc_ring3_slot_ready
+.exc_r3_inflight_next:
+    inc ecx
+    jmp .exc_r3_inflight_scan
+.exc_r3_orphan:
+    ; ORPHANED ring-3 fault: no slot has a live callback frame, so there is no
+    ; saved kernel RSP for l3_return_guard to unwind through - the RIP-derived
+    ; path below would land on slot 0 (KERNEL_RSP==0), and l3_return_guard's
+    ; no-landing-pad fallback would park the BSP with cli;hlt -> WHOLE-OS FREEZE
+    ; (the app-open freeze: ring 3 ran an untracked kernel-resident-blob VA, e.g.
+    ; an un-permuted #15 syscall, then took a ring-3 fetch #PF). If the BSP main
+    ; loop has armed its top-level recovery guard, longjmp straight back to it
+    ; (input/render/timers stay alive; the offending app is struck on the kmain
+    ; side). This is a SEPARATE buffer from kfault so render_frame_guarded's inner
+    ; kfault arm/disarm cannot clobber this outer pad.
+    cmp qword [rel r3g_armed], 0
+    je .exc_r3_from_rip                 ; no guard armed -> legacy RIP-derived path
+    mov qword [rel r3g_armed], 0        ; disarm; kmain re-arms each loop iteration
+    lock dec dword [rel nested_exc_count]
+    mov rbx, [rel r3g_jmp_rbx]
+    mov rbp, [rel r3g_jmp_rbp]
+    mov r12, [rel r3g_jmp_r12]
+    mov r13, [rel r3g_jmp_r13]
+    mov r14, [rel r3g_jmp_r14]
+    mov r15, [rel r3g_jmp_r15]
+    mov rax, [rel r3g_jmp_rsp]
+    mov rsp, rax
+    push qword 0x10                     ; SS  = kernel data
+    push rax                            ; RSP = kmain guard-entry stack
+    push qword 0x202                    ; RFLAGS (IF=1)
+    push qword 0x08                     ; CS  = kernel code
+    push qword [rel r3g_jmp_rip]        ; RIP = kmain landing pad
+    mov rax, 1                          ; r3guard_arm "returns" 1 on recovery
+    iretq
+.exc_r3_from_rip:
     mov rax, [rsp]
     sub rax, [rel l3_app_arena_base_v]
     jc .exc_ring3_slot_zero
@@ -426,7 +479,8 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     lock dec dword [rel nested_exc_count]
     push rax                 ; call_app_l3_return expects the app slot at [rsp].
     extern call_app_l3_return
-    jmp call_app_l3_return
+    extern l3_return_guard
+    jmp l3_return_guard      ; guards KERNEL_RSP==0 then call_app_l3_return
 .isr_r3_canary_bad:
     mov rdi, rax
     lea rsi, [rel .isr_r3_canary_bad]
@@ -501,7 +555,52 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     mov rax, [rsp + 152]    ; saved CS on the IRQ frame
     and rax, 3
     cmp rax, 3
-    jne .done               ; from ring 0: never abort
+    je .irq_timer_ring3     ; ring 3: callback deadman path below
+
+    ; --- Tier-1 kernel-liveness watchdog (feedback_no_freeze_invariant) -------
+    ; The timer interrupted ring 0. If the BSP main loop has been wedged past the
+    ; deadline (a kernel infinite loop / livelock with IF=1), abandon the stuck
+    ; kernel operation and longjmp back to kmain's top-level r3guard landing pad
+    ; - the SAME recovery used for orphaned ring-3 faults - so input/render/timers
+    ; stay alive instead of the OS appearing frozen. Only when a pad is armed.
+    cmp qword [rel r3g_armed], 0
+    je .done                ; no landing pad yet (pre-main-loop) -> nothing to do
+    extern kwd_check
+    call kwd_check
+    test eax, eax
+    jz .done                ; not wedged: normal ring-0 timer exit (unchanged)
+%ifdef ENABLE_DEBUG_SERIAL
+    SER 'K'
+    SER 'W'
+    SER 'D'
+    SER 'G'
+    SER 13
+    SER 10
+%endif
+    ; Forced recovery: rewind to the kmain guard frame and iretq to its pad.
+    ; First drop any kernel lock the abandoned BSP context held (no re-deadlock).
+    extern blk_recover_release_bsp
+    call blk_recover_release_bsp
+    mov qword [rel r3g_armed], 0
+    mov dword [rel nested_exc_count], 0      ; we are unwinding the whole stack
+    ; (kwd_check already bumped kwd_recovered_count on the trip)
+    mov rbx, [rel r3g_jmp_rbx]
+    mov rbp, [rel r3g_jmp_rbp]
+    mov r12, [rel r3g_jmp_r12]
+    mov r13, [rel r3g_jmp_r13]
+    mov r14, [rel r3g_jmp_r14]
+    mov r15, [rel r3g_jmp_r15]
+    mov rax, [rel r3g_jmp_rsp]
+    mov rsp, rax
+    push qword 0x10                          ; SS  = kernel data
+    push rax                                 ; RSP = kmain guard-entry stack
+    push qword 0x202                         ; RFLAGS (IF=1)
+    push qword 0x08                          ; CS  = kernel code
+    push qword [rel r3g_jmp_rip]             ; RIP = kmain landing pad
+    mov rax, 1                               ; r3guard_arm "returns" 1 on recovery
+    iretq
+
+.irq_timer_ring3:
     extern cb_deadman_check
     call cb_deadman_check
     test eax, eax
@@ -523,7 +622,7 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     xor eax, eax
 .irq_timer_slot_ready:
     push rax                ; call_app_l3_return expects the app slot at [rsp].
-    jmp call_app_l3_return
+    jmp l3_return_guard     ; guards KERNEL_RSP==0 then call_app_l3_return
 .irq_r3_canary_bad:
     mov rdi, rax
     lea rsi, [rel .irq_r3_canary_bad]
@@ -619,6 +718,81 @@ ser_print_hex64:
 %endif
 
 ; ============================================================================
+; NMI handler (vector 2) - Tier-2 kernel-liveness watchdog landing pad.
+; (feedback_no_freeze_invariant / kernel_liveness_watchdog)
+;
+; This DELIBERATELY does NOT route through isr_common_stub: that stub's
+; nested-exception guard halts on re-entry, which is the exact opposite of what
+; a liveness watchdog must do. An NMI is non-maskable, so it is delivered even
+; while the BSP spins with interrupts disabled (cli / IF=0) - the one stall the
+; PIT-based Tier-1 watchdog can never catch. A live AP detects the frozen BSP
+; heartbeat and sends us this NMI IPI (kwd_ap_watch -> wd_send_nmi_bsp).
+;
+; Policy lives in GHL (kwd_nmi_should_recover): recover ONLY when an AP actually
+; flagged a stall AND kmain has a landing pad armed; otherwise pass the NMI
+; through untouched (some other, legitimate NMI source).
+; ============================================================================
+FN_DECL isr_nmi, 0, 0, FN_RET_SCALAR
+    push rax
+    KPTI_SWITCH_TO_KERNEL_CR3 rax
+    pop rax
+    cld
+    PUSH_ALL                                ; NMI can interrupt anything: save all
+    extern kwd_nmi_should_recover
+    call kwd_nmi_should_recover
+    test eax, eax
+    jnz .nmi_recover
+    POP_ALL                                 ; not ours -> restore and resume
+    iretq
+.nmi_recover:
+    ; Abandon the wedged BSP operation. First drop any kernel spinlock the
+    ; recovered context held, so a waiter cannot re-deadlock on a lock whose
+    ; holder we are about to unwind (held-lock-abandoned-by-recovery fix).
+    extern blk_recover_release_bsp
+    call blk_recover_release_bsp
+%ifdef ENABLE_DEBUG_SERIAL
+    SER 'K'
+    SER 'W'
+    SER 'D'
+    SER 'N'
+    SER 13
+    SER 10
+%endif
+    ; Rewind to kmain's r3guard frame and iretq to its landing pad - the SAME
+    ; recovery the Tier-1 PIT path and orphaned-ring-3 faults use.
+    mov qword [rel r3g_armed], 0
+    mov dword [rel nested_exc_count], 0
+    mov rbx, [rel r3g_jmp_rbx]
+    mov rbp, [rel r3g_jmp_rbp]
+    mov r12, [rel r3g_jmp_r12]
+    mov r13, [rel r3g_jmp_r13]
+    mov r14, [rel r3g_jmp_r14]
+    mov r15, [rel r3g_jmp_r15]
+    mov rax, [rel r3g_jmp_rsp]
+    mov rsp, rax
+    push qword 0x10                          ; SS  = kernel data
+    push rax                                 ; RSP = kmain guard-entry stack
+    push qword 0x202                         ; RFLAGS (IF=1)
+    push qword 0x08                          ; CS  = kernel code
+    push qword [rel r3g_jmp_rip]             ; RIP = kmain landing pad
+    mov rax, 1                               ; r3guard_arm "returns" 1 on recovery
+    iretq
+
+; ============================================================================
+; isr_ap_tick (vector AP_WD_TICK_VEC) - per-AP one-shot LAPIC-timer wake.
+; Idle APs STI;HLT and would otherwise only wake on a work IPI; this self-wake
+; lets every idle AP re-run kwd_ap_watch at a bounded cadence (~tens of ms) so
+; the cross-core watchdog keeps observing the BSP heartbeat. Body is trivial:
+; just EOI and return; the worker loop re-arms the one-shot before its next HLT.
+; ============================================================================
+FN_DECL isr_ap_tick, 0, 0, FN_RET_SCALAR
+    push rax
+    mov rax, [rel lapic_base]
+    mov dword [rax + 0x0B0], 0               ; LAPIC EOI
+    pop rax
+    iretq
+
+; ============================================================================
 ; kfault guard primitives (setjmp/longjmp-style ring-0 recovery).
 ;
 ; Any ring-0 kernel section can bracket risky work with a recovery landing pad:
@@ -674,6 +848,32 @@ FN_DECL kfault_disarm, 0, 0, FN_RET_SCALAR
     ret
 
 ; ----------------------------------------------------------------------------
+; r3guard_arm() - top-level BSP recovery pad for ORPHANED ring-3 faults.
+;
+; setjmp-style: captures the caller (kmain main-loop) frame and returns 0 the
+; first time. If a ring-3 fault occurs with NO in-flight callback slot to unwind
+; through, the ISR .exc_r3_orphan path longjmps here, and r3guard_arm "returns" 1
+; - so kmain re-enters its loop with input/render/timers alive instead of the BSP
+; parking forever in l3_return_guard's cli;hlt. Uses a DEDICATED buffer so the
+; inner render_frame_guarded kfault arm/disarm cannot clobber this outer pad.
+; Must be called directly in the frame to recover to (kmain), not via a wrapper.
+; auto-wrapped (FN_DECL emits global): global r3guard_arm
+FN_DECL r3guard_arm, 0, 0, FN_RET_SCALAR
+    mov [rel r3g_jmp_rbx], rbx
+    mov [rel r3g_jmp_rbp], rbp
+    mov [rel r3g_jmp_r12], r12
+    mov [rel r3g_jmp_r13], r13
+    mov [rel r3g_jmp_r14], r14
+    mov [rel r3g_jmp_r15], r15
+    lea rax, [rsp + 8]                 ; caller RSP after this ret
+    mov [rel r3g_jmp_rsp], rax
+    mov rax, [rsp]                     ; return address = landing-pad RIP
+    mov [rel r3g_jmp_rip], rax
+    mov qword [rel r3g_armed], 1
+    xor eax, eax                       ; first (direct) return: 0
+    ret
+
+; ----------------------------------------------------------------------------
 ; render_frame_guarded(): the original display-path consumer, now expressed in
 ; terms of the primitives above. Behavior is identical: arm with .land as the
 ; landing pad, call render_frame, disarm. On a ring-0 fault inside the present
@@ -714,5 +914,18 @@ global kfault_recovered_count
 ; already armed?" before deciding to arm - the buffer is single-slot / not
 ; reentrant (see kfault_arm header).
 global kfault_armed
+
+; Top-level ring-3 orphan-fault recovery buffer (r3guard_arm). Separate from
+; kfault so the inner render_frame_guarded kfault usage never clobbers it.
+r3g_armed:               dq 0
+r3g_jmp_rbx:             dq 0
+r3g_jmp_rbp:             dq 0
+r3g_jmp_r12:             dq 0
+r3g_jmp_r13:             dq 0
+r3g_jmp_r14:             dq 0
+r3g_jmp_r15:             dq 0
+r3g_jmp_rsp:             dq 0
+r3g_jmp_rip:             dq 0
+global r3g_armed
 
 section .text

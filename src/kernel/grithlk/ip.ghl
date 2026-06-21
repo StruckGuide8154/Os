@@ -1,0 +1,178 @@
+# ============================================================================
+# ip.ghl  -  GritHLK (zero-asm) IPv4 protocol module.
+#
+# Structured zero-asm port of src/kernel/net/ip.asm. Generic IPv4 packet
+# construction + RX demux above the selected NIC. Drivers never build IP
+# packets; they only transmit complete Ethernet frames via net_nic_tx_frame.
+#
+# Exported symbols / ABI byte-for-byte match the asm module:
+#   net_ipv4_tx_proto(rdi=payload, ecx=len, esi=dst A.B.C.D, rdx=dstMAC, al=proto)
+#                                                              -> eax = 1 sent
+#   net_rx_frame(rdi=frame, ecx=len)        -> eax = 1 consumed
+#   net_ipv4_rx_packet(rdi=pkt, ecx=len)    -> eax = 1 consumed
+#
+# Externs (owned elsewhere): net_checksum (eth.ghl), net_arp_rx_frame (arp.ghl),
+# net_info / net_nic_mac / net_nic_tx_frame (nic.asm), net_tcp_rx_ipv4 (tcp.asm),
+# net_udp_rx_ipv4 (udp.ghl).
+#
+# BYTE-ORDER NOTE (TX correctness):
+#   Every multi-byte on-wire field is written as explicit big-endian byte pairs
+#   (sb high then low), reproducing the asm `xchg al,ah; mov word [..], ax`
+#   network-order stores byte-for-byte. 32-bit IPv4 addresses on the wire are the
+#   byte-swapped (network-order) form of the A.B.C.D-packed host scalar (htonl).
+#   The IP header checksum returned by net_checksum is ALREADY network-order in
+#   AX, so it is stored low-byte-first (sb +24, sb +25) exactly as `mov [+24],ax`.
+# ============================================================================
+
+module "ip";
+
+unsafe raw_mem;
+unsafe implicit_extern;
+
+global net_ipv4_tx_proto;
+global ipv4_tx_build;
+global net_rx_frame;
+global net_ipv4_rx_packet;
+
+const MASK32 = 0xFFFFFFFF;
+const NET_IP_PROTO_TCP = 6;
+const NET_IP_PROTO_UDP = 17;
+
+# --- IP module state (was ip.asm .bss). ---
+align 16;
+data net_ipv4_frame:       1518 x 1;
+data net_ipv4_id:          1 x 4 = 0;     # 16-bit counter (low word used)
+data net_ipv4_payload_ptr: 1 x 8 = 0;
+data net_ipv4_payload_len: 1 x 4 = 0;
+data net_ipv4_dst_ip:      1 x 4 = 0;
+data net_ipv4_proto:       1 x 4 = 0;
+
+fn ip_htonl32(v) {
+    let a = (v >> 24) & 0xFF;
+    let b = (v >> 8)  & 0xFF00;
+    let c = (v << 8)  & 0xFF0000;
+    let d = (v << 24) & 0xFF000000;
+    return (a | b | c | d) & MASK32;
+}
+
+# Store a 16-bit value in network (big-endian) order at addr: high byte first.
+# Reproduces `xchg al,ah; mov word [addr], ax`.
+fn ip_store_be16(addr, v) {
+    sb(addr,     (v >> 8) & 0xFF);
+    sb(addr + 1, v & 0xFF);
+}
+
+# ---------------------------------------------------------------------------
+# net_ipv4_tx_proto - legacy custom-ABI entry kept for the remaining asm caller
+# (tcp.asm): rdi=payload, ecx=len, esi=dst IPv4 (A.B.C.D-packed), rdx=dst MAC ptr,
+# al=protocol. eax=1 on send. It just forwards to the System-V worker
+# ipv4_tx_build, whose return value (in rax) it returns.
+# ---------------------------------------------------------------------------
+fn net_ipv4_tx_proto(rdi payload, ecx len, esi dst, rdx dmac, al proto)
+        preserves(rbx, rcx, rdx, rsi, rdi) {
+    return ipv4_tx_build(payload, len, dst, dmac, proto);
+}
+
+# ---------------------------------------------------------------------------
+# ipv4_tx_build - the actual IPv4 TX path, plain System-V so GHL callers (udp.ghl
+# net_udp_send_ipv4, and the net_ipv4_tx_proto forwarder above) can call it
+# positionally AND capture its eax return:
+#   rdi=payload, rsi=len, rdx=dst IPv4 (A.B.C.D-packed), rcx=dst MAC ptr,
+#   r8=protocol. eax = 1 on send / 0 on failure.
+# ---------------------------------------------------------------------------
+fn ipv4_tx_build(payload, len, dst, dmac, proto) {
+    if len > 1480 { return 0; }
+    sq(&net_ipv4_payload_ptr, payload);
+    sw(&net_ipv4_payload_len, len);
+    sw(&net_ipv4_dst_ip, dst);
+    sb(&net_ipv4_proto, proto);
+
+    # Ethernet header: dst MAC (6 bytes from dmac), src MAC, ethertype IPv4.
+    let i = 0;
+    while i < 6 {
+        sb(&net_ipv4_frame + i, lb(dmac + i));
+        i = i + 1;
+    }
+    if net_nic_mac(&net_ipv4_frame + 6) == 0 { return 0; }
+    sb(&net_ipv4_frame + 12, 0x08);   # ethertype IPv4 0x0800 (wire 08,00)
+    sb(&net_ipv4_frame + 13, 0x00);
+
+    # IPv4 header (frame+14, 20 bytes). Zero it first.
+    let k = 0;
+    while k < 20 {
+        sb(&net_ipv4_frame + 14 + k, 0);
+        k = k + 1;
+    }
+    sb(&net_ipv4_frame + 14, 0x45);                 # ver=4, IHL=5
+    sb(&net_ipv4_frame + 15, 0);                     # DSCP/ECN
+    ip_store_be16(&net_ipv4_frame + 16, (len + 20) & 0xFFFF);   # total length
+    # Identification: 16-bit counter, incremented per packet.
+    let id = (lw(&net_ipv4_id) + 1) & 0xFFFF;
+    sw(&net_ipv4_id, id);
+    ip_store_be16(&net_ipv4_frame + 18, id);
+    sb(&net_ipv4_frame + 20, 0); sb(&net_ipv4_frame + 21, 0);   # flags/frag = 0
+    sb(&net_ipv4_frame + 22, 64);                    # TTL
+    sb(&net_ipv4_frame + 23, proto);                 # protocol
+    sb(&net_ipv4_frame + 24, 0); sb(&net_ipv4_frame + 25, 0);   # checksum = 0 (pre-calc)
+
+    let myip = net_info(2);          # NI_IP, A.B.C.D-packed
+    if myip == 0 { return 0; }
+    sw(&net_ipv4_frame + 26, ip_htonl32(myip));         # source address
+    sw(&net_ipv4_frame + 30, ip_htonl32(lw(&net_ipv4_dst_ip) & MASK32));  # dest address
+
+    # Header checksum over the 20-byte IPv4 header. net_checksum returns the
+    # network-order 16-bit sum in AX; store it low-byte-first (sb), matching
+    # `mov [+24], ax`.
+    let ck = net_checksum(&net_ipv4_frame + 14, 20) & 0xFFFF;
+    sb(&net_ipv4_frame + 24, ck & 0xFF);
+    sb(&net_ipv4_frame + 25, (ck >> 8) & 0xFF);
+
+    # Payload at frame+34.
+    let plen = lw(&net_ipv4_payload_len) & MASK32;
+    let src = lq(&net_ipv4_payload_ptr);
+    let p = 0;
+    while p < plen {
+        sb(&net_ipv4_frame + 34 + p, lb(src + p));
+        p = p + 1;
+    }
+
+    call net_nic_tx_frame(rdi: &net_ipv4_frame, rcx: plen + 34);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# net_rx_frame - rdi = complete Ethernet frame, ecx = length. Hands ARP frames
+# to net_arp_rx_frame; IPv4 frames to net_ipv4_rx_packet (after stripping the
+# 14-byte Ethernet header). eax = 1 consumed / 0 dropped.
+# ---------------------------------------------------------------------------
+# net_rx_frame keeps the driver ABI (rdi=frame, ecx=len) since rtl8139/rtl8156
+# call it that way. The GHL-local demux helpers (net_arp_rx_frame,
+# net_ipv4_rx_packet) are plain System-V (rdi,rsi), so they are called
+# positionally and their return value is captured in rax. The asm callee
+# net_tcp_rx_ipv4 reads (rdi,ecx); ecx==rcx is the 4th System-V arg register, so
+# it is called as f(ptr, 0, 0, len) to land len in ecx (rsi/rdx ignored).
+fn net_rx_frame(rdi frame, ecx len) preserves(rbx, rsi) {
+    if net_arp_rx_frame(frame, len) != 0 { return 1; }
+    if len < 34 { return 0; }
+    # ethertype IPv4 at +12 (wire 0x08,0x00).
+    if lb(frame + 12) != 0x08 { return 0; }
+    if lb(frame + 13) != 0x00 { return 0; }
+    return net_ipv4_rx_packet(frame + 14, len - 14);
+}
+
+# ---------------------------------------------------------------------------
+# net_ipv4_rx_packet - rdi = IPv4 packet, ecx = length. Demux to TCP/UDP.
+# eax = 1 consumed / 0 dropped.
+# ---------------------------------------------------------------------------
+# Plain System-V (rdi=pkt, rsi=len). Callers: net_rx_frame (GHL).
+fn net_ipv4_rx_packet(pkt, len) {
+    if len < 20 { return 0; }
+    # version nibble must be 4.
+    if (lb(pkt) & 0xF0) != 0x40 { return 0; }
+    let proto = lb(pkt + 9);
+    # net_tcp_rx_ipv4 (asm) reads rdi+ecx -> positional (pkt,_,_,len) lands len
+    # in ecx. net_udp_rx_ipv4 (udp.ghl) is plain System-V (pkt,len).
+    if proto == NET_IP_PROTO_TCP { return net_tcp_rx_ipv4(pkt, 0, 0, len); }
+    if proto == NET_IP_PROTO_UDP { return net_udp_rx_ipv4(pkt, len); }
+    return 0;
+}
