@@ -189,7 +189,22 @@ rtl8139_poll_rx:
     mov ax, [rsi]
     test ax, 1
     jz .advance
-    movzx ecx, word [rsi + 2]
+    movzx ecx, word [rsi + 2]            ; device-reported RX frame length
+    ; SECURITY (GSEC net): the RTL8139 RX-status length word is device-supplied
+    ; and MUST NOT be trusted as an in-bounds length. Clamp it to the bytes that
+    ; physically remain in the 8 KiB ring from this frame's payload start, so a
+    ; corrupt / oversized descriptor length can never drive net_rx_frame -> IP/TCP
+    ; to read past RTL_RX_BUF_ADDR + RTL_RX_BUF_LEN. This upholds the ecx = "true
+    ; buffer length" contract that net_tcp_rx_ipv4's memory-safety proof depends on
+    ; (docs/security/proof-net-tcp-rx.md). avail = (RTL_RX_BUF_LEN-4) - rx_off;
+    ; the subtract borrows (CF=1) iff rx_off > RTL_RX_BUF_LEN-4 -> corrupt, drop.
+    mov eax, RTL_RX_BUF_LEN - 4
+    sub eax, ebx                         ; ebx = rtl_rx_off (frame header offset)
+    jc .advance                          ; rx_off past ring -> fail-closed
+    cmp ecx, eax
+    jbe .len_ok
+    mov ecx, eax                         ; clamp to ring-remaining bytes
+.len_ok:
     cmp ecx, 14
     jb .advance
     lea rdi, [rsi + 4]
