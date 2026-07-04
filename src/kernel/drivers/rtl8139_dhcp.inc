@@ -250,6 +250,17 @@ rtl8139_handle_udp:
     je .classify
     cmp al, 0
     je .opt_pad
+    ; SECURITY (GSEC net): the option LENGTH byte lives at [rsi+1]. The loop head
+    ; only proved rsi < r8 (the type byte is in-frame); reading [rsi+1] when the
+    ; type byte is the final frame byte (rsi == r8-1) over-reads 1 byte past the
+    ; DHCP frame end. Bounded today (lands in the zeroed 16+1500 ring wrap pad
+    ; cleared at init, so it decodes as len 0 and the r9>r8 check drops it) but a
+    ; frame ending exactly at the ring's last mapped byte would #PF, and it
+    ; violates the "never index past frame end" invariant. Fail-closed: a
+    ; truncated option with no length byte terminates option parsing.
+    lea rbx, [rsi + 1]                    ; rbx is caller-saved here, al preserved
+    cmp rbx, r8
+    jae .classify
     movzx edx, byte [rsi + 1]
     lea r9, [rsi + rdx + 2]
     cmp r9, r8
