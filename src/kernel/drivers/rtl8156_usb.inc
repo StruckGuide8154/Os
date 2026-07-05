@@ -172,15 +172,25 @@ rtl8156_consume_event:
     and eax, RTL8156_RX_LEN_MASK
     cmp eax, 18 + 14
     jb .requeue
+    ; SECURITY (GSEC G1 - device-reported length OOB, same class as rtl8139):
+    ; the length field is fully device-controlled (masked to 0x7FFF => up to
+    ; 32767) but only RTL8156_RX_DMA_LEN bytes were DMA'd into the single RX
+    ; buffer, with the frame body starting after the 24-byte rx_desc. A
+    ; descriptor claiming more than fits would make handle_frame read stale or
+    ; unmapped memory past the buffer. Reject fail-closed (a real Ethernet frame
+    ; is <=1518, far under this cap; a legit large frame is truncated by the
+    ; 4096-byte TRB anyway, so an over-claim can only be corrupt/hostile).
+    cmp eax, RTL8156_RX_MAX_FRAME
+    ja .requeue
     sub eax, 4
-    lea rdi, [abs RTL8156_RX_BUF_ADDR + 24]
+    lea rdi, [abs RTL8156_RX_BUF_ADDR + RTL8156_RX_DESC_LEN]
     mov ecx, eax
     call rtl8156_handle_frame
 .requeue:
     ; Queue the next bulk-IN TRB so the next frame can arrive.
     mov r8d, RTL8156_RX_BUF_ADDR
     xor r9d, r9d
-    mov r10d, 4096
+    mov r10d, RTL8156_RX_DMA_LEN
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2)
     mov rdi, RTL8156_BULK_IN_RING_ADDR
     lea rsi, [rel rtl8156_bulk_in_enqueue]
@@ -223,7 +233,7 @@ rtl8156_arm_rx:
     je .out
     mov r8d, RTL8156_RX_BUF_ADDR
     xor r9d, r9d
-    mov r10d, 4096
+    mov r10d, RTL8156_RX_DMA_LEN
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2)
     mov rdi, RTL8156_BULK_IN_RING_ADDR
     lea rsi, [rel rtl8156_bulk_in_enqueue]

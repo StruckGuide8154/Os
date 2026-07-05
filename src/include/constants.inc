@@ -312,6 +312,22 @@ RTL8156_BULK_OUT_RING_ADDR equ 0x1B20000
 RTL8156_RX_BUF_ADDR        equ 0x1B30000
 RTL8156_TX_BUF_ADDR        equ 0x1B40000
 RTL8156_SCRATCH_ADDR       equ 0x1B50000
+; RX DMA window: the bulk-IN TRB writes exactly RTL8156_RX_DMA_LEN bytes into
+; the single buffer at RTL8156_RX_BUF_ADDR. The Realtek rx_desc header is 24
+; bytes and the frame follows it, so a frame can be at most (DMA_LEN - 24)
+; bytes. The device-reported length field (rx_desc opts1, low 15 bits => up to
+; 32767) is UNTRUSTED and MUST be clamped to this before it drives a read of
+; the frame body — otherwise handle_frame reads stale/unmapped memory past the
+; buffer (GSEC G1 OOB; same class as the rtl8139 RX length clamp).
+RTL8156_RX_DMA_LEN         equ 4096
+RTL8156_RX_DESC_LEN        equ 24
+RTL8156_RX_MAX_FRAME       equ (RTL8156_RX_DMA_LEN - RTL8156_RX_DESC_LEN)
+; The DMA read must never leave the RX buffer's own region (the next region,
+; the TX buffer, starts one 0x10000 slot up). Pin it so the buffer layout and
+; the clamp can never silently drift apart.
+%if (RTL8156_RX_DMA_LEN > (RTL8156_TX_BUF_ADDR - RTL8156_RX_BUF_ADDR))
+  %error "RTL8156 RX DMA window overruns into the TX buffer region"
+%endif
 ; Dedicated xHCI device context + control EP0 ring for the NIC slot, so that
 ; addressing the NIC does not stomp the HID slot1/slot2 device contexts that
 ; the mouse/keyboard drivers depend on.
