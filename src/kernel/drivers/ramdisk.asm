@@ -125,34 +125,40 @@ ramdisk_classify:
     cmp byte [ramdisk_active], 1
     jne .out                    ; no region -> outside
 
-    mov r10d, [ramdisk_lba_base]
+    mov r10d, [ramdisk_lba_base]    ; r10 = region base (zero-extended, 64-bit clean)
     mov eax, edi
     cmp eax, r10d
     jb .maybe_outside           ; LBA < base: outside or partial
 
-    ; offset_sectors = LBA - base
-    sub eax, r10d
-    ; end_sectors = offset + count
-    mov r8d, eax
-    add r8d, edx
-    ; if end > region_sectors -> partial overlap (extending beyond region)
-    cmp r8d, [ramdisk_sectors]
-    ja .partial
+    ; offset_sectors = LBA - base  (both < 2^32, offset >= 0)
+    sub eax, r10d               ; eax = offset, rax zero-extended
+    mov r9, rax                 ; r9 = offset (64-bit, kept for byte_offset)
+    mov r8d, edx                ; r8 = count (zero-extended)
+    ; end_sectors = offset + count in 64-bit: offset and count are each < 2^32,
+    ; so the sum is < 2^33 and CANNOT wrap. A 32-bit `add` here could wrap a
+    ; near-2^32 count back to a small end and mis-pass the region gate below,
+    ; letting a huge rep-movsb run OOB. Fail-closed via the true 64-bit sum.
+    add r8, r9                  ; r8 = end_sectors (no wrap)
+    mov r10d, [ramdisk_sectors] ; r10 = region size (zero-extended); base no longer needed
+    cmp r8, r10
+    ja .partial                 ; end > region -> partial overlap
 
     ; Inside. Translate to byte offset / byte count.
+    mov r8, r9
+    shl r8, 9                   ; byte_offset = offset * 512
     mov r9d, edx
     shl r9, 9                   ; byte_count = sectors * 512
-    shl rax, 9                  ; byte_offset = (LBA - base) * 512
-    mov r8, rax
     mov eax, 1
     ret
 
 .maybe_outside:
     ; LBA is below region base. Does the request reach into the region?
-    ; LBA + count compared to base.
-    mov eax, edi
-    add eax, edx
-    cmp eax, r10d
+    ; (LBA + count) vs base, computed in 64-bit so a near-2^32 count cannot wrap
+    ; the sum below `base` and falsely report "outside".
+    mov r8d, edi
+    mov r9d, edx
+    add r8, r9
+    cmp r8, r10                 ; r10 = base (still valid on this path)
     ja .partial                 ; spans the boundary
 .out:
     xor eax, eax
@@ -361,5 +367,5 @@ ramdisk_active     db 0
 section .bss
 alignb 8
 ; One bit per 4 KiB page over the DATA_IMG_MAX_SIZE window.
-; DATA_IMG_MAX_SIZE / 4096 / 8 = 16 MiB / 4 KiB / 8 = 512 bytes today.
+; DATA_IMG_MAX_SIZE / 4096 / 8 = 32 MiB / 4 KiB / 8 = 1024 bytes today.
 ramdisk_dirty_bitmap  resb (DATA_IMG_MAX_SIZE / 4096 / 8)

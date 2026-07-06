@@ -41,6 +41,32 @@ SMP_CORE_STATE_SIZE equ 128
 SYSTEM_RESERVED_END equ (BOOT_ANIM_BUF_ADDR + BOOT_ANIM_BUF_SIZE)
 %endif
 
+; Per-core state record field offsets (record is SMP_CORE_STATE_SIZE bytes).
+; NOTE: offsets +24..+79 are OWNED by the SMP CPU-accounting fields published by
+; smp_worker_loop / cpu_acct (workqueue.ghl, cpu_acct.ghl):
+;   +0  dword  state (3 = PARKED/available, counted by smp_count_states)
+;   +4  dword  dense core index
+;   +8  dword  LAPIC id
+;   +16 qword  liveness beat / heartbeat
+;   +24 dword  utilisation percent  (CS_UTIL / SCS_UTIL)
+;   +28 dword  clock MHz estimate   (CS_MHZ  / SCS_MHZ)
+;   +32 qword  busy-cycle accumulator
+;   +40 qword  idle-cycle accumulator
+;   +48 qword  last TSC mark
+;   +56 qword  last published tick
+;   +64 qword  last IA32_APERF snapshot
+;   +72 qword  last IA32_MPERF snapshot
+;   +80 qword  this CPU's read-back IA32_PAT (AP_STATE_OFF_PAT) - written by
+;              ap_long_mode_init right after the PAT wrmsr so the BSP can emit
+;              every core's PAT and a test can assert the WC layout is uniform.
+;              MUST live above +79: smp_worker_loop writes CS_MHZ at +28 the
+;              instant an AP enters the worker (before any PIT-tick window), so
+;              parking PAT in the +24/+28 dwords had its high half overwritten by
+;              the (then-zero) MHz estimate -> recorded PAT read back as
+;              0000000000070106. The live MSR was always correct; only the
+;              recorded copy collided. Slot +80 is unused by every other writer.
+AP_STATE_OFF_PAT    equ 80
+
 ; --- Media player per-window full-clip buffer ------------------------------
 ; Upper bound on a single video's contiguous buffer (page_alloc_contig). Caps
 ; how much physical RAM one media window can claim for a clip larger than its
@@ -86,6 +112,20 @@ STAGE2_SECTORS      equ 63           ; Sectors 1-63
 KERNEL_START_SECTOR equ 64           ; Kernel starts at sector 64
 KERNEL_SECTORS      equ 4096         ; 2MB max BIOS-loaded kernel
 FAT16_PART_LBA      equ (KERNEL_START_SECTOR + KERNEL_SECTORS)
+
+; Largest sector count any single ata_read_sectors / ata_write_sectors call may
+; request. The block layer trusts the caller-supplied count for the destination
+; window (it cannot see the buffer size), and it also feeds the ramdisk region
+; classifier. A wild/hostile count therefore drives either an unbounded PIO loop
+; or (via ramdisk_classify's range add) a 32-bit wrap that mis-passes the region
+; gate. This fail-closed ceiling bounds every call to the largest provisioned
+; FS cache (fat16_fat_cache / fat16_file_buf = 65536 B = 128 sectors in
+; fat16_core.ghl); floor_store passes 1, the FAT/root/cluster caches ≤128. A
+; request above this cap is a bug or an attack -> rejected, never truncated.
+ATA_MAX_SECTORS_PER_CALL equ 128
+%if (ATA_MAX_SECTORS_PER_CALL * 512) > DATA_IMG_MAX_SIZE
+%error "ATA_MAX_SECTORS_PER_CALL: a single capped transfer can exceed the ramdisk window"
+%endif
 
 ; --- Screen ---
 SCREEN_WIDTH        equ 1024
@@ -143,6 +183,46 @@ COLOR_CURSOR         equ COLOR_TEXT_PRIMARY
 COLOR_START_BTN      equ COLOR_SURFACE_1
 COLOR_START_HOVER    equ COLOR_SURFACE_2
 
+; --- Grit Design System geometry / elevation / glass tokens ---
+; (spacing.css). Single source of truth for the kernel chrome renderer.
+; Corner radii (px) - soft, never razor-sharp.
+DS_R_XS             equ 5     ; chips, tiny controls
+DS_R_SM             equ 7     ; buttons, inputs
+DS_R_MD             equ 9     ; menus, small cards
+DS_R_LG             equ 13    ; cards, panels
+DS_R_XL             equ 16    ; windows, dialogs
+DS_R_2XL            equ 22    ; dock, hero surfaces
+; Control / chrome sizing.
+DS_CTL_H_SM         equ 28
+DS_CTL_H_MD         equ 34
+DS_CTL_H_LG         equ 42
+DS_TITLEBAR_H       equ 40
+DS_DOCK_H           equ 64
+; Glass: titlebar/dock/menu backdrop blur radius + translucent tint.
+; Tint stored as 0xAARRGGBB (alpha-premultiply at composite time).
+DS_BLUR_GLASS       equ 22    ; px backdrop blur radius (--blur-glass)
+DS_BLUR_THIN        equ 12    ; px (--blur-thin)
+DS_GLASS_TINT       equ 0xA816181D   ; rgba(22,24,29,0.66) -> A=0xA8
+DS_GLASS_TINT_2     equ 0xBC1C1F25   ; rgba(28,31,37,0.74) -> A=0xBC
+; Inner top lit edge (--edge-light): white @ ~5% over dark.
+DS_EDGE_LIGHT       equ 0x0DFFFFFF   ; A=0x0D (~5%)
+; Drop-shadow: opacity (0..255) packed; geometry used by draw_drop_shadow.
+; --shadow-window ~ large soft; --shadow-md ~ medium.
+DS_SHADOW_WIN_A     equ 0x9E   ; ~0.62 alpha
+DS_SHADOW_WIN_BLUR  equ 28
+DS_SHADOW_WIN_DY    equ 18
+DS_SHADOW_MD_A      equ 0x61   ; ~0.38 alpha
+DS_SHADOW_MD_BLUR   equ 12
+DS_SHADOW_MD_DY     equ 5
+; Motion durations (ms) + easing ids (--dur-*, --ease-*).
+DS_DUR_1            equ 90
+DS_DUR_2            equ 150
+DS_DUR_3            equ 240
+DS_DUR_4            equ 400
+DS_EASE_OUT         equ 0
+DS_EASE_IN_OUT      equ 1
+DS_EASE_SPRING      equ 2
+
 ; --- Syscall rate limiting (security_todo.md §2) ---
 ; Per-slot token bucket size, refilled by pit_handler every timer tick. At the
 ; PIT tick rate this caps a slot to SC_BUDGET_PER_TICK * tick_rate syscalls/sec
@@ -153,6 +233,54 @@ SC_BUDGET_PER_TICK  equ 4096
 ; GUI syscalls use a separate frame/tick bucket so rendering does not drain the
 ; general syscall budget, but is still bounded.
 SC_GUI_BUDGET_PER_TICK equ 8192
+
+; --- No-progress / spin watchdog (FE/FH spam class of bug) ---
+; A slot that issues the SAME syscall with the SAME (arg0,arg1) this many times
+; in a row - making no observable progress (e.g. SYS_FS_ENTRY(0) -> 0 forever) -
+; is flagged with a structured serial diagnostic instead of spinning silently.
+; Picked well above any legitimate same-arg poll burst within a tick, but far
+; below the rate-limit ceiling so a wedged loop is caught long before the budget
+; throttle masks it. Debug-only (ENABLE_DEBUG_SERIAL); zero-cost in release.
+SC_PROGRESS_LIMIT   equ 1024
+
+; --- Wallpaper-render isolation watchdog ---
+; wallpaper_render_active gates the ENTIRE interactive path: the window
+; compositor (window_desktop.inc), the taskbar / start-menu / context-menu draw
+; (frame_present.ghl), and crucially dispatch_app_callback (callback_dispatch.ghl)
+; which drops every app click/draw callback while it is set. The flag is cleared
+; only when the AP wallpaper render job finishes - and that job runs the ring-3
+; SVG draw with NO deadman guard. So a wedged/runaway wallpaper render (a tenant
+; spinning in usermode) would pin the flag at 1 and freeze the whole UI: drag
+; releases don't commit, apps/menus won't open, the bg never lands.
+;
+; This is the hard bound, measured in tick_count units (the 100 Hz PIT counter,
+; NOT frames - while the render is active the BSP busy-repaints far above the
+; idle 30 Hz governor, so a frame/poll count would abandon a legit render early).
+; If a render stays active longer than this, the kernel ABANDONS it - clears
+; wallpaper_render_active, reverts to the solid desktop, and lets the slot's
+; normal strike/deadman engine reclaim the runaway AP. One app can no longer
+; freeze every other app via the background. Generous: a full-quality SVG raster
+; finishes in well under 20 s; this only fires on a genuinely stuck render.
+WALLPAPER_RENDER_MAX_TICKS equ 2000        ; 100 Hz -> ~20 s
+
+; --- Per-core raster target (GS-base relative) ---
+; The raster destination (addr/width/height/pitch) is per-CPU: each core's GS
+; base points at its own RTGT_STRIDE-byte slot in raster_target_tbl, so the BSP
+; compositor (core 0, targeting the back buffer) and an AP wallpaper render
+; (targeting the packed wallpaper cache) never share the pointer. This is what
+; lets the compositor / taskbar / window drag stay live while the wallpaper
+; rasterizes on an AP, instead of being frozen by the old wallpaper_render_active
+; gate. Fields are read in the hot per-pixel primitives as [gs:RTGT_*], so the
+; lookup is a single segment-relative load (no wd_core_index in the pixel loop).
+; raster_gs_init seeds every core's slot with the same back-buffer default the
+; old global raster_target_* had, so a raster op on a core that has not yet run a
+; target-select still writes somewhere safe rather than to a null slot.
+RTGT_ADDR    equ 0          ; qword: destination base
+RTGT_WIDTH   equ 8          ; dword: clip width  (px)
+RTGT_HEIGHT  equ 12         ; dword: clip height (px)
+RTGT_PITCH   equ 16         ; qword: row pitch   (bytes)
+RTGT_STRIDE  equ 32         ; per-core slot stride (padded)
+IA32_GS_BASE_MSR equ 0xC0000101
 
 ; --- Slot teardown on suspect syscall return (security_todo.md §12) ---
 ; Number of security-reason -1 returns (cap mismatch, validator reject, rate
@@ -192,6 +320,11 @@ ANOMALY_HIRISK_HOLD_BUDGET  equ 256
 ; --- Window Manager ---
 MAX_WINDOWS         equ APP_SLOT_COUNT
 WINDOW_STRUCT_SIZE  equ 256          ; Bytes per window struct
+; SYS_WM_LIST record: u32 id, u32 flags, 40-byte title (null-padded). Kept in
+; sync with the WM_LIST_REC const in core.ghl and the shell's taskbar reader.
+WM_LIST_REC         equ 48
+WM_LIST_TITLE_OFF   equ 8
+WM_LIST_TITLE_LEN   equ 40
 L3_USER_STACK_SIZE  equ 16384        ; 16 KB user stack per L3 window callback context
 L3_SYSCALL_STACK_SIZE equ 4096       ; 4 KB usable syscall stack per L3 context
 ; Per-slot footprint in l3_syscall_stacks (16 KiB stride, two guard pages):
@@ -258,6 +391,42 @@ WF_FOCUSED          equ 0x02
 WF_DRAGGING         equ 0x04
 WF_MINIMIZED        equ 0x08
 WF_ACTIVE           equ 0x10         ; Slot is in use
+WF_MANIFEST_OK      equ 0x20         ; Capability manifest has been applied to this
+                                     ; slot. Cleared at create (struct is zeroed),
+                                     ; set by kernel_apply_app_manifest. Until set,
+                                     ; sc_record_strike suppresses strikes so a draw
+                                     ; dispatched in the launch gap (window drawable
+                                     ; before its manifest narrows caps) cannot kill
+                                     ; the app for the kernel's own ordering race.
+WF_READY            equ 0x40         ; Window is FULLY provisioned and safe to
+                                     ; render: capability manifest applied, L3 slot
+                                     ; seeded, and the CPI-signed click/key/draw
+                                     ; handlers installed. Cleared at create (struct
+                                     ; is zeroed); set as the LAST launch step by
+                                     ; wm_window_finalize (and immediately for
+                                     ; app-created SYS_WM_CREATE windows, which are
+                                     ; provisioned by their already-sandboxed
+                                     ; caller). wm_draw_window refuses to render a
+                                     ; window without it, so the launch-ordering
+                                     ; race -- window drawable before its manifest /
+                                     ; slot-seed land -- can never present a blank
+                                     ; frame or dispatch a draw whose syscalls the
+                                     ; cap gate then rejects. The authoritative
+                                     ; "drawable" gate; WF_VISIBLE remains the
+                                     ; user-facing show/hide (minimize, taskbar).
+WF_SHELL            equ 0x80         ; This window IS the ring-3 desktop shell
+                                     ; (gshell.ghl, APP_SHELL slot): chromeless,
+                                     ; full-screen, drawn UNDER all app windows as
+                                     ; the desktop layer, and excluded from
+                                     ; wm_hit_window_at / SYS_WM_LIST. Empty-area
+                                     ; clicks that miss every app window route to
+                                     ; its client click handler (the taskbar /
+                                     ; desktop / Start menu live in gshell). Set as
+                                     ; the post-launch step in .launch_shell; the
+                                     ; shell is never WF_FOCUSED so the focused
+                                     ; draw pass never lifts it over apps. Replaces
+                                     ; the retired kernel asm shell (desktop.asm +
+                                     ; taskbar.asm). See docs/shell-architecture.md.
 
 ; --- Mouse event types ---
 MEVT_MOVE           equ 1
@@ -303,6 +472,55 @@ XHCI_INT_RING2_ADDR equ 0x19C0000    ; Interrupt IN Transfer Ring (slot 2)
 XHCI_MOUSE_BUF2_ADDR equ 0x19D0000   ; Mouse interrupt data buffers (slot 2)
 XHCI_CTRL_RING2_ADDR equ 0x19E0000   ; Control EP0 Transfer Ring (slot 2)
 XHCI_MEM_END        equ 0x19F0000    ; End of XHCI memory region
+
+; Hard ceiling on bytes the controller may DMA into a per-slot HID interrupt
+; buffer AND the byte count the parser is allowed to walk. The USB endpoint
+; wMaxPacketSize field is 11 bits => spec-legal mps <= 2047 < 0x800, so this
+; clamp never fires for a conforming device; it is a fail-closed, defence-in-
+; depth bound used at the DMA queue site and the parser call so a malicious or
+; future-unmasked usb_ep_mps can never overrun the buffer's slack (the proof of
+; memory safety must hold in asm alone, not lean on the GHL `& 0x07FF` mask).
+XHCI_HID_REPORT_MAX equ 0x800
+; Build-enforce the safety invariant: each slot's interrupt buffer must have at
+; least XHCI_HID_REPORT_MAX bytes of slack before the next allocated region, so
+; a full-size transfer cannot scribble into the neighbouring xHCI structure.
+%if (XHCI_DEV_CTX2_ADDR - XHCI_MOUSE_BUF_ADDR) < XHCI_HID_REPORT_MAX
+  %error "XHCI_MOUSE_BUF_ADDR slack < XHCI_HID_REPORT_MAX (slot1 HID buffer too small)"
+%endif
+%if (XHCI_CTRL_RING2_ADDR - XHCI_MOUSE_BUF2_ADDR) < XHCI_HID_REPORT_MAX
+  %error "XHCI_MOUSE_BUF2_ADDR slack < XHCI_HID_REPORT_MAX (slot2 HID buffer too small)"
+%endif
+
+; --- xHCI device-supplied index bounds (security) -------------------------
+; Both the Enable-Slot completion's slot id and the HCSPARAMS2 scratchpad count
+; are attacker-influenced (supplied by the controller) yet used as indices into
+; the fixed xHCI DMA region. These constants + asserts pin the cross-region
+; invariants that keep every such index in-bounds so the safety proof does not
+; silently rest on the memory map happening to be generous.
+;
+; MaxSlotsEn is programmed to at most 16 (xhci_init CONFIG write), so a conforming
+; controller only ever returns a slot id in 1..16. xhci_enable_slot fail-closed
+; rejects anything outside 1..XHCI_MAX_SLOT_ID before it indexes DCBAA/doorbell.
+XHCI_MAX_SLOT_ID    equ 16
+; Largest count of 4 KiB scratchpad buffers that fit AFTER the pointer-array page
+; inside the SCRATCH region. Buffers live at XHCI_SCRATCH_ADDR + 0x1000*(i+1), so
+; the last buffer (i = count-1) must end at or before the next region (DEV_CTX):
+;   0x1000 * (count+1) <= (XHCI_DEV_CTX_ADDR - XHCI_SCRATCH_ADDR)
+XHCI_SCRATCH_MAX    equ ((XHCI_DEV_CTX_ADDR - XHCI_SCRATCH_ADDR) / 0x1000) - 1
+; A validated slot id (1..XHCI_MAX_SLOT_ID) must index inside the DCBAA region.
+%if ((XHCI_MAX_SLOT_ID + 1) * 8) > (XHCI_CMD_RING_ADDR - XHCI_DCBAA_ADDR)
+  %error "DCBAA region too small for XHCI_MAX_SLOT_ID entries"
+%endif
+; Defence in depth: even an UNVALIDATED 8-bit slot id (0..255) stays inside the
+; DCBAA region, so a malicious Enable-Slot response can never reach host RAM
+; outside the array even in the window before the range check rejects it.
+%if ((255 + 1) * 8) > (XHCI_CMD_RING_ADDR - XHCI_DCBAA_ADDR)
+  %error "DCBAA region < 256 slot entries (8-bit slot id could escape the array)"
+%endif
+; The scratchpad region must hold at least one buffer after its pointer page.
+%if (XHCI_SCRATCH_MAX < 1)
+  %error "SCRATCH region too small for even one scratchpad buffer"
+%endif
 
 ; --- RTL8152/RTL8156 USB Ethernet DMA region ---
 ; Kept outside the fixed xHCI controller workspace. The RTL8139 fallback uses
@@ -373,6 +591,7 @@ XHCI_CMD_INTE       equ (1 << 2)     ; Interrupter Enable
 
 ; --- USBSTS bits ---
 XHCI_STS_HCH        equ (1 << 0)     ; HC Halted
+XHCI_STS_EINT       equ (1 << 3)     ; Event Interrupt (write-1-to-clear)
 XHCI_STS_CNR        equ (1 << 11)    ; Controller Not Ready
 
 ; --- PORTSC bits ---
