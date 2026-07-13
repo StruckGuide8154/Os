@@ -195,9 +195,8 @@ rtl8139_icmp_ping_ics:
 global rtl8139_icmp_ping_ipv4
 rtl8139_icmp_ping_ipv4:
     push rdi
-    call net_nic_active
-    test eax, eax
-    jnz .have_nic
+    cmp byte [rtl_active], 1
+    je .have_nic
     call rtl8139_init
     test eax, eax
     jz .skip_dhcp
@@ -235,9 +234,8 @@ rtl8139_icmp_ping_current:
     push rdi
     push r12
 
-    call net_nic_active
-    test eax, eax
-    jnz .active
+    cmp byte [rtl_active], 1
+    je .active
     call rtl8139_init
     test eax, eax
     jz .fail
@@ -251,7 +249,7 @@ rtl8139_icmp_ping_current:
     mov rbx, [tick_count]
     add rbx, 200
 .arp_wait:
-    call rtl8139_poll_selected
+    call rtl8139_poll_rx
     cmp byte [rtl_have_gw_mac], 1
     je .got_arp
     mov rax, [tick_count]
@@ -267,7 +265,7 @@ rtl8139_icmp_ping_current:
     mov rbx, [tick_count]
     add rbx, 200
 .icmp_wait:
-    call rtl8139_poll_selected
+    call rtl8139_poll_rx
     cmp byte [rtl_ping_reply], 1
     je .ok
     mov rax, [tick_count]

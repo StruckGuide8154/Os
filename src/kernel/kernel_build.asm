@@ -269,8 +269,6 @@ section .text
 ; references symbols that no longer link in the active tree.
 %include "src/kernel/drivers/rtl8139.asm"
 section .text
-%include "src/kernel/drivers/virtio_net.asm"
-section .text
 %include "src/kernel/drivers/xhci.asm"
 section .text
 ; GritHLK: USB HID LEAF helpers (zero-asm). Must precede usb_hid.asm so its

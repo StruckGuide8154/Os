@@ -16,9 +16,9 @@ function Assert-NoMatch([string]$Text, [string]$Pattern, [string]$Message) {
 
 $caps = Read-RepoFile 'src\include\syscall_caps.inc'
 $table = Read-RepoFile 'src\kernel\proc\syscall_support.inc'
-$handlers = Read-RepoFile 'src\kernel\proc\syscall_handlers_driver.inc'
+$handlers = Read-RepoFile 'src\kernel\proc\syscall_handlers_wx_net.inc'
 $broker = Read-RepoFile 'src\kernel\grithlk\driver_host.ghl'
-$classes = Read-RepoFile 'src\include\device_class.inc'
+$classes = Read-RepoFile 'src\include\net_driver.inc'
 $kernelBuild = Read-RepoFile 'src\kernel\kernel_build.asm'
 $uefiBuild = Read-RepoFile 'scripts\build\build_uefi.ps1'
 
@@ -40,7 +40,15 @@ Assert-Match $broker 'fn\s+drvhost_register_slot\(slot,\s*requested\)' 'Slot-der
 Assert-NoMatch $broker '\b(ld|sd)\(' 'Obsolete ld/sd primitives reappeared in the linked broker.'
 Assert-Match $broker 'const\s+RING_MAX_DESC\s*=\s*256' 'Driver batch work bound is missing.'
 Assert-Match $broker 'if\s+count\s*>\s*RING_MAX_DESC\s*\{\s*return\s+DRV_ERR_GRANT' 'Oversized driver batches are not rejected.'
-Assert-Match $broker 'if\s+op\s*!=\s*DESC_OP_WRITE32\s*\{\s*return\s+DRV_ERR_GRANT' 'Unknown driver-ring operations are not rejected before execution.'
+Assert-Match $broker 'if\s+op\s*!=\s*DESC_OP_WRITE32\s*\{\s*rc\s*=\s*DRV_ERR_GRANT' 'Unknown driver-ring operations are not rejected before execution.'
+Assert-Match $broker 'data\s+drv_ring_scratch:\s*65536\s*x\s*1' 'Kernel-owned driver-ring snapshots are missing.'
+Assert-Match $broker 'atomic_xchg\(&drv_ring_busy\s*\+\s*id\s*\*\s*4,\s*1\)' 'Per-driver ring serialization is missing.'
+Assert-Match $broker 'data\s+drv_pci_cfg_busy:\s*1\s*x\s*4[\s\S]*atomic_xchg\(&drv_pci_cfg_busy,\s*1\)[\s\S]*drvhost_raw_pci_cfg_read32[\s\S]*atomic_xchg\(&drv_pci_cfg_busy,\s*0\)' 'PCI CF8/CFC transactions are not serialized.'
+Assert-Match $broker 'let\s+snap\s*=\s*&drv_ring_scratch[\s\S]*sq\(s,\s*lq\(u\)\)[\s\S]*drvhost_raw_mmio_write32\(addr,\s*lw\(s\s*\+\s*8\)\)' 'Ring execution does not use the kernel-owned snapshot.'
+Assert-NoMatch $broker 'drvhost_raw_mmio_(read|write)32\([^\r\n]*\bdesc_base\b' 'Hardware execution reloads mutable user descriptors.'
+Assert-Match $broker 'if\s+lw\(&drv_state\s*\+\s*id\s*\*\s*4\)\s*!=\s*DRV_ST_NONE\s*\{\s*return\s+DRV_ERR_STATE' 'Driver registration is not one-shot.'
+Assert-Match $broker 'fn\s+drvhost_quarantine[\s\S]*drvhost_revoke_resources\(id\)' 'Quarantine does not revoke hardware grants.'
+Assert-Match $broker 'fn\s+drvhost_restart[\s\S]*drvhost_revoke_resources\(id\)' 'Restart does not revoke stale hardware grants.'
 Assert-Match $kernelBuild '%include\s+"build/ghl/driver_host\.asm"' 'Kernel does not link the driver-host broker.'
 Assert-Match $uefiBuild "driver_host\.ghl';\s*out\s*=\s*'build\\ghl\\driver_host\.asm'" 'UEFI generator does not compile driver_host.ghl.'
 

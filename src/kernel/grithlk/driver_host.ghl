@@ -31,6 +31,7 @@ module "driver_host";
 unsafe raw_mem;          # lq/sq over the broker's own tables + brokered MMIO
 unsafe kernel_io;        # inb/outb/ind/outd for brokered PORT I/O at the boundary
 unsafe implicit_extern;  # &drv_* module-local table addresses
+unsafe kernel_priv;      # atomic_xchg for bounded per-driver ring serialization
 
 # --- registration / lifecycle ----------------------------------------------
 global drvhost_register;
@@ -60,6 +61,7 @@ global drvhost_fault;
 global drvhost_quarantine;
 global drvhost_restart;
 global drvhost_irq_deliver;
+global drvhost_revoke_resources;
 
 # ---------------------------------------------------------------------------
 # Capability classes - coarse "what kind of access is conceivable" bits. A set
@@ -113,6 +115,14 @@ data drv_restarts: 16 x 4;      # restart generation
 data drv_slot_policy_caps: 16 x 4;
 data drv_slot_code_hash: 16 x 8;
 
+# A ring batch is copied once from ring-3 memory into the caller's private,
+# kernel-owned 4 KiB snapshot.  The busy word prevents two threads in the same
+# driver slot from sharing scratch.  Hardware execution never reloads address,
+# operation, or write data from the mutable user batch.
+data drv_ring_busy: 16 x 4;
+data drv_ring_scratch: 65536 x 1;       # 16 slots * 4096 bytes
+data drv_pci_cfg_busy: 1 x 4;           # CF8/CFC is one global transaction port
+
 # --- MMIO grant table -------------------------------------------------------
 data mg_drv:   32 x 4;
 data mg_base:  32 x 8;
@@ -156,12 +166,110 @@ fn drv_valid_slot(slot) {
     return 1;
 }
 
+# Bounded lifecycle/data-plane serialization.  Failure is safe: quarantine has
+# already made the driver non-running, and restart refuses to restore it until
+# the prior bounded batch releases this lock.
+fn drvhost_ring_lock(id) {
+    let spins = 0;
+    while spins < 4096 {
+        if atomic_xchg(&drv_ring_busy + id * 4, 1) == 0 { return 1; }
+        spins = spins + 1;
+    }
+    return 0;
+}
+
+# Remove every hardware authority row owned by `id`.  The tables are compacted
+# in place so repeated quarantine/restart cycles cannot exhaust capacity with
+# dead rows.  State is set non-running before this helper is called, making all
+# data-plane checks fail closed while revocation completes.
+fn drvhost_revoke_resources(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+
+    let mn = lw(&mg_count);
+    let ms = 0;
+    let md = 0;
+    while ms < mn {
+        if lw(&mg_drv + ms * 4) != id {
+            if md != ms {
+                sw(&mg_drv + md * 4, lw(&mg_drv + ms * 4));
+                sq(&mg_base + md * 8, lq(&mg_base + ms * 8));
+                sq(&mg_end + md * 8, lq(&mg_end + ms * 8));
+            }
+            md = md + 1;
+        }
+        ms = ms + 1;
+    }
+    let mkeep = md;
+    while md < mn {
+        sw(&mg_drv + md * 4, 0);
+        sq(&mg_base + md * 8, 0);
+        sq(&mg_end + md * 8, 0);
+        md = md + 1;
+    }
+    sw(&mg_count, mkeep);
+
+    let pn = lw(&pg_count);
+    let ps = 0;
+    let pd = 0;
+    while ps < pn {
+        if lw(&pg_drv + ps * 4) != id {
+            if pd != ps {
+                sw(&pg_drv + pd * 4, lw(&pg_drv + ps * 4));
+                sw(&pg_lo + pd * 4, lw(&pg_lo + ps * 4));
+                sw(&pg_hi + pd * 4, lw(&pg_hi + ps * 4));
+            }
+            pd = pd + 1;
+        }
+        ps = ps + 1;
+    }
+    let pkeep = pd;
+    while pd < pn {
+        sw(&pg_drv + pd * 4, 0);
+        sw(&pg_lo + pd * 4, 0);
+        sw(&pg_hi + pd * 4, 0);
+        pd = pd + 1;
+    }
+    sw(&pg_count, pkeep);
+
+    let dn = lw(&dg_count);
+    let ds = 0;
+    let dd = 0;
+    while ds < dn {
+        if lw(&dg_drv + ds * 4) != id {
+            if dd != ds {
+                sw(&dg_drv + dd * 4, lw(&dg_drv + ds * 4));
+                sq(&dg_base + dd * 8, lq(&dg_base + ds * 8));
+                sq(&dg_end + dd * 8, lq(&dg_end + ds * 8));
+            }
+            dd = dd + 1;
+        }
+        ds = ds + 1;
+    }
+    let dkeep = dd;
+    while dd < dn {
+        sw(&dg_drv + dd * 4, 0);
+        sq(&dg_base + dd * 8, 0);
+        sq(&dg_end + dd * 8, 0);
+        dd = dd + 1;
+    }
+    sw(&dg_count, dkeep);
+
+    let v = 0;
+    while v < IRQ_MAX {
+        if lw(&irq_owner + v * 4) == id { sw(&irq_owner + v * 4, 0); }
+        v = v + 1;
+    }
+    return DRV_OK;
+}
+
 # Kernel-only control-plane hook. `caps` and `code_hash` must already have
 # passed signed ART_DRIVER admission and concrete device permission review.
 # Installing policy grants no MMIO/PIO/DMA window by itself.
 fn drvhost_policy_install(slot, caps, code_hash) {
     if drv_valid_slot(slot) == 0 { return DRV_ERR_NODRV; }
     if caps == 0 { return DRV_ERR_CAP; }
+    let id = slot + 1;
+    if lw(&drv_state + id * 4) != DRV_ST_NONE { return DRV_ERR_STATE; }
     sw(&drv_slot_policy_caps + slot * 4, caps);
     sq(&drv_slot_code_hash + slot * 8, code_hash);
     return DRV_OK;
@@ -208,6 +316,10 @@ fn drv_is_running(id) {
 # ---------------------------------------------------------------------------
 fn drvhost_register(id, requested, policy_grant, code_hash) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    # Registration is a one-shot admission transition.  A quarantined, dead,
+    # or already-running driver must use the kernel-only recovery path; ring 3
+    # cannot reset its own fault state by registering again.
+    if lw(&drv_state + id * 4) != DRV_ST_NONE { return DRV_ERR_STATE; }
     let eff = requested & policy_grant;
     sw(&drv_caps_req + id * 4, requested);
     sw(&drv_policy   + id * 4, policy_grant);
@@ -463,7 +575,12 @@ fn drvhost_pci_cfg_read32(id, bus, dev, func, reg) {
     if func > 7 { return PCICFG_OPEN_BUS; }
     if reg < 0 { return PCICFG_OPEN_BUS; }
     if reg > 255 { return PCICFG_OPEN_BUS; }
-    return drvhost_raw_pci_cfg_read32(bus, dev, func, reg);
+    # CF8 selects global chipset state and CFC consumes it. Serialize the pair
+    # so another CPU cannot redirect this read between the two port accesses.
+    if atomic_xchg(&drv_pci_cfg_busy, 1) != 0 { return PCICFG_OPEN_BUS; }
+    let value = drvhost_raw_pci_cfg_read32(bus, dev, func, reg);
+    atomic_xchg(&drv_pci_cfg_busy, 0);
+    return value;
 }
 
 # ---------------------------------------------------------------------------
@@ -507,6 +624,7 @@ const DESC_STRIDE = 16;          # {addr:8 @0, data:4 @8, op:4 @12}
 const RING_MAX_DESC = 256;       # bound one syscall's validation/execution work
 const DESC_OP_READ32  = 0;
 const DESC_OP_WRITE32 = 1;
+const RING_SNAPSHOT_BYTES = 4096;      # 256 descriptors * 16 bytes
 
 fn drvhost_ring_establish(id, abi_version) {
     if drv_has_cap(id, DRV_CAP_RING) == 0 { return DRV_ERR_CAP; }
@@ -514,40 +632,84 @@ fn drvhost_ring_establish(id, abi_version) {
     return DRV_OK;
 }
 
-# Validate the whole batch first, then execute. Returns DRV_OK only if every
-# descriptor was in-window; otherwise DRV_ERR_GRANT and NOTHING was executed.
+# Copy the whole batch into kernel-owned per-driver scratch, validate that
+# immutable snapshot, then execute the same bytes.  Read results are copied
+# only into the documented user data slots after hardware execution.  Returns
+# DRV_OK only if every descriptor was in-window; otherwise NOTHING executes.
 fn drvhost_ring_submit(id, desc_base, count) {
     if drv_has_cap(id, DRV_CAP_RING) == 0 { return DRV_ERR_CAP; }
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if count < 1 { return DRV_ERR_GRANT; }
     if count > RING_MAX_DESC { return DRV_ERR_GRANT; }
-    # Pass 1: validate every descriptor's window before touching hardware.
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+
+    let snap = &drv_ring_scratch + id * RING_SNAPSHOT_BYTES;
     let i = 0;
+    # Snapshot all authorization and data fields exactly once while the syscall
+    # wrapper has enabled bounded user access for the pre-validated span.
     while i < count {
-        let d = desc_base + i * DESC_STRIDE;
-        let addr = lq(d);                                  # field @0
-        if drv_mmio_contained(id, addr, 4) == 0 { return DRV_ERR_GRANT; }
-        let op = lw(d + 12);
-        if op != DESC_OP_READ32 {
-            if op != DESC_OP_WRITE32 { return DRV_ERR_GRANT; }
-        }
+        let u = desc_base + i * DESC_STRIDE;
+        let s = snap + i * DESC_STRIDE;
+        sq(s, lq(u));
+        sw(s + 8, lw(u + 8));
+        sw(s + 12, lw(u + 12));
         i = i + 1;
     }
-    # Pass 2: all validated - execute. `data` is field @8, `op` is field @12.
+
+    # Validate every descriptor in the immutable kernel snapshot.
+    let rc = DRV_OK;
     i = 0;
     while i < count {
-        let d = desc_base + i * DESC_STRIDE;
-        let addr = lq(d);
-        let op = lw(d + 12);
-        if op == DESC_OP_WRITE32 {
-            drvhost_raw_mmio_write32(addr, lw(d + 8));     # data slot = value to write
+        let s = snap + i * DESC_STRIDE;
+        let addr = lq(s);                                  # field @0
+        let op = lw(s + 12);
+        if op != DESC_OP_READ32 {
+            if op != DESC_OP_WRITE32 { rc = DRV_ERR_GRANT; }
         }
-        if op == DESC_OP_READ32 {
-            sw(d + 8, drvhost_raw_mmio_read32(addr));       # data slot <- read result
+        if drv_mmio_contained(id, addr, 4) == 0 { rc = DRV_ERR_GRANT; }
+        i = i + 1;
+    }
+    if rc != DRV_OK {
+        atomic_xchg(&drv_ring_busy + id * 4, 0);
+        return rc;
+    }
+
+    # Execute only snapshot fields.  User mutations after the copy cannot alter
+    # the address, operation, or write value reaching the raw hardware sink.
+    i = 0;
+    while i < count {
+        let s = snap + i * DESC_STRIDE;
+        let addr = lq(s);
+        let op = lw(s + 12);
+        # Quarantine flips state before waiting on this lock.  Recheck at every
+        # hardware boundary so a concurrent fault stops the batch promptly.
+        if drv_is_running(id) == 0 {
+            rc = DRV_ERR_STATE;
+        } else {
+            if op == DESC_OP_WRITE32 {
+                drvhost_raw_mmio_write32(addr, lw(s + 8));
+            }
+            if op == DESC_OP_READ32 {
+                sw(s + 8, drvhost_raw_mmio_read32(addr));
+            }
         }
         i = i + 1;
     }
-    return DRV_OK;
+
+    # Copy back read results only.  The dispatcher already proved the complete
+    # count*16 span is writable; user-modified op fields are ignored here.
+    if rc == DRV_OK {
+        i = 0;
+        while i < count {
+            let s = snap + i * DESC_STRIDE;
+            if lw(s + 12) == DESC_OP_READ32 {
+                sw(desc_base + i * DESC_STRIDE + 8, lw(s + 8));
+            }
+            i = i + 1;
+        }
+    }
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
+    return rc;
 }
 
 # ---------------------------------------------------------------------------
@@ -568,7 +730,10 @@ fn drvhost_fault(id) {
 fn drvhost_quarantine(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
     sw(&drv_state + id * 4, DRV_ST_QUARANTINE);
-    return DRV_OK;
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+    let rc = drvhost_revoke_resources(id);
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
+    return rc;
 }
 
 # Restart: only from QUARANTINE/DEAD. Clears the fault count, bumps the restart
@@ -581,8 +746,15 @@ fn drvhost_restart(id) {
     if st != DRV_ST_QUARANTINE {
         if st != DRV_ST_DEAD { return DRV_ERR_STATE; }
     }
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+    let rc = drvhost_revoke_resources(id);
+    if rc != DRV_OK {
+        atomic_xchg(&drv_ring_busy + id * 4, 0);
+        return rc;
+    }
     sw(&drv_faults + id * 4, 0);
     sw(&drv_restarts + id * 4, lw(&drv_restarts + id * 4) + 1);
     sw(&drv_state + id * 4, DRV_ST_RUNNING);
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
     return DRV_OK;
 }

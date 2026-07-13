@@ -316,7 +316,7 @@ Foundation landed:
 - Ring batches receive whole-range dispatcher validation and SMAP bracketing.
 - Driver-created grants, DMA mapping, IRQ waiting/routing, and cross-driver grants
   remain denied until the device-manager control plane provisions them safely.
-- `device_class.inc` defines the common version, handle, message, descriptor,
+- `net_driver.inc` defines the common version, handle, message, descriptor,
   `net.l2`, and `wlan.radio` ABI constants.
 - `test_driver_framework.ps1` permanently guards these properties in full verify.
 

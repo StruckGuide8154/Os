@@ -11,8 +11,9 @@ rtl8139_send_arp_gateway:
     mov ecx, 6
     mov al, 0xFF
     rep stosb
-    call net_nic_mac
-    add rdi, 6
+    lea rsi, [rtl_mac]
+    mov ecx, 6
+    rep movsb
     mov word [rdi], 0x0608             ; ethertype ARP
     add rdi, 2
     mov word [rdi], 0x0100             ; Ethernet
@@ -20,15 +21,17 @@ rtl8139_send_arp_gateway:
     mov byte [rdi + 4], 6
     mov byte [rdi + 5], 4
     mov word [rdi + 6], 0x0100         ; request
+    lea rsi, [rtl_mac]
     mov rdi, RTL_TX_BUF_ADDR + 22
-    call net_nic_mac
+    mov ecx, 6
+    rep movsb
     mov eax, [rtl_guest_ip]
     mov dword [abs RTL_TX_BUF_ADDR + 28], eax
     mov qword [abs RTL_TX_BUF_ADDR + 32], 0
     mov eax, [rtl_next_hop_ip]
     mov dword [abs RTL_TX_BUF_ADDR + 38], eax
     mov ecx, 60
-    call rtl8139_tx_selected
+    call rtl8139_tx
     pop rdi
     pop rsi
     pop rcx
@@ -49,8 +52,9 @@ rtl8139_send_icmp_gateway:
     lea rsi, [rtl_gw_mac]
     mov ecx, 6
     rep movsb
-    call net_nic_mac
-    add rdi, 6
+    lea rsi, [rtl_mac]
+    mov ecx, 6
+    rep movsb
     mov word [rdi], 0x0008             ; ethertype IPv4
     add rdi, 2
     ; IPv4 header at +14
@@ -84,7 +88,7 @@ rtl8139_send_icmp_gateway:
     call net_checksum
     mov [abs RTL_TX_BUF_ADDR + 36], ax
     mov ecx, 60
-    call rtl8139_tx_selected
+    call rtl8139_tx
     pop rdi
     pop rsi
     pop rcx
@@ -121,15 +125,6 @@ rtl8139_tx:
     pop rbx
     pop rax
     ret
-
-; ECX=frame length at RTL_TX_BUF_ADDR. Preserve the exact direct-hardware path
-; for RTL8139 (including its descriptor timing); use the generic NIC surface
-; only when the shared DHCP/ICMP builder is serving VirtIO-net.
-rtl8139_tx_selected:
-    cmp byte [virtio_net_active], 1
-    jne rtl8139_tx
-    mov rdi, RTL_TX_BUF_ADDR
-    jmp net_nic_tx_frame
 
 ; Generic NIC ABI wrapper. RDI = complete Ethernet frame, ECX = length.
 global rtl8139_net_tx_frame
@@ -237,15 +232,7 @@ rtl8139_poll_rx:
     pop rax
     ret
 
-; Preserve the legacy RTL8139 polling path exactly; the shared protocol
-; routines reach the NIC dispatcher only when VirtIO owns the active link.
-rtl8139_poll_selected:
-    cmp byte [virtio_net_active], 1
-    jne rtl8139_poll_rx
-    jmp net_nic_poll_rx
-
 ; RDI = Ethernet frame, ECX = frame length.
-global rtl8139_handle_frame
 rtl8139_handle_frame:
     push rax
     push rcx

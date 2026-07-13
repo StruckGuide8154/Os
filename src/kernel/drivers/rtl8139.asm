@@ -14,11 +14,6 @@ extern pci_write_conf_dword
 extern tick_count
 extern debug_print
 extern net_rx_frame
-extern net_nic_active
-extern net_nic_tx_frame
-extern net_nic_mac
-extern net_nic_poll_rx
-extern virtio_net_active
 
 section .text
 
