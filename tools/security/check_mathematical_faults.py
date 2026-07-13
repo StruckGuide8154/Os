@@ -356,7 +356,9 @@ def check_default_manifest(root: Path, findings: list[Finding]) -> None:
     body = fn.group("body") if fn else text
     body_base_line = text[: fn.start("body")].count("\n") + 1 if fn else 1
     required = [
-        r"mov\s+rdx\s*,\s*\[rel\s+l3_slot_code_slide\s*\+\s*rcx\*8\]",
+        # Indexed NASM symbols use `abs`; accept `rel` as well for equivalent
+        # source forms on targets where the assembler permits indexed RIP data.
+        r"mov\s+rdx\s*,\s*\[(?:abs|rel)\s+l3_slot_code_slide\s*\+\s*rcx\*8\]",
         r"add\s+rax\s*,\s*\[rel\s+app_blob_code_size_v\]",
         r"mov\s+\[l3_wx_code_start\s*\+\s*rcx\*8\]\s*,\s*rdx",
         r"mov\s+\[l3_wx_code_end\s*\+\s*rcx\*8\]\s*,\s*rax",
