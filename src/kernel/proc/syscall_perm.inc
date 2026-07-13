@@ -437,15 +437,34 @@ sc_slot_perm_apply_blob:
 ; the *required* enforcement point: every launch path the system supports
 ; ends up here, so apps can't run a single syscall outside their manifest.
 ;
-; Out-of-range slot or app_id is a no-op so a launcher with a stale app_id
-; doesn't accidentally widen CAP_ALL → 0. The current dispatcher leaves the
-; default CAP_ALL in place; if you want strict deny-by-default, change the
-; .kam_done fallback to clear slot_cap_mask[slot] instead.
+; Out-of-range slot is a no-op (cannot store). An out-of-range app_id is NOT
+; left at the boot default: it drops to the CAP_CORE floor via .kam_deny.
+; The slot default is already deny-by-default (slot_cap_mask boots at CAP_CORE,
+; see syscall_data.ghl), so a launch path that somehow skipped this apply still
+; leaves the slot confined to core syscalls rather than fully unrestricted.
 ;
 ; Clobbers: rax, rcx, rsi, r8.
 FN_BEGIN kernel_apply_app_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), FN_RET_VOID
     cmp edi, MAX_WINDOWS
     jae .kam_done                     ; slot out of range: cannot store -> no-op
+    ; Mark this slot's window as sandboxed: its capability decision (the manifest
+    ; below, or the CAP_CORE default-deny floor) is being made now, so the launch-
+    ; ordering strike suppression in sc_record_strike no longer applies from here.
+    ; Done before the app_id checks so BOTH the success and .kam_deny paths flip it.
+    ; Window id == slot id for app windows. Clobbers eax (in the documented set).
+    movzx eax, dil
+    imul eax, eax, WINDOW_STRUCT_SIZE
+    add rax, WINDOW_POOL_ADDR
+    or qword [rax + WIN_OFF_FLAGS], WF_MANIFEST_OK
+    ; Authoritative per-slot strike gate: the sandbox is now live for this slot.
+    ; sc_record_strike keys off slot_sandboxed[slot] (NOT the window flag above,
+    ; which a tenant can clear via SYS_WM_CLOSE while still running). Set on BOTH
+    ; the manifest-applied and .kam_deny floor paths, since either way the slot's
+    ; capability decision has been made. See
+    ; docs/security/finding-strike-immunity-via-self-close.md.
+    movzx ecx, dil
+    lea r8, [rel slot_sandboxed]
+    mov byte [r8 + rcx], 1
     cmp rsi, APP_MIN_ID
     jb .kam_deny                      ; valid slot, unknown app_id -> default-deny
     cmp rsi, APP_MAX_ID
@@ -537,6 +556,7 @@ app_manifest_table:
     dw MANIFEST_TASKMGR                 ; APP_TASKMGR          (9)
     dw MANIFEST_PING                    ; APP_PING            (10)
     dw MANIFEST_MEDIA                   ; APP_MEDIA           (11)
+    dw MANIFEST_SHELL                   ; APP_SHELL           (12)
 
 ; Per-app syscall deny lists (security_todo.md §2). Each list is a run of
 ; syscall numbers terminated by SC_DENY_LIST_END (0xFF); sc_build_allow_bitmap
@@ -561,5 +581,6 @@ app_syscall_deny_table:
     dq sc_deny_none                     ; APP_TASKMGR          (9)
     dq sc_deny_none                     ; APP_PING            (10)
     dq sc_deny_none                     ; APP_MEDIA           (11)
+    dq sc_deny_none                     ; APP_SHELL           (12)
 
 section .text

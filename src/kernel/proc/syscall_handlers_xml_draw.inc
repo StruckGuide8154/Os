@@ -35,7 +35,7 @@
     push rdx
     mov rdi, rsi
     mov rsi, rdx
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: tag name written to user buf (slot-only)
     pop rdx
     pop rdi
     test eax, eax
@@ -72,7 +72,7 @@
     ; validate out range
     mov rdi, [rsp + ALL_R10]
     mov rsi, [rsp + ALL_R8]
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: attr value written to user buf (slot-only)
     test eax, eax
     jz .sc_xml_reject
     ; reload original args and call xml_attr(node, name, nlen, out, omax)
@@ -91,7 +91,7 @@
     push rdx
     mov rdi, rsi
     mov rsi, rdx
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: text written to user buf (slot-only)
     pop rdx
     pop rdi
     test eax, eax
@@ -133,7 +133,7 @@
     ; rdi = node, rsi = run index, rdx = out, r10 = max
     mov rdi, [rsp + ALL_RDX]
     mov rsi, [rsp + ALL_R10]
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: run text written to user buf (slot-only)
     test eax, eax
     jz .sc_xml_reject
     mov rdi, [rsp + ALL_RDI]
@@ -156,7 +156,7 @@
 .sc_xml_namespace_out:
     mov rdi, [rsp + ALL_R10]
     mov rsi, [rsp + ALL_R8]
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: namespace written to user buf (slot-only)
     test eax, eax
     jz .sc_xml_reject
     mov rdi, [rsp + ALL_RDI]
@@ -172,7 +172,7 @@
     ; rdi = node, rsi = out, rdx = max
     mov rdi, [rsp + ALL_RSI]
     mov rsi, [rsp + ALL_RDX]
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: namespace written to user buf (slot-only)
     test eax, eax
     jz .sc_xml_reject
     mov rdi, [rsp + ALL_RDI]
@@ -191,7 +191,7 @@
     jz .sc_xml_reject
     mov rdi, [rsp + ALL_RDX]
     mov rsi, [rsp + ALL_R10]
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: entity value written to user buf (slot-only)
     test eax, eax
     jz .sc_xml_reject
     mov rsi, [rsp + ALL_RDI]

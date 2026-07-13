@@ -52,6 +52,7 @@ global sc_get_slot_bounds;
 global sc_range_in_bounds;
 global sc_validate_user_range;
 global sc_validate_user_io_range;
+global sc_validate_user_write;
 global sc_validate_callback_target;
 global dbg_wc_hex64;
 global dbg_wmcreate_log;
@@ -155,13 +156,60 @@ fn sc_validate_user_range(rdi uptr, rsi len, r15d slot)
 }
 
 # ---------------------------------------------------------------------------
-# sc_validate_user_io_range - alias kept for callers; identical contract to
-# sc_validate_user_range (the asm was a bare `call sc_validate_user_range; ret`).
+# Read / write / execute validators (finding: input and output buffers were
+# validated by the SAME predicate, so a handler could be handed a blob-resident
+# OUTPUT pointer and write through it, corrupting code/rodata shared by every
+# app). They are now distinct:
+#
+#   * read    : sc_validate_user_range      (slot OR read-only blob)  - INPUT
+#   * write   : sc_validate_user_write      (slot ONLY)               - OUTPUT
+#   * execute : sc_validate_callback_target (slot OR blob, one line)  - CODE
+#
+# sc_validate_user_io_range keeps its historical READ contract (slot OR blob) so
+# input buffers that legitimately point into the shared blob (e.g. a built-in
+# XML/template constant an app parses, or constant data an app writes to a file)
+# keep working. Genuine OUTPUT sites - where the kernel STORES into the user
+# buffer (fs_read, fs_entry_info, wm_list, fs_format_name, the XML result
+# buffers) - call sc_validate_user_write instead, which rejects the blob.
 #   In: RDI = ptr, RSI = len, R15 = slot.  Out: EAX = 1/0.
 # ---------------------------------------------------------------------------
 fn sc_validate_user_io_range(rdi uptr, rsi len)
         preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
     call sc_validate_user_range(rdi: uptr, rsi: len);
+}
+
+# ---------------------------------------------------------------------------
+# sc_validate_user_write - OUTPUT-buffer validator. Accepts ONLY the caller's
+# own private, writable slot arena; the shared built-in app blob is REJECTED so
+# no syscall can be steered into writing over code/rodata that other apps see.
+# Same custom ABI + preserves set as sc_validate_user_range / io_range.
+#   In: RDI = ptr, RSI = len, R15 = slot.  Out: EAX = 1 if [ptr,ptr+len) lies
+#   fully inside the caller's own slot; else 0. Zero-length and ptr+len overflow
+#   are rejected up front, exactly as sc_validate_user_range does.
+# ---------------------------------------------------------------------------
+fn sc_validate_user_write(rdi uptr, rsi len, r15d slot)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if len == 0 {
+        return 0;
+    }
+    let last = uptr + len;
+    if last < uptr {
+        return 0;
+    }
+    let s = slot;
+    if s >= MAX_WINDOWS {
+        s = 0;
+    }
+    let slot_base = s * APP_SLOT_SIZE + lq(&l3_app_arena_base_v);
+    let slot_end = slot_base + APP_SLOT_SIZE;
+    if uptr >= slot_base {
+        if last <= slot_end {
+            return 1;
+        }
+    }
+    # No blob fallback: an output buffer MUST be in the caller's private,
+    # writable slot arena. A blob-resident destination is rejected.
+    return 0;
 }
 
 # ---------------------------------------------------------------------------
