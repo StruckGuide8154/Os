@@ -447,7 +447,7 @@
     push rsi                              ; save user buf
     mov rdi, rsi
     mov rsi, FS_ENTRY_INFO_SIZE
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: entry snapshot written to user buf (slot-only)
     pop rsi
     pop rdi
     test eax, eax

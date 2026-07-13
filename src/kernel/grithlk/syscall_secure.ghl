@@ -53,6 +53,7 @@ global cpi_sign_callback;
 global cpi_verify_callback;
 global cap_mask_sign;
 global cap_mask_store;
+global cap_mask_verify;
 global slot_cap_hmac_init;
 
 extern dbg_event_emit6;
@@ -73,13 +74,30 @@ const CPI_PTR_MASK   = 0x0000FFFFFFFFFFFF;  # callback-pointer bits (low 48)
 const CPI_HI_MASK    = 0xFFFF000000000000;  # stored-tag bits (high 16)
 const CPI_TAG_SHIFT  = 48;                  # tag occupies bits [48:64]
 const CAP_TAG_MASK   = 0xFF;                # low8 retained for the cap-mask tag
+# --- 128-bit cap-mask MAC (finding: 8-bit tag is brute-forceable) -----------
+# The authenticator is now two independent 64-bit lanes (16 bytes/slot, stored
+# in slot_cap_hmac[slot*16 ..]). Each lane is a SplitMix64 finalizer over a
+# keyed base = kernel_canary ^ (slot*A) ^ (mask16*B) ^ KDOM_CAP_MASK, with a
+# distinct per-lane gamma. Forging a matching 16-byte pair without the secret
+# kernel_canary is ~2^-128, versus 1/256 for the old linear low-8 fold. The two
+# lanes bind the FULL 16-bit mask (not the old high^low fold) so a CAP_FS_* high
+# bit and a low bit are distinguished. NOTE: the arithmetic need not match a
+# reference SplitMix - store, init and verify all run this identical GHL, so
+# they agree by construction regardless of >> being logical or arithmetic.
+const CAP_HMAC_BYTES = 16;
+const CAPMAC_SM_A    = 0x9E3779B97F4A7C15;
+const CAPMAC_SM_B    = 0xC2B2AE3D27D4EB4F;
+const CAPMAC_C1      = 0xBF58476D1CE4E5B9;
+const CAPMAC_C2      = 0x94D049BB133111EB;
+const CAPMAC_G0      = 0xD1B54A32D192ED03;
+const CAPMAC_G1      = 0xA0761D6478BD642F;
 const EVT_CPI_SIGN        = 0x43504947;     # CPIG
 const EVT_CPI_VERIFY_FAIL = 0x43504956;     # CPIV
 const WINDOW_POOL_ADDR = 0x2410000;
 const WINDOW_STRUCT_SIZE = 256;
 const WIN_OFF_ID       = 0;
 const WIN_OFF_FLAGS    = 40;
-const WIN_OFF_APPDATA  = 96;
+const WIN_OFF_APPDATA  = 136;
 const WIN_OFF_DRAWFN   = 112;
 const WIN_OFF_KEYFN    = 120;
 const WIN_OFF_CLICKFN  = 128;
@@ -197,67 +215,119 @@ fn cpi_verify_callback(rax result, rdi stored, rsi win, rdx off)
 }
 
 # ----------------------------------------------------------------------------
-# cap_mask_sign(rdi=slot, rsi=mask) -> rax = authenticator byte (0..255).
-# tag = low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK). Pure function of the
-# inputs + kernel_canary; clobbers only rax (rcx/r8 preserved). slot/mask are
-# masked to a byte to match the asm's movzx of dil/sil.
+# cap_mask_sign(rdi=slot, rsi=mask) -> rax = lane-0 of the 128-bit MAC.
+# Retained for any external single-shot signer; returns the first 64-bit lane
+# (== the qword stored at slot_cap_hmac[slot*16]). The authoritative store/verify
+# path uses BOTH lanes (cap_mask_store / cap_mask_verify). Pure function of the
+# inputs + kernel_canary; clobbers only rax (rdi/rsi/rcx/r8 preserved).
 # ----------------------------------------------------------------------------
 fn cap_mask_sign(rax result, rdi slot, rsi mask)
         preserves(rdi, rsi, rcx, r8) {
     let s = slot & 0xFF;
     let m = mask & 0xFFFF;
-    # Fold the high byte into the low byte so the 8-bit authenticator covers all
-    # 16 mask bits - a tamper of CAP_FS_* (high byte) is detected just like a
-    # low-byte flip. The dispatcher gate recomputes the identical fold.
-    let mf = (m ^ (m >> 8)) & 0xFF;
-    result = (lq(&kernel_canary) ^ s ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
+    let base = lq(&kernel_canary) ^ (s * CAPMAC_SM_A) ^ (m * CAPMAC_SM_B) ^ KDOM_CAP_MASK;
+    let x0 = base ^ CAPMAC_G0;
+    x0 = (x0 ^ (x0 >> 30)) * CAPMAC_C1;
+    x0 = (x0 ^ (x0 >> 27)) * CAPMAC_C2;
+    x0 = x0 ^ (x0 >> 31);
+    result = x0;
 }
 
 # ----------------------------------------------------------------------------
 # cap_mask_store(rdi=slot, rsi=mask): write slot_cap_mask[slot]=mask AND its
-# authenticator slot_cap_hmac[slot] together so the pair is always consistent -
-# the single place mask writes go through. Caller must have range-checked
-# slot < MAX_WINDOWS; we re-check defensively (the asm trusted the caller, so a
-# guarded skip is strictly safer and behavior-preserving for in-range slots).
-# Clobbers rax (rdi/rsi preserved); rcx/r8 are private scratch.
+# 128-bit authenticator slot_cap_hmac[slot*16 ..] together so the pair is always
+# consistent - the single place mask writes go through. Caller must have
+# range-checked slot < MAX_WINDOWS; we re-check defensively. Clobbers rax
+# (rdi/rsi preserved); rcx/r8 are private scratch.
 #
-# The authenticator is computed INLINE (identical arithmetic to cap_mask_sign:
-# low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK)) rather than via an inner
-# call - a regabi callee's rax return cannot be captured into a GHLK `let`, and
-# inlining the one-XOR-chain is byte-equivalent. cap_mask_sign remains the
-# exported standalone source of truth for any external single-shot signer.
-# Both byte writes are bounds-checked against MAX_WINDOWS.
+# The two MAC lanes are computed INLINE (a regabi callee's rax return cannot be
+# captured into a GHLK `let`). cap_mask_verify recomputes the identical lanes.
+# All writes are bounds-checked against MAX_WINDOWS.
 # ----------------------------------------------------------------------------
 fn cap_mask_store(rdi slot, rsi mask)
         preserves(rdi, rsi, rcx, r8) {
     let s = slot & 0xFF;
     let m = mask & 0xFFFF;
     if s < MAX_WINDOWS {
-        let mf = (m ^ (m >> 8)) & 0xFF;     # fold high byte into the authenticator
-        let auth = (lq(&kernel_canary) ^ s ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
         sb(&slot_cap_mask + s, m & 0xFF);          # mask low byte
         sb(&slot_cap_mask_hi + s, (m >> 8) & 0xFF);# mask high byte (CAP_FS_* etc.)
-        sb(&slot_cap_hmac + s, auth);              # matching authenticator
+        # 128-bit MAC over (slot, full 16-bit mask), keyed by kernel_canary.
+        let base = lq(&kernel_canary) ^ (s * CAPMAC_SM_A) ^ (m * CAPMAC_SM_B) ^ KDOM_CAP_MASK;
+        let x0 = base ^ CAPMAC_G0;
+        x0 = (x0 ^ (x0 >> 30)) * CAPMAC_C1;
+        x0 = (x0 ^ (x0 >> 27)) * CAPMAC_C2;
+        x0 = x0 ^ (x0 >> 31);
+        let x1 = base ^ CAPMAC_G1;
+        x1 = (x1 ^ (x1 >> 30)) * CAPMAC_C1;
+        x1 = (x1 ^ (x1 >> 27)) * CAPMAC_C2;
+        x1 = x1 ^ (x1 >> 31);
+        let off = s * CAP_HMAC_BYTES;
+        sq(&slot_cap_hmac + off, x0);
+        sq(&slot_cap_hmac + off + 8, x1);
     }
 }
 
 # ----------------------------------------------------------------------------
-# slot_cap_hmac_init(): stamp every slot's authenticator to match its current
-# (static CAP_ALL) mask, using the now-final kernel_canary. Called once from
-# kernel_main right after kernel_canary_init, before any syscall can dispatch.
-# Loops slot = 0..MAX_WINDOWS-1; reads slot_cap_mask[slot], signs it, writes
-# slot_cap_hmac[slot]. Clobbers rax/rcx/rdx/rsi/rdi/r8 (no preserves - matches
-# the asm's documented clobber set; it is a void init helper). Authenticator is
-# computed inline (same arithmetic as cap_mask_sign), each access bounds-checked.
+# cap_mask_verify(rdi=slot, rsi=mask) -> rax = 1 if slot_cap_hmac[slot] matches
+# the 128-bit MAC recomputed over (slot, mask), else 0. The dispatcher calls
+# this at every syscall with the mask it is about to consult (rsi = the 16-bit
+# value it loaded from slot_cap_mask/_hi), so it authenticates the EXACT bytes it
+# will AND against the required cap. Out-of-range slot -> 0 (fail-closed).
+# Preserves every register except rax (the dispatcher keeps rcx/rdx=mask and
+# r12/r15 live across the call).
+# ----------------------------------------------------------------------------
+fn cap_mask_verify(rax result, rdi slot, rsi mask)
+        preserves(rdi, rsi, rdx, rcx, rbx, r8, r9, r10, r11, r12, r13, r14, r15) {
+    let s = slot & 0xFF;
+    let m = mask & 0xFFFF;
+    if s >= MAX_WINDOWS {
+        result = 0;
+    } else {
+        let base = lq(&kernel_canary) ^ (s * CAPMAC_SM_A) ^ (m * CAPMAC_SM_B) ^ KDOM_CAP_MASK;
+        let x0 = base ^ CAPMAC_G0;
+        x0 = (x0 ^ (x0 >> 30)) * CAPMAC_C1;
+        x0 = (x0 ^ (x0 >> 27)) * CAPMAC_C2;
+        x0 = x0 ^ (x0 >> 31);
+        let x1 = base ^ CAPMAC_G1;
+        x1 = (x1 ^ (x1 >> 30)) * CAPMAC_C1;
+        x1 = (x1 ^ (x1 >> 27)) * CAPMAC_C2;
+        x1 = x1 ^ (x1 >> 31);
+        let off = s * CAP_HMAC_BYTES;
+        result = 0;
+        if lq(&slot_cap_hmac + off) == x0 {
+            if lq(&slot_cap_hmac + off + 8) == x1 {
+                result = 1;
+            }
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# slot_cap_hmac_init(): stamp every slot's 128-bit authenticator to match its
+# current (default-deny CAP_CORE) mask, using the now-final kernel_canary. Called
+# once from kernel_main right after kernel_canary_init, before any syscall can
+# dispatch. Loops slot = 0..MAX_WINDOWS-1; reads slot_cap_mask[slot], signs both
+# lanes, writes slot_cap_hmac[slot*16 ..]. Void init helper; each access
+# bounds-checked by the loop condition.
 # ----------------------------------------------------------------------------
 fn slot_cap_hmac_init() {
     let slot = 0;
     while slot < MAX_WINDOWS {
         let lo = lb(&slot_cap_mask + slot);          # mask low byte
         let hi = lb(&slot_cap_mask_hi + slot);       # mask high byte
-        let mf = (lo ^ hi) & 0xFF;                   # same fold as cap_mask_sign
-        let auth = (lq(&kernel_canary) ^ slot ^ mf ^ KDOM_CAP_MASK) & CAP_TAG_MASK;
-        sb(&slot_cap_hmac + slot, auth);
+        let m = (lo | (hi << 8)) & 0xFFFF;
+        let base = lq(&kernel_canary) ^ (slot * CAPMAC_SM_A) ^ (m * CAPMAC_SM_B) ^ KDOM_CAP_MASK;
+        let x0 = base ^ CAPMAC_G0;
+        x0 = (x0 ^ (x0 >> 30)) * CAPMAC_C1;
+        x0 = (x0 ^ (x0 >> 27)) * CAPMAC_C2;
+        x0 = x0 ^ (x0 >> 31);
+        let x1 = base ^ CAPMAC_G1;
+        x1 = (x1 ^ (x1 >> 30)) * CAPMAC_C1;
+        x1 = (x1 ^ (x1 >> 27)) * CAPMAC_C2;
+        x1 = x1 ^ (x1 >> 31);
+        let off = slot * CAP_HMAC_BYTES;
+        sq(&slot_cap_hmac + off, x0);
+        sq(&slot_cap_hmac + off + 8, x1);
         slot = slot + 1;
     }
 }

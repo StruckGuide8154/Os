@@ -7,14 +7,21 @@
 ; entitlements - declarative, enforced once at the syscall gate, not
 ; sprinkled through handlers.
 ;
-; Lifecycle:
-;   - Every slot starts at CAP_ALL (no restriction) so legacy callers keep
-;     working. The first time an app calls SYS_APP_DECLARE_MANIFEST(app_id)
-;     its slot mask is *narrowed* (AND-only - can never be widened) to the
-;     manifest declared for that app_id in app_manifest_table.
-;   - Declaration is one-way: a sandboxed app can never escalate, even by
-;     re-declaring a different app's manifest. This is the iOS-entitlement
-;     property: capabilities are bounded by the static manifest.
+; Lifecycle (DEFAULT-DENY - do not restore the old CAP_ALL default):
+;   - Every slot boots at CAP_CORE (slot_cap_mask default in syscall_data.ghl):
+;     print/exit/app_done/ticks/sysinfo/handles only. No FS/NET/GUI/WX/APP_CTRL
+;     without an explicit grant.
+;   - The LOADER installs the manifest, not the app. app_launch calls
+;     kernel_apply_app_manifest (via the APPLY_MANIFEST macro) right after the
+;     window is created and BEFORE the app runs its first instruction; it sets
+;     the slot mask to the app's app_manifest_table row, or drops to the
+;     CAP_CORE floor for an unknown/forged app_id (.kam_deny). So enforcement
+;     never depends on the app cooperating.
+;   - SYS_APP_DECLARE_MANIFEST(app_id) is an OPTIONAL extra self-narrowing an
+;     app may call to drop caps further; it is AND-only and can never widen.
+;   - Declaration/manifesting is one-way: a sandboxed app can never escalate,
+;     even by re-declaring a different app's manifest. This is the
+;     iOS-entitlement property: capabilities are bounded by the static manifest.
 ;
 ; Maintenance:
 ;   - To add a new capability domain, define a new CAP_* bit here (2 bytes
@@ -41,12 +48,13 @@
 ; cap_mask_sign / the dispatcher gate).
 CAP_CORE        equ 0x0001  ; print, exit, app_done, ticks, sysinfo, handles
 CAP_PROC        equ 0x0002  ; priority manager: SYS_PROC_SETPRIO (was free CAP_GUI bit)
+CAP_WM_QUERY    equ 0x0004  ; enumerate open windows (SYS_WM_LIST) - shell taskbar
 CAP_NET         equ 0x0008  ; ping, dhcp, dns, tcp_connect
 CAP_APP_CTRL    equ 0x0010  ; launch / open other apps
 CAP_WX          equ 0x0020  ; mprotect_wx, wx_install_manifest, wx_jit_alias
 CAP_MEDIA       equ 0x0040  ; media_blit_scaled, open_file_media
-; low-byte bits 0x0002 (former coarse CAP_GUI), 0x0004 (former coarse CAP_FS),
-; and 0x0080 are now free/reserved.
+CAP_SHELL       equ 0x0080  ; privileged desktop shell: SYS_SHELL_LAUNCH + draw/input authority
+; All low-byte capability bits are now assigned; new domains take a high-byte bit.
 
 ; --- Fine-grained capabilities (high byte) ----------------------------------
 ; The former single CAP_FS (0x04) split into three so a manifest can grant, e.g.
@@ -66,10 +74,11 @@ CAP_ALL         equ 0xFFFF
 ; --- Cap-mask authenticator (time-of-check capability cache) ----------------
 ; slot_cap_mask[] is plain kernel data, so any kernel-write bug could flip a
 ; cap bit and silently widen a slot's privileges between writes. To make that
-; tamper detectable, slot_cap_hmac[slot] stores
-;   low8(kernel_canary ^ slot ^ mask ^ KDOM_CAP_MASK)
-; recomputed on every legitimate mask write and re-checked at dispatch before
-; the mask is trusted (see cap_mask_sign / cap_mask_verify in syscall.asm).
+; tamper detectable, slot_cap_hmac[slot] stores a 128-bit (16-byte) MAC:
+;   two SplitMix64 lanes over kernel_canary ^ (slot*A) ^ (mask16*B) ^ KDOM_CAP_MASK
+; recomputed on every legitimate mask write (cap_mask_store) and re-checked at
+; dispatch by cap_mask_verify before the mask is trusted. (Was an 8-bit tag -
+; only 256 values, brute-forceable by a repeatable corrupt-and-retry primitive.)
 ; The domain byte separates this MAC from the WIN_OFF_USER_ARG / CPI tags that
 ; reuse the same kernel_canary key, so a tag forged for one can't be replayed
 ; into the other.
@@ -133,6 +142,12 @@ MANIFEST_SECURITY_PROBE equ CAP_CORE | CAP_GUI | CAP_WX
 MANIFEST_TASKMGR        equ CAP_CORE | CAP_GUI | CAP_PROC | CAP_APP_CTRL
 MANIFEST_PING           equ CAP_CORE | CAP_GUI | CAP_NET
 MANIFEST_MEDIA          equ CAP_CORE | CAP_GUI | CAP_FS | CAP_MEDIA
+; The desktop shell (taskbar / desktop / Start menu) runs as a privileged ring-3
+; slot. It draws (CAP_GUI), enumerates open windows for the taskbar
+; (CAP_WM_QUERY), launches apps from icons/menu (CAP_APP_CTRL + CAP_SHELL gate on
+; SYS_SHELL_LAUNCH). It deliberately has NO CAP_FS / CAP_NET / CAP_WX: a shell
+; compromise cannot touch the filesystem, network, or W^X.
+MANIFEST_SHELL          equ CAP_CORE | CAP_GUI | CAP_APP_CTRL | CAP_WM_QUERY | CAP_SHELL
 
 ; --- Per-app syscall allowlist (security_todo.md §2) ------------------------
 ; The CAP_* mask above is coarse: a single CAP_FS bit grants every FS syscall

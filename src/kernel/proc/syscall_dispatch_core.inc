@@ -5,101 +5,79 @@
 ; Extracted verbatim from syscall.asm (textual %include split, no logic change).
 ; Lines below remain in syscall_entry's local-label scope where applicable.
 ; ============================================================================
-    ; SYSCALL enters CPL0 on the user stack. KPTI must switch to the kernel CR3
-    ; before touching kernel data, but this preamble still uses the user stack
-    ; to save state, so keep SMAP open until those saves are restored.
-    USER_ACCESS_BEGIN
-    push rax
-    KPTI_SWITCH_TO_KERNEL_CR3 rax
-    pop rax
-    USER_ACCESS_END
-    ; Save critical SYSCALL state into the active slot runtime before any
-    ; helper calls.
-    USER_ACCESS_BEGIN
-    push rbx
-    push rdx
-    push r10
-    USER_ACCESS_END
-    mov rdx, rcx
-    sub rdx, [rel l3_app_arena_base_v]
-    jc .slot_from_global
-    cmp rdx, [rel l3_app_arena_size_v]
-    jae .slot_from_global
-    shr rdx, 21
-    mov ebx, edx
-    jmp .slot_ok_entry
-.slot_from_global:
-    xor ebx, ebx
-    jmp .slot_ok_entry
-.slot_ok_entry:
-    mov r10d, ebx
+%ifndef SC_SLOT_FROM_RIP_DEFINED
+%define SC_SLOT_FROM_RIP_DEFINED
+; SC_SLOT_FROM_RIP <reg64>
+;   reg <- the app slot index derived from the user return RIP in rcx (0 when
+;   rcx is outside every app arena). Pure register arithmetic - touches no
+;   memory but the two arena-bound globals - so it is safe to use while still
+;   on the user stack, before any trusted kernel stack exists. Clobbers only
+;   the named register and EFLAGS.
+%macro SC_SLOT_FROM_RIP 1
+    mov %1, rcx
+    sub %1, [rel l3_app_arena_base_v]
+    jc %%sc_slot_zero
+    cmp %1, [rel l3_app_arena_size_v]
+    jae %%sc_slot_zero
+    shr %1, 21
+    jmp %%sc_slot_done
+%%sc_slot_zero:
+    xor %1, %1
+%%sc_slot_done:
+%endmacro
+%endif
+    ; ------------------------------------------------------------------------
+    ; SYSCALL lands at CPL0 with rsp STILL pointing at the user-controlled
+    ; stack. The previous prologue preserved registers with `push` right here -
+    ; but a hostile app picks rsp, so every such push was a kernel-mode store
+    ; to an attacker-selected address (CWE-787 write-what-where / CWE-123). We
+    ; now record the user context into this slot's L3 runtime record and switch
+    ; to the trusted per-slot kernel syscall stack BEFORE the first push, so no
+    ; CPL0 write ever lands on user-chosen memory. Do not use rbp as bootstrap
+    ; scratch: generated GritHL code uses rbp as its frame pointer across syscall
+    ; wrappers, and clobbering it makes the post-syscall function epilogue return
+    ; through spilled argument values.
+    ; ------------------------------------------------------------------------
+    KPTI_SWITCH_TO_KERNEL_CR3 rbx        ; reach kernel CR3 before any kernel read
+    SC_SLOT_FROM_RIP rbx                 ; rbx = slot id from user RIP (rcx)
+    mov r15d, ebx                        ; r15 = slot id (live through dispatch)
     imul rbx, L3_RT_SIZE
-    lea rdx, [rel l3_runtime]
-    add rbx, rdx
-    mov [rbx + L3_RT_SLOT], r10d
+    lea rbx, [rel l3_runtime + rbx]      ; rbx = &l3_runtime[slot]
+    mov [rbx + L3_RT_USER_RSP], rsp
+    mov [rbx + L3_RT_SLOT], r15d
     mov [rbx + L3_RT_USER_RIP], rcx
     mov [rbx + L3_RT_USER_RFLAGS], r11
-    mov rdx, rsp
-    add rdx, 24
-    mov [rbx + L3_RT_USER_RSP], rdx
     mov [rbx + L3_RT_SYSCALL_NUM], rax
     mov [rbx + L3_RT_ARG0], rdi
     mov [rbx + L3_RT_ARG1], rsi
-    ; [rsp+8] and [rsp] read back the rdx/r10 we pushed onto the USER stack
-    ; above; with SMAP enforced (FMASK clears EFLAGS.AC on SYSCALL entry) these
-    ; supervisor reads of a PTE.U page #PF (e=0001) unless bracketed by stac.
-    ; They sat in the unbracketed gap between the push/pop USER_ACCESS regions,
-    ; so the very first ring-3 syscall faulted -> the app-open "empty window then
-    ; freeze". Bracket the user-stack reads (kernel-mem stores below are fine
-    ; under stac too).
-    USER_ACCESS_BEGIN
-    mov rdx, [rsp + 8]
     mov [rbx + L3_RT_USER_RDX], rdx
     mov [rbx + L3_RT_USER_R8], r8
     mov [rbx + L3_RT_USER_R9], r9
-    mov rdx, [rsp]
-    mov [rbx + L3_RT_USER_R10], rdx
-    pop r10
-    pop rdx
-    pop rbx
-    USER_ACCESS_END
-    ; Kernel-entry FS/GS sanitization (security_todo.md §3). Load kernel data
+    mov [rbx + L3_RT_USER_R10], r10
+    mov rsp, r15
+    inc rsp                              ; rsp = slot + 1
+    imul rsp, rsp, L3_SYSCALL_STACK_STRIDE
+    mov rbx, L3_SYSCALL_STACK_ADDR       ; 64-bit base (slot re-derived below)
+    add rsp, rbx                         ; top = base + (slot+1)*STRIDE
+    and rsp, -16                         ; 16-byte ABI alignment; now on kernel stack
+
+    ; Kernel-entry FS/GS sanitization (security_todo.md sec 3). Load kernel data
     ; selectors into ds/es/fs/gs so no user-controlled selector is in force
     ; while in ring 0; under -dENABLE_FSGS_MSR_SCRUB also zeroes the FS/GS base
-    ; MSRs (no-op in the flat model, deterministic if FSGSBASE is ever enabled).
-    ; Clobbers ax only - rcx (user RIP) and the rest of the live state survive.
+    ; MSRs. Clobbers ax (and rcx/rdx under the MSR scrub), so the full user
+    ; context is reloaded from l3_runtime below before PUSH_ALL.
     SANITIZE_SEG_KERNEL_ENTRY
 
-    ; Switch to syscall stack without calling out while we're still on the
-    ; user stack. A normal CALL would push a return address to user memory.
-    mov rax, rcx
-    sub rax, [rel l3_app_arena_base_v]
-    jc .slot_zero_stack
-    cmp rax, [rel l3_app_arena_size_v]
-    jae .slot_zero_stack
-    shr rax, 21
-    jmp .slot_ok_stack
-.slot_zero_stack:
-    xor eax, eax
-.slot_ok_stack:
-    mov r8d, eax
-    imul rax, L3_SYSCALL_STACK_STRIDE
-    mov rdx, L3_SYSCALL_STACK_ADDR
-    add rax, rdx
-    add rax, L3_SYSCALL_STACK_STRIDE        ; top of slot i = base + (i+1)*STRIDE
-    and rax, -16
-    
-    mov rsp, rax             ; Now on Kernel Syscall Stack
-    ; Stack canary: push a 16-byte canary frame (canary + 8-byte alignment
-    ; pad) before the slot id so the slot stays at [rsp] for all existing
-    ; readers, while keeping PUSH_ALL's frame 16-byte aligned for callee ABI.
-    ; The canary is checked at every syscall exit path before SYSRET / app
-    ; return; a mismatch traps to kernel_panic_canary.
+    ; Syscall footer: [rsp+16]=alignment pad, [rsp+8]=stack canary, [rsp]=slot.
+    ; The canary is checked at every syscall exit before SYSRET / app return; a
+    ; mismatch traps to kernel_panic_canary. The slot id stays at [rsp] for all
+    ; existing readers, while the pad keeps PUSH_ALL's frame 16-byte aligned.
     sub rsp, 8                                  ; alignment pad
     push qword [rel kernel_canary]              ; canary at [rsp + 8] (after slot push)
-    push r8                                     ; Slot for validation and return.
-    
-    ; Push usermode context manually so PUSH_ALL has it
+    push r15                                    ; Slot for validation and return.
+
+    ; Reload the user context PUSH_ALL captures (SANITIZE_SEG and the optional
+    ; MSR scrub may have clobbered ax/rcx/rdx). rbx is reload scratch.
     push rbx
     mov ebx, [rsp + 8]
     imul rbx, L3_RT_SIZE
@@ -116,7 +94,7 @@
     mov r10, [rbx + L3_RT_USER_R10]
     pop rbx
     mov r15d, [rsp]
-    
+
     cld
     PUSH_ALL
 
@@ -149,6 +127,117 @@
     ; the arg-register reloads at the dispatch tail, which are far too late.
     mov rax, [rsp + ALL_RAX]
     DBG_EVT EVT_SYSCALL_ENTER, r15, rax, rcx, 0, 0, 0, 0
+
+%ifdef ENABLE_DEBUG_SERIAL
+    ; No-progress / spin watchdog (FE/FH spam class). A slot wedged in a tight
+    ; syscall loop that makes no progress - issuing the SAME syscall with the
+    ; SAME (arg0,arg1) over and over (e.g. SYS_FS_ENTRY(0) always returning
+    ; handle 0) - would otherwise just spin quietly, visible only as serial spam.
+    ; Here we compare this call's (number,arg0,arg1) signature against the slot's
+    ; last-issued one: identical -> bump a per-slot repeat counter; different ->
+    ; reset it and store the new signature. When the counter crosses
+    ; SC_PROGRESS_LIMIT we emit ONE structured diagnostic (slot, syscall number,
+    ; args, faulting user RIP, repeat count) via the DBG_EVT ring and serial, then
+    ; re-arm (counter back to 0) so a still-wedged loop logs again every N calls
+    ; rather than flooding. Fail-soft: log only by default; -dENABLE_PROGRESS_WD_BREAK
+    ; additionally breaks the loop by forcing this call to return -1. Generic over
+    ; all slots, no per-app instrumentation. Whole block is absent in release.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    push r9
+    mov rax, [rsp + 48 + ALL_RAX]       ; syscall number
+    mov rcx, [rsp + 48 + ALL_RDI]       ; arg0
+    mov rdx, [rsp + 48 + ALL_RSI]       ; arg1
+    movzx ebx, r15b                     ; slot id (table index)
+    lea r8, [rel sc_wd_last_num]
+    cmp [r8 + rbx*8], rax
+    jne .pwd_reset
+    lea r8, [rel sc_wd_last_a0]
+    cmp [r8 + rbx*8], rcx
+    jne .pwd_reset
+    lea r8, [rel sc_wd_last_a1]
+    cmp [r8 + rbx*8], rdx
+    jne .pwd_reset
+    ; Same signature as last time for this slot -> bump the repeat counter.
+    lea r8, [rel sc_wd_repeat]
+    mov r9d, [r8 + rbx*4]
+    inc r9d
+    mov [r8 + rbx*4], r9d
+    cmp r9d, SC_PROGRESS_LIMIT
+    jb .pwd_done
+    ; Threshold reached: this slot has made no progress for SC_PROGRESS_LIMIT
+    ; identical calls. Emit a structured diagnostic, then re-arm.
+    mov dword [r8 + rbx*4], 0
+    mov r8, [rsp + 48 + ALL_RCX]        ; faulting user RIP
+    DBG_EVT_IMPORTANT EVT_NOPROGRESS, r15, rax, rcx, rdx, r8, r9, 0
+    ; Serial line: "NOPRG s<slot> n<num> a<arg0>/<arg1> r<rip> x<count>".
+    push rdi                            ; ser_print_hex64 takes rdi, clobbers caller-saved
+    SER 'N'
+    SER 'O'
+    SER 'P'
+    SER 'R'
+    SER 'G'
+    SER ' '
+    SER 's'
+    movzx edi, r15b
+    call ser_print_hex64
+    SER ' '
+    SER 'n'
+    mov rdi, [rsp + 56 + ALL_RAX]       ; +8 for the pushed rdi
+    call ser_print_hex64
+    SER ' '
+    SER 'a'
+    mov rdi, [rsp + 56 + ALL_RDI]
+    call ser_print_hex64
+    SER '/'
+    mov rdi, [rsp + 56 + ALL_RSI]
+    call ser_print_hex64
+    SER ' '
+    SER 'r'
+    mov rdi, [rsp + 56 + ALL_RCX]
+    call ser_print_hex64
+    SER ' '
+    SER 'x'
+    mov edi, SC_PROGRESS_LIMIT
+    call ser_print_hex64
+    SER 13
+    SER 10
+    pop rdi
+%ifdef ENABLE_PROGRESS_WD_BREAK
+    ; Optional loop-break: force the wedged call to return -1 so the app's loop
+    ; observes a changed result and can fall out of it. Unwind our scratch frame
+    ; first, then set the saved return value and take the normal exit.
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    mov qword [rsp + ALL_RAX], -1
+    jmp .done
+%endif
+    jmp .pwd_done
+.pwd_reset:
+    ; Different signature -> progress was made; store the new one and reset count.
+    lea r8, [rel sc_wd_last_num]
+    mov [r8 + rbx*8], rax
+    lea r8, [rel sc_wd_last_a0]
+    mov [r8 + rbx*8], rcx
+    lea r8, [rel sc_wd_last_a1]
+    mov [r8 + rbx*8], rdx
+    lea r8, [rel sc_wd_repeat]
+    mov dword [r8 + rbx*4], 0
+.pwd_done:
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+%endif
 
 %ifdef ENABLE_TRACE
     mov rdi, [rsp + ALL_RAX]
@@ -337,8 +426,12 @@
     add r12, rbx
     ; Capability gate: reject before argument validation so a sandboxed app
     ; can't even probe pointer behaviour of a forbidden syscall. R15 is the
-    ; current slot id; slot_cap_mask[] defaults to CAP_ALL for every slot
-    ; until the app declares its manifest.
+    ; current slot id. slot_cap_mask[] is DEFAULT-DENY: every slot boots at
+    ; CAP_CORE (syscall_data.ghl), and the loader narrows it to the app's
+    ; manifest (or the CAP_CORE floor for an unknown app_id) BEFORE the app runs
+    ; its first instruction - see kernel_apply_app_manifest / APPLY_MANIFEST.
+    ; A slot never runs at CAP_ALL; manifest enforcement does not depend on the
+    ; app voluntarily calling SYS_APP_DECLARE_MANIFEST.
     movzx eax, word [r12 + SYSCALL_CAP_OFF]   ; 16-bit required cap tag
     test ax, ax
     jz .sc_cap_reject               ; untagged entry = misconfiguration; deny
@@ -354,27 +447,22 @@
     or edx, r8d                     ; dx = 16-bit mask (dh = high byte)
     ; Time-of-check authentication of the cap mask. slot_cap_mask[*] are plain
     ; kernel data; any kernel-write bug that flips a bit there would silently
-    ; widen this slot's capabilities. Before trusting dx we recompute the
-    ; per-slot HMAC (low8(kernel_canary ^ slot ^ fold(mask) ^ KDOM_CAP_MASK))
-    ; - folding high^low so a high-byte (CAP_FS_*) flip is caught - and compare
-    ; it against the authenticator stamped alongside the mask. A mismatch means
-    ; the mask was tampered with after the last legitimate write, so we panic on
-    ; the same CANARY path as CPI corruption rather than dispatch on a forged
-    ; mask. Done before the cap AND so a widened mask is never even consulted.
-    ; Clobbers r8/r9/rax (rcx/rdx=mask live).
-    movzx r8d, r15b                 ; slot id (HMAC in0)
-    movzx eax, dl                   ; mask low byte
-    mov r9d, edx
-    shr r9d, 8
-    and r9d, 0xFF                   ; mask high byte (avoid dh: no REX high-byte)
-    xor eax, r9d                    ; folded mask byte (HMAC in1) - matches cap_mask_sign
-    KHMAC_TAG r9, r9d, r9b, r8, rax, KDOM_CAP_MASK
-    lea r8, [rel slot_cap_hmac]
-    movzx eax, r15b                 ; reload slot into a scratch index reg
-    add r8, rax
-    movzx eax, byte [r8]            ; stored authenticator for this slot
-    cmp r9b, al
-    jne .sc_cap_tamper
+    ; widen this slot's capabilities. Before trusting dx we call cap_mask_verify,
+    ; which recomputes this slot's 128-bit MAC over (slot, full 16-bit mask)
+    ; keyed by kernel_canary and compares ALL 16 stored bytes (was an 8-bit tag -
+    ; only 256 values - which a repeatable corrupt-and-retry primitive could
+    ; forge). We pass dx, the exact mask we are about to AND, so the value that
+    ; is authenticated is the value that is consulted. A mismatch means the mask
+    ; was tampered after its last legitimate write, so we kill only this slot on
+    ; the CANARY path rather than dispatch on a forged mask. Done before the cap
+    ; AND so a widened mask is never even consulted. cap_mask_verify preserves
+    ; rcx/rdx (mask) and r12/r15; result in rax. rdi/rsi are free scratch here
+    ; (the handler's arg regs are reloaded from the PUSH_ALL frame further down).
+    movzx edi, r15b                 ; slot
+    mov esi, edx                    ; full 16-bit mask (dl | dh<<8)
+    call cap_mask_verify
+    test eax, eax
+    jz .sc_cap_tamper
     movzx eax, word [r12 + SYSCALL_CAP_OFF]   ; restore required cap word
     and dx, ax
     cmp dx, ax                      ; every required bit present in the mask?

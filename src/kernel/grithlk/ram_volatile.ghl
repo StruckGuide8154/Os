@@ -75,7 +75,7 @@ extern l3_slot_code_slide;   # qword[MAX_WINDOWS] per-slot code ASLR slide
 extern l3_slot_ustack_off;   # qword[MAX_WINDOWS] per-slot user-stack ASLR off
 extern l3_code_hash;         # qword[MAX_WINDOWS] code-range baseline hash
 extern l3_code_hash_valid;   # byte[MAX_WINDOWS] baseline-live flags
-extern slot_cap_hmac;        # byte[MAX_WINDOWS] cap-mask authenticator
+extern slot_cap_hmac;        # byte[MAX_WINDOWS*16] 128-bit cap-mask authenticator
 extern net_tcp_rng_key;      # qword TCP ISN key (RDTSC^RDRAND, per boot)
 extern net_tcp_rng_state;    # qword TCP ISN running state
 extern l3_slot_live;         # qword[MAX_WINDOWS] != 0 => slot arena is mapped present
@@ -309,7 +309,7 @@ fn nx_volatile_scrub_secrets() {
     nx_zero(&l3_slot_ustack_off, MAX_WINDOWS * 8);
     nx_zero(&l3_code_hash, MAX_WINDOWS * 8);
     nx_zero(&l3_code_hash_valid, MAX_WINDOWS);
-    nx_zero(&slot_cap_hmac, MAX_WINDOWS);
+    nx_zero(&slot_cap_hmac, MAX_WINDOWS * 16);   # 128-bit MAC/slot (CAP_HMAC_BYTES)
     sq(&net_tcp_rng_key, 0);
     sq(&net_tcp_rng_state, 0);
 }
