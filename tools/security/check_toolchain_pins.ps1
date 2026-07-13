@@ -162,14 +162,22 @@ foreach ($line in $rawLines) {
             if ($Update) {
                 $rewritten.Add("tool-version | nasm | version | $liveVer | $note")
             } else {
-                # The pinned token must be a prefix of (or equal to) the live
-                # first line, so "NASM version 2.16.03" matches the full
-                # "NASM version 2.16.03 compiled on ..." banner.
-                if (-not $liveVer.StartsWith($value)) {
+                # A semicolon-separated value is an explicit allow-list of
+                # complete/prefix banners. This keeps local production NASM and
+                # the GitHub-hosted runner build pinned without a wildcard.
+                $acceptedVersions = @($value.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                $versionAccepted = $false
+                foreach ($acceptedVersion in $acceptedVersions) {
+                    if ($liveVer.StartsWith($acceptedVersion)) {
+                        $versionAccepted = $true
+                        break
+                    }
+                }
+                if (-not $versionAccepted) {
                     $findings.Add([pscustomobject]@{
                         Rule = 'toolchain-pin-drift'
                         Location = "tools/security/toolchain_pins.txt:$lineNo"
-                        Text = "nasm version drift: pinned '$value', live '$liveVer'."
+                        Text = "nasm version drift: accepted '$value', live '$liveVer'."
                     })
                 }
                 $rewritten.Add($line)

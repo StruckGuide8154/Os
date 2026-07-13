@@ -40,6 +40,7 @@ src/boot/mbr.asm | boot | high | legacy | TBD
 src/boot/paging.asm | boot | high | legacy | TBD
 src/boot/stage2.asm | boot | high | legacy | TBD
 src/boot/uefi_loader.asm | boot | high | legacy | TBD
+src/boot/uefi_loader_boottrace.inc | boot | high | legacy | bounded debug framebuffer tracer
 src/boot/uefi_loader_data.inc | boot | high | legacy | TBD
 src/boot/uefi_loader_defs.inc | boot | high | legacy | TBD
 src/boot/uefi_loader_entry.inc | boot | high | legacy | TBD
@@ -255,6 +256,7 @@ src/user/poc/stack_overflow_poc.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_jit_alias_fuzz.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_jit_alias_pos.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_poc_exec_w.asm | user-poc | low | legacy | TBD
+src/user/poc/wx_poc_manifestless_blob.asm | user-poc | low | legacy | GHL security-regression harness
 src/user/poc/wx_poc_pos.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_poc_write_x.asm | user-poc | low | legacy | TBD
 src/user/templates/hello_callback.asm | user-templates | low | legacy | TBD

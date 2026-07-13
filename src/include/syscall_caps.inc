@@ -67,7 +67,13 @@ CAP_FS          equ (CAP_FS_READ | CAP_FS_WRITE | CAP_FS_DELETE)
 CAP_GUI_DRAW    equ 0x0800  ; gui_rect/text, wm, draw/blend/xml, media_blit
 CAP_GUI_DISPLAY equ 0x1000  ; display mode/flags, desktop background, cursor
 CAP_GUI         equ (CAP_GUI_DRAW | CAP_GUI_DISPLAY)
-; high-byte bits 0x2000.. reserved.
+CAP_DRIVER      equ 0x2000  ; signed driver slots only: driver-host data plane
+; high-byte bits 0x4000.. reserved.
+
+; Applied by the future verified external-driver loader after ART_DRIVER
+; admission and before the first instruction. No ordinary app manifest below
+; includes CAP_DRIVER, so built-in apps fail closed on driver-host syscalls.
+MANIFEST_DRIVER_BASE equ CAP_CORE | CAP_DRIVER
 
 CAP_ALL         equ 0xFFFF
 

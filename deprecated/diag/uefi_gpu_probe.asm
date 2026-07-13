@@ -1,5 +1,5 @@
 ; ============================================================================
-; Grit Diagnostic - UEFI GPU Probe (BOOTX64.EFI)
+; Deprecated Grit Diagnostic - UEFI GPU Probe (BOOTX64.EFI)
 ; ----------------------------------------------------------------------------
 ; First real-silicon checkpoint for the general AMD GPU driver work
 ; (docs/gpu-driver/TODO.md). Runs standalone in UEFI Boot Services (no FAT16,

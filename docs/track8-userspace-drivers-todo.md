@@ -47,8 +47,12 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       as a `user` app). Tests: `tests/ghl_kernel/driver_target_{ok,no_io,no_mmio}.ghl`
       in `scripts/test/test_gritc_security.ps1`. Mirrors the
       `user_privileged_forbidden.ghl` gate for `--target user`.
-- [ ] Wire the broker entry points into the syscall dispatcher (a `SC_DRVHOST_*`
-      family, default-deny in the slot allow bitmap; only driver slots get them).
+- [~] Wire the broker entry points into the syscall dispatcher. **Foundation
+      landed 2026-07-13:** fixed sparse rows `232..249`, `CAP_DRIVER`,
+      caller-slot-derived identity, kernel-owned policy rows, linked broker,
+      bounded/SMAP-bracketed ring submission, and fail-closed control-plane
+      rows. Remaining: verified driver-slot creation, concrete device grants,
+      DMA mapping, IRQ events, and device-manager provisioning.
 - [ ] MMIO/DMA capability gates in `gritc` (the open `[ ]` items under "P0: GHL
       Compiler Security": "capability gates for MMIO operations" / "for DMA
       mapping" / "for device reset and firmware load") - these ARE the G1
@@ -65,8 +69,8 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       NEVER raw `inb/outb`. Compiles broker-only under `--target driver` (no
       `unsafe`, no privileged intrinsic - G1 holds); asserted in
       `test_ghl_security_guards.ps1` + `test_gritc_security.ps1`.
-- [ ] Wire `SC_DRVHOST_*` into the dispatcher (shared Rung-1 item) - until then
-      the .asm stays live and is NOT deleted (same gate as the HDA driver).
+- [ ] Complete the shared Rung-1 runtime path (driver slot + concrete PIO grant);
+      until then the .asm stays live and is NOT deleted (same gate as HDA).
 - [ ] Delete `battery.asm` (and `acpi_ec.asm` if subsumed) + its
       `driver_inventory.txt` line (the shrink) - GATED on the dispatcher wiring.
 - [ ] QEMU phase: battery status still reads correctly, sourced from ring 3.
@@ -149,8 +153,8 @@ Self-rating now: **security 7 / speed 6**. The keystone: G1/G2 gates + the HDA
 class driver landed and a new in-kernel driver is impossible, but most drivers still
 run in-kernel until the migration ladder finishes.
 
-- [ ] **(sec→10)** Wire `SC_DRVHOST_*` into the dispatcher (default-deny in the slot
-      allow bitmap) — the shared blocker for every migration.
+- [~] **(sec→10)** Driver syscall foundation is linked and default-deny; finish
+      verified driver slots, device-manager grants, DMA mapping, and IRQ events.
 - [ ] **(sec→10)** Finish the ladder: battery/acpi_ec → rtl8156 → i2c_hid/xhci/
       usb_hid/display to ring-3; delete each `.asm` + its inventory line.
 - [ ] **(sec→10)** Rung 4: fault-budget quarantine-and-restart + the per-stage
