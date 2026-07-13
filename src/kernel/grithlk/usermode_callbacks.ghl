@@ -85,6 +85,8 @@ const WIN_OFF_APPDATA    = 136;
 const APP_SLOT_SIZE      = 0x200000;
 const L3_SHADOW_WIN_OFF  = 0x1FFE00;     # APP_SLOT_SIZE - 512
 const L3_SLOT_MAGIC      = 0x30544F4C5358414E;
+const L3_SLOT_USER_STACK_TOP = 0x1FFDF0; # L3_SHADOW_WIN_OFF - 16
+const L3_SLOT_USTACK_TOP_LOW = 0x1FF000; # guard + one page + 16 KiB stack
 
 # WINDOW_STRUCT_SIZE / 8 - qword count for the shadow-window block copy.
 const WIN_STRUCT_QWORDS  = 32;
@@ -94,6 +96,7 @@ const WIN_STRUCT_QWORDS  = 32;
 # lockstep with the GDT definition.
 const GDT64_USER_DATA = extern;
 const GDT64_USER_CODE = extern;
+const GDT64_KERNEL_DATA = 0x10;
 
 # SYS_APP_DONE real table row (src/kernel/proc/syscall_support.inc - sc_app_done
 # is row 10) and SYS_PRINT row 0. Emitted RAW (no per-slot fixup) because these
@@ -108,6 +111,8 @@ const SYS_PRINT    = 0;
 extern l3_slot_live;          # qword[MAX_WINDOWS] - L3_SLOT_MAGIC when populated
 extern l3_app_arena_base_v;   # qword - arena base VA
 extern l3_slot_in_flight;     # qword[MAX_WINDOWS] - 1 while slot's ring-3 cb runs
+extern l3_wx_code_start;      # qword[MAX_WINDOWS] - executable window start off
+extern l3_wx_code_end;        # qword[MAX_WINDOWS] - executable window end off
 
 # ---------------------------------------------------------------------------
 # RFLAGS.IF/TF mask. The iretq frame's RFLAGS is the kernel RFLAGS with bits
@@ -187,19 +192,17 @@ fn l3_prepare_callback(rdi target, rsi arg0, rdx arg1, rcx arg2) {
     # offender is demoted/killed by the priority manager.
     let entry = l3_translate_target(target, app_base);
     # FAIL-CLOSED (extended): redirect to the app-done trampoline unless `entry`
-    # landed inside THIS slot's ring-3 arena window [app_base, app_base+APP_SLOT_SIZE).
-    # The sentinel-0 check alone is insufficient: l3_translate_target's
-    # `.translate_original` path returns a target that is neither a blob VA nor an
-    # in-arena VA UNCHANGED (e.g. a stale/garbage kernel VA from a corrupted handler
-    # slot). iretq'ing ring 3 into that supervisor (US=0) page faults on instruction
-    # fetch (CR2==RIP) and can park/freeze the whole OS - the observed app-open freeze
-    # (XINV #15 then a ring-3 #PF at a sub-arena kernel VA). Validating the final
-    # entry against the slot window closes the hole for every translate outcome.
+    # landed inside THIS slot's declared executable W^X window. The old "inside
+    # slot" check was not tight enough once the blob has a writable .appdata tail:
+    # a stale/corrupt handler that resolves to data, stack, or shadow-window bytes
+    # must never be accepted as an iret target just because the address is in-slot.
     let in_slot = 0;
     if entry != 0 {
         let eoff = entry - app_base;
         if eoff >= 0 {
-            if eoff < APP_SLOT_SIZE { in_slot = 1; }
+            if eoff >= lq(&l3_wx_code_start + slot * 8) {
+                if eoff < lq(&l3_wx_code_end + slot * 8) { in_slot = 1; }
+            }
         }
     }
     if in_slot == 0 {
@@ -253,6 +256,17 @@ fn l3_prepare_callback(rdi target, rsi arg0, rdx arg1, rcx arg2) {
 
     # --- install the IRET return trampoline onto the slot's user stack ---
     let ustk = l3_user_stack_top(slot) - 8;
+    # Defense in depth for stack-ASLR state corruption: the iretq RSP must stay
+    # in this slot's legal user-stack band, below the shadow window and above the
+    # fixed guard page. If the stored offset is stale/corrupt, use the fixed high
+    # stack top for this slot rather than entering ring 3 with a cross-slot RSP.
+    let uoff = ustk - app_base;
+    if uoff < L3_SLOT_USTACK_TOP_LOW - 8 {
+        ustk = app_base + L3_SLOT_USER_STACK_TOP - 8;
+    }
+    if uoff > L3_SLOT_USER_STACK_TOP - 8 {
+        ustk = app_base + L3_SLOT_USER_STACK_TOP - 8;
+    }
     let tramp = l3_install_app_done_trampoline(slot);
     smap_open();
     sq(ustk, tramp);              # trampoline addr the handler `ret`s to (PTE.U=1)
@@ -399,6 +413,9 @@ fn call_app_l3_packed(blk) {
 # naked: it owns the stack swap; there is no compiler frame here.
 # ===========================================================================
 fn call_app_l3_return() naked {
+    load_ds(GDT64_KERNEL_DATA);
+    load_es(GDT64_KERNEL_DATA);
+
     # slot id is the dword at [rsp] (left by POP_ALL). pop_val() pops it into the
     # accumulator; stash to cb_slot (naked has no `let`). The original only READ
     # [rsp] then overwrote rsp from KERNEL_RSP, discarding the whole post-POP_ALL

@@ -1,0 +1,39 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Radii & elevation" subtitle="Corner radii and the layered shadow ramp" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 20px 22px; display:flex; gap:36px; }
+  .grp { display: flex; gap: 14px; align-items: center; }
+  .box { width: 56px; height: 56px; background: var(--surface-panel); border: 1px solid var(--border-control); display:flex; align-items:flex-end; justify-content:center; padding-bottom:5px; }
+  .lab { font: var(--fw-medium) 9px/1 var(--font-mono); color: var(--text-muted); }
+  .sbox { width: 56px; height: 56px; background: var(--surface-panel); border-radius: var(--r-lg); }
+  .col { display:flex; flex-direction:column; gap:18px; }
+  .cap { font: var(--fw-semibold) var(--fs-micro)/1 var(--font-ui); letter-spacing:var(--ls-label); text-transform:uppercase; color: var(--text-faint); margin-bottom:12px; }
+</style>
+</head>
+<body>
+<div>
+  <div class="cap">Radius</div>
+  <div class="grp">
+    <div class="box" style="border-radius:var(--r-xs);"><span class="lab">5</span></div>
+    <div class="box" style="border-radius:var(--r-sm);"><span class="lab">7</span></div>
+    <div class="box" style="border-radius:var(--r-lg);"><span class="lab">13</span></div>
+    <div class="box" style="border-radius:var(--r-xl);"><span class="lab">16</span></div>
+    <div class="box" style="border-radius:var(--r-2xl);"><span class="lab">22</span></div>
+  </div>
+</div>
+<div>
+  <div class="cap">Elevation</div>
+  <div class="grp">
+    <div class="sbox" style="box-shadow:var(--shadow-sm);"></div>
+    <div class="sbox" style="box-shadow:var(--shadow-md);"></div>
+    <div class="sbox" style="box-shadow:var(--shadow-lg);"></div>
+    <div class="sbox" style="box-shadow:var(--glow-accent);"></div>
+  </div>
+</div>
+</body>
+</html>

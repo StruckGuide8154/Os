@@ -93,6 +93,7 @@ const PROC_TERMINATED = 4;
 const WIN_OFF_ID        = 0;
 const L3IF_APPDATA_OFF  = 136;   # WIN_OFF_APPDATA (src/include/window_layout.inc)
 const L3_RT_KERNEL_RSP  = 32;    # src/include/l3_runtime.inc
+const GDT64_KERNEL_DATA = 0x10;
 
 # Secure work-queue job IDs (must match wq_job_table in workqueue.ghl).
 const WQ_JOB_MEDIA   = 2;     # media blit (the only AP offload left in this module)
@@ -413,6 +414,9 @@ fn process_get_affinity(pid) {
 # naked: it owns the stack-arg ABI; the slot lives in lrg_slot, not a `let`.
 # ===========================================================================
 fn l3_return_guard() naked {
+    load_ds(GDT64_KERNEL_DATA);
+    load_es(GDT64_KERNEL_DATA);
+
     # Pop the slot id off [rsp] into lrg_slot (a naked fn has no `let`); clamp
     # out-of-range to 0 (matches the asm `cmp/jb/xor`; value is a zero-extended
     # dword). On the normal path it is re-pushed so call_app_l3_return - which

@@ -24,7 +24,8 @@ dbg_event_emit6:
     mov r10, rax
     and r10, DBG_EVT_MASK
     imul r10, DBG_EVT_RECORD_SIZE
-    lea r10, [rel dbg_evt_ring + r10]
+    lea r11, [rel dbg_evt_ring]
+    add r10, r11
     mov [r10 + DBG_EVT_SEQ], rbx
     rdtsc
     shl rdx, 32
@@ -100,7 +101,7 @@ dbg_event_dump_serial:
     mov r10, r8
     and r10, DBG_EVT_MASK
     imul r10, DBG_EVT_RECORD_SIZE
-    lea r10, [rel dbg_evt_ring + r10]
+    lea r10, [abs dbg_evt_ring + r10]
     cmp qword [r10 + DBG_EVT_ID], 0
     je .next
 

@@ -10,6 +10,29 @@ bits 64
 extern pci_read_conf_dword
 extern pci_write_conf_dword
 
+; ---------------------------------------------------------------------------
+; xHCI extended-capability walk bound (GSEC hardening 2026-07-01).
+; The xHCI xECP field and each capability's "next" pointer are DEVICE-supplied.
+; They are walked as byte offsets from the controller BAR; nothing in the raw
+; spec bounds them to the decoded register window, so a malicious/malfunctioning
+; controller can drive [bar + off] far past its BAR -> OOB MMIO reads and, since
+; the walk keeps chasing "next", an effectively non-terminating boot-time loop
+; (until an unmapped page #PF hangs/panics ring 0).
+;
+; USB_XHCI_BAR_WINDOW mirrors MMIO_XHCI_WINDOW (src/include/mmio_bounds.inc): a
+; conservative 64 KiB upper bound on the reachable cap/op/runtime/doorbell set.
+; The walk base register here is (BAR + CapLength), CapLength <= 0xFF, and each
+; read is a 4-byte dword, so bound the running offset to keep every access strictly
+; inside the BAR: off <= WINDOW - 4 - 0xFF. Any device offset beyond that is treated
+; as end-of-list (fail-closed). Because a non-zero "next" advances the offset by
+; >= 4 each step while this cap holds it below the window, the loop provably
+; terminates in <= WINDOW/4 iterations.
+USB_XHCI_BAR_WINDOW equ 0x10000
+USB_XHCI_WALK_MAX   equ USB_XHCI_BAR_WINDOW - 4 - 0xFF
+%if USB_XHCI_WALK_MAX <= 0
+  %error "usb.asm: BAR window too small to bound the xHCI cap walk"
+%endif
+
 section .text
 global usb_init
 
@@ -145,7 +168,9 @@ usb_init:
     call pci_read_conf_dword
     and eax, 0xFFFFFFF0  ; Base Address
     mov rdi, rax         ; MMIO Base
-    
+    test rdi, rdi        ; unprogrammed/empty BAR reads back 0 after masking -
+    jz .next_func_pop    ; never dereference a null MMIO base (fail-closed)
+
     ; Read HCCPARAMS (Offset 0x08 in MMIO)
     mov ebx, [rdi + 0x08]
     shr ebx, 8           ; EECP is at bit 8-15
@@ -195,7 +220,9 @@ usb_init:
     call pci_read_conf_dword
     and eax, 0xFFFFFFF0
     mov rsi, rax         ; MMIO Base
-    
+    test rsi, rsi        ; unprogrammed/empty BAR reads back 0 after masking -
+    jz .next_func_pop    ; never dereference a null MMIO base (fail-closed)
+
     ; Need to map this memory? It's likely identity mapped by UEFI loader or in higher half.
     ; Loader identity maps low memory, but BAR might be high.
     ; If BAR is > 4GB, we need 64-bit address (BAR0|BAR1).
@@ -218,6 +245,9 @@ usb_init:
     ; Find USB Legacy Support Capability (ID = 1)
     ; Loop through extended caps
 .xhci_cap_loop:
+    cmp rcx, USB_XHCI_WALK_MAX ; device xECP/next must stay inside the BAR window;
+    ja .next_func_pop          ; out-of-range -> fail-closed end-of-list (also bounds
+                               ; the loop: rcx strictly increases yet is capped here)
     mov edx, [rsi + rcx]  ; Read Capability Header
     mov eax, edx
     and eax, 0xFF         ; Capability ID

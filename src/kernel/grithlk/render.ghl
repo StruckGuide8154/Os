@@ -48,17 +48,27 @@ global render_get_backbuffer;
 global render_mark_dirty;
 global render_mark_full;
 global render_flush;
+global render_flip_wait;
 global render_flip_job;
 global render_save_backbuffer;
 global render_restore_backbuffer;
 global render_restore_dirty_backbuffer;
 global render_save_dirty_backbuffer;
+# Grit Design System chrome primitives (Stage 2): anti-aliased rounded fills +
+# soft drop shadows. These replace the old hard-rectangle VGA bevels so window
+# corners are smooth (no jagged stair-stepping) and depth reads via a soft
+# layered shadow rather than a 1px bevel.
+global render_round_rect;       # (x,y,w,h,r,color) AA rounded-rect fill
+global render_round_rect_top;   # (x,y,w,h,r,color) AA only on the TOP two corners
+global render_drop_shadow;      # (x,y,w,h,r) soft window shadow (DS --shadow-window)
+global render_hline_blend;      # (x,y,w,argb) alpha-blended 1px line (lit edge)
 
 # Display driver leaves (drivers/display_*.inc).
 extern display_flip_rect;   # (edi x, esi y, edx w, ecx h) blit one rect bb->FB
 extern display_flip;        # () blit the whole active framebuffer bb->FB
 extern fill_rect;           # (edi x, esi y, edx w, ecx h, r8d color)
 extern draw_string;         # (rdi x, rsi y, rdx str, rcx fg, r8 bg)
+extern blend_pixel;         # (edi x, esi y, edx 0xAARRGGBB) source-over onto RTGT
 
 # Shared scanout geometry (core_runtime_state.asm) - all read-only here.
 extern bb_addr;             # dq - backbuffer base
@@ -132,6 +142,172 @@ fn render_line() {
     return 0;
 }
 
+# ===========================================================================
+# Grit Design System chrome primitives (Stage 2)
+# ---------------------------------------------------------------------------
+# Anti-aliased rounded rectangles + soft drop shadows, drawn straight into the
+# active render target (the backbuffer) via the alpha-blend leaf `blend_pixel`.
+# Corner coverage is computed by 4x4 supersampling against the arc (no sqrt on
+# the corner path), so edges are smooth with no stair-stepping. Interior rows
+# are solid `fill_rect` spans, so the cost is ~O(perimeter*r), not O(area).
+# ===========================================================================
+
+fn rr_abs(v) {
+    if v < 0 { return 0 - v; }
+    return v;
+}
+
+# Alpha-blended horizontal hairline (argb = 0xAARRGGBB). Used for the DS inner
+# top "lit edge" highlight that gives chrome a subtly lit upper rim.
+fn render_hline_blend(rdi x, rsi y, rdx w, rcx argb) {
+    let i = 0;
+    while i < w {
+        blend_pixel(x + i, y, argb);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Clamp a corner radius to half the smaller side (never overlap opposite corner).
+fn rr_clamp_radius(r, w, h) {
+    let m = w;
+    if h < m { m = h; }
+    m = m >> 1;
+    if r > m { r = m; }
+    if r < 0 { r = 0; }
+    return r;
+}
+
+# One AA corner block: an r x r square at (ox,oy). cx_org / cy_org pick which
+# side of the block the arc centre sits on (1 = at the block origin edge, 0 =
+# at the far edge), so the same routine serves all four corners. Coverage is
+# the fraction of 16 subsamples (1/8-pixel grid) inside the radius.
+fn rr_corner(ox, oy, r, color, cx_org, cy_org) {
+    let r8 = r << 3;             # radius in 1/8-pixel units
+    let rr = r8 * r8;
+    let j = 0;
+    while j < r {
+        let i = 0;
+        while i < r {
+            let cnt = 0;
+            let sy = 0;
+            while sy < 4 {
+                let py = (j << 3) + (sy << 1) + 1;   # subsample centre (1/8 units)
+                let dy = py;
+                if cy_org == 0 { dy = r8 - py; }
+                let dyy = dy * dy;
+                let sx = 0;
+                while sx < 4 {
+                    let px = (i << 3) + (sx << 1) + 1;
+                    let dx = px;
+                    if cx_org == 0 { dx = r8 - px; }
+                    if dx * dx + dyy <= rr { cnt = cnt + 1; }
+                    sx = sx + 1;
+                }
+                sy = sy + 1;
+            }
+            if cnt > 0 {
+                let cov = (cnt * 255) >> 4;
+                blend_pixel(ox + i, oy + j, color | (cov << 24));
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# Filled rounded rectangle (all four corners). color is 0x00RRGGBB (opaque).
+fn render_round_rect(rdi x, rsi y, rdx w, rcx h, r8 r, r9 color) {
+    r = rr_clamp_radius(r, w, h);
+    if r <= 0 {
+        fill_rect(x, y, w, h, color);
+        return 0;
+    }
+    fill_rect(x, y + r, w, h - (r << 1), color);          # middle band
+    fill_rect(x + r, y, w - (r << 1), r, color);          # top band
+    fill_rect(x + r, y + h - r, w - (r << 1), r, color);  # bottom band
+    rr_corner(x,         y,         r, color, 0, 0);       # top-left
+    rr_corner(x + w - r, y,         r, color, 1, 0);       # top-right
+    rr_corner(x,         y + h - r, r, color, 0, 1);       # bottom-left
+    rr_corner(x + w - r, y + h - r, r, color, 1, 1);       # bottom-right
+    return 0;
+}
+
+# Rounded only on the TOP two corners (square bottom) - for a titlebar that
+# meets a square window body underneath.
+fn render_round_rect_top(rdi x, rsi y, rdx w, rcx h, r8 r, r9 color) {
+    r = rr_clamp_radius(r, w, h);
+    if r <= 0 {
+        fill_rect(x, y, w, h, color);
+        return 0;
+    }
+    fill_rect(x, y + r, w, h - r, color);                 # everything below radius
+    fill_rect(x + r, y, w - (r << 1), r, color);          # top band
+    rr_corner(x,         y, r, color, 0, 0);
+    rr_corner(x + w - r, y, r, color, 1, 0);
+    return 0;
+}
+
+# Soft window drop shadow (DS --shadow-window): a rounded-rect signed-distance
+# field with an octagonal length approximation, offset down, with a linear
+# alpha falloff over the blur radius. Black, alpha-blended. Pixels the opaque
+# window will cover are skipped (the window overwrites them), so only the soft
+# fringe + the bottom band that sticks out are actually blended.
+fn render_drop_shadow(rdi x, rsi y, rdx w, rcx h, r8 r) {
+    let dyo  = 18;               # shadow vertical offset
+    let blur = 28;               # falloff width
+    let a0   = 158;              # ~0.62 * 255 base opacity
+    r = rr_clamp_radius(r, w, h);
+    let sx = x;
+    let sy = y + dyo;
+    let cx = sx + (w >> 1);
+    let cy = sy + (h >> 1);
+    let ehw = (w >> 1) - r;
+    if ehw < 0 { ehw = 0; }
+    let ehh = (h >> 1) - r;
+    if ehh < 0 { ehh = 0; }
+    let x0 = x - blur;
+    let x1 = x + w + blur;
+    let y0 = y - blur;
+    let y1 = y + h + dyo + blur;
+    let py = y0;
+    while py < y1 {
+        let qy = rr_abs(py - cy) - ehh;
+        if qy < 0 { qy = 0; }
+        let px = x0;
+        while px < x1 {
+            let inwin = 0;
+            if px >= x {
+                if px < x + w {
+                    if py >= y {
+                        if py < y + h { inwin = 1; }
+                    }
+                }
+            }
+            if inwin == 1 {
+                px = x + w;                  # skip the covered span (no ++)
+            } else {
+                let qx = rr_abs(px - cx) - ehw;
+                if qx < 0 { qx = 0; }
+                let lo = qx;
+                let hi = qy;
+                if qx > qy { lo = qy; hi = qx; }
+                let len = hi + ((lo * 54) >> 7);   # octagonal length ~= 0.42*min
+                let d = len - r;
+                if d < blur {
+                    let cov = a0;
+                    if d > 0 { cov = (a0 * (blur - d)) / blur; }
+                    if cov > 0 { blend_pixel(px, py, cov << 24); }
+                }
+                px = px + 1;
+            }
+        }
+        py = py + 1;
+    }
+    return 0;
+}
+
 fn render_get_backbuffer() {
     return lq(&bb_addr);
 }
@@ -188,15 +364,41 @@ fn render_flush() {
     sw(&dirty_count, 0);
     sb(&full_redraw, 0);
 
-    # Hand the blit to an AP through the secure job-ID allow-list (not a raw fn
-    # pointer). High priority so app jobs cannot starve frames. Queue full ->
-    # blit on the BSP so a frame is never dropped.
-    let handle = workqueue_submit(WQ_JOB_FLIP, 0, WQ_PRIO_HIGH);
-    if handle == WQ_INVALID {
-        render_flip_job();
-        return 0;
+    # Present on the BSP. AP-side flip jobs were taking recoverable #GPs in the
+    # framebuffer/string-copy path under QEMU after the scheduler update, which
+    # pinned CPU and left partially presented frames (cursor trails, white app
+    # interiors, disappearing desktop icons). Dirty rects keep this copy small
+    # during interaction; APs remain available for app/media/wallpaper jobs.
+    render_flip_job();
+    sw(&flip_job_handle, WQ_INVALID);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# render_flip_wait - block until the in-flight flip job (if any) has finished
+# copying the back buffer to the FRONT framebuffer, then clear the handle.
+#
+# The mouse cursor is composited onto the FRONT buffer (cursor.ghl), but
+# render_flush hands the back->front blit to an AP and returns immediately. If
+# the cursor were stamped (cursor_draw) or its background restored (cursor_hide)
+# while that AP blit is still sweeping the FRONT buffer top->bottom, the two
+# writers race: the sweep overpaints / tears the cursor depending on which
+# scanline it has reached, which drifts at a slow beat frequency (~1 s) and
+# leaves a smear. Debug builds hide this because serial logging slows the BSP
+# enough that the AP always finishes first; release exposes it.
+#
+# cursor_hide()/cursor_draw() call this before touching the FRONT buffer so the
+# documented "composite AFTER the compositor blit" invariant holds again. The
+# blit still runs on the AP (the BSP did its scene work in parallel up to this
+# point); we only serialize the brief cursor stamp against it. Timeout-guarded
+# exactly like the drain in render_flush so a wedged AP can never freeze input.
+# ---------------------------------------------------------------------------
+fn render_flip_wait() {
+    let h = lw(&flip_job_handle);
+    if h != WQ_INVALID {
+        workqueue_wait_timeout(h, FLIP_BUDGET);
+        sw(&flip_job_handle, WQ_INVALID);
     }
-    sw(&flip_job_handle, handle);
     return 0;
 }
 

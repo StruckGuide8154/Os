@@ -240,7 +240,7 @@ FN_BEGIN tb_draw, 0, 0, FN_RET_SCALAR
     add esi, MENU_PAD_TOP
     mov rdx, START_MENU_W - 16
     mov rcx, 1
-    mov r8d, 0x00555588
+    mov r8d, COLOR_BORDER
     call render_rect
 .no_sep:
 
@@ -560,4 +560,4 @@ tb_icon_for_window:
     ret
 .taskmgr:
     mov rax, nx_icon_taskmgr_16
-    ret
+    ret

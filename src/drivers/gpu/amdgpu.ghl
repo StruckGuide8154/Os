@@ -1,0 +1,341 @@
+# ============================================================================
+# amdgpu.ghl - AMD GPU driver, Track-8 ring-3 driver-host process.
+# Compile: --target driver  (forces --forbid-asm + --deny-unsafe; no unsafe
+# cap, no privileged intrinsic; reaches hardware ONLY via SC_DRVHOST_* broker
+# syscalls). See docs/gpu-driver/TODO.md and docs/architecture-userspace-drivers.md.
+#
+# WHAT THIS IS (M1 + M2 of the ladder, transliterated from the verified 780M
+# asm in docs/gpu-driver/reference-780M-asm/, NOT resurrected from it):
+#   * Brokered BAR0 MMIO register access (was amd_gpu_mmio.asm).
+#   * NBIO SMN indirect proxy - the "master key" to SoC-fabric blocks (SMU,
+#     PSP) that are NOT in BAR0 on APUs (was amd_smn.asm, HW-VERIFIED).
+#   * SMU/MP1 mailbox protocol + TestMessage/GetSmuVersion/DisallowGfxOff
+#     (was amd_smu.asm, HW-VERIFIED on Strix Point 2026-05-26).
+#   * IP-discovery table parser - the GPU enumerates its own IP blocks +
+#     SMN bases so we never hardcode per-SKU maps (was amd_ip_disc.asm).
+#
+# WHAT THIS IS NOT YET: PSP fw-load (M3), GMC/GART (M4), CP ring (M5),
+#   accelerated blit (M6), scanout (M7). Those are the hard 70% and must be
+#   redone from amdgpu source against real silicon - see TODO.md.
+#
+# COMPARTMENT NOTE: per TODO.md §3 this file is the seed of the `gpu-mem`/
+#   plumbing compartment. As M3+ land, fwload(PSP)/gfx(CP)/display(DCN) split
+#   into their own driver_ids with their own narrow grants. Keep new engine
+#   logic OUT of this file so the compartment boundaries stay real.
+#
+# THREAT MODEL: code-exec here buys nothing toward the kernel. Every register
+#   and framebuffer access is a broker syscall bounds-checked against the two
+#   granted windows (BAR0 regs, FB scan). No ambient MMIO/DMA, no kernel R/W.
+# ============================================================================
+
+app "amdgpu" { stack = 8192; }
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of rtl8156.ghl / hda.ghl; see driver_host.ghl).
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232
+const SC_DRVHOST_GRANT_MMIO   = 233
+const SC_DRVHOST_MMIO_READ32  = 240
+const SC_DRVHOST_MMIO_WRITE32 = 241
+const SC_TICKS                = 18
+
+const DRV_OK = 0
+
+# Capability classes (driver_host.ghl DRV_CAP_*).
+const CAP_MMIO = 1
+
+# ---------------------------------------------------------------------------
+# NBIO SMN indirect-access pair (amd_smn.asm). Byte offsets within BAR0.
+# regBIF_BX0_PCIE_INDEX2 = dword 0x0E (byte 0x38), _DATA2 = dword 0x0F (0x3C).
+# write32(BAR0+0x38, smn_addr) latches the target; read/write BAR0+0x3C.
+# ---------------------------------------------------------------------------
+const SMN_INDEX2 = 0x38
+const SMN_DATA2  = 0x3C
+
+# ---------------------------------------------------------------------------
+# SMU/MP1 mailbox (amd_smu.asm). VERIFIED on Strix Point: MP1 answers at SMN
+# base 0x03B10000 (mp_13_0_4 SEG4 alias). Do NOT use 0x0243FC00 - that's
+# MP0/PSP. C2PMSG dword offsets *4 off the base.
+#   NOTE (generality): once IP-discovery (M2) is trusted end-to-end, prefer
+#   the DISCOVERED MP1 base over this constant. Kept as the verified fallback.
+# ---------------------------------------------------------------------------
+const MP1_BASE_SMN       = 0x03B10000
+const SMN_MP1_C2PMSG_66  = 0x03B10A08   # MP1_BASE + 0x0282*4  (msg)
+const SMN_MP1_C2PMSG_82  = 0x03B10A48   # MP1_BASE + 0x0292*4  (arg)
+const SMN_MP1_C2PMSG_90  = 0x03B10A68   # MP1_BASE + 0x029A*4  (resp)
+
+# Healthy fw acks within ms; PIT-tick based (real HW vs QEMU diverge ~5000x
+# on raw loops - never spin on a raw counter).
+const SMU_TIMEOUT_TICKS = 200
+
+# PPSMC message IDs / results (amdgpu_ppsmc.inc, smu_v13_0_4 - VERIFIED).
+const PPSMC_MSG_TestMessage   = 0x01
+const PPSMC_MSG_GetSmuVersion = 0x02
+const PPSMC_MSG_DisallowGfxOff = 0x13
+const PPSMC_Result_OK         = 0x01
+
+# GC block (amdgpu_regs.inc): GC_BASE byte = 0x4980 (dword 0x1260).
+# Scratch round-trip proves GC MMIO is live. dword = GC_BASE/4 + mmSCRATCH_REG0.
+const GC_BASE_DW_FALLBACK = 0x1260
+const MM_SCRATCH_REG0     = 0x2040
+const GFX_SCRATCH_PROBE   = 0xCAFEF00D
+
+# ---------------------------------------------------------------------------
+# IP-discovery table (amd_ip_disc.asm). The table enumerates every IP block +
+# its SMN base, so no per-SKU hardcoding. Lives in the FB-visible region.
+# ---------------------------------------------------------------------------
+const SIG_BIN_HEADER  = 0x44504924   # "$IPD" little-endian
+const SIG_IP_DISC     = 0x4D435049   # "IPCM" little-endian
+const IPDISC_SCAN_BYTES  = 0x00400000   # 4 MiB scan window
+const IPDISC_SCAN_STRIDE = 4
+
+const HWID_GC    = 1
+const HWID_MMHUB = 9
+const HWID_NBIO  = 12
+const HWID_MP0   = 14
+const HWID_MP1   = 15
+const HWID_DCN   = 16
+const HWID_IMU   = 50
+
+# AMD PCI vendor id (PnP match - see TODO.md §4).
+const PCI_VENDOR_AMD = 0x1002
+
+# Window sizes to request from the broker.
+const BAR0_WINDOW_LEN = 0x100000     # 1 MiB of BAR0 register space
+const FB_WINDOW_LEN   = 0x00400000   # 4 MiB FB scan window
+
+# ---------------------------------------------------------------------------
+# Driver-private state (ring-3 local; MMU-confined; outside any writable slot
+# the broker exposes - a compromised driver cannot widen its own grants).
+# ---------------------------------------------------------------------------
+state {
+    self_id:    4;
+    bar0_base:  8;     # brokered BAR0 register window base
+    fb_base:    8;     # brokered FB scan window base
+    # IP-discovery outputs (0 = not found; no fake fallbacks).
+    ipd_found:  4;
+    ipd_mp0:    4;
+    ipd_mp1:    4;
+    ipd_gc:     4;
+    ipd_mmhub:  4;
+    ipd_nbio:   4;
+    ipd_dcn:    4;
+    ipd_imu:    4;
+    # SMU diag.
+    smu_last_result: 4;
+    smu_version:     4;
+}
+
+# ---------------------------------------------------------------------------
+# Brokered BAR0 MMIO. abs_dword_offset matches the asm convention
+# (abs_dword = IP_BASE_BYTES/4 + reg_dword); we *4 to a byte offset here.
+# ---------------------------------------------------------------------------
+fn reg_rd(dword_off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&bar0_base) + (dword_off << 2));
+}
+fn reg_wr(dword_off, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&bar0_base) + (dword_off << 2), val);
+}
+
+# Byte-offset BAR0 access (for the INDEX2/DATA2 pair, which are byte-addressed).
+fn bar_rd_b(byte_off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&bar0_base) + byte_off);
+}
+fn bar_wr_b(byte_off, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&bar0_base) + byte_off, val);
+}
+
+# ---------------------------------------------------------------------------
+# NBIO SMN proxy (amd_smn.asm). Re-latch INDEX2 on every transaction
+# (bring-up is single-threaded; no locking).
+# ---------------------------------------------------------------------------
+fn smn_r32(smn_addr) {
+    bar_wr_b(SMN_INDEX2, smn_addr);
+    return bar_rd_b(SMN_DATA2);
+}
+fn smn_w32(smn_addr, val) {
+    bar_wr_b(SMN_INDEX2, smn_addr);
+    bar_wr_b(SMN_DATA2, val);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# SMU mailbox (amd_smu.asm). Returns PPSMC_Result_* or 0 on timeout.
+# Protocol: snapshot resp -> clear resp -> write arg -> write msg (kick) ->
+# poll resp non-zero. Linux does NOT wait-for-nonzero before the kick (that
+# wedged a cold boot once); we clear-then-kick.
+# ---------------------------------------------------------------------------
+fn smu_msg_send(msg_id, arg) {
+    smn_r32(SMN_MP1_C2PMSG_90);          # (1) snapshot prior resp (diag)
+    smn_w32(SMN_MP1_C2PMSG_90, 0);       # (2) clear resp
+    smn_w32(SMN_MP1_C2PMSG_82, arg);     # (3) write arg
+    smn_w32(SMN_MP1_C2PMSG_66, msg_id);  # (4) kick SMU
+
+    let deadline = syscall(SC_TICKS) + SMU_TIMEOUT_TICKS;   # (5) wait resp
+    while syscall(SC_TICKS) < deadline {
+        let r = smn_r32(SMN_MP1_C2PMSG_90);
+        if r != 0 {
+            sd(&smu_last_result, r);
+            return r;
+        }
+    }
+    sd(&smu_last_result, 0);
+    return 0;                              # timeout
+}
+
+# TestMessage handshake + DisallowGfxOff + GC scratch round-trip (Task H).
+# Returns 1 if the mailbox is alive and GC MMIO answers, else 0.
+fn smu_handshake() {
+    if smu_msg_send(PPSMC_MSG_TestMessage, 0) != PPSMC_Result_OK { return 0; }
+
+    # DisallowGfxOff - best effort, don't fail on it (pins GFX active so later
+    # GMC/CP pokes don't race power-gating).
+    smu_msg_send(PPSMC_MSG_DisallowGfxOff, 0);
+
+    # GC scratch round-trip. 0xFFFFFFFF => clock-gated / in reset.
+    let gc_dw = GC_BASE_DW_FALLBACK;
+    if ld(&ipd_gc) != 0 { gc_dw = ld(&ipd_gc) >> 2; }   # prefer discovered base
+    let scr = gc_dw + MM_SCRATCH_REG0;
+
+    if reg_rd(scr) == 0xFFFFFFFF { return 0; }
+    reg_wr(scr, GFX_SCRATCH_PROBE);
+    if reg_rd(scr) != GFX_SCRATCH_PROBE { return 0; }
+    return 1;
+}
+
+fn smu_get_version() {
+    if smu_msg_send(PPSMC_MSG_GetSmuVersion, 0) != PPSMC_Result_OK { return 0; }
+    let v = smn_r32(SMN_MP1_C2PMSG_82);
+    sd(&smu_version, v);
+    return v;
+}
+
+# ---------------------------------------------------------------------------
+# Framebuffer reads for IP-discovery, via the brokered FB window. Only the
+# broker's read32 ABI is used; unaligned u32/u16/u8 are synthesized from two
+# aligned reads (the table fields are not all 4-aligned).
+#   PERF TODO (TODO.md M2): the 4 MiB signature scan is up to 1M brokered
+#   read32 syscalls. Add a broker bulk-scan/FB-VA-map primitive before this
+#   is anything but a bring-up path. Functionally correct as-is.
+# ---------------------------------------------------------------------------
+fn fb_rd32a(off) {                        # aligned dword read
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&fb_base) + off);
+}
+fn fb_rd32u(off) {                        # arbitrary-offset dword
+    let a = off & 0xFFFFFFFC;
+    let s = (off & 3) << 3;
+    let lo = fb_rd32a(a);
+    if s == 0 { return lo; }
+    let hi = fb_rd32a(a + 4);
+    return ((lo >> s) | (hi << (32 - s))) & 0xFFFFFFFF;
+}
+fn fb_rd16(off) { return fb_rd32u(off) & 0xFFFF; }
+fn fb_rd8(off)  { return fb_rd32u(off) & 0xFF; }
+
+# Store the discovered SMN base for a recognized HW id.
+fn ipd_store(hw_id, base) {
+    if hw_id == HWID_MP0   { sd(&ipd_mp0, base);   return 0; }
+    if hw_id == HWID_MP1   { sd(&ipd_mp1, base);   return 0; }
+    if hw_id == HWID_GC    { sd(&ipd_gc, base);    return 0; }
+    if hw_id == HWID_MMHUB { sd(&ipd_mmhub, base); return 0; }
+    if hw_id == HWID_NBIO  { sd(&ipd_nbio, base);  return 0; }
+    if hw_id == HWID_DCN   { sd(&ipd_dcn, base);   return 0; }
+    if hw_id == HWID_IMU   { sd(&ipd_imu, base);   return 0; }
+    return 0;
+}
+
+# Parse one die's ip_v4 records starting at byte offset `ip0` for `num_ips`.
+# ip_v4: hw_id(u16) @0, num_base_address(u8) @3, base_address[0](u32) @10;
+# record size = 10 + 4*num_base_address.
+fn ipd_parse_ips(ip0, num_ips) {
+    let p = ip0;
+    let n = num_ips;
+    while n != 0 {
+        let hw_id = fb_rd16(p);
+        let nba   = fb_rd8(p + 3);
+        if nba != 0 {
+            ipd_store(hw_id, fb_rd32u(p + 10));   # first SMN base
+        }
+        p = p + 10 + (nba << 2);
+        n = n - 1;
+    }
+    return 0;
+}
+
+# Scan the FB for the $IPD signature, validate via the IPCM sub-signature,
+# then walk the first die. Returns 1 on found+parsed, 0 if not located.
+# (Faithful port of amd_ip_disc.asm; first-die-only, as most APUs are 1 die.)
+fn ip_disc_scan() {
+    sd(&ipd_found, 0);
+    sd(&ipd_mp0, 0); sd(&ipd_mp1, 0); sd(&ipd_gc, 0);
+    sd(&ipd_mmhub, 0); sd(&ipd_nbio, 0); sd(&ipd_dcn, 0); sd(&ipd_imu, 0);
+
+    if lq(&fb_base) == 0 { return 0; }
+
+    let off = 0;
+    while off < IPDISC_SCAN_BYTES {
+        if fb_rd32a(off) == SIG_BIN_HEADER {
+            # binary_signature sits at offset 12 in binary_header; table start
+            # is sig_off - 12.
+            let tbl = off - 12;
+            if tbl >= 0 {
+                let tlo = fb_rd16(tbl + 0);             # table_list_offset
+                if tlo != 0 {
+                    if fb_rd32u(tbl + tlo) == SIG_IP_DISC {
+                        # Validated. Walk first die.
+                        let ipd = tbl + tlo;            # ip_discovery struct
+                        # die_header begins conservatively at ipd + 12.
+                        let die = ipd + 12;
+                        let num_ips = fb_rd16(die + 2);
+                        if num_ips != 0 {
+                            ipd_parse_ips(die + 4, num_ips);
+                        }
+                        sd(&ipd_found, 1);
+                        return 1;
+                    }
+                }
+            }
+        }
+        off = off + IPDISC_SCAN_STRIDE;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Init: register with the broker, grant the two windows, run M2 discovery +
+# M1 SMU handshake. bar0_phys / fb_phys come from the PnP controller (TODO.md
+# §4); main() uses provisional values until the controller lands.
+# ---------------------------------------------------------------------------
+fn amdgpu_init(bar0_phys, fb_phys) {
+    let id = syscall(SC_DRVHOST_REGISTER, CAP_MMIO, 0, 0);
+    sd(&self_id, id);
+
+    sq(&bar0_base, bar0_phys);
+    syscall(SC_DRVHOST_GRANT_MMIO, bar0_phys, BAR0_WINDOW_LEN);
+
+    sq(&fb_base, fb_phys);
+    syscall(SC_DRVHOST_GRANT_MMIO, fb_phys, FB_WINDOW_LEN);
+
+    # M2: self-enumerate IP blocks (drives all later dispatch).
+    ip_disc_scan();
+
+    # M1: prove the SMU mailbox + GC MMIO are alive.
+    smu_handshake();
+    smu_get_version();
+
+    return DRV_OK;
+}
+
+fn main() {
+    # TODO(M0): receive bar0_phys / fb_phys from the gpu-pnp controller via the
+    # signed match-table bind, not as literals. Phoenix/Strix provisional
+    # values for QEMU bring-up only.
+    let bar0_phys = 0xFA10000000;     # reference-780M-asm: Strix BAR0
+    let fb_phys   = 0;                # PnP supplies the GOP FB base
+    let rc = amdgpu_init(bar0_phys, fb_phys);
+    if rc != DRV_OK { return rc; }
+
+    # Idle: future M3+ engine compartments drive from here / their own procs.
+    while 1 { }
+    return DRV_OK;
+}

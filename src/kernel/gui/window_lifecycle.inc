@@ -85,15 +85,21 @@ wm_do_create:
     jb .fail
     cmp r8d, MIN_WINDOW_H
     jb .fail
+    ; Clamp against the RUNTIME framebuffer resolution (UEFI GOP scr_width/
+    ; scr_height), not the compile-time SCREEN_WIDTH/SCREEN_HEIGHT fallback
+    ; constants (1024x768). The active GOP mode is commonly larger (e.g.
+    ; 1920x1200), and the full-screen WF_SHELL desktop is created at the live
+    ; scr_width x scr_height -- comparing against the stale constants rejected
+    ; it (x+w > 1024) and returned -1, leaving a blank desktop with no taskbar.
     mov eax, r13d
     add eax, r15d
     jc .fail
-    cmp eax, SCREEN_WIDTH
+    cmp eax, [scr_width]
     ja .fail
     mov eax, r14d
     add eax, r8d
     jc .fail
-    cmp eax, SCREEN_HEIGHT
+    cmp eax, [scr_height]
     ja .fail
 
     ; Slot 0 is reserved for the native desktop wallpaper renderer's
@@ -192,6 +198,18 @@ wm_do_create:
     mov rax, WF_VISIBLE | WF_ACTIVE | WF_FOCUSED
     mov [rbx + WIN_OFF_FLAGS], rax
 
+    ; New tenant for this slot index: clear the per-slot sandbox-live flag so the
+    ; §12 strike engine suppresses rejects during the launch gap (this window is
+    ; drawable now, but kernel_apply_app_manifest has not run yet). The manifest
+    ; apply sets slot_sandboxed[slot]=1 once the sandbox is real. Kept independent
+    ; of WIN_OFF_FLAGS so a later SYS_WM_CLOSE cannot reopen the strike-immunity
+    ; hole. ecx = slot/window index (1..MAX_WINDOWS-1).
+    ; See docs/security/finding-strike-immunity-via-self-close.md.
+    push rax
+    lea rax, [rel slot_sandboxed]
+    mov byte [rax + rcx], 0
+    pop rax
+
     ; Copy title (up to 63 chars)
     mov rsi, r12
     lea rdi, [rbx + WIN_OFF_TITLE]
@@ -229,6 +247,12 @@ wm_do_create:
     inc qword [wm_window_count]
 
     mov rax, rcx         ; Return window ID
+    ; Record the freshly-created id for app_launch's kfault landing pad, so a
+    ; ring-0 fault before wm_window_finalize can close this orphan instead of
+    ; leaking the slot. Harmless for SYS_WM_CREATE callers: launch_pending_win is
+    ; only consulted inside app_launch's .al_land, which always re-initialises it
+    ; on entry, so a value left here outside a launch is never acted on.
+    mov [launch_pending_win], rax
     jmp .done
 
 .fail:
@@ -240,6 +264,36 @@ wm_do_create:
     pop r13
     pop r12
     pop rbx
+    ret
+
+; Finalize a freshly-launched window: RDI = window ID. Idempotent; preserves RAX.
+;
+; Called as the LAST step of every app launch (app_launch_impl .done), after the
+; capability manifest is applied, the L3 slot is seeded, and the signed
+; click/key/draw handlers are installed. Promotes the window to WF_READY (and
+; re-asserts WF_VISIBLE) and marks the scene dirty so the WM repaints the
+; now-fully-provisioned window on the very next frame.
+;
+; Until this runs, wm_draw_window skips the window entirely (see WF_READY in
+; constants.inc), which closes the launch-ordering race that otherwise painted
+; ~1/3 of opened apps blank. Guarded so it only ever finalizes a live slot: a
+; bounds-rejected id or an already-closed/free window is a no-op, so a stale id
+; can neither resurrect a dead slot nor scribble outside the window pool.
+FN_BEGIN wm_window_finalize, 1, 0, FN_RET_VOID
+    cmp rdi, MAX_WINDOWS
+    jae .wf_done
+    push rax
+    mov rax, rdi
+    imul rax, WINDOW_STRUCT_SIZE
+    add rax, WINDOW_POOL_ADDR
+    test qword [rax + WIN_OFF_FLAGS], WF_ACTIVE
+    jz .wf_pop
+    or qword [rax + WIN_OFF_FLAGS], WF_VISIBLE | WF_READY
+    mov byte [scene_dirty], 1
+.wf_pop:
+    pop rax
+.wf_done:
+    FN_END wm_window_finalize
     ret
 
 ; Close window by ID: RDI = window ID

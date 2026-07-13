@@ -1,0 +1,224 @@
+# GritHL desktop shell (ring-3).
+#
+# The taskbar + desktop ("homescreen") + Start menu, rendered entirely in
+# user space from the data-driven shell_config model. This is the ring-3
+# replacement for the old kernel-asm shell (src/kernel/gui/taskbar.asm +
+# desktop.asm); see docs/shell-architecture.md.
+#
+# (Named "gshell" rather than "shell" because the legacy APP_SEG_SHELL segment
+# label - app_seg_shell_* in apps.asm - is taken by unrelated legacy app glue
+# in src/user/apps/shell.inc. Renaming that is a separate cleanup.)
+#
+# Privilege: launched as APP_SHELL (12) on MANIFEST_SHELL - CAP_GUI to draw,
+# CAP_WM_QUERY to enumerate open windows (SYS_WM_LIST) for the taskbar, and
+# CAP_APP_CTRL to launch apps from icons/menu. Deliberately NO CAP_FS / CAP_NET
+# / CAP_WX: a shell compromise cannot reach the filesystem, network, or W^X.
+#
+# Everything it shows comes from shell_config (catalog + the desktop/menu/pin
+# surfaces) and is styled through the theme (theme_col) + icon pack
+# (icon_render), so adding an app is one catalog row and a theme switch
+# restyles the whole shell.
+#
+# STAGING NOTE: this first lands as an ordinary launchable window so the whole
+# render + SYS_WM_LIST + config pipeline can be QEMU-verified with zero
+# boot-path risk. Promoting it to the authoritative full-screen shell slot
+# (and retiring the kernel asm shell) is Stage 3 of the migration - no
+# shell-side rewrite, just a different mount + input route.
+
+use core
+use gui
+use theme
+use shell_config
+
+# NOTE on icons: we deliberately do NOT `use icon` here. icon.ghl pulls in
+# image -> svg2 (the full SVG rasterizer, ~1 MB) which would blow the shell past
+# the 1 MB app-slot cap, even though icon_render currently only draws a
+# placeholder. sh_icon() below draws the same themed placeholder keyed by the
+# logical icon name, so switching to the real pack is a one-function change the
+# day icon.ghl is decoupled from svg2 (or the disk icon loader lands).
+fn sh_icon(win, name, x, y, size) {
+    ui_rect_at(win, x, y, size, size, UI_COL_SURFACE_2);
+    ui_rect_at(win, x, y, size, 1, UI_COL_ACCENT);
+    ui_rect_at(win, x, y + size - 1, size, 1, UI_COL_ACCENT);
+    ui_rect_at(win, x, y, 1, size, UI_COL_ACCENT);
+    ui_rect_at(win, x + size - 1, y, 1, size, UI_COL_ACCENT);
+}
+
+app "Grit Shell" { stack = 8192; }
+
+# --- Layout (client-area relative; click handler recomputes identically). ---
+const SH_PAD       = 12
+const SH_ROW_H     = 28      # Start-menu / desktop row pitch
+const SH_ICON      = 16      # menu glyph size
+const SH_DICON     = 32      # desktop glyph size
+const SH_MENU_X    = 12
+const SH_MENU_W    = 190
+const SH_DESK_X    = 220     # desktop column x
+const SH_TB_H      = 32      # taskbar strip height
+const SH_TB_BTN_W  = 130
+const SH_TB_BTN_GAP = 4
+const SH_TB_PAD_X  = 8
+const SH_BRAND_H   = 30      # top brand band (kit top bar: wordmark + subtitle)
+const SH_HDR_Y     = 42      # column headers below the brand band (SH_PAD + SH_BRAND_H)
+
+str sh_brand    = "Grit";
+str sh_brand_sub = "secure desktop";
+
+# Uppercase tracked accent labels mirror the kit's signature `.grit-label`
+# chrome detail (letter-spacing 0.18em, semibold, muted/accent). The bitmap
+# font can't track glyphs, so we approximate with uppercase + the gold accent.
+str sh_hdr_menu = "START";
+str sh_hdr_desk = "DESKTOP";
+
+# Scratch for SYS_WM_LIST output (MAX_WINDOWS records). MAX_WINDOWS is 12.
+state {
+    win_buf: 768;     # 12 * WM_LIST_REC(48) = 576, padded
+}
+
+# ---------------------------------------------------------------------------
+# Geometry helpers - shared by draw + click so hit-testing always matches.
+# ---------------------------------------------------------------------------
+fn sh_menu_row_y(i)  { return SH_HDR_Y + UI_ROW_GAP + (i + 1) * SH_ROW_H; }
+fn sh_desk_row_y(i)  { return SH_HDR_Y + UI_ROW_GAP + (i + 1) * SH_ROW_H; }
+fn sh_tb_y(win)      { return ui_win_h(win) - UI_TITLEBAR - UI_BORDER * 2 - SH_TB_H; }
+
+# ---------------------------------------------------------------------------
+# Draw
+# ---------------------------------------------------------------------------
+# Draw a kit-style section header: gold accent uppercase label over a thin
+# accent underline that spans the column. Returns nothing; callers keep their
+# own row geometry (this is draw-only).
+fn sh_header(win, x, w, text) {
+    ui_text_at(win, x, SH_HDR_Y, text, UI_COL_ACCENT, UI_COL_SURFACE_2);
+    ui_rect_at(win, x, SH_HDR_Y + 12, w, 1, UI_COL_ACCENT);
+}
+
+# Top brand band spanning the shell width: the Grit wordmark in gold with a
+# muted subtitle and a hairline rule under it (kit top bar, brand-left).
+fn sh_draw_brand(win) {
+    let w = ui_win_w(win) - UI_BORDER * 2;
+    ui_rect_at(win, 0, 0, w, SH_BRAND_H, UI_COL_MENU);
+    ui_rect_at(win, 0, SH_BRAND_H, w, 1, UI_COL_BORDER);
+    ui_text_at(win, SH_MENU_X, SH_PAD - 4, &sh_brand, UI_COL_ACCENT, UI_COL_MENU);
+    ui_text_at(win, SH_MENU_X + 44, SH_PAD - 2, &sh_brand_sub, UI_COL_TEXT_MUTED, UI_COL_MENU);
+}
+
+fn sh_draw_menu(win) {
+    # surface-2 sidebar panel behind the Start column (kit: panels/sidebars).
+    let panel_h = ui_win_h(win) - UI_TITLEBAR - UI_BORDER * 2;
+    ui_rect_at(win, 0, 0, SH_MENU_X + SH_MENU_W + SH_PAD, panel_h, UI_COL_SURFACE_2);
+    ui_rect_at(win, SH_MENU_X + SH_MENU_W + SH_PAD, 0, 1, panel_h, UI_COL_BORDER);
+    sh_header(win, SH_MENU_X, SH_MENU_W, &sh_hdr_menu);
+    let n = shell_menu_count();
+    let i = 0;
+    while i < n {
+        let id  = shell_menu_at(i);
+        let y   = sh_menu_row_y(i);
+        let mf  = shell_menu_flags_at(i);
+        # Separator above (MF_SEP_ABOVE).
+        if (mf & MF_SEP_ABOVE) != 0 {
+            ui_rect_at(win, SH_MENU_X, y - 4, SH_MENU_W, 1, UI_COL_BORDER);
+        }
+        sh_icon(win, shell_cat_icon(id), SH_MENU_X, y, SH_ICON);
+        let fg = UI_COL_TEXT;
+        if (mf & MF_DIM) != 0 { fg = UI_COL_TEXT_MUTED; }
+        ui_text_at(win, SH_MENU_X + SH_ICON + UI_LABEL_GAP, y + 2, shell_cat_label(id), fg, UI_COL_SURFACE_2);
+        i = i + 1;
+    }
+}
+
+fn sh_draw_desktop(win) {
+    sh_header(win, SH_DESK_X, 180, &sh_hdr_desk);
+    let n = shell_desktop_count();
+    let i = 0;
+    while i < n {
+        let id = shell_desktop_at(i);
+        let y  = sh_desk_row_y(i);
+        sh_icon(win, shell_cat_icon(id), SH_DESK_X, y, SH_DICON);
+        ui_text_at(win, SH_DESK_X + SH_DICON + UI_LABEL_GAP, y + SH_DICON / 2 - 6,
+                   shell_cat_label(id), UI_COL_TEXT, UI_COL_BG_BASE);
+        i = i + 1;
+    }
+}
+
+# Taskbar: a strip listing every open window from SYS_WM_LIST.
+fn sh_draw_taskbar(win) {
+    let y = sh_tb_y(win);
+    let w = ui_win_w(win) - UI_BORDER * 2;
+    # Dock-style strip: surface-2 band with a lit top accent rule (kit dock is a
+    # raised glass surface; we approximate with surface-2 + an accent hairline).
+    ui_rect_at(win, 0, y, w, SH_TB_H, UI_COL_SURFACE_2);
+    ui_rect_at(win, 0, y, w, 1, UI_COL_ACCENT);
+
+    let n = wm_list(&win_buf, 12);
+    if n < 0 { return; }
+    let i = 0;
+    let bx = SH_TB_PAD_X;
+    while i < n {
+        let rec   = &win_buf + i * WM_LIST_REC;
+        let title = rec + WM_LIST_OFF_TITLE;
+        # Running-app chip: raised surface tile with an accent left edge (the
+        # kit's running-dot indicator, adapted to the bitmap chrome).
+        ui_rect_at(win, bx, y + 4, SH_TB_BTN_W, SH_TB_H - 8, UI_COL_SURFACE);
+        ui_rect_at(win, bx, y + 4, 2, SH_TB_H - 8, UI_COL_ACCENT);
+        ui_text_at(win, bx + 6, y + SH_TB_H / 2 - 6, title, UI_COL_TEXT, UI_COL_SURFACE);
+        bx = bx + SH_TB_BTN_W + SH_TB_BTN_GAP;
+        i = i + 1;
+    }
+}
+
+fn draw(win) {
+    theme_init();
+    shell_cfg_init();
+    ui_fill_client_below(win, 0, UI_COL_BG_BASE);
+    sh_draw_menu(win);
+    sh_draw_desktop(win);
+    sh_draw_taskbar(win);
+    sh_draw_brand(win);
+}
+
+# ---------------------------------------------------------------------------
+# Input
+# ---------------------------------------------------------------------------
+# Launch an app by catalog id (CAP_APP_CTRL). Ignores ids the catalog rejects.
+fn sh_launch(id) {
+    if id == 0 { return; }
+    if shell_cat_find(id) == 0 { return; }
+    syscall(SYS_APP_LAUNCH, id);
+}
+
+# Hit-test a single-column list of `n` rows starting at row-y(0); returns the
+# row index under y, or -1. Rows are SH_ROW_H tall.
+fn sh_hit_row(y, row0, n) {
+    if y < row0 { return -1; }
+    let idx = (y - row0) / SH_ROW_H;
+    if idx >= n { return -1; }
+    return idx;
+}
+
+fn click(win, x, y) {
+    # Start menu column.
+    if x >= SH_MENU_X {
+        if x < SH_MENU_X + SH_MENU_W {
+            let mn = shell_menu_count();
+            let mi = sh_hit_row(y, sh_menu_row_y(0), mn);
+            if mi >= 0 {
+                sh_launch(shell_menu_at(mi));
+                return;
+            }
+        }
+    }
+    # Desktop column.
+    if x >= SH_DESK_X {
+        let dn = shell_desktop_count();
+        let di = sh_hit_row(y, sh_desk_row_y(0), dn);
+        if di >= 0 {
+            sh_launch(shell_desktop_at(di));
+            return;
+        }
+    }
+}
+
+fn key(win, k) {
+    # No keyboard actions yet; reserved for Start-menu type-to-search.
+}

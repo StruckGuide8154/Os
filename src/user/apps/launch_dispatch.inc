@@ -1,6 +1,10 @@
 app_launch:
     sub rsp, 8
     mov [rsp], rdi                     ; preserve app id across kfault_arm (rdi)
+    ; No window is in flight yet for this launch. Clearing here means a stale id
+    ; left in launch_pending_win by an earlier launch or a SYS_WM_CREATE caller
+    ; can never be closed by this launch's .al_land.
+    mov qword [launch_pending_win], -1
     lea rdi, [rel .al_land]
     call kfault_arm                    ; kfault_jmp_rsp -> this app-id slot
     mov rdi, [rsp]                     ; restore app id
@@ -11,8 +15,17 @@ app_launch:
 .al_land:
     ; Reached via the ISR longjmp after a recovered ring-0 fault inside the
     ; launch body. Callee-saved regs + RSP were restored to their kfault_arm
-    ; snapshot; RSP points at the app-id slot. Disarm and fail soft.
+    ; snapshot; RSP points at the app-id slot. If a window was created before the
+    ; fault but not yet finalized, close it so it does not leak its slot / show as
+    ; a "fake open" taskbar button; .done clears the tracker once a window is
+    ; ready, so a fully-provisioned window is never torn down here.
     call kfault_disarm
+    mov rdi, [launch_pending_win]
+    cmp rdi, 0
+    jl .al_no_orphan
+    mov qword [launch_pending_win], -1
+    call wm_close_window
+.al_no_orphan:
     add rsp, 8
     mov rax, -1
     ret
@@ -82,7 +95,9 @@ app_launch_impl:
     je .done
     APPLY_MANIFEST APP_EXPLORER
     call app_refresh_window_slot
-    call app_reset_explorer_slot
+    ; app_refresh_window_slot copies a fresh GritHL Explorer state block.
+    ; The legacy reset helper uses kernel-image explorer_* symbols, not
+    ; slot-local GritHL state, and can abort launch before handlers/finalize.
     mov r10, app_hl_explorer_click
     mov r11, app_hl_explorer_key
     call app_set_window_handlers
@@ -120,6 +135,12 @@ app_launch_impl:
     ; populates it. Do NOT touch the kernel image's np_* master copies here -
     ; they are linker placeholders, not shared state, and were a source of
     ; cross-instance corruption when used as scratch.
+    ;
+    ; Heavy debug instrumentation (debug builds only): the launch milestones
+    ; below are TSC-stamped into the dbg_evt ring so a "notepad opened blank"
+    ; run can be reconstructed - in particular whether a draw callback raced
+    ; ahead of the manifest/seed (see EVT_NP_DRAW / EVT_NP_STRIKE_GAP).
+    DBG_EVT6 EVT_NP_LAUNCH, APP_NOTEPAD, 0, 0, 0, 0
     lea rdi, [rel szNotepadTitle]
     mov rsi, 250
     mov rdx, 120
@@ -137,13 +158,24 @@ app_launch_impl:
     call ser_print_hex64
     pop rdi
     pop rax
+    ; rax = window/slot id (or -1). a0 = win id.
+    DBG_EVT6 EVT_NP_WINCREATE, rax, rax, 0, 0, 0
     cmp rax, -1
     je .done
     APPLY_MANIFEST APP_NOTEPAD
+    ; Confirm the sandbox is now live: read back WIN_OFF_FLAGS so the dump shows
+    ; WF_MANIFEST_OK set. a0 = win id, a1 = flags.
+    mov r10, rax
+    imul r10, r10, WINDOW_STRUCT_SIZE
+    add r10, WINDOW_POOL_ADDR
+    mov r10, [r10 + WIN_OFF_FLAGS]
+    DBG_EVT6 EVT_NP_MANIFEST, rax, rax, r10, WF_MANIFEST_OK, 0
     call app_seed_notepad_slot
+    DBG_EVT6 EVT_NP_SEED, rax, rax, 0, 0, 0
     mov r10, app_hl_notepad_click
     mov r11, app_hl_notepad_key
     call app_set_window_handlers
+    DBG_EVT6 EVT_NP_HANDLERS, rax, rax, 0, 0, 0
     SER 'n'
     jmp .done
 
@@ -310,6 +342,10 @@ app_launch_impl:
     call app_set_window_handlers
     jmp .done
 
+; (.launch_shell removed: the ring-3 gshell desktop shell is parked under
+; docs/design-system/deprecated-shell-restyle/. The in-kernel asm shell
+; (desktop.asm + taskbar.asm) is authoritative again.)
+
 .launch_ping:
     lea rdi, [rel szPingTitle]
     mov rsi, 220
@@ -329,6 +365,25 @@ app_launch_impl:
     jmp .done
 
 .done:
+    ; Single, app-agnostic finalize point. Every .launch_* case keeps RAX = the
+    ; window id (all post-create helpers -- APPLY_MANIFEST, app_set_window_*,
+    ; app_seed_*_slot -- preserve it) or RAX = -1 on failure. Promote the
+    ; now-fully-provisioned window to WF_READY (+ force a repaint) as the last
+    ; step, so wm_draw_window only ever renders a window whose manifest, slot
+    ; seed, and signed handlers are all in place. New apps inherit this for free
+    ; by following the existing "leave RAX = window id, jmp .done" convention.
+    ; Launch has reached its terminal step. Whether the window is about to be
+    ; finalized (success) or was already closed by a failing APPLY_MANIFEST, it
+    ; is no longer an unfinalized orphan, so clear the tracker: a fault in
+    ; finalize or afterwards must not let .al_land close a ready window.
+    mov qword [launch_pending_win], -1
+    cmp rax, -1
+    je .done_ret
+    push rax
+    mov rdi, rax
+    call wm_window_finalize
+    pop rax
+.done_ret:
     ret
 
 
@@ -336,4 +391,4 @@ app_launch_impl:
 ; app_open_file - Open a file, routing by extension
 ; RDI = pointer to FAT16 dir entry (32 bytes)
 ; ============================================================================
-global app_open_file
+global app_open_file

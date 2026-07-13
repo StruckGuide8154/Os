@@ -14,9 +14,19 @@ i2c_hid_poll:
 
     push rbx                    ; rbx is callee-saved; clobbered by xor ebx,ebx below
 
-    cmp byte [i2c_poll_busy], 0
+    ; Atomic test-and-set of the reentry guard. i2c_hid_poll runs in BOTH the
+    ; main loop (frame_pacing.ghl, interrupts enabled) and the touchpad IRQ
+    ; (isr.asm .irq_apic_touchpad), so the touchpad IRQ can preempt a main-loop
+    ; poll. A non-atomic cmp-then-mov leaves a TOCTOU window: both contexts read
+    ; busy==0 before either writes 1, then run concurrently and desync the I2C
+    ; state machine / RX-FIFO drain. `xchg` carries an implicit LOCK on a memory
+    ; operand, so exactly one context observes the prior 0 and proceeds; the
+    ; other sees 1 and bails. Mirrors the `xchg al, [mouse_moved]` TAS idiom in
+    ; mouse_handler.inc. Every acquiring exit below clears i2c_poll_busy.
+    mov al, 1
+    xchg al, [i2c_poll_busy]
+    test al, al
     jne .poll_ret_busy
-    mov byte [i2c_poll_busy], 1
 
     mov rsi, [i2c_base_addr]
     ; §8: prove the whole DW_IC register window (every [rsi+off] below, off<=0xF4)
@@ -235,6 +245,12 @@ i2c_hid_poll:
     ; consecutive processed reports.  At 3GHz: 1 unit ≈ 21.8 μs.
     ; Target for 125Hz touchpad: ~8ms inter-report = ~0x016E units at 3GHz.
     ; Connect a serial terminal and observe the printed values to confirm rate.
+    ;
+    ; PRIVACY/LOGLESS: this emits per-report touchpad TIMING over COM1, which is
+    ; a side channel of user-input cadence (scroll/move rate, idle gaps). Gated
+    ; behind ENABLE_DEBUG_SERIAL so release builds are zero-cost AND leak nothing
+    ; off-machine, matching the SER/BOOTLOG2 convention in macros.inc.
+%ifdef ENABLE_DEBUG_SERIAL
     push rbx
     push rcx
     push rdx
@@ -292,6 +308,7 @@ i2c_hid_poll:
     pop rdx
     pop rcx
     pop rbx
+%endif ; ENABLE_DEBUG_SERIAL
 
     ; --- DEBUG: capture raw report (count, length, first 8 bytes) ---
     inc dword [i2c_dbg_rpts]

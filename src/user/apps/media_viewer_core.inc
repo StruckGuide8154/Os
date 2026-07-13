@@ -56,6 +56,7 @@ extern page_alloc_contig
 extern page_free_contig
 extern fat16_get_file_size
 
+section .appdata
 global media_full_buf
 media_full_buf:        times MAX_WINDOWS dq 0
 global media_full_buf_pages
@@ -64,6 +65,7 @@ global media_direct_present
 global media_direct_presented
 media_direct_present db 0
 media_direct_presented db 0
+section .text
 
 global app_media_draw
 ; nx_media_blit_scaled is reachable from the kernel via SYS_MEDIA_BLIT_SCALED

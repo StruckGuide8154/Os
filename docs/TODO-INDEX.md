@@ -9,6 +9,36 @@ _Last reconciled: 2026-06-04._
 
 ---
 
+## Security/Speed scorecard + Path-to-10 (2026-06-23)
+
+Each track now carries a **"Path to 10/10"** section (security-first; speed
+maximized under security 10). Self-ratings — to be re-rated by an independent
+audit agent, NOT trusted as final:
+
+| Track | Security /10 | Speed /10 | 10/10 reachable? |
+|---|---|---|---|
+| 1 repo-enforcement | 8 | 10 | yes (sec→10 via reproducible-build + signed CI provenance) |
+| 2 signed-everything | 10 software / HW-blocked | 7->8 | software complete; full zero-TODO closure blocked on NVMe/USB block backend |
+| 3 seL4-invariants | 10 | 10 | complete; independently verified 2026-06-28 |
+| 4 ram-erasure | 5 | 5→9 | **10 only where FME hardware present** (bounded) |
+| 5 hw-monitor | 4 | 4→8 | **10 only where virt+IOMMU present** (the keystone) |
+| 6 compartment-monitor | 6 | 6→8 | 10 with Track 5 (floor-disable residual) |
+| 7 public-root | 9 | 9 | yes (QEMU boot + first-link SB) |
+| 8 userspace-drivers | 7 | 6→8 | yes (finish migration ladder + quarantine) |
+| 9 speed-isolation | 5 | **10** | sec inherited from Tracks 2/3/6/8 |
+| 10 fpga-enclave | 6 | 5→7 | **bounded 10** (board + documented residuals; speed capped by USB latency) |
+| 11 structural-cfi | 8 | 9 | 10 with Track 5/6 monitor |
+
+**Global ceiling-lifter (do FIRST): Track 5 G1** — privilege-below-ring-0 makes the
+shared `nk_monitor` root *un-disableable* in hardware. Until it lands, NO track can
+exceed 9 (every track rests on that software root, per STATUS.md §9). Getting one
+vendor (Intel VT-x) to `tested-accel` is what raises the whole stack's ceiling.
+
+Honest bounds that are NOT faked to 10: Track 4/5/10 carry hardware/physical caps;
+their "10" is explicitly conditional ("10 where FME / virt+IOMMU / board present").
+
+---
+
 ## Authority hierarchy (who wins on a conflict)
 
 1. **`docs/STATUS.md`** - formal source of truth for *project status* and the
@@ -60,14 +90,15 @@ They are complementary, not duplicates: the tracks build the architecture; the
 |---|---|---|
 | `ghl-beyond-zero-trust-todo.md` | master checklist + Extended Hardening + Kill-Chain Defense + HW mem-enc | active; master P0/P1 mostly `[ ]`; Extended/Kill-Chain are net-new |
 | `track1-repo-enforcement-todo.md` | repo enforcement (no new .asm/.inc, presubmits, CI) | **DONE / green** |
-| `track2-signed-everything-todo.md` | signed-artifact envelope + threshold | **reader landed** (2026-06-09): in-kernel `envelope_reader.ghl` in the image + full reject matrix executed by `eval_envelope.py`; threshold signing, host writer, boot/update call-site binding TODO |
-| `track3-sel4-validity-todo.md` | seL4-style authority invariants | **COMPLETE / CLOSED 2026-06-10** - 12 invariants `proven` (2.28M evaluations) AND P3 mapping done: authority bitmasks derived from real signed policy (`derive_authority.py`, 194 checks in the runner); proofs + containment claim table in `track3-invariant-proofs.md` |
+| `track2-signed-everything-todo.md` | signed-artifact envelope + threshold | **software complete / HW-blocked** - envelope reader, real Ed25519 threshold signatures, boot/update/kernel/class call sites, persistent floors, device binding, reject matrix, fuzzing, and independent Worker A software verification are green. Full zero-TODO closure is blocked on the real NVMe/USB `blk_write_sectors` backend for cross-reboot floor persistence on those boot media. |
+| `track3-sel4-validity-todo.md` | seL4-style authority invariants | **COMPLETE / CLOSED / independently verified 2026-06-28** - 21 invariants `proven` (4,576,644 evaluations), translation validation, planted-drift meta-tests, and P3 mapping done: authority bitmasks derived from real signed policy (`derive_authority.py`, 208 checks in the runner); proofs + containment claim table in `track3-invariant-proofs.md` |
 | `track4-ram-secure-erasure-todo.md` | RAM-only/volatile + secure-erasure + HW FME (TME/SME) + leak≠elevation | Part A landed; Part B partial; Part C detect-only; Part D matrix audited |
 | `track4-data-egress-elevation-matrix.md` | Part D leak≠elevation matrix: artifact × barrier, with code citations | **static audit DONE**; planted-leak negative test still `[ ]` |
 | `track5-hypervisor-monitor-todo.md` | **all-vendor hardware** monitor tier - the two irreducible-hardware guarantees only (G1 privilege-below-ring-0 to make the floor un-disableable; G2 IOMMU device-DMA), abstracted across Intel VT-x/VT-d, AMD SVM/AMD-Vi, ARM EL2/SMMUv3, RISC-V H-ext/IOMMU behind one `mon_hal` | **new, design only**; opportunistic; hardens Track 6 |
 | `track6-compartmentalized-monitor-todo.md` | the **software "-1" monitor** decomposed into mutually-isolated single-authority compartments (PT/KEY/HASH/CAP/DMA/LOAD-MON) so one compromise ≠ total compromise; the non-hardware half of the final goal, TCG-verifiable | **new, design only**; the realizable core; Track 5 makes it un-disableable |
 | `track8-userspace-drivers-todo.md` | the Kill-Chain keystone: **drivers as ring-3 default-deny sandbox processes** behind the in-kernel **driver-host broker** (`src/kernel/grithlk/driver_host.ghl`); design in `architecture-userspace-drivers.md` | **Rung 0+1 LANDED 2026-06-14**: design doc, broker framework (compiles `--target kernel --forbid-asm`), and **G2 enforcement** (`tools/security/driver_inventory.txt` freeze + `scripts/test/test_userspace_drivers.ps1`, wired into the entry point with a negative self-test) make a NEW in-kernel driver impossible. Next: Rung 1 G1 `--target driver` compiler gate + Rung 2 battery/acpi_ec migration |
 | `track9-speed-isolation-microarea-todo.md` | sandboxed **speed-isolation prioritisation micro-area**: signed custom scripts running real-time "faster than perfect asm" (whole-program O3/QUBO codegen + runtime-tax removal) inside the Track 2/3/6/8 envelope; multi-core pin/isolate; broker-proxied optimised module/net access; target = server HFT + fast provably-fair RNG/result generation | **new, design only** (2026-06-14); not started |
+| `track11-structural-cfi-memsafety-todo.md` | **structural CFI + memory-safety-by-construction**, replacing hardware PAC/CET with GHL-emitted, monitor-gated, vendor-neutral enforcement: L1 type-signature call tables (fine-grained forward edge), L2 SafeStack split (backward edge, removes the overwrite primitive vs detecting it), L3 spatial+temporal memory safety (the data-only/DOP class PAC/CET miss), L4 CFI-as-a-checked-theorem from the whole-program call graph. Stronger (no forgeable tags/keys, covers data-only), faster (1–3 ALU ops, mostly elided vs sign+auth crypto), portable (GHL + nk WP monitor). | **new, design only** (2026-06-23); not started; depends on GHL compiler + Track 5/6 monitor |
 | `track10-fpga-secure-enclave-todo.md` | **USB-attached FPGA secure-enclave board**, always-on but **single-use-per-boot**: a Phase-A boot one-shot releases only a derived measurement-bound key, then a **triplicated hardware latch** gates the privileged opcodes off in silicon until power-cycle; Phase B serves only board-signed sign/RNG/counter/attest, with the **Track 5 monitor/hypervisor + IOMMU** exclusively owning the device so no ring-3 app (or compromised kernel) can reach it. Moves root-of-trust (Track 7)/anti-rollback floors (Track 2)/real TRNG off host CPU+DRAM; AEAD+nonce session channel; board-enforced (not host-text) required/optional policy. Beyond-iOS = one-transaction privileged window vs SEP's whole-session reachability. Includes threat model + non-goals (lab-physical = raised bar not guarantee) + an **open-problem section on the first-instruction bootstrap gap** (host measures itself; 5 candidate tiers A–E, recommended = B earliest-self-measurement-into-board, in-ethos; C/D vendor-TPM/DRTM only as optional opportunistic hardening) | **new, design only** (2026-06-14); not started; depends on Track 2/5/7/8 |
 
 > **Track 10 status correction (2026-06-14):** software/design is complete: GHL
@@ -114,12 +145,18 @@ Build: monolithic `nasm -f bin` on `src/kernel/kernel_build.asm` via
 
 ## GOTCHAS - known false alarms (do not chase)
 
-- **`worktrees/` inventory failures.** `test_ghl_security_guards.ps1` currently
-  EXITS 1 with ~400 `[new-legacy-extension] worktrees/...` findings. These are a
-  **stray untracked git worktree** (`worktrees/beautiful-yonath-843eca/`), NOT a
-  real regression. Only findings whose path is OUTSIDE `worktrees/` matter. Fix
-  the noise with `git worktree prune` / gitignore. Verify your own change with:
-  filter the output to non-`worktrees/` path-bearing finding lines - zero = clean.
+- **`worktrees/` inventory failures (RESOLVED 2026-06-27 - stale note kept for
+  history).** This used to EXIT 1 with ~400 `[new-legacy-extension]
+  worktrees/...` findings from a stray untracked git worktree. It no longer
+  happens: `tools/security/check_no_asm.ps1:127` now ignores the `worktrees`,
+  `.claude`, `.git`, and `sandbox_shadow` prefixes, AND git-ignored paths are
+  excluded via `git ls-files --others --ignored`, so a stray worktree produces
+  zero findings. If `test_ghl_security_guards.ps1` exits 1, the cause is a REAL
+  finding (e.g. a new `.asm/.inc` not in `legacy_asm_inventory.txt`, a toolchain
+  pin drift after editing `gritc.py` - re-bake with
+  `check_toolchain_pins.ps1 -Update` after review, or a reproducible-build digest
+  drift - re-bake with `check_reproducible_build.py --update` after review), not
+  worktree noise.
 - **`security_todo.md` "SCOPED OUT / DEFERRED" notes are stale.** §5 (snapshot-on-
   open), §7 (net active-slot), and §12 (syscall-perm loader rewrite) were written
   as deferred but are **now wired** (each item carries an `_UPDATE (now LIVE)_`
@@ -167,10 +204,11 @@ Build: monolithic `nasm -f bin` on `src/kernel/kernel_build.asm` via
   KERNEL.ENV; the loader publishes it plus the pristine container read
   buffer (VBE 0xB0..0xC8); kernel_env_verify_boot (envelope_gate.ghl, K5)
   re-hashes and fail-closed compares ('KSG*' panics; QEMU phase 9 of
-  test_track2_envelope_callsites.ps1 green). Track 2 core is COMPLETE;
-  minor residuals: device_id pinned to 1, unused artifact classes,
-  NVMe/USB-boot floor write-back.
-- **Track 3**: **COMPLETE / CLOSED (2026-06-10)** - all 12 invariants `proven`
+  test_track2_envelope_callsites.ps1 green). Track 2 software is COMPLETE;
+  device_id and driver/config/policy class residuals are closed; the only
+  remaining blocker is NVMe/USB-boot floor write-back behind the still-stubbed
+  `blk_write_sectors` backend.
+- **Track 3**: **COMPLETE / CLOSED / independently verified (2026-06-28)** - all 21 invariants `proven`
   AND the P3 mapping landed: `scripts/test/derive_authority.py` derives the
   authority bitmasks from the real signed policy (app manifests / policy graph
   / compiler unsafe caps over the signed build list / artifact-class quorums)

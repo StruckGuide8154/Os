@@ -7,16 +7,18 @@ reduce maintenance risk.
 
 ## P0: Verification Blockers
 
-- [ ] Fix final `scripts\test\test_verify_all.ps1` failure: `scripts\test\test_smp_boot.ps1` reports `Missing extended SMP counters`.
-- [ ] Inspect why `build/cache32_serial.log` contains bare `SMP:` lines instead of the expected extended format: `SMP:<detected>/<target>/<started>/<alive>/<parked>`.
-- [ ] Verify whether `perfdiag_print_smp` in `src/kernel/core/perfdiag.asm` is being called in the Cache32Max BIOS boot path.
-- [ ] Confirm whether the SMP counters are missing because boot logging is truncated, the marker format changed, or AP startup state is not initialized before printing.
-- [ ] Add or adjust a serial marker that always emits extended SMP counters after AP startup, before `scripts\test\test_smp_boot.ps1` reads the log.
-- [ ] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes.
+- [x] Fix final `scripts\test\test_verify_all.ps1` failure: `scripts\test\test_smp_boot.ps1` reports `Missing extended SMP counters`.
+- [x] Inspect why `build/cache32_serial.log` contains bare `SMP:` lines instead of the expected extended format: `SMP:<detected>/<target>/<started>/<alive>/<parked>`.
+- [x] Verify whether `perfdiag_print_smp` in `src/kernel/core/perfdiag.asm` is being called in the Cache32Max BIOS boot path.
+- [x] Confirm whether the SMP counters are missing because boot logging is truncated, the marker format changed, or AP startup state is not initialized before printing. *(The harness ignored a failed/oversized BIOS build and inspected stale output; after the build pipeline was repaired, the complete marker was present.)*
+- [x] Add or adjust a serial marker that always emits extended SMP counters after AP startup, before `scripts\test\test_smp_boot.ps1` reads the log. *(Verified together with eight per-core `APAT` markers.)*
+- [x] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes. *(8/8 detected/target/started/alive/parked.)*
 - [ ] Re-run full `.\scripts\test\test_verify_all.ps1` after the SMP marker fix.
-- [ ] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`.
-- [ ] Ensure QEMU is fully stopped before rebuilding `build\Grit.img`.
-- [ ] Consider making `scripts\test\test_cache32_boot.ps1` delete/retry the image only after confirming no QEMU process holds it.
+- [x] Reconcile the cream/gold palette guard with the runtime palette. *(Replaced XML/manual three-way sync with the validated, generated, CPU-only unified theme system in `assets/themes/theme-spec.json` + `tools/theme_tool.py`; kernel chrome, apps, and NPL resources now derive from one source.)*
+- [ ] Decide how BIOS boots obtain the required signed `SYSSIG.ENV` payload. Cache32 diagnostics are available before the current `SSG0` fail-closed stop, but an interactive BIOS boot cannot pass the signed-artifact join yet.
+- [x] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`. *(The harness previously killed all QEMU processes and did not fail fast on a nonzero BIOS build, allowing stale/mapped-image behavior.)*
+- [x] Ensure the Cache32-owned QEMU is fully stopped before rebuilding `build\Grit.img`, without terminating unrelated interactive QEMU sessions.
+- [x] Make `scripts\test\test_cache32_boot.ps1` wait for its image-owning QEMU process to exit before rebuilding; fail closed if it remains mapped.
 
 ## P0: Test And Guard Staleness
 

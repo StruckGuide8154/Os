@@ -27,6 +27,7 @@ global netpanel_live_refresh;
 # no-op after the boot-time first paint - used to bisect the 1664x262 scanout
 # clobber. feat_on() lives in boot_features.ghl (same NASM translation unit).
 extern feat_on;
+extern kernel_data_segments;
 const FEAT_FRAME_PRESENT_REFRESH = 2;
 const FEAT_DEBUG_OVERLAY = 512;
 
@@ -130,10 +131,15 @@ fn rf_save_idle_keys() {
 # Full repaint: desktop + taskbar + menus + FPS, save, flush, cursor.
 fn rf_full_path() {
     wm_draw_desktop();
-    if lb(&wallpaper_render_active) != 0 {
-        sb(&scene_dirty, 1);          # wallpaper AP busy: defer to next frame
-        return;
-    }
+    # The wallpaper render now targets its own per-core raster slot, so it no
+    # longer races the BSP compositor - the shell / windows / drag stay live while
+    # it rasterizes instead of the whole frame being deferred here (the old
+    # wallpaper-busy whole-frame defer is intentionally gone - kept as infra).
+    #
+    # Kernel asm desktop shell: the taskbar + Start menu are drawn in-kernel
+    # (taskbar.asm). They are drawn every frame now and are no longer hostage to
+    # the wallpaper AP being idle. ctx_menu_draw stays - it is the Explorer
+    # right-click "Open" menu, unrelated to the desktop shell.
     tb_draw();
     tb_draw_submenu();
     ctx_menu_draw();
@@ -160,13 +166,6 @@ fn rf_full_path() {
     cursor_draw(lw(&mouse_x), lw(&mouse_y));
     rf_save_idle_keys();
     if saved == 0 { sb(&scene_dirty, 1); }
-}
-
-# Keep the current front buffer stable while the wallpaper AP rasterizes. Mouse
-# input updates the front-buffer cursor directly, so repeatedly hiding it and
-# full-flushing the same saved frame only creates visible flicker.
-fn rf_wallpaper_busy_present() {
-    sb(&scene_dirty, 1);
 }
 
 # Idle fast path: only the FPS region + cursor change.
@@ -198,6 +197,8 @@ fn rf_draw_drag() {
 # ---- render_frame ----
 
 fn render_frame() {
+    kernel_data_segments();
+
     # Runtime gate: suppress all per-frame present/refresh work when disabled.
     # The boot-time first paint (kmain's initial render_frame) is also gated, so
     # with present=off the desktop is whatever display_init/display_flip left.
@@ -217,11 +218,15 @@ fn render_frame() {
     # it ahead of the wallpaper gate so window movement remains interactive.
     if lq(&wm_drag_window_id) != NO_DRAG { rf_draw_drag(); return; }
 
-    # Wallpaper AP active: pump it; if still busy, preserve the current frame.
+    # Wallpaper AP active: pump it; while it is STILL rendering, preserve the
+    # current frame and do NOT composite. The raster destination is a single
+    # shared target (display_core.inc raster_target_tbl slot 0, guarded by
+    # raster_target_lock), so compositing here would race the AP's wallpaper
+    # raster - the skewed-stripes bug. Defer the frame until the AP finishes.
     if lb(&wallpaper_render_active) != 0 {
         wm_poll_wallpaper_render();
         if lb(&wallpaper_render_active) != 0 {
-            rf_wallpaper_busy_present();
+            sb(&scene_dirty, 1);
             return;
         }
     }
@@ -235,20 +240,15 @@ fn render_frame() {
 
     if lb(&scene_dirty) != 0 { rf_full_path(); return; }
 
-    # Truly idle: skip everything unless the FPS overlay changed. Mouse movement
-    # is already presented by process_mouse() directly to the front buffer; doing
-    # another cursor_hide()/flush()/cursor_draw() here makes the pointer flicker,
-    # especially at high refresh targets.
+    # Truly idle: skip everything unless the FPS overlay or cursor position
+    # changed. Cursor presentation is owned here so hide/draw stays serialized
+    # with render_flush and restores from the current saved backbuffer.
     if lw(&mouse_x) == lw(&rf_last_mouse_x) {
         if lw(&mouse_y) == lw(&rf_last_mouse_y) {
             if lw(&last_fps) == lw(&rf_last_fps) {
                 return;
             }
         }
-    }
-    if lw(&last_fps) == lw(&rf_last_fps) {
-        rf_save_idle_keys();
-        return;
     }
     rf_fast_path();
 }

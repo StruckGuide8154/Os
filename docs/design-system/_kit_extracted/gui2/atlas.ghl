@@ -1,0 +1,107 @@
+# ============================================================================
+# GritHL GUI v2 - atlas.ghl
+# Glyph atlas: rasterize each glyph once, then blit cached cells.
+#
+# v1 SYS_GUI_TEXT re-rasterizes every glyph of every string every frame from
+# the bitmap font. A static label costs the same as freshly typed text. v2
+# rasterizes a glyph once into an off-screen atlas surface owned by the
+# compositor, then text drawing emits OP_GLYPH/OP_BLIT records that copy the
+# cached cell - a memcpy of a few cache lines instead of per-pixel font
+# decoding.
+#
+# The atlas is a grid of fixed cells (one monospace glyph each). A 256-entry
+# direct map covers the printable ASCII range with room for the box-drawing
+# glyphs the terminal uses; codepoints outside the map fall back to v1
+# SYS_GUI_TEXT (correct, just not cached). A small generation counter lets a
+# theme change (which recolors antialiased edges) invalidate the cache.
+# ============================================================================
+
+use core
+
+const SYS_GUI_GLYPH_BAKE = 32   # bake(codepoint, fg, bg) -> atlas cell index
+
+# Font cell metrics match the kernel bitmap font (UI_FONT_W/H in v1).
+const ATLAS_CELL_W = 8
+const ATLAS_CELL_H = 12
+const ATLAS_COLS   = 32          # 32 * 8  = 256px wide
+const ATLAS_ROWS   = 16          # 16 * 12 = 192px tall  -> 512 cells
+
+# Direct codepoint -> cell map (one quad per codepoint). -1 = not baked.
+const GLYPH_MAP   = 0x00BFD000   # 256 quads
+const GLYPH_GEN   = 0x00BFCFF0   # palette generation the cache was baked at
+const GLYPH_NONE  = -1
+
+fn atlas_reset() {
+    let i = 0;
+    while i < 256 {
+        sq(GLYPH_MAP + i * 8, GLYPH_NONE);
+        i = i + 1;
+    }
+    sq(GLYPH_GEN, 0);
+}
+
+# Bump on theme/palette change so colored glyph cells re-bake lazily.
+fn atlas_invalidate(gen) {
+    sq(GLYPH_GEN, gen);
+    atlas_reset();
+}
+
+# Look up (or lazily bake) the atlas cell for one codepoint at the current
+# fg/bg. Returns a cell index usable by cmd_glyph; GLYPH_NONE means "fall
+# back to immediate text for this one".
+fn atlas_cell(codepoint, fg, bg) {
+    if codepoint < 0 { return GLYPH_NONE; }
+    if codepoint >= 256 { return GLYPH_NONE; }
+    let slot = GLYPH_MAP + codepoint * 8;
+    let cell = lq(slot);
+    if cell != GLYPH_NONE { return cell; }
+    # Cold: ask the compositor to rasterize once into the atlas.
+    cell = syscall(SYS_GUI_GLYPH_BAKE, codepoint, fg, bg);
+    sq(slot, cell);
+    return cell;
+}
+
+# Pixel x of a cell within the atlas surface (compositor uses this; exposed
+# for tools that visualize the atlas).
+fn atlas_cell_x(cell) {
+    return (cell % ATLAS_COLS) * ATLAS_CELL_W;
+}
+
+fn atlas_cell_y(cell) {
+    return (cell / ATLAS_COLS) * ATLAS_CELL_H;
+}
+
+# Draw a string through the atlas. Emits one OP_GLYPH per character via
+# batch.ghl (cmd_glyph). Characters not in the atlas map fall back to a
+# single OP_TEXT run so nothing is ever dropped. Returns the advance width.
+#
+# `str_ptr` points at a length-prefixed byte string (quad length, then bytes)
+# matching the GritHL string layout core.ghl uses.
+extern cmd_glyph;
+extern cmd_text;
+
+fn atlas_draw_text(x, y, str_ptr, fg, bg) {
+    let len = lq(str_ptr);
+    let p = str_ptr + 8;
+    let cx = x;
+    let i = 0;
+    while i < len {
+        let ch = lb(p + i);
+        let cell = atlas_cell(ch, fg, bg);
+        if cell == GLYPH_NONE {
+            # Uncached glyph: draw just this char immediately, keep going.
+            cmd_text(cx, y, p + i, 1, fg, bg);
+        } else {
+            cmd_glyph(cx, y, cell, fg, bg);
+        }
+        cx = cx + ATLAS_CELL_W;
+        i = i + 1;
+    }
+    return cx - x;
+}
+
+# Width in pixels a string will occupy (monospace) - layout.ghl measures with
+# this instead of guessing.
+fn atlas_text_w(str_ptr) {
+    return lq(str_ptr) * ATLAS_CELL_W;
+}

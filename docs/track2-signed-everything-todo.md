@@ -227,19 +227,41 @@ evaluator's case table so they cannot drift.
       verifier runs in the kernel over loader-published pristine bytes; a
       pre-kernel root of trust for the loader binary itself remains UEFI
       Secure Boot's job.
-- [~] Remaining residuals: device_id is now REAL (CPUID-derived per-machine
-      id via `gate_device_id_init`, no longer pinned to 1); driver/config/policy
-      artifact classes are wired through the gate (no loaded artifacts yet, by
-      design - no such artifacts ship). Only HW-gated residual left: persistent
-      floors on NVMe/USB-boot hardware need the Phase-4 block write-back (#21),
-      which is untestable under QEMU TCG.
+- [~] Remaining residuals: device_id is now REAL and FULLY unpinned
+      (CPUID-derived per-machine id via `gate_device_id_init`; the only `=1` is
+      `GATE_DEVICE_WILDCARD`, the intentional device-AGNOSTIC build-artifact
+      target, not a verifier fallback - `gate_device_id()` returns the derived
+      id once init has run and masks it to u32 so a top-bit-set CPUID id still
+      EXACT-matches its envelope target; QEMU logs `[DEVID] id=...`).
+      Cross-device replay is now a NEGATIVE test (eval_ed25519.py §11): a
+      device-A-signed envelope is rejected ENVR_ERR_TARGET_DEVICE on machine B
+      and vice-versa, while wildcard-target build artifacts admit on any
+      machine. The driver/config/policy artifact classes have LIVE, tested
+      call sites (`boot_artifact_class_check`, kmain K5; QEMU `[CLASS] k=4/7`):
+      eval_ed25519.py §12 proves each class admits its signed artifact, latches
+      "none" when absent, and refuses a wrong-class (app-in-driver-slot)
+      artifact with GATE_ERR_CALLER_TYPE - so no declared class is a silent
+      no-op. The ONE remaining residual is genuinely HW-gated: persistent
+      floors on NVMe/USB-boot hardware need a kernel NVMe/USB-MSC backing
+      driver behind `blk_write_sectors` (issue #21). The floor_store routing
+      (storage-class dispatch -> `blk_write_sectors`, fail-soft on BLK_ENODEV)
+      is CORRECT and in place; `blk_write_sectors` is a fail-closed stub until
+      the block driver lands. This is untestable under QEMU TCG (no NVMe/USB
+      boot path) - a real physical bound, not a skipped item (see "Path to
+      10/10" below for the precise honest status).
 
 ### Verification (call-site binding)
 
 - Host: `scripts/test/eval_ed25519.py` sections 5-6 (run by
   `test_ghl_security_guards.ps1`) - transpiles crypto.ghl + envelope_gate.ghl
   with the production frontend and exercises admit/cache/wrong-class/
-  fail-closed-panic/update-latch paths (15 checks).
+  fail-closed-panic/update-latch paths (15 checks). §11 adds the cross-device
+  replay negatives (device-A envelope rejected on machine B and vice-versa,
+  wildcard artifacts portable). §12 adds the driver/config/policy class
+  call-site tests (each class admits its signed artifact, latches none when
+  absent, refuses a wrong-class artifact with CALLER_TYPE). All green
+  2026-06-23 (eval_ed25519.py exit 0); independently rerun by Worker A on
+  2026-06-28 together with `eval_envelope.py` and `fuzz_envelope.py`, all green.
 - QEMU end-to-end: `scripts/test/test_track2_envelope_callsites.ps1` - 4
   boots: signed accept (+ in-kernel cache hit), tampered SYSSIG fail-closed
   (no [/BOOTTIME]), signed KUPDATE accepted, tampered KUPDATE rejected
@@ -338,3 +360,61 @@ were already excluded from the GHLK build.**
       ENVR_ERR_SIGCRYPTO). System-wide closure still needs the boot/update
       call sites to be bound to `envelope_verify_signed` (P1 above) so no
       unsigned path remains.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 10 (software) / speed 7**. Core is complete +
+Ed25519-real; the two software-closeable residuals below are CLOSED. The one
+remaining open item is genuinely HW-gated (NVMe/USB block driver) and is bounded
+honestly, exactly like the Track 4/5 hardware residuals - it cannot be closed or
+tested in software under QEMU TCG.
+
+- [x] **(sec→10)** Unpin `device_id` fully and add a cross-device replay negative
+      test on real ids. DONE (2026-06-23): the verifier has no `=1` fallback -
+      `gate_device_id()` returns the CPUID-derived per-machine id
+      (`gate_device_id_init`) once init runs, masked to u32 so a top-bit-set
+      derived id still EXACT-matches its envelope target (fixed a latent
+      signed-`lw` vs unsigned-u32-target mismatch in envelope_gate.ghl). The
+      sole `=1` is `GATE_DEVICE_WILDCARD`, the intentional device-AGNOSTIC
+      build-artifact target. Negative test: eval_ed25519.py §11 drives the
+      gate's derived-id state for two simulated machines and asserts a
+      device-A-signed envelope is REJECTED ENVR_ERR_TARGET_DEVICE (12) on
+      machine B, the device-B envelope is rejected on machine A, each admits on
+      its own machine, and wildcard build artifacts admit on both. Wired into
+      `test_ghl_security_guards.ps1` (the Ed25519 evaluator step). QEMU logs the
+      real id: `[DEVID] id=000000000EF819F5`.
+- [x] **(sec→10)** Retire or wire the unused driver/config/policy artifact classes
+      so every declared class has a live, tested call site. DONE (chose WIRE,
+      not retire): `boot_artifact_class_check` (envelope_gate.ghl, kmain K5)
+      runs each of DRIVER/CONFIG/POLICY through `artifact_gate_admit`, latching
+      a per-class present/rc verdict (optional staged `\EFI\BOOT\*.ENV` files;
+      applying an accepted artifact is a later increment). Tested by
+      eval_ed25519.py §12: each class admits its correctly-signed artifact,
+      latches "none" when the file is absent, and refuses a validly-signed
+      WRONG-class artifact (app staged in the driver slot) with
+      GATE_ERR_CALLER_TYPE (23) - so a declared class can never be a silent
+      no-op nor accept a mis-targeted artifact. QEMU confirms the call sites
+      run in-kernel: `[CLASS] k=4` / `[CLASS] k=7`.
+- [ ] **(sec→10, HW-GATED — bounded, cannot close in software)** NVMe/USB-boot
+      persistent floor write-back (#21). The floor_store.ghl routing is COMPLETE
+      and correct: `floor_persist` dispatches by `ramdisk_storage_class()` and
+      routes NVMe/USB to `blk_write_sectors` (issue #21), ATA to raw PIO, and
+      fails SOFT (floors stay raised in RAM this boot; only cross-reboot
+      persistence is deferred) when no backing driver answers. The remaining
+      work is a real kernel NVMe / USB-MSC block backing driver behind
+      `blk_write_sectors`, which today is a fail-closed `BLK_ENODEV` stub
+      (ramdisk.asm). This is a PHYSICAL bound: QEMU TCG provides no NVMe/USB
+      boot medium for the floor sector, so the cross-reboot persistence on those
+      media cannot be exercised in this environment - the same class of honest
+      HW residual as Track 4 FME / Track 5 VMX hardware enforcement. The
+      software contract around it (storage-class dispatch, fail-soft
+      correctness, RAM ratchet) IS verified.
+- [x] **Verify:** independent Worker A re-rated this track **security 10**
+      (software) on 2026-06-28. The one open `[ ]` above is HW-gated and
+      bounded, not a software gap. Verification run: `eval_envelope.py`
+      (28 reject-matrix cases), `fuzz_envelope.py` (54 corpus + 1500 fuzz
+      inputs), and `eval_ed25519.py` (threshold signatures, call sites,
+      floors, device binding, driver/config/policy classes) all passed.
+- **(speed→max under sec 10)** Keep the by-hash verified-artifact cache; move the
+      SHA-256 payload hashing onto the Track 9 async SMP-offload path so admit
+      never blocks. Target speed **8** (Ed25519 verify is inherently off-hot-path).

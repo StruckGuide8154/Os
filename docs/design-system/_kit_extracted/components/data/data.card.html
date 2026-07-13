@@ -1,0 +1,62 @@
+<!-- @dsCard group="Components" viewport="700x250" name="Data display" subtitle="Card, Badge, Avatar, ProgressBar" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../../styles.css" />
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); color: var(--text-body); font-family: var(--font-ui); padding: 22px 24px; }
+  .row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .row:last-child { margin-bottom: 0; }
+  [data-lucide] { width: 18px; height: 18px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const { Card, Badge, Avatar, ProgressBar } = window.NexusOSDesignSystem_497743;
+  const I = (n) => <i data-lucide={n}></i>;
+  function Demo() {
+    return (
+      <div>
+        <div className="row">
+          <Badge tone="success" dot>Running</Badge>
+          <Badge tone="warning" dot>Degraded</Badge>
+          <Badge tone="error" dot>Halted</Badge>
+          <Badge tone="accent" variant="solid">PRO</Badge>
+          <Badge variant="outline">v0.4.2</Badge>
+          <Badge>Default</Badge>
+        </div>
+        <div className="row">
+          <Avatar name="Ada Lovelace" status="online" />
+          <Avatar name="Grace Hopper" size={44} status="busy" />
+          <Avatar name="Linus T" size={28} status="away" />
+          <Card glow padding="md" style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 220 }}>
+            <span style={{ color: 'var(--text-accent)' }}>{I('cpu')}</span>
+            <div style={{ flex: 1 }}>
+              <div className="grit-label" style={{ marginBottom: 6 }}>Kernel build</div>
+              <ProgressBar value={72} />
+            </div>
+          </Card>
+          <Card interactive padding="md" style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 200 }}>
+            <span style={{ color: 'var(--text-muted)' }}>{I('download')}</span>
+            <div style={{ flex: 1 }}>
+              <div className="grit-label" style={{ marginBottom: 6 }}>Syncing</div>
+              <ProgressBar indeterminate />
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+  ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+  setTimeout(() => window.lucide && window.lucide.createIcons(), 60);
+</script>
+</body>
+</html>

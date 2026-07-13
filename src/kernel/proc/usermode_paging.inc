@@ -167,18 +167,22 @@ FN_BEGIN l3_apply_slot_isolation, 0, 0, FN_RET_SCALAR
 ; l3_apply_wx_policy - EDI = active slot
 ; Walks the active slot's 4KB PT and enforces strict W^X per page:
 ;
-;   * Manifest version 0 (default, set by l3_copy_app_blob_to_slot):
-;     no code range is committed yet. Every present page in the slot is
-;     forced W+NX ??? an unmanifested slot literally cannot execute any
-;     user code until it commits a manifest via SYS_WX_INSTALL_MANIFEST.
+;   * Manifest version 1 (the default now installed by l3_copy_app_blob_to_slot
+;     for EVERY slot, and re-settable by SYS_WX_INSTALL_MANIFEST): strict W+NX
+;     everywhere in the slot, except pages whose slot-offset lies in
+;     [code_start_off, code_end_off) which become X+!W. The default install
+;     names the whole app code window [slide, slide + code_size); the compiler
+;     and blob framing keep all writable app data in `.appdata` above that
+;     window, so the data tail is W+NX without bricking code.
 ;
-;   * Manifest version 1 (set by SYS_WX_INSTALL_MANIFEST after validation):
-;     strict W+NX everywhere in the slot, except pages whose slot-offset
-;     lies in [code_start_off, code_end_off) which become X+!W.
+;   * No valid manifest (version != 1, or installed bounds that fail the
+;     defense-in-depth revalidation): FAIL CLOSED -- every present page in the
+;     slot is forced W+NX, so a slot with a missing/garbage manifest literally
+;     cannot execute any user code (and can never be left W+X). This is the
+;     Codex-review finding-2 fix: the old version-0 "legacy permissive" posture
+;     (blob pages kept W+X) is gone.
 ;
-; Manifest versions other than 1, or installed bounds that fail the
-; defense-in-depth revalidation, collapse back to the version-0 posture
-; (whole slot W+NX). The function only touches the active slot's PT;
+; The function only touches the active slot's PT;
 ; other slots' PTEs are left as l3_apply_slot_isolation set them. TLB is
 ; flushed via CR3 reload before returning.
 ;
@@ -275,12 +279,16 @@ FN_BEGIN l3_apply_wx_policy, 0, 0, FN_RET_SCALAR
     cmp rdx, (L3_HANDLE_TABLE_SZ + 0xFFF) & ~0xFFF
     jb .wx_set_wnx
 
-    ; No manifest -> legacy permissive: blob pages keep their existing W+X
-    ; permissions. GritHL apps interleave .text and .data in one section,
-    ; so forcing W+NX here breaks string scratches / .bss-style buffers.
-    ; Apps that want strict W^X opt in via SYS_WX_INSTALL_MANIFEST.
+    ; No valid manifest -> FAIL CLOSED (Codex review finding 2): force this blob
+    ; page W+NX rather than leaving it W+X. Every slot now installs a default v1
+    ; manifest at copy time (l3_copy_app_blob_to_slot), and the compiler/blob
+    ; framing groups all writable app data into `.appdata` above the code window,
+    ; so a *valid* manifest never needs a page to be both writable and executable.
+    ; Reaching here with r10d==0 means the manifest was missing or failed the
+    ; bounds revalidation above -- treat the page as non-executable data, never as
+    ; W+X. (Stack/handle-table pages already diverted to .wx_set_wnx above.)
     test r10d, r10d
-    jz .wx_next
+    jz .wx_set_wnx
 
     mov ecx, r8d
     cmp rsi, [l3_wx_code_start + rcx*8]
@@ -303,6 +311,24 @@ FN_BEGIN l3_apply_wx_policy, 0, 0, FN_RET_SCALAR
     mov [r11], rax
 
 .wx_next:
+    ; Invariant check (Codex review finding 2): after this walker touches a
+    ; present slot page, it must never leave the PTE both writable and
+    ; executable. This is cheap enough to keep in the runtime path, and turns any
+    ; future carve-out regression into a fail-closed kernel-integrity panic
+    ; instead of silently handing ring 3 a W+X page.
+    test al, 1
+    jz .wx_advance
+    test al, 2
+    jz .wx_advance
+    mov rdx, PAGE_NX
+    test rax, rdx
+    jnz .wx_advance
+    mov rdi, rax
+    mov rsi, r11
+    mov edx, 0x57585054             ; "WXPT"
+    jmp kernel_panic_canary
+
+.wx_advance:
     add r11, 8
     inc r12d
     cmp r12d, ARENA_SLOT_PAGES
@@ -314,7 +340,7 @@ FN_BEGIN l3_apply_wx_policy, 0, 0, FN_RET_SCALAR
     call nk_pt_window_end
 
     ; Code-range hash-on-install (security_todo.md ??12). The first time a slot
-    ; presents a valid v1 manifest (r10d==1), capture the FNV-1a hash of its
+    ; presents a valid v1 manifest (r10d==1), capture the SHA-256 hash of its
     ; X-page bytes as the integrity baseline. Subsequent activations skip this
     ; (valid flag set); pit_handler re-verifies the baseline periodically. We
     ; baseline here rather than in the install syscall so the hook stays
@@ -349,10 +375,11 @@ FN_BEGIN l3_apply_wx_policy, 0, 0, FN_RET_SCALAR
 ; l3_apply_wx_policy guards the *permissions*; this guards the *contents*.
 ;
 ; APPROACH: when a slot first commits a valid v1 manifest, hash every byte of
-; its executable code range (FNV-1a; same constants as crypto.ghl, but a
-; local stateless fold so we carry no cross-file dependency) and stash it in
-; l3_code_hash[slot]. pit_handler periodically re-hashes and compares; a
-; mismatch means executable bytes changed under us -> kernel_panic_canary.
+; its executable code range (truncated SHA-256 via crypto.ghl's reentrant
+; ci_sha256_* over a per-call stack context - second-preimage resistant, unlike
+; the former FNV-1a fold a code-page writer could trivially forge) and stash the
+; low 64 bits in l3_code_hash[slot]. pit_handler periodically re-hashes and
+; compares; a mismatch means executable bytes changed under us -> per-slot kill.
 ;
 ; The per-slot kernel-owned handle table lives inside the legal code window and
 ; is legitimately mutable (handle_alloc/close write it). l3_apply_wx_policy

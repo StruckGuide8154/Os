@@ -65,7 +65,7 @@ extern i2c_hid_debug_dump
 extern mouse_wait_input
 extern fat16_debug_dump_root
 
-section .data
+section .appdata
 kernel_render_rect_ptr dq render_rect
 kernel_render_text_ptr dq render_text
 

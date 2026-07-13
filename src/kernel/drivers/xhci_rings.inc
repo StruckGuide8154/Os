@@ -9,17 +9,20 @@ xhci_setup_scratchpad:
     test ecx, ecx
     jz .scratch_done              ; No scratchpads needed
 
-    ; XHCI region 0x1740000..0x17F0000 = 0xB0000 (720 KB). First page holds
-    ; the pointer array (max 512 entries fits in 4 KB); buffers start at
-    ; +0x1000. That leaves 0xAF000/0x1000 = 175 4K-buffer slots. Cap at 64
-    ; - way above what any real controller asks for (typical: 8-32) and
-    ; far enough below the limit to be safe. Real AMD FCH/Promontory
-    ; report >4 here, and silently dropping them gives undefined DMA
-    ; targets on first device address - a likely "QEMU works, HW fails"
-    ; failure mode.
-    cmp ecx, 128
+    ; SECURITY: ecx is the controller-reported scratchpad count (HCSPARAMS2, an
+    ; attacker-influenced value up to 0x3FF). The pointer array lives in the first
+    ; page of the SCRATCH region (XHCI_SCRATCH_ADDR) and buffer i is placed at
+    ; XHCI_SCRATCH_ADDR + 0x1000*(i+1). The SCRATCH region is exactly one 64 KiB
+    ; window (XHCI_DEV_CTX_ADDR - XHCI_SCRATCH_ADDR = 0x10000), so only
+    ; XHCI_SCRATCH_MAX (=15) 4 KiB buffers fit after the pointer page. The old cap
+    ; (128) let a controller that reports many scratchpads be handed buffer
+    ; pointers running to +0x80000 - well past DEV_CTX/INPUT_CTX/the rings - i.e.
+    ; directing controller DMA on top of our own xHCI control structures. Clamp to
+    ; XHCI_SCRATCH_MAX so every buffer stays inside the region (15 >= any real
+    ; controller's request: typical 8-32 -> here bounded by the region, not 128).
+    cmp ecx, XHCI_SCRATCH_MAX
     jle .scratch_ok
-    mov ecx, 128
+    mov ecx, XHCI_SCRATCH_MAX
 .scratch_ok:
 
     ; Scratchpad array at XHCI_SCRATCH_ADDR
@@ -112,7 +115,76 @@ xhci_setup_event_ring:
     mov dword [rsi + XHCI_RT_IR0_ERSTBA_LO], XHCI_ERST_ADDR
     mov dword [rsi + XHCI_RT_IR0_ERSTBA_HI], 0
 
+    ; Interrupter 0: no moderation for now (the main loop batches event-ring
+    ; drain work), clear any stale pending bit, and enable interrupt delivery.
+    mov dword [rsi + XHCI_RT_IR0_IMOD], 0
+    mov dword [rsi + XHCI_RT_IR0_IMAN], 3     ; IP W1C | IE
+
     pop rsi
+    ret
+
+; ============================================================================
+; xhci_route_irq - Route firmware PCI INTx line to vector 51 when available.
+; ============================================================================
+global xhci_route_irq
+xhci_route_irq:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+
+    mov eax, [xhci_pci_addr]
+    test eax, eax
+    jz .route_done
+    or eax, 0x3C
+    call pci_read_conf_dword
+    movzx edi, al                    ; Interrupt Line
+    cmp edi, 0xFF
+    je .route_done
+    cmp edi, 0
+    je .route_done
+    mov esi, 51                      ; xHCI vector
+    xor edx, edx                     ; BSP APIC id 0
+    mov ecx, 0xA000                  ; PCI INTx: level-triggered, active-low
+    call ioapic_set_irq
+
+.route_done:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; ============================================================================
+; xhci_irq_ack - Minimal ISR-side acknowledgement.
+; The heavy event-ring drain stays in the main loop. This clears xHCI's pending
+; interrupt latches so the level line can deassert before LAPIC EOI.
+; ============================================================================
+global xhci_irq_ack
+xhci_irq_ack:
+    push rax
+    push rsi
+
+    mov rsi, [xhci_rt_base]
+    test rsi, rsi
+    jz .ack_sts
+    XHCI_MMIO_ASSERT rsi, MMIO_XHCI_WINDOW
+    mov eax, [rsi + XHCI_RT_IR0_IMAN]
+    or eax, 3                        ; clear IP, keep IE set
+    mov [rsi + XHCI_RT_IR0_IMAN], eax
+
+.ack_sts:
+    mov rsi, [xhci_op_base]
+    test rsi, rsi
+    jz .ack_done
+    XHCI_MMIO_ASSERT rsi, MMIO_XHCI_WINDOW
+    mov dword [rsi + XHCI_OP_USBSTS], XHCI_STS_EINT
+
+.ack_done:
+    pop rsi
+    pop rax
     ret
 
 ; ============================================================================
@@ -137,16 +209,10 @@ xhci_submit_cmd:
     jl .no_wrap
 
     ; We hit the Link TRB - toggle cycle and wrap
-    
+
     ; Debug: 'C'
-    push rax
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'C'
-    out dx, al
-    pop rdx
-    pop rax
-    
+    SER 'C'
+
     ; Update Link TRB cycle bit
     mov rsi, XHCI_CMD_RING_ADDR
     lea rax, [rsi + (XHCI_RING_SIZE - 1) * XHCI_TRB_SIZE]
@@ -187,13 +253,7 @@ xhci_submit_cmd:
     mov dword [rsi], 0
 
     ; Serial: 'v' = doorbell rung
-    push rax
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'v'
-    out dx, al
-    pop rdx
-    pop rax
+    SER 'v'
 
     ; Poll event ring for Command Completion (PIT-based 2-second timeout + spin fallback)
     mov rax, [tick_count]
@@ -209,13 +269,7 @@ xhci_submit_cmd:
     jl .poll
 
     ; PIT timeout
-    push rax
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'Z'
-    out dx, al
-    pop rdx
-    pop rax
+    SER 'Z'
     jmp .cmd_fail
 
 .cmd_fail:
@@ -231,7 +285,8 @@ xhci_submit_cmd:
     cmp ecx, TRB_CMD_COMPLETION
     jne .poll                     ; Not our event, keep polling
 
-    ; Serial: print completion code digit
+    ; Serial: print completion code digit (debug-only)
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
     push rdx
     mov dx, 0x3F8
@@ -246,6 +301,7 @@ xhci_submit_cmd:
     pop rax
     pop rdx
     pop rax
+%endif
 
     ; Return completion code
     ; (already in EAX from xhci_poll_event)
@@ -266,6 +322,7 @@ global xhci_poll_event
 xhci_poll_event:
     push rsi
     push rdi
+    push r8                       ; steal-budget scratch (restored before return)
 
     ; Serialize access to the event ring. GRIT_ENABLE_RING3_AP can have CPU0
     ; in rtl8156_rx_once polling for a DHCP OFFER while CPU N is in
@@ -274,17 +331,35 @@ xhci_poll_event:
     ; cycle bit was JUST flipped by the other's dequeue advance, treats the
     ; old contents as a fresh event, and dispatches off a stale slot/type →
     ; observed as RIP=0 page fault during DHCP+mouse contention.
+    ; BOUNDED acquire. The critical section is a few dozen instructions, so a
+    ; legitimately-held lock clears almost immediately. A lock that is still held
+    ; after a large spin budget means the holder is wedged or died mid-section
+    ; (e.g. a faulted core, or an MMIO assert long-jumped out without releasing).
+    ; Past the budget we STEAL it rather than spin forever - matches the
+    ; bounded_lock.ghl liveness-over-exclusion policy and keeps this AP alive.
+    ; The budget is iteration-based (tick-independent) so it holds even when
+    ; tick_count is frozen; ~50M pause iterations is far longer than any real
+    ; holder yet still terminates in well under a second on any CPU.
+    mov r8d, 50000000             ; steal budget (spin iterations)
 .evt_lock_acquire:
     mov eax, 1
     xchg eax, [rel xhci_evt_lock]
     test eax, eax
-    jnz .evt_lock_spin
-    jmp .evt_have_lock
+    jz .evt_have_lock             ; got it (old value 0)
+    ; contended - back off without bus-locking, re-test
+    dec r8d
+    jz .evt_lock_steal
 .evt_lock_spin:
     pause
     cmp dword [rel xhci_evt_lock], 0
-    jne .evt_lock_spin
+    jne .evt_lock_recheck_budget
     jmp .evt_lock_acquire
+.evt_lock_recheck_budget:
+    dec r8d
+    jnz .evt_lock_spin
+.evt_lock_steal:
+    ; Budget exhausted: presume wedged/dead holder and take the lock.
+    mov dword [rel xhci_evt_lock], 1
 .evt_have_lock:
 
     mov edi, [xhci_evt_dequeue]
@@ -314,15 +389,9 @@ xhci_poll_event:
     jl .no_evt_wrap
     xor edi, edi
     xor byte [xhci_evt_cycle], 1  ; Toggle cycle on wrap
-    
+
     ; Debug: 'W' (Event Wrap)
-    push rax
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'W'
-    out dx, al
-    pop rdx
-    pop rax
+    SER 'W'
 
 .no_evt_wrap:
     mov [xhci_evt_dequeue], edi
@@ -351,6 +420,7 @@ xhci_poll_event:
 
 .evt_ret:
     mov dword [rel xhci_evt_lock], 0   ; release
+    pop r8
     pop rdi
     pop rsi
     ret
@@ -359,4 +429,4 @@ xhci_poll_event:
 ; xhci_find_port - Find first port with a connected device
 ; Returns: EAX = 1 if found, 0 if not. Port number stored in xhci_port_num
 ; ============================================================================
-global xhci_find_port
+global xhci_find_port

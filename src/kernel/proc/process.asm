@@ -30,6 +30,7 @@ global process_find_by_window
 
 extern l3_user_stack_top
 extern l3_syscall_stack_top
+extern l3_install_app_done_trampoline
 extern tss64
 extern tick_count
 %include "src/kernel/proc/process_core.inc"

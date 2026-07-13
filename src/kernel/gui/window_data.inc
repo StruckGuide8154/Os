@@ -45,6 +45,14 @@ wallpaper_process_id dd -1
 wallpaper_render_state db 0
 wallpaper_render_active db 0
 times 2 db 0
+; tick_count deadline for the in-flight wallpaper render (0 = no render armed).
+; Set to tick_count + WALLPAPER_RENDER_MAX_TICKS when a render is submitted; once
+; tick_count passes it the render is abandoned so a wedged render can never pin
+; wallpaper_render_active (and thus freeze the compositor + every app callback).
+; Tick-based, not frame-based: the BSP busy-repaints above the idle frame rate
+; while a render is active. See constants.inc.
+align 8
+wallpaper_render_deadline dq 0
 wallpaper_render_handle dd -1
 wallpaper_render_theme dd 0
 wallpaper_render_w dd 0
@@ -60,7 +68,7 @@ wallpaper_render_pack times 32 db 0
 ; recycled slot re-interns on its next dispatch. Mirrors the per-slot handle
 ; table's kernel-BSS discipline.
 section .bss
-align 16
+alignb 16
 global wm_cb_table
 wm_cb_table  resq MAX_WINDOWS * WM_CB_FIELDS
 

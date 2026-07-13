@@ -13,7 +13,7 @@ $required = @(
     'src/boot/paging.asm',
     'src/include/window_layout.inc',
     'src/kernel/gui/window.asm',
-    'src/kernel/fs/fat16.asm',
+    'src/kernel/grithlk/fat16_core.ghl',
     'scripts/test/test_verify_all.ps1'
 )
 

@@ -1,0 +1,375 @@
+# GritHL shell configuration model.
+#
+# The single source of truth for the desktop shell's *content*: which apps
+# exist, what icon/label/geometry each uses, and which apps currently appear
+# on the three customizable surfaces - the desktop ("homescreen"), the taskbar
+# pin strip, and the Start menu.
+#
+# This replaces the scattered hardcoded kernel-asm tables that used to own this
+# data (menu_entries / icon_table / desktop_icons in src/kernel/gui/*.asm). The
+# shell process (src/user/grithl/apps/shell.ghl) reads everything through the
+# enumerate API below and renders it with gui2 + theme_col + icon_render, so:
+#
+#   * adding an app is one catalog row - no renderer or kernel change,
+#   * a theme switch restyles the whole shell (colors via theme, glyphs via the
+#     active icon pack resolved by logical name), and
+#   * the surfaces are mutable at runtime (add/remove desktop icon, pin/unpin).
+#
+# Frozen-surface pattern (same as theme.ghl / icon.ghl): the seed tables here
+# are the interim source. When the disk-backed loader lands they are replaced
+# by a parse of `assets/themes/<active>/shell.xml`; the public API
+# (shell_cfg_init + the enumerate/mutate fns) is already what that loader will
+# expose, so no shell-side change is required at that point.
+#
+# DRIFT WARNING: app ids below MUST match the APP_* enum in
+# src/include/constants.inc and the launch_dispatch switch. A guard in
+# scripts/test/test_source_guards.ps1 cross-checks the two; change both in the
+# same commit.
+
+use core
+
+# ---------------------------------------------------------------------------
+# App ids. Mirror of the kernel APP_* enum (constants.inc / launch_dispatch).
+# ---------------------------------------------------------------------------
+const APP_EXPLORER       = 2
+const APP_TERMINAL       = 3
+const APP_NOTEPAD        = 4
+const APP_SETTINGS       = 5
+const APP_PAINT          = 6
+const APP_ABOUT          = 7
+const APP_SECURITY_PROBE = 8
+const APP_TASKMGR        = 9
+const APP_PING           = 10
+const APP_MEDIA          = 11
+const APP_SHELL          = 12     # the shell's own privileged slot id (not a surface entry)
+
+# ---------------------------------------------------------------------------
+# Catalog record layout. One row per app. Stride is 64 bytes; every field is a
+# machine word accessed via lq/sq so the layout never depends on packing.
+# ---------------------------------------------------------------------------
+const CAT_STRIDE = 64
+const CAT_ID     = 0      # app id (0 = empty row / end of table)
+const CAT_ICON   = 8      # ptr to logical icon-name string ("terminal", ...)
+const CAT_LABEL  = 16     # ptr to display label string
+const CAT_X      = 24     # default window geometry, used at launch time
+const CAT_Y      = 32
+const CAT_W      = 40
+const CAT_H      = 48
+const CAT_FLAGS  = 56     # byte0 = catalog flags (CF_*), byte1 = menu flags (MF_*)
+
+# Catalog flags (byte 0 of CAT_FLAGS).
+const CF_MENU       = 1   # appears in the Start menu
+const CF_DESKTOP    = 2   # part of the *default* desktop layout
+const CF_DESKTOP_OK = 4   # may be added to / removed from the desktop by the user
+const CF_HIDDEN     = 8   # never shown on a surface (internal / dev-only)
+
+# Start-menu per-row flags (byte 1 of CAT_FLAGS) - mirror the old MENU_FLAG_*.
+const MF_SEP_ABOVE = 1    # draw a thin separator above this row
+const MF_DIM       = 2    # render the label muted
+
+const SHELL_CAT_MAX     = 16
+const SHELL_DESKTOP_MAX = 12
+const SHELL_PIN_MAX     = 12
+
+# Backing store. Zero-initialized by the slot loader; seeded by shell_cfg_init.
+#   catalog        : SHELL_CAT_MAX rows of CAT_STRIDE bytes.
+#   desktop / pins : ordered byte lists of app ids (0 = empty tail slot).
+#   cfg_state      : byte0 = inited flag, bytes1..7 reserved.
+state {
+    catalog: 1024;        # SHELL_CAT_MAX * CAT_STRIDE
+    desktop_ids: 16;      # SHELL_DESKTOP_MAX, padded
+    pin_ids: 16;          # SHELL_PIN_MAX, padded
+    cfg_state: 8;
+}
+
+# Canonical strings. Single label + logical icon name per app (the icon pack
+# supplies the glyph for the name; theme supplies the colors).
+str ico_explorer = "explorer";
+str ico_terminal = "terminal";
+str ico_notepad  = "notepad";
+str ico_settings = "settings";
+str ico_paint    = "paint";
+str ico_about    = "about";
+str ico_taskmgr  = "taskmgr";
+str ico_network  = "network";
+str ico_media    = "media";
+str ico_start    = "start";
+str ico_close    = "close";
+str ico_file     = "file";
+str ico_folder   = "folder";
+
+str lbl_explorer = "File Explorer";
+str lbl_terminal = "Terminal";
+str lbl_notepad  = "Notepad";
+str lbl_settings = "Settings";
+str lbl_paint    = "Paint";
+str lbl_about    = "About Grit";
+str lbl_taskmgr  = "Task Manager";
+str lbl_network  = "Networking";
+str lbl_media    = "Media Player";
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+fn cfg_inited() {
+    return lb(&cfg_state);
+}
+
+fn cat_row(idx) {
+    return &catalog + idx * CAT_STRIDE;
+}
+
+# Write one catalog row. Geometry + flags fold into a handful of stores so the
+# seed table below stays a readable one-line-per-app block.
+fn cat_set(idx, id, icon, label, x, y, w, h, cflags, mflags) {
+    let r = cat_row(idx);
+    sq(r + CAT_ID,    id);
+    sq(r + CAT_ICON,  icon);
+    sq(r + CAT_LABEL, label);
+    sq(r + CAT_X, x);
+    sq(r + CAT_Y, y);
+    sq(r + CAT_W, w);
+    sq(r + CAT_H, h);
+    sb(r + CAT_FLAGS,     cflags);
+    sb(r + CAT_FLAGS + 1, mflags);
+}
+
+# ---------------------------------------------------------------------------
+# Seed tables (interim source until shell.xml; see DRIFT WARNING at top).
+# Columns: idx, id, icon, label, x, y, w, h, catalog-flags, menu-flags.
+# ---------------------------------------------------------------------------
+fn cfg_seed_catalog() {
+    cat_set(0,  APP_EXPLORER, &ico_explorer, &lbl_explorer, 120, 80,  420, 340, CF_MENU | CF_DESKTOP | CF_DESKTOP_OK, 0);
+    cat_set(1,  APP_TERMINAL, &ico_terminal, &lbl_terminal, 200, 150, 450, 300, CF_MENU | CF_DESKTOP | CF_DESKTOP_OK, 0);
+    cat_set(2,  APP_NOTEPAD,  &ico_notepad,  &lbl_notepad,  250, 120, 400, 300, CF_MENU | CF_DESKTOP | CF_DESKTOP_OK, 0);
+    cat_set(3,  APP_SETTINGS, &ico_settings, &lbl_settings, 300, 180, 380, 340, CF_MENU | CF_DESKTOP_OK, 0);
+    cat_set(4,  APP_PAINT,    &ico_paint,    &lbl_paint,    150, 100, 340, 240, CF_MENU | CF_DESKTOP_OK, 0);
+    cat_set(5,  APP_TASKMGR,  &ico_taskmgr,  &lbl_taskmgr,  200, 120, 360, 300, CF_MENU | CF_DESKTOP | CF_DESKTOP_OK, 0);
+    cat_set(6,  APP_PING,     &ico_network,  &lbl_network,  220, 90,  480, 360, CF_MENU | CF_DESKTOP | CF_DESKTOP_OK, 0);
+    cat_set(7,  APP_MEDIA,    &ico_media,    &lbl_media,    180, 120, 480, 340, CF_MENU | CF_DESKTOP_OK, 0);
+    cat_set(8,  APP_ABOUT,    &ico_about,    &lbl_about,    280, 200, 380, 300, CF_MENU, MF_SEP_ABOVE | MF_DIM);
+    # End marker.
+    sq(cat_row(9) + CAT_ID, 0);
+}
+
+fn cfg_seed_surfaces() {
+    # Default desktop layout (mirrors the old desktop_icons table: 2,3,4,9,10).
+    sb(&desktop_ids + 0, APP_EXPLORER);
+    sb(&desktop_ids + 1, APP_TERMINAL);
+    sb(&desktop_ids + 2, APP_NOTEPAD);
+    sb(&desktop_ids + 3, APP_TASKMGR);
+    sb(&desktop_ids + 4, APP_PING);
+    # Taskbar pin strip starts empty - the taskbar otherwise shows live windows.
+    # Pin an app here (e.g. sb(&pin_ids + 0, APP_TERMINAL)) to demo a fixed
+    # launcher button.
+}
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+# One-shot init. Idempotent - safe to call from every draw if the shell has no
+# clear startup hook.
+fn shell_cfg_init() {
+    if cfg_inited() != 0 { return; }
+    cfg_seed_catalog();
+    cfg_seed_surfaces();
+    sb(&cfg_state, 1);
+}
+
+# --- Catalog lookup --------------------------------------------------------
+# Return the row address for app id, or 0 if not in the catalog.
+fn shell_cat_find(id) {
+    if cfg_inited() == 0 { shell_cfg_init(); }
+    let i = 0;
+    while i < SHELL_CAT_MAX {
+        let r = cat_row(i);
+        let rid = lq(r + CAT_ID);
+        if rid == 0 { return 0; }
+        if rid == id { return r; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Field accessors. Unknown id returns 0 so callers don't have to guard.
+fn shell_cat_icon(id)  { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_ICON); }
+fn shell_cat_label(id) { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_LABEL); }
+fn shell_cat_x(id)     { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_X); }
+fn shell_cat_y(id)     { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_Y); }
+fn shell_cat_w(id)     { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_W); }
+fn shell_cat_h(id)     { let r = shell_cat_find(id); if r == 0 { return 0; } return lq(r + CAT_H); }
+fn shell_cat_cflags(id){ let r = shell_cat_find(id); if r == 0 { return 0; } return lb(r + CAT_FLAGS); }
+fn shell_cat_mflags(id){ let r = shell_cat_find(id); if r == 0 { return 0; } return lb(r + CAT_FLAGS + 1); }
+
+# True if an app id is allowed on the user-editable desktop surface. Apps the
+# catalog does not mark CF_DESKTOP_OK (and unknown ids) are rejected - this is
+# the gate that keeps a theme/config from placing an unlaunchable or hidden
+# (dev-only) entry on the homescreen.
+fn shell_app_desktop_ok(id) {
+    let f = shell_cat_cflags(id);
+    if (f & CF_HIDDEN) != 0 { return 0; }
+    if (f & CF_DESKTOP_OK) != 0 { return 1; }
+    return 0;
+}
+
+# --- Desktop ("homescreen") surface ---------------------------------------
+fn shell_desktop_count() {
+    if cfg_inited() == 0 { shell_cfg_init(); }
+    let n = 0;
+    while n < SHELL_DESKTOP_MAX {
+        if lb(&desktop_ids + n) == 0 { return n; }
+        n = n + 1;
+    }
+    return SHELL_DESKTOP_MAX;
+}
+
+fn shell_desktop_at(i) {
+    if i < 0 { return 0; }
+    if i >= SHELL_DESKTOP_MAX { return 0; }
+    return lb(&desktop_ids + i);
+}
+
+fn shell_desktop_has(id) {
+    let i = 0;
+    while i < SHELL_DESKTOP_MAX {
+        if lb(&desktop_ids + i) == id { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Add app to the first free desktop slot. No-op if already present, if the app
+# is not CF_DESKTOP_OK, or if the surface is full. Returns 1 on add, else 0.
+fn shell_desktop_add(id) {
+    if shell_app_desktop_ok(id) == 0 { return 0; }
+    if shell_desktop_has(id) != 0 { return 0; }
+    let i = 0;
+    while i < SHELL_DESKTOP_MAX {
+        if lb(&desktop_ids + i) == 0 {
+            sb(&desktop_ids + i, id);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Remove app from the desktop, compacting the tail. Returns 1 if removed.
+fn shell_desktop_remove(id) {
+    let i = 0;
+    while i < SHELL_DESKTOP_MAX {
+        if lb(&desktop_ids + i) == id {
+            let j = i;
+            while j < SHELL_DESKTOP_MAX - 1 {
+                sb(&desktop_ids + j, lb(&desktop_ids + j + 1));
+                j = j + 1;
+            }
+            sb(&desktop_ids + SHELL_DESKTOP_MAX - 1, 0);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- Taskbar pin strip -----------------------------------------------------
+fn shell_pin_count() {
+    if cfg_inited() == 0 { shell_cfg_init(); }
+    let n = 0;
+    while n < SHELL_PIN_MAX {
+        if lb(&pin_ids + n) == 0 { return n; }
+        n = n + 1;
+    }
+    return SHELL_PIN_MAX;
+}
+
+fn shell_pin_at(i) {
+    if i < 0 { return 0; }
+    if i >= SHELL_PIN_MAX { return 0; }
+    return lb(&pin_ids + i);
+}
+
+fn shell_pin_has(id) {
+    let i = 0;
+    while i < SHELL_PIN_MAX {
+        if lb(&pin_ids + i) == id { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn shell_pin_add(id) {
+    if shell_cat_find(id) == 0 { return 0; }
+    if shell_pin_has(id) != 0 { return 0; }
+    let i = 0;
+    while i < SHELL_PIN_MAX {
+        if lb(&pin_ids + i) == 0 {
+            sb(&pin_ids + i, id);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn shell_pin_remove(id) {
+    let i = 0;
+    while i < SHELL_PIN_MAX {
+        if lb(&pin_ids + i) == id {
+            let j = i;
+            while j < SHELL_PIN_MAX - 1 {
+                sb(&pin_ids + j, lb(&pin_ids + j + 1));
+                j = j + 1;
+            }
+            sb(&pin_ids + SHELL_PIN_MAX - 1, 0);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- Start menu surface ----------------------------------------------------
+# The menu is derived from the catalog: every CF_MENU row, in catalog order.
+# This keeps one ordering source while still letting the (future) shell.xml
+# reorder by reordering catalog rows.
+fn shell_menu_count() {
+    if cfg_inited() == 0 { shell_cfg_init(); }
+    let n = 0;
+    let i = 0;
+    while i < SHELL_CAT_MAX {
+        let r = cat_row(i);
+        let id = lq(r + CAT_ID);
+        if id == 0 { return n; }
+        if (lb(r + CAT_FLAGS) & CF_MENU) != 0 { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Return the app id of the i-th menu entry (0 if out of range).
+fn shell_menu_at(i) {
+    if cfg_inited() == 0 { shell_cfg_init(); }
+    if i < 0 { return 0; }
+    let seen = 0;
+    let k = 0;
+    while k < SHELL_CAT_MAX {
+        let r = cat_row(k);
+        let id = lq(r + CAT_ID);
+        if id == 0 { return 0; }
+        if (lb(r + CAT_FLAGS) & CF_MENU) != 0 {
+            if seen == i { return id; }
+            seen = seen + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Per-row menu flags (MF_*) for the i-th menu entry.
+fn shell_menu_flags_at(i) {
+    let id = shell_menu_at(i);
+    if id == 0 { return 0; }
+    return shell_cat_mflags(id);
+}

@@ -1,0 +1,480 @@
+# ============================================================================
+# amd_gmc.ghl - AMD GPU GMC / GART memory compartment (gpu-mem), M4.
+# Track-8 ring-3 driver-host process. Pure GHL, zero-asm.
+# Compile: --target driver  (forces --forbid-asm + --deny-unsafe; reaches
+# hardware ONLY via SC_DRVHOST_* broker syscalls).
+# See docs/gpu-driver/TODO.md (M4 + §3 compartment table) and
+# docs/architecture-userspace-drivers.md.
+#
+# ----------------------------------------------------------------------------
+# WHAT THIS IS (milestone M4)
+# ----------------------------------------------------------------------------
+#   The GMC (Graphics Memory Controller) compartment. It owns GPU memory
+#   translation and NOTHING else:
+#     * Allocates a DMA-contained region from the broker (GRANT_DMA + DMA_MAP)
+#       and lays down a GART/GPUVM page table inside it.
+#     * Programs the GFXHUB (GCVM) VM-context-0 base/start/end registers via
+#       brokered MMIO so the GPU's GFX clients translate through OUR page table.
+#     * Exposes gart_map(gpu_va, sys_phys, flags) - the primitive that maps one
+#       system-physical 4 KiB page into a GPU virtual address. M5/M6 (the
+#       gpu-gfx / CP-ring compartment) submit work whose target pages MUST have
+#       been mapped here first.
+#
+#   Transliterated (NOT resurrected) from:
+#     docs/gpu-driver/reference-780M-asm/code/drivers/gpu/amd_gmc.asm  (~15% scaffold)
+#   and the real Linux sequence:
+#     drivers/gpu/drm/amd/amdgpu/gmc_v11_0.c
+#     drivers/gpu/drm/amd/amdgpu/gfxhub_v3_0.c
+#     gc/gc_11_0_0_offset.h, gc/gc_11_0_0_sh_mask.h  (regGCVM_*)
+#
+# ----------------------------------------------------------------------------
+# COMPARTMENT SECURITY CONTRACT (TODO.md §3 - the headline requirement)
+# ----------------------------------------------------------------------------
+#   gpu-mem is a SEPARATE driver_id from amdgpu(plumbing), gpu-fwload, gpu-gfx,
+#   gpu-display. Its ONLY granted authority is:
+#     (a) the GMC/GFXHUB/MMHUB MMIO register window (a sub-range of BAR0), and
+#     (b) one DMA-contained region holding the page tables.
+#   It is NOT granted: the GFX doorbell, the CP ring DMA, MP0/PSP, or the
+#   scanout surface. Therefore a FULL code-exec compromise of gpu-mem:
+#     * CAN corrupt GART translations (its job - controls what GPU VA -> what
+#       system page), but
+#     * CANNOT submit CP/PM4 work (no doorbell/ring grant),
+#     * CANNOT scan out / change pixels (no DCN grant),
+#     * CANNOT widen its own grants (broker effective = requested & policy),
+#     * CANNOT DMA over the kernel or another driver: the page-table region is
+#       drvhost_dma_contained, and every PTE this code writes can only point at
+#       pages the *broker* already minted as DMA-reachable for this driver.
+#
+#   gart_map() IS THE SECURITY CHOKE POINT for the whole GPU stack: the later
+#   gpu-gfx compartment may DMA *only* into pages this compartment mapped. The
+#   double-gate (TODO.md §3 "DMA is double-gated") is: gpu-gfx ring targets are
+#   checked against GART, and GART entries are checked here against the broker's
+#   DMA containment. Neither side alone can reach unmapped memory.
+#
+# ----------------------------------------------------------------------------
+# HONESTY: this is UNRUNNABLE without real AMD silicon.
+# ----------------------------------------------------------------------------
+#   Every register offset, the PTE bit layout, the CONTEXT0_CNTL template, and
+#   the GRANT_DMA/DMA_MAP broker ABI semantics are marked inline with
+#   "NEEDS-HW" where they require a real GPU (or the not-yet-final broker DMA
+#   ABI) to verify. Code-complete != working. Do not claim M4 done until a
+#   real AMD GPU confirms a fault-free context-0 enable + a translating map.
+# ============================================================================
+
+app "amd_gmc" { stack = 8192; }
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of rtl8156.ghl / amdgpu.ghl; see driver_host.ghl).
+# These numbers are the coherent SC_DRVHOST_* ABI shared by all driver-host
+# processes. (driver_host.ghl: REGISTER 232, GRANT_MMIO 233, GRANT_DMA 234,
+# MMIO_READ32 240, MMIO_WRITE32 241, DMA_MAP 242.)
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232
+const SC_DRVHOST_GRANT_MMIO   = 233
+const SC_DRVHOST_GRANT_DMA    = 234
+const SC_DRVHOST_MMIO_READ32  = 240
+const SC_DRVHOST_MMIO_WRITE32 = 241
+const SC_DRVHOST_DMA_MAP      = 242
+const SC_TICKS                = 18
+
+const DRV_OK = 0
+
+# Capability classes (driver_host.ghl DRV_CAP_*).
+const CAP_MMIO = 1
+const CAP_DMA  = 4
+
+# ---------------------------------------------------------------------------
+# GFXHUB (GCVM) context-0 register dword offsets, RELATIVE TO THE GC SMN BASE.
+# In the asm these were ((GC_BASE/4) + mmGCVM_*). Here the GC base comes from
+# IP-discovery (passed in as gc_base_byte) so we never hardcode a per-SKU base.
+# The mmGCVM_* dword indices below are gc_11_0_0_offset.h values (GFX11).
+#   NEEDS-HW: these dword indices are GFX11-specific. GFX10/GFX12 differ; the
+#   extractor (TODO.md §5) will emit them per IP version. Verify against
+#   gc_<ver>_0_offset.h before trusting on other silicon.
+# ---------------------------------------------------------------------------
+const MM_GCVM_CTX0_CNTL            = 0x16E5   # mmGCVM_CONTEXT0_CNTL
+const MM_GCVM_CTX0_PT_BASE_LO      = 0x16C0   # ..PAGE_TABLE_BASE_ADDR_LO32
+const MM_GCVM_CTX0_PT_BASE_HI      = 0x16C1   # ..PAGE_TABLE_BASE_ADDR_HI32
+const MM_GCVM_CTX0_PT_START_LO     = 0x16E0   # ..PAGE_TABLE_START_ADDR_LO32
+const MM_GCVM_CTX0_PT_START_HI     = 0x16E1   # ..PAGE_TABLE_START_ADDR_HI32
+const MM_GCVM_CTX0_PT_END_LO       = 0x16E2   # ..PAGE_TABLE_END_ADDR_LO32
+const MM_GCVM_CTX0_PT_END_HI       = 0x16E3   # ..PAGE_TABLE_END_ADDR_HI32
+const MM_GCVM_INV_ENG0_REQ         = 0x16F1   # mmGCVM_INVALIDATE_ENG0_REQ
+const MM_GCVM_INV_ENG0_ACK         = 0x1701   # mmGCVM_INVALIDATE_ENG0_ACK
+const MM_GCVM_FAULT_STATUS         = 0x16BB   # mmGCVM_L2_PROTECTION_FAULT_STATUS
+const MM_GCVM_FAULT_ADDR_LO        = 0x16BC   # ..L2_PROTECTION_FAULT_ADDR_LO32
+const MM_GCVM_FAULT_ADDR_HI        = 0x16BD   # ..L2_PROTECTION_FAULT_ADDR_HI32
+
+# The GART aperture base/size registers (mmGCMC_VM_*) live in GMC, not the
+# context block. Used to advertise the aperture to the hub. NEEDS-HW offsets.
+const MM_GCMC_VM_FB_LOCATION_BASE  = 0x15A8   # mmGCMC_VM_FB_LOCATION_BASE
+const MM_GCMC_VM_FB_LOCATION_TOP   = 0x15A9   # mmGCMC_VM_FB_LOCATION_TOP
+const MM_GCMC_VM_AGP_BASE          = 0x167D   # mmGCMC_VM_AGP_BASE
+const MM_GCMC_VM_AGP_BOT           = 0x167C   # mmGCMC_VM_AGP_BOT
+const MM_GCMC_VM_AGP_TOP           = 0x167B   # mmGCMC_VM_AGP_TOP
+
+# ---------------------------------------------------------------------------
+# CONTEXT0_CNTL bits (gfxhub_v3_0_setup_vmid_config, vmid 0). The asm used the
+# Linux "enable + retry + range-check + NO fault-on-anything" template 0x1FFFC03.
+# During bring-up we keep every fault-on-* enable OFF so a stray probe address
+# does not latch and wedge the hub. PAGE_TABLE_DEPTH and BLOCK_SIZE select the
+# flat single-level layout (one root entry == one leaf, see below).
+#   NEEDS-HW: 0x1FFFC03 is the GFX11 template. Confirm bitfields per IP version.
+# ---------------------------------------------------------------------------
+const GCVM_CTX0_CNTL_ENABLE = 0x1FFFC03
+
+# TLB invalidate request (gmc_v11_0_flush_gpu_tlb): flush vmid 0, all levels.
+#   bits 15:0  PER_VMID_INVALIDATE_REQ (vmid mask)  -> bit 0 for vmid 0
+#   bit  19    INVALIDATE_L2_PTES
+#   bits 20-22 INVALIDATE_L2_PDE0/1/2
+#   bit  23    INVALIDATE_L1_PTES
+# Combined = 0x00F80001.  NEEDS-HW.
+const GCVM_INVALIDATE_ALL = 0x00F80001
+
+# ---------------------------------------------------------------------------
+# PTE / page-table format (amdgpu GPUVM, GFX9..GFX11 64-bit PTE).
+#   bit  0    VALID
+#   bit  1    SYSTEM   (target is system memory, not local VRAM)
+#   bit  2    SNOOPED / coherent
+#   bit  4    READABLE
+#   bit  5    WRITEABLE
+#   bit  6    EXECUTABLE
+#   bit  54   PTE_BLOCK / further (used for the flat 2 MiB block trick; for a
+#             4 KiB leaf PTE it is 0)
+#   bits 47:12 hold the system physical page frame (addr already 4 KiB aligned).
+# We build a SINGLE-LEVEL flat page table: the context's page-table base points
+# directly at an array of 4 KiB leaf PTEs (PAGE_TABLE_DEPTH = 0). Entry i maps
+# gpu_va = GART_APERTURE_BASE + i*4096. This is the simplest correct GART: a
+# linear PTE array over a fixed aperture. A tree builder replaces it when MES /
+# multi-context lands (matches the asm's note).
+#   NEEDS-HW: exact bit positions (esp. SNOOPED/EXEC and the 47:12 frame field)
+#   must be confirmed against gmc_v11_0.c::gmc_v11_0_get_vm_pte_flags + the
+#   amdgpu_vm pte helpers for the target IP version.
+# ---------------------------------------------------------------------------
+const PTE_VALID    = 0x1
+const PTE_SYSTEM   = 0x2
+const PTE_SNOOPED  = 0x4
+const PTE_READABLE = 0x10
+const PTE_WRITE    = 0x20
+const PTE_EXEC     = 0x40
+const PTE_ADDR_MASK = 0x0000FFFFFFFFF000   # bits 47:12 (page frame)
+
+# Default flags for a system-memory page the GPU may read+write (no exec).
+const GART_FLAGS_RW = 0x37    # VALID|SYSTEM|SNOOPED|READABLE|WRITE
+
+# ---------------------------------------------------------------------------
+# Aperture + page-table geometry.
+#   The flat PT covers GART_NPAGES * 4 KiB starting at GART_APERTURE_BASE in GPU
+#   virtual space. 2048 entries * 4 KiB = 8 MiB aperture; 2048 * 8 B = 16 KiB of
+#   page-table memory (well within one DMA region). Bring-up sizing; grow later.
+#   NEEDS-HW: GART_APERTURE_BASE must sit in the GPUVM hole the firmware leaves
+#   for the system aperture (gmc_v11_0 derives it from mc_vram_size / agp). The
+#   value here is a placeholder; the real base comes from GMC FB/AGP location
+#   readback once silicon is present.
+# ---------------------------------------------------------------------------
+const PAGE_SHIFT       = 12
+const PAGE_SIZE        = 0x1000
+const GART_NPAGES      = 2048
+const PTE_BYTES        = 8
+const GART_PT_BYTES    = 0x4000          # 2048 * 8 = 16 KiB
+const GART_APERTURE_BASE = 0x0000000000000000   # NEEDS-HW: real system aperture base
+
+# DMA region we ask the broker to mint: page-table bytes, rounded to a page.
+# Kept tiny + DMA-contained so a gpu-mem compromise is boxed to this region.
+const DMA_TOTAL = 0x4000                 # 16 KiB == GART_PT_BYTES
+
+# Healthy invalidate ack within ~ms; PIT-tick based (raw loops diverge ~5000x
+# QEMU vs real HW - never spin a raw counter).
+const GMC_TIMEOUT_TICKS = 50
+
+# Sub-step progress markers (transliterated from the asm gmc_substep) so a
+# failed init tells us WHERE it died.
+const SUBSTEP_NONE        = 0
+const SUBSTEP_DMA_GRANTED = 1
+const SUBSTEP_PT_WRITTEN  = 2
+const SUBSTEP_BASE_PROG   = 3
+const SUBSTEP_RANGE_PROG  = 4
+const SUBSTEP_CTX_ENABLED = 5
+const SUBSTEP_INV_KICK    = 6
+const SUBSTEP_FAULT_CHECK = 7
+const SUBSTEP_READY       = 8
+
+# ---------------------------------------------------------------------------
+# Driver-private state (ring-3 local; MMU-confined; outside any broker-writable
+# slot - a compromised gpu-mem cannot widen its own grants).
+# ---------------------------------------------------------------------------
+state {
+    self_id:    4;
+    gc_base:    8;     # GC/GFXHUB SMN/MMIO base BYTE offset (from IP-discovery)
+    mmhub_base: 8;     # MMHUB base BYTE offset (from IP-discovery; reserved)
+    pt_phys:    8;     # device-physical base of the page-table DMA region
+    pt_va:      8;     # ring-3 VA the broker mapped the DMA region to
+    mapped_pages: 4;   # accounting: live GART entries
+    # GMC diagnostics (mirror the asm globals).
+    substep:        4;
+    fault_status:   4;
+    fault_addr_lo:  4;
+    fault_addr_hi:  4;
+    inv_ack_seen:   4;
+    cntl_readback:  4;
+    # Simple-but-real VRAM/GTT accounting (bytes). VRAM size is read from GMC on
+    # real HW; here we track GTT (system-aperture) usage which is what GART maps.
+    gtt_total:  8;
+    gtt_used:   8;
+}
+
+# ---------------------------------------------------------------------------
+# Brokered MMIO. The GC base is a BYTE offset (from IP-discovery); a register's
+# absolute byte offset = gc_base + reg_dword*4. The broker bounds-checks every
+# access against this compartment's granted GMC window (default-deny).
+# ---------------------------------------------------------------------------
+fn gc_rd(reg_dw) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&gc_base) + (reg_dw << 2));
+}
+fn gc_wr(reg_dw, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&gc_base) + (reg_dw << 2), val);
+}
+
+# ---------------------------------------------------------------------------
+# Page-table memory writes go to the DMA region VA the broker mapped. PTEs are
+# 64-bit; GHL sd() stores a 32-bit dword, so a PTE = two dwords (lo, hi).
+# Writing here is NOT a syscall: the region is already broker-granted +
+# DMA-contained, so ring-3 may touch it directly (validate-once discipline,
+# same as rtl8156's dma_va frame writes).
+# ---------------------------------------------------------------------------
+fn pte_write(index, pte_lo, pte_hi) {
+    let va = lq(&pt_va) + index * PTE_BYTES;
+    sd(va,     pte_lo);
+    sd(va + 4, pte_hi);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# gart_zero_pt - clear the whole page table so every entry starts INVALID
+# (bit0 = 0). Fail-closed: an unmapped GPU VA must fault, never alias stale
+# system memory. This is the security baseline of the choke point.
+# ---------------------------------------------------------------------------
+fn gart_zero_pt() {
+    let i = 0;
+    while i < GART_NPAGES {
+        pte_write(i, 0, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# gart_map(gpu_va, sys_phys, flags) - THE PRIMITIVE (and the security choke
+# point). Map one 4 KiB system-physical page at `sys_phys` into GPU virtual
+# address `gpu_va` with `flags` (e.g. GART_FLAGS_RW).
+#
+# Returns DRV_OK on success, negative on rejection. REJECTS (fail-closed):
+#   * gpu_va outside [GART_APERTURE_BASE, +GART_NPAGES*4096)
+#   * gpu_va or sys_phys not 4 KiB aligned
+#
+# SECURITY NOTE: the system page `sys_phys` MUST be one the broker already
+# minted as DMA-reachable for THIS driver (it lies inside our GRANT_DMA region
+# or a brokered IPC handle). gpu-mem cannot fabricate DMA authority - it can
+# only point a PTE at memory the broker already authorized. A later gpu-gfx
+# compartment may then DMA only into pages mapped here. The broker's
+# drvhost_dma_contained is the kernel-side enforcement; this function is the
+# compartment-side gate that decides WHICH authorized page lands at WHICH VA.
+#   NEEDS-HW: after writing the PTE a real flush must invalidate the TLB for the
+#   touched VA before the GPU sees it. We do a full-context invalidate in
+#   gart_flush(); a production path would do a ranged invalidate per map.
+# ---------------------------------------------------------------------------
+fn gart_map(gpu_va, sys_phys, flags) {
+    # Range + alignment checks (fail-closed).
+    if gpu_va < GART_APERTURE_BASE { return 0 - 1; }
+    let off = gpu_va - GART_APERTURE_BASE;
+    if off >= (GART_NPAGES << PAGE_SHIFT) { return 0 - 2; }
+    if (gpu_va & 0xFFF) != 0 { return 0 - 3; }
+    if (sys_phys & 0xFFF) != 0 { return 0 - 4; }
+
+    let index = off >> PAGE_SHIFT;
+
+    # Compose the 64-bit PTE: page frame (47:12) | attribute flags (low bits).
+    let pte = (sys_phys & PTE_ADDR_MASK) | (flags & 0xFFF);
+    let pte_lo = pte & 0xFFFFFFFF;
+    let pte_hi = (pte >> 32) & 0xFFFFFFFF;
+    pte_write(index, pte_lo, pte_hi);
+
+    sd(&mapped_pages, ld(&mapped_pages) + 1);
+    sq(&gtt_used, lq(&gtt_used) + PAGE_SIZE);
+    return DRV_OK;
+}
+
+# gart_unmap - return a GPU VA to INVALID (fault-on-access). Mirror checks.
+fn gart_unmap(gpu_va) {
+    if gpu_va < GART_APERTURE_BASE { return 0 - 1; }
+    let off = gpu_va - GART_APERTURE_BASE;
+    if off >= (GART_NPAGES << PAGE_SHIFT) { return 0 - 2; }
+    if (gpu_va & 0xFFF) != 0 { return 0 - 3; }
+    let index = off >> PAGE_SHIFT;
+    pte_write(index, 0, 0);
+    if ld(&mapped_pages) != 0 {
+        sd(&mapped_pages, ld(&mapped_pages) - 1);
+        sq(&gtt_used, lq(&gtt_used) - PAGE_SIZE);
+    }
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# gart_flush - kick GFXHUB invalidate engine 0 (flush vmid 0, all levels) and
+# poll the ack. The ack may never come pre-KIQ (engine 0 is conventionally
+# KIQ-reserved on GFX11), so we capture it for diag but DO NOT fail on timeout -
+# the real success criterion is a clean fault-status (see gmc_program_context).
+#   NEEDS-HW: ack semantics + whether engine 0 is usable before KIQ.
+# ---------------------------------------------------------------------------
+fn gart_flush() {
+    gc_wr(MM_GCVM_INV_ENG0_REQ, GCVM_INVALIDATE_ALL);
+    sd(&substep, SUBSTEP_INV_KICK);
+    let deadline = syscall(SC_TICKS) + GMC_TIMEOUT_TICKS;
+    while syscall(SC_TICKS) < deadline {
+        let a = gc_rd(MM_GCVM_INV_ENG0_ACK);
+        if (a & 0x1) != 0 {
+            sd(&inv_ack_seen, a);
+            return 1;
+        }
+    }
+    sd(&inv_ack_seen, gc_rd(MM_GCVM_INV_ENG0_ACK));
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# gmc_program_context - program GFXHUB VM context 0 to translate through our
+# flat page table over [GART_APERTURE_BASE, +aperture). Sequence transliterated
+# from gfxhub_v3_0_setup_vm_pt_regs + gfxhub_v3_0_setup_vmid_config:
+#   1. base    = pt_phys (LO/HI)
+#   2. start   = GART_APERTURE_BASE >> 12 (page units, inclusive)
+#   3. end     = (GART_APERTURE_BASE + aperture - 1) >> 12
+#   4. enable context 0 (CNTL), read it back
+#   5. invalidate TLB
+#   6. capture fault status (informational on bare context-enable)
+# Returns 1 on success (context enabled, no hard fault), 0 on a precondition or
+# a latched protection fault that should block further bring-up.
+# ---------------------------------------------------------------------------
+fn gmc_program_context() {
+    if lq(&gc_base) == 0 { return 0; }
+    if lq(&pt_va) == 0   { return 0; }
+
+    # (1) page-table base = device-physical base of the PT region.
+    let base = lq(&pt_phys);
+    gc_wr(MM_GCVM_CTX0_PT_BASE_LO, base & 0xFFFFFFFF);
+    gc_wr(MM_GCVM_CTX0_PT_BASE_HI, (base >> 32) & 0xFFFFFFFF);
+    sd(&substep, SUBSTEP_BASE_PROG);
+
+    # (2)+(3) start/end in 4 KiB page units (inclusive).
+    let start_pg = GART_APERTURE_BASE >> PAGE_SHIFT;
+    let end_byte = GART_APERTURE_BASE + (GART_NPAGES << PAGE_SHIFT) - 1;
+    let end_pg   = end_byte >> PAGE_SHIFT;
+    gc_wr(MM_GCVM_CTX0_PT_START_LO, start_pg & 0xFFFFFFFF);
+    gc_wr(MM_GCVM_CTX0_PT_START_HI, (start_pg >> 32) & 0xFFFFFFFF);
+    gc_wr(MM_GCVM_CTX0_PT_END_LO,   end_pg & 0xFFFFFFFF);
+    gc_wr(MM_GCVM_CTX0_PT_END_HI,   (end_pg >> 32) & 0xFFFFFFFF);
+    sd(&substep, SUBSTEP_RANGE_PROG);
+
+    # (4) enable context 0, read back so we know the write landed.
+    gc_wr(MM_GCVM_CTX0_CNTL, GCVM_CTX0_CNTL_ENABLE);
+    sd(&cntl_readback, gc_rd(MM_GCVM_CTX0_CNTL));
+    sd(&substep, SUBSTEP_CTX_ENABLED);
+
+    # (5) flush the TLB (ack best-effort, see gart_flush).
+    gart_flush();
+
+    # (6) capture fault status/address. A non-zero fault on bare context enable
+    # is expected (clients begin translating through a sparse PT), so we record
+    # it but advance. The CP is still in reset; nothing has done wrong yet.
+    sd(&fault_status,  gc_rd(MM_GCVM_FAULT_STATUS));
+    sd(&fault_addr_lo, gc_rd(MM_GCVM_FAULT_ADDR_LO));
+    sd(&fault_addr_hi, gc_rd(MM_GCVM_FAULT_ADDR_HI));
+    sd(&substep, SUBSTEP_FAULT_CHECK);
+
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# gmc_init - the compartment entry point.
+#   gc_base_byte    : GC/GFXHUB MMIO base BYTE offset (from IP-discovery ipd_gc)
+#   mmhub_base_byte : MMHUB base BYTE offset (ipd_mmhub; reserved for DCN/SDMA)
+#
+# Steps:
+#   1. Register with the broker requesting ONLY MMIO + DMA caps (no doorbell,
+#      no ring, no IRQ - the compartment cannot submit work or scan out).
+#   2. Grant the GMC MMIO window (a sub-range of BAR0) - the broker bounds every
+#      gc_rd/gc_wr to it.
+#   3. Mint a DMA-contained region for the page table (GRANT_DMA -> phys,
+#      DMA_MAP -> ring-3 VA). The broker records {base,end} so every PTE target
+#      this code later programs is proven inside our own window.
+#   4. Zero the PT (all INVALID = fault-closed), program VM context 0.
+# Returns DRV_OK on success.
+#   NEEDS-HW: GRANT_DMA returning a DMA-coherent, IOMMU-confined,
+#   device-physically-addressable region (and DMA_MAP giving a ring-3 VA over
+#   it) is the broker ABI we depend on; its GPU-suitability is unverified
+#   without silicon.
+# ---------------------------------------------------------------------------
+fn gmc_init(gc_base_byte, mmhub_base_byte) {
+    sd(&substep, SUBSTEP_NONE);
+
+    let id = syscall(SC_DRVHOST_REGISTER, CAP_MMIO | CAP_DMA, 0, 0);
+    sd(&self_id, id);
+
+    # (2) GMC/GFXHUB MMIO window. We grant from the GC base for a bounded span
+    # covering the GCVM context + invalidate + fault + GCMC aperture registers.
+    # 64 KiB comfortably covers the GCVM register block. NEEDS-HW: confirm the
+    # span; keep it as TIGHT as possible (least authority).
+    sq(&gc_base, gc_base_byte);
+    syscall(SC_DRVHOST_GRANT_MMIO, gc_base_byte, 0x10000);
+
+    sq(&mmhub_base, mmhub_base_byte);   # reserved; not granted yet (MMHUB is
+                                        # only needed for DCN/SDMA, deferred).
+
+    # (3) DMA-contained page-table region.
+    let phys = syscall(SC_DRVHOST_GRANT_DMA, DMA_TOTAL);
+    sq(&pt_phys, phys);
+    sq(&pt_va, syscall(SC_DRVHOST_DMA_MAP, phys));
+    sd(&substep, SUBSTEP_DMA_GRANTED);
+
+    # Accounting: the GART aperture is the GTT we can hand out.
+    sq(&gtt_total, GART_NPAGES << PAGE_SHIFT);
+    sq(&gtt_used, 0);
+    sd(&mapped_pages, 0);
+
+    # (4) fault-closed PT, then program + enable the context.
+    gart_zero_pt();
+    sd(&substep, SUBSTEP_PT_WRITTEN);
+
+    if gmc_program_context() == 0 { return 0 - 1; }
+
+    sd(&substep, SUBSTEP_READY);
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Diagnostic accessors (read-only; mirror the asm globals). A controller /
+# test harness can poll these to see where init stands without any new grant.
+# ---------------------------------------------------------------------------
+fn gmc_substep()      { return ld(&substep); }
+fn gmc_fault_status() { return ld(&fault_status); }
+fn gmc_cntl_readback() { return ld(&cntl_readback); }
+fn gmc_mapped_pages() { return ld(&mapped_pages); }
+fn gmc_gtt_used()     { return lq(&gtt_used); }
+fn gmc_gtt_total()    { return lq(&gtt_total); }
+
+fn main() {
+    # TODO(M0): the gpu-pnp controller supplies gc_base / mmhub_base from the
+    # bound instance's IP-discovery (amdgpu.ghl ipd_gc / ipd_mmhub), via the
+    # signed match-table bind - NOT as literals. Provisional GFX11 values for
+    # bring-up wiring only; these are byte offsets within the granted MMIO map.
+    #   NEEDS-HW: real bases come from IP-discovery on the actual device.
+    let gc_base_byte    = 0x00000000;   # placeholder; PnP supplies ipd_gc
+    let mmhub_base_byte = 0x00000000;   # placeholder; PnP supplies ipd_mmhub
+
+    let rc = gmc_init(gc_base_byte, mmhub_base_byte);
+    if rc != DRV_OK { return rc; }
+
+    # Idle. M5 (gpu-gfx) drives gart_map via brokered IPC to map its ring /
+    # blit target pages; this compartment never submits work itself.
+    while 1 { }
+    return DRV_OK;
+}

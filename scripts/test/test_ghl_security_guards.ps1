@@ -5,6 +5,8 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $NoAsmGuard = Join-Path $Root 'tools\security\check_no_asm.ps1'
 $PrivacyGuard = Join-Path $Root 'tools\security\check_release_privacy.ps1'
 $BuildIntegrityGuard = Join-Path $Root 'tools\security\check_build_integrity.ps1'
+$MathematicalFaultGuard = Join-Path $Root 'tools\security\check_mathematical_faults.ps1'
+$ToolchainPinGuard = Join-Path $Root 'tools\security\check_toolchain_pins.ps1'
 $PresubmitGuard = Join-Path $Root 'tools\security\check_ghl_presubmit.ps1'
 $FixtureGuard = Join-Path $Root 'scripts\test\test_ghl_security_fixtures.ps1'
 $InvariantGuard = Join-Path $Root 'scripts\test\test_ghl_invariants.ps1'
@@ -37,6 +39,12 @@ if (-not (Test-Path -LiteralPath $PrivacyGuard)) {
 }
 if (-not (Test-Path -LiteralPath $BuildIntegrityGuard)) {
     throw "Missing build-graph integrity guard: $BuildIntegrityGuard"
+}
+if (-not (Test-Path -LiteralPath $MathematicalFaultGuard)) {
+    throw "Missing mathematical fault guard: $MathematicalFaultGuard"
+}
+if (-not (Test-Path -LiteralPath $ToolchainPinGuard)) {
+    throw "Missing toolchain pin guard: $ToolchainPinGuard"
 }
 if (-not (Test-Path -LiteralPath $PresubmitGuard)) {
     throw "Missing GHL presubmit guard: $PresubmitGuard"
@@ -87,6 +95,18 @@ Write-Host '[ghl-security] Checking build-graph integrity (legacy vs new-archite
 & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildIntegrityGuard
 if ($LASTEXITCODE -ne 0) {
     throw 'Build-graph integrity guard failed (asm/include/nasm leak, generated-as-source, or deprecated import).'
+}
+
+Write-Host '[ghl-security] Checking mathematically triggerable fault proofs...' -ForegroundColor Yellow
+& powershell -NoProfile -ExecutionPolicy Bypass -File $MathematicalFaultGuard -RepoRoot $Root
+if ($LASTEXITCODE -ne 0) {
+    throw 'Mathematical fault guard failed (deterministic trigger/evidence/fix finding emitted).'
+}
+
+Write-Host '[ghl-security] Checking frozen toolchain pins (gritc.py + ed25519_host.py sha256, nasm version)...' -ForegroundColor Yellow
+& powershell -NoProfile -ExecutionPolicy Bypass -File $ToolchainPinGuard
+if ($LASTEXITCODE -ne 0) {
+    throw 'Toolchain pin guard failed (a swapped/edited compiler or assembler).'
 }
 
 Write-Host '[ghl-security] Checking GHL source presubmit rules...' -ForegroundColor Yellow
@@ -174,6 +194,26 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Ed25519 verifier evaluation failed.'
 }
 
+Write-Host '[ghl-security] === Track-1 reproducible-build attestation (pinned gritc double-compile vs recorded digests) ===' -ForegroundColor Cyan
+$ReproBuild = Join-Path $Root 'scripts\test\check_reproducible_build.py'
+if (-not (Test-Path -LiteralPath $ReproBuild)) {
+    throw "Missing reproducible-build attestation: $ReproBuild"
+}
+& python $ReproBuild
+if ($LASTEXITCODE -ne 0) {
+    throw 'Reproducible-build attestation failed (non-reproducible compile or digest drift).'
+}
+
+Write-Host '[ghl-security] === Track-1 signed CI provenance (SLSA-style, verified by the Track-2/7 Ed25519 root) ===' -ForegroundColor Cyan
+$ProvenanceEval = Join-Path $Root 'scripts\test\eval_provenance.py'
+if (-not (Test-Path -LiteralPath $ProvenanceEval)) {
+    throw "Missing signed-provenance evaluator: $ProvenanceEval"
+}
+& python $ProvenanceEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'Signed CI provenance evaluation failed (gen/sign/verify round-trip or a negative).'
+}
+
 Write-Host '[ghl-security] === Enforcement meta-tests (the guards have negative tests) ===' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass -File $MetaTest
 if ($LASTEXITCODE -ne 0) {
@@ -256,9 +296,9 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host '[ghl-security] === Track-5 G1 REAL VT-x back-end compiles (kernel_vmx intrinsics) ===' -ForegroundColor Cyan
 # The back-end emits real VMXON/VMCS/VMLAUNCH; VMX #UDs on TCG so it is NOT run
-# here (verified tested-accel per scripts/test/run_vmx_accel.md). This guard
-# proves the module + the new kernel_vmx/sgdt/sidt/str intrinsics keep compiling
-# in kernel emit mode, so the privileged path can never silently rot.
+# here. scripts/test/run_vmx_accel.md documents the separate accel/HW procedure;
+# this guard only proves the module + the kernel_vmx/sgdt/sidt/str intrinsics
+# keep compiling in kernel emit mode, so the privileged path can never silently rot.
 $VmxBackend = Join-Path $Root 'src\kernel\grithlk\mon_hal_vmx_backend.ghl'
 if (-not (Test-Path -LiteralPath $VmxBackend)) {
     throw "Missing Track-5 VT-x back-end: $VmxBackend"

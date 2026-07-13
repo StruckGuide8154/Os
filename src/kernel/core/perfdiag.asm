@@ -13,6 +13,7 @@ extern smp_target_cores
 extern smp_started_cores
 extern smp_alive_cores
 extern smp_parked_cores
+extern smp_core_states
 extern l3_app_arena_base_v
 extern pci_gpu_scan
 extern pci_gpu_count
@@ -139,6 +140,7 @@ perfdiag_print_profile:
 
     call perfdiag_print_memory
     call perfdiag_print_smp
+    call perfdiag_print_ap_pat
     pop rdi
     ret
 
@@ -260,6 +262,77 @@ perfdiag_print_smp:
     call ser_print_hex64
     call serial_crlf
     pop rdi
+    ret
+
+; ----------------------------------------------------------------------------
+; perfdiag_print_ap_pat - emit one "APAT:<coreidx>/<pat>" line per started core.
+; ap_long_mode_init records each AP's read-back IA32_PAT at AP_STATE_OFF_PAT in
+; its per-core state record; this routine (run on the BSP, after smp_ap_startup)
+; reads those slots and prints them, so a test can assert every core programmed
+; the canonical WC PAT (slot 1 = WC). The BSP itself programmed PAT via the
+; same canonical constant in fbperf_wc_activate; it is emitted as core 0 for
+; symmetry by reading its own MSR. Every STARTED core is emitted (state 2 RUNNING
+; or 3 PARKED); only never-started cores (state 0, the rep-stosq zero from
+; smp_init_states) are skipped. The PAT is recorded once in ap_long_mode_init and
+; never changes, so a core that happens to be RUNNING a job at sweep time still
+; has a valid recorded PAT and MUST be emitted - else test_smp_boot's
+; "patLines.Count >= started" check fails intermittently. Serialised on the BSP
+; -> no interleave.
+; ----------------------------------------------------------------------------
+global perfdiag_print_ap_pat
+perfdiag_print_ap_pat:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    xor esi, esi                      ; esi = core index
+.ppat_loop:
+    cmp esi, SMP_MAX_CORES
+    jge .ppat_done
+    mov eax, esi
+    imul eax, SMP_CORE_STATE_SIZE
+    mov ebx, eax                      ; ebx = byte offset of this core's record
+    test esi, esi
+    jnz .ppat_check_state
+    ; Core 0 (BSP): emit its own live PAT (it has no AP state slot writer).
+    ; IA32_PAT = MSR 0x277 (literal: arch_regs.inc is included after this file
+    ; in the single-unit build, so the IA32_PAT_MSR equ is not yet in scope).
+    mov ecx, 0x277
+    rdmsr
+    mov ecx, edx
+    shl rcx, 32
+    or  rcx, rax                      ; rcx = full 64-bit PAT
+    jmp .ppat_emit
+.ppat_check_state:
+    cmp dword [smp_core_states + rbx], 2   ; started? (2=RUNNING, 3=PARKED; 0=absent)
+    jb .ppat_next
+    mov ecx, [smp_core_states + rbx + AP_STATE_OFF_PAT]
+    mov edx, [smp_core_states + rbx + AP_STATE_OFF_PAT + 4]
+    shl rdx, 32
+    or  rcx, rdx                      ; rcx = recorded PAT
+.ppat_emit:
+    push rcx                          ; preserve PAT across serial calls
+    lea rdi, [rel msg_apat]
+    call serial_puts
+    mov rdi, rsi                      ; core index
+    call ser_print_hex64
+    SER '/'
+    pop rcx
+    mov rdi, rcx
+    call ser_print_hex64
+    call serial_crlf
+.ppat_next:
+    inc esi
+    jmp .ppat_loop
+.ppat_done:
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     ret
 
 perfdiag_print_pci_gpu:
@@ -563,6 +636,7 @@ msg_ramdump2: db 'RAMDUMP:WALL:', 0
 msg_ramdump3: db 'RAMDUMP:SAVE:', 0
 msg_bootanim: db 'BOOTANIM:', 0
 msg_smp:    db 'SMP:', 0
+msg_apat:   db 'APAT:', 0
 msg_gpu780m: db 'GPU780M:', 0
 msg_gpu_count: db 'DISP:', 0
 msg_gpu_bdf: db 'BDF:', 0

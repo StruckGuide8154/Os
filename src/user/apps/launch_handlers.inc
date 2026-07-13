@@ -278,6 +278,7 @@ app_reset_explorer_slot:
 extern kernel_apply_app_manifest
 extern app_segment_verify
 extern wm_close_window
+extern wm_window_finalize
 %macro APPLY_MANIFEST 1
     push rax
     push rdi

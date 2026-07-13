@@ -41,28 +41,43 @@ $displayPath = @(
     (Join-Path $Root 'src\kernel\drivers\display.asm')
     (Get-ChildItem (Join-Path $Root 'src\kernel\drivers\display_*.inc') | ForEach-Object FullName)
 )
-$usermodePath = Join-Path $Root 'src\kernel\proc\usermode.asm'
-$windowPath = Join-Path $Root 'src\kernel\gui\window.asm'
-$processCallbacksPath = Join-Path $Root 'src\kernel\proc\process_callbacks.inc'
+$usermodePath = @(
+    (Join-Path $Root 'src\kernel\proc\usermode.asm')
+    # Callback entry/return migrated to structured GritHLK; keep guards on the
+    # source of truth rather than requiring the retired assembly spelling.
+    (Join-Path $Root 'src\kernel\grithlk\usermode_callbacks.ghl')
+    (Join-Path $Root 'src\kernel\grithlk\usermode_translate.ghl')
+)
+$windowPath = @(
+    (Join-Path $Root 'src\kernel\gui\window.asm')
+    (Get-ChildItem (Join-Path $Root 'src\kernel\gui\window_*.inc') | ForEach-Object FullName)
+    (Join-Path $Root 'src\kernel\grithlk\wm_helpers.ghl')
+)
+$processCallbacksPath = Join-Path $Root 'src\kernel\grithlk\callback_dispatch.ghl'
 $inputDispatchPath = Join-Path $Root 'src\kernel\grithlk\input_dispatch.ghl'
 $appsPath = Join-Path $Root 'build\ghl\explorer.asm'
 $wrapperPath = Join-Path $Root 'src\user\apps.asm'
-$launchPath = Join-Path $Root 'src\user\apps\launch.inc'
+$launchPath = @(
+    (Get-ChildItem (Join-Path $Root 'src\user\apps\launch*.inc') | ForEach-Object FullName)
+)
 $pagingPath = Join-Path $Root 'src\boot\paging.asm'
 $userWindowPath = Join-Path $Root 'src\user\lib\grit_window.inc'
-$paintPath = Join-Path $Root 'src\user\apps\paint.inc'
+$paintPath = Join-Path $Root 'src\user\grithl\apps\paint.ghl'
 $ghlBuildPath = Join-Path $Root 'scripts\build\build_ghl.ps1'
 $ghlNotepadPath = Join-Path $Root 'src\user\grithl\apps\notepad.ghl'
 $ghlExplorerPath = Join-Path $Root 'src\user\grithl\apps\explorer.ghl'
 $ghlMediaPath = Join-Path $Root 'src\user\grithl\apps\media.ghl'
 $ghlWallpaperPath = Join-Path $Root 'src\user\grithl\apps\wallpaper.ghl'
-$mediaViewerPath = Join-Path $Root 'src\user\apps\media_viewer.inc'
+$mediaViewerPath = @(
+    (Get-ChildItem (Join-Path $Root 'src\user\apps\media_viewer*.inc') | ForEach-Object FullName)
+)
 $bootAnimGenPath = Join-Path $Root 'tools\gen_boot_anim.py'
 $uefiBuildPath = Join-Path $Root 'scripts\build\build_uefi.ps1'
 $biosBuildPath = Join-Path $Root 'scripts\build\build_bios.ps1'
+# FAT16 is now a zero-asm GHL driver (src/kernel/grithlk/fat16_core.ghl); the
+# legacy src/kernel/fs/fat16*.asm/.inc were deleted in the FS zero-asm migration.
 $fat16Path = @(
-    (Join-Path $Root 'src\kernel\fs\fat16.asm')
-    (Get-ChildItem (Join-Path $Root 'src\kernel\fs\fat16_*.inc') | ForEach-Object FullName)
+    (Join-Path $Root 'src\kernel\grithlk\fat16_core.ghl')
 )
 
 Write-Host '[guards] Checking user/kernel structure...' -ForegroundColor Yellow
@@ -87,9 +102,14 @@ Assert-Match $syscallPath '\.sc_fs_mkdir:[\s\S]*call sc_validate_user_range[\s\S
 Assert-Match $syscallPath '\.sc_open_file_np:[\s\S]*\.sc_open_file_np_media:[\s\S]*call kernel_open_file_in_media' 'SYS_OPEN_FILE_NP must redirect known media formats to Media Player.'
 Assert-Match $syscallPath '\.sc_app_open:[\s\S]*call sc_validate_user_cstring[\s\S]*call kernel_open_app_command' 'SYS_APP_OPEN must validate the user command string before launching apps.'
 Assert-Match $syscallUserPath '%macro SYS_APP_OPEN 1[\s\S]*APP_SYSNO 23[\s\S]*syscall' 'SYS_APP_OPEN user wrapper must call syscall 23 through the permutation macro.'
-Assert-Match $syscallPath 'APP_MAX_ID\s+equ 11' 'SYS_APP_LAUNCH must allow the Media Player app id.'
+Assert-Match $syscallPath 'APP_MAX_ID\s+equ 11' 'SYS_APP_LAUNCH must allow the Media Player app id without exposing parked app ids.'
 Assert-Match $syscallPath 'SC_VALIDATE_FRAME_OFF equ 72[\s\S]*add eax, SC_VALIDATE_FRAME_OFF[\s\S]*mov rdi, \[rsp \+ rax\]' 'Table-driven syscall validation must read the selected arg from the saved register slot through the helper call frame (constant-time displacement).'
-Assert-Match $syscallPath '\.check_ptr_has_desc:[\s\S]*push rdi[\s\S]*push r8[\s\S]*add eax, SC_VALIDATE_FRAME_OFF \+ 8[\s\S]*mov rdi, \[rsp \+ rax\]' 'Sibling-length validation must account for saved qwords and the absent helper return address when reading the syscall frame.'
+Assert-Match $syscallPath '\.check_ptr_sibling:[\s\S]*push rdx[\s\S]*push rdi[\s\S]*push r8[\s\S]*add eax, SC_VALIDATE_FRAME_OFF \+ 16[\s\S]*mov rsi, \[rsp \+ rax\]' 'Sibling-length validation must account for all three saved qwords and the absent helper return address when reading the syscall frame.'
+Assert-Match $syscallPath 'SC_DESC_WRITE_SHIFT\s+equ 48[\s\S]*%define SC_DESC_WRITE\(arg_idx\)' 'Pointer descriptors must reserve the upper-qword write-direction bitmap.'
+Assert-Match $syscallPath '\.check_ptr_do:[\s\S]*bt r13, rax[\s\S]*call sc_validate_user_range[\s\S]*\.check_ptr_do_write:[\s\S]*call sc_validate_user_write' 'Pointer direction must make the dispatcher select the slot-only output validator.'
+Assert-Match $syscallPath 'sc_fs_read[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_fs_format_name[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_fs_entry_info[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_wm_list[^\r\n]*SC_DESC_WRITE\(0\)' 'All filesystem/window-manager output buffers must be write-directed in the syscall table.'
+Assert-Match $syscallPath 'sc_xml_tag_name[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_xml_attr[^\r\n]*SC_DESC_WRITE\(3\)[\s\S]*sc_xml_text[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_xml_text_run[^\r\n]*SC_DESC_WRITE\(2\)[\s\S]*sc_xml_namespace[^\r\n]*SC_DESC_WRITE\(3\)[\s\S]*sc_xml_node_namespace[^\r\n]*SC_DESC_WRITE\(1\)[\s\S]*sc_xml_entity_value[^\r\n]*SC_DESC_WRITE\(2\)' 'All XML output buffers must be write-directed in the syscall table while XML name/value inputs remain read-directed.'
+Assert-NotMatch $syscallPath 'sc_fs_write[^\r\n]*SC_DESC_WRITE|sc_xml_parse[^\r\n]*SC_DESC_WRITE|sc_blend_span_argb[^\r\n]*SC_DESC_WRITE' 'Input-only syscall pointers must retain read direction so legitimate shared-blob inputs remain supported.'
 Assert-Match $syscallPath '\.sc_wm_handlers:[\s\S]*cmp rdi, MAX_WINDOWS[\s\S]*jae \.sc_wm_handlers_reject' 'SYS_WM_HANDLERS must reject out-of-range window ids.'
 Assert-Match $syscallPath '\.sc_wm_handlers:[\s\S]*call sc_validate_callback_target' 'SYS_WM_HANDLERS must validate handler targets.'
 Assert-Match $syscallPath '\.sc_wm_handlers:[\s\S]*mov rsi, \[rsp \+ ALL_RSI\][\s\S]*mov rdx, \[rsp \+ ALL_RDX\][\s\S]*call cpi_sign_callback[\s\S]*mov \[rax \+ WIN_OFF_CLICKFN\], r10' 'SYS_WM_HANDLERS must reload handler pointers after validation clobbers RSI/RDX, then store the CPI-signed callback.'
@@ -102,41 +122,41 @@ Assert-NotMatch $syscallPath 'call\s+sc_validate_dir_entry_handle|call\s+sc_dir_
 Assert-NotMatch $syscallValidationPath '^sc_validate_dir_entry_handle:' 'Legacy sc_validate_dir_entry_handle definition must stay removed from syscall_validation.inc.'
 Assert-Match $syscallValidationPath '(sc_validate_callback_target:|fn sc_validate_callback_target)[\s\S]*call sc_validate_user_range' 'Callback targets must validate through user range validation.'
 Assert-Match $displayPath '(display_set_mode:|FN_BEGIN display_set_mode)[\s\S]*BOOT_BACK_BUFFER_SIZE / 4[\s\S]*\.set_fail' 'display_set_mode must reject modes that exceed the boot back buffer.'
-Assert-Match $fat16Path 'fat16_mkdir[\s\S]*call fat16_flush_fats[\s\S]*call fat16_flush_current_dir' 'FAT16 mkdir must create persistent directories through FAT and directory flushes.'
-Assert-Match $fat16Path 'fat16_delete_entry[\s\S]*call fat16_flush_fats[\s\S]*call fat16_flush_current_dir' 'FAT16 delete must persist FAT and directory changes.'
-Assert-Match $fat16Path 'fat16_rename_entry[\s\S]*call fat16_flush_current_dir' 'FAT16 rename must persist directory metadata.'
+Assert-Match $fat16Path 'fn fat16_mkdir\([\s\S]*fat16_flush_fats\(\);[\s\S]*fat16_flush_current_dir\(\);' 'FAT16 mkdir must create persistent directories through FAT and directory flushes.'
+Assert-Match $fat16Path 'fn fat16_delete_entry\([\s\S]*fat16_flush_fats\(\);[\s\S]*fat16_flush_current_dir\(\);' 'FAT16 delete must persist FAT and directory changes.'
+Assert-Match $fat16Path 'fn fat16_rename_entry\([\s\S]*fat16_flush_current_dir\(\);' 'FAT16 rename must persist directory metadata.'
 
 Write-Host '[guards] Checking L3 callback isolation...' -ForegroundColor Yellow
-Assert-Match $usermodePath '(call_app_l3:|FN_DECL call_app_l3)[\s\S]*call l3_runtime_ptr[\s\S]*mov \[r12 \+ L3_RT_KERNEL_RSP\], rsp' 'L3 callbacks must save kernel return state in slot-local runtime storage.'
-Assert-Match $usermodePath '(call_app_l3:|FN_DECL call_app_l3)[\s\S]*call l3_install_app_done_trampoline[\s\S]*iretq' 'L3 callbacks must enter ring 3 through the app-done trampoline and iretq.'
-Assert-Match $usermodePath 'FN_BEGIN l3_translate_target[\s\S]*l3_app_arena_base_v' 'L3 target translation must recognize callback pointers from app slots.'
-Assert-Match $usermodePath 'FN_BEGIN l3_translate_target[\s\S]*and rax, APP_SLOT_SIZE - 1[\s\S]*cmp rax, \[rel app_blob_size_v\]' 'L3 target translation must preserve only the app-blob offset from slot-local callback pointers.'
-Assert-Match $usermodePath '(call_app_l3_return:|FN_DECL call_app_l3_return)[\s\S]*call l3_runtime_ptr[\s\S]*mov rsp, \[r12 \+ L3_RT_KERNEL_RSP\]' 'L3 return must restore kernel stack from slot-local runtime storage.'
-Assert-Match $syscallPath '(syscall_entry:|FN_(BEGIN|DECL) syscall_entry)[\s\S]*mov \[rbx \+ L3_RT_USER_RIP\], rcx[\s\S]*mov \[rbx \+ L3_RT_USER_RSP\], rdx' 'Syscall entry must save user RIP/RSP in slot-local runtime storage.'
-Assert-Match $syscallPath '(syscall_entry:|FN_(BEGIN|DECL) syscall_entry)[\s\S]*mov rdx, L3_SYSCALL_STACK_ADDR[\s\S]*mov rsp, rax' 'Syscall entry must switch to a slot-local kernel syscall stack before dispatch.'
+Assert-Match $usermodePath '(fn call_app_l3\(\) naked|call_app_l3:|FN_DECL call_app_l3)[\s\S]*(save_rsp\(lq\(&cb_rt\) \+ L3_RT_KERNEL_RSP\)|call l3_runtime_ptr[\s\S]*mov \[r12 \+ L3_RT_KERNEL_RSP\], rsp)' 'L3 callbacks must save kernel return state in slot-local runtime storage.'
+Assert-Match $usermodePath '(fn l3_prepare_callback\([\s\S]*l3_install_app_done_trampoline[\s\S]*fn call_app_l3\(\) naked[\s\S]*iretq\(\)|(?:call_app_l3:|FN_DECL call_app_l3)[\s\S]*call l3_install_app_done_trampoline[\s\S]*iretq)' 'L3 callbacks must enter ring 3 through the app-done trampoline and iretq.'
+Assert-Match $usermodePath '(FN_BEGIN l3_translate_target|fn l3_translate_target\()[\s\S]*l3_app_arena_base_v' 'L3 target translation must recognize callback pointers from app slots.'
+Assert-Match $usermodePath '(FN_BEGIN l3_translate_target[\s\S]*and rax, APP_SLOT_SIZE - 1[\s\S]*cmp rax, \[rel app_blob_size_v\]|fn l3_translate_target\([\s\S]*\(target - abase\) & SLOT_MASK[\s\S]*bo >= lq\(&app_blob_size_v\))' 'L3 target translation must preserve only the app-blob offset from slot-local callback pointers.'
+Assert-Match $usermodePath '(fn call_app_l3_return\(\) naked|call_app_l3_return:|FN_DECL call_app_l3_return)[\s\S]*l3_runtime_ptr[\s\S]*(write_rsp\(lq\(lq\(&cb_rt\) \+ L3_RT_KERNEL_RSP\)\)|mov rsp, \[r12 \+ L3_RT_KERNEL_RSP\])' 'L3 return must restore kernel stack from slot-local runtime storage.'
+Assert-Match $syscallPath '(syscall_entry:|FN_(BEGIN|DECL) syscall_entry)[\s\S]*mov \[rbx \+ L3_RT_USER_RSP\], rsp[\s\S]*mov \[rbx \+ L3_RT_USER_RIP\], rcx' 'Syscall entry must save user RIP/RSP in slot-local runtime storage before leaving the user stack.'
+Assert-Match $syscallPath '(syscall_entry:|FN_(BEGIN|DECL) syscall_entry)[\s\S]*imul rsp, rsp, L3_SYSCALL_STACK_STRIDE[\s\S]*mov rbx, L3_SYSCALL_STACK_ADDR[\s\S]*add rsp, rbx' 'Syscall entry must switch to a slot-local kernel syscall stack before dispatch.'
 
 Write-Host '[guards] Checking multicore app routing build flags...' -ForegroundColor Yellow
 Assert-Match $uefiBuildPath "GRIT_CACHE32_AP_STARTUP'[\s\S]*GRIT_ENABLE_RING3_AP" 'UEFI AP startup builds must enable ring-3 AP callback routing.'
 Assert-Match $biosBuildPath "PerfProfile -eq 'Cache32Max'[\s\S]*GRIT_SMP'[\s\S]*GRIT_CACHE32_AP_STARTUP'[\s\S]*GRIT_ENABLE_RING3_AP" 'BIOS Cache32Max AP startup builds must enable SMP, AP startup, and ring-3 AP callback routing.'
-Assert-Match $usermodePath 'FN_BEGIN call_app_l3_packed' 'AP-routed callbacks require the packed call_app_l3 thunk.'
+Assert-Match $usermodePath '(FN_BEGIN call_app_l3_packed|fn call_app_l3_packed\()' 'AP-routed callbacks require the packed call_app_l3 thunk.'
 Assert-Match $windowPath 'call dispatch_app_callback' 'Window manager callbacks must go through dispatch_app_callback.'
-Assert-Match $inputDispatchPath 'call dispatch_app_callback' 'Main-loop app input callbacks must go through dispatch_app_callback.'
+Assert-Match $inputDispatchPath '(call\s+dispatch_app_callback|dispatch_app_callback\()' 'Main-loop app input callbacks must go through dispatch_app_callback.'
 
 Write-Host '[guards] Checking window bounds fix...' -ForegroundColor Yellow
 Assert-Match $windowPath '(wm_close_window:|FN_BEGIN wm_close_window)[\s\S]*cmp rdi, MAX_WINDOWS[\s\S]*jae \.close_ret' 'wm_close_window must use an unsigned bounds check.'
 Assert-Match $windowPath 'wm_close_window[\s\S]*call wm_focus_top_active[\s\S]*wm_focus_top_active:' 'Closing the focused window must transfer focus to another active visible window.'
 Assert-Match $windowPath 'Slot 0 = native GritHL wallpaper renderer[\s\S]*mov esi, CAP_CORE \| CAP_GUI[\s\S]*call cap_mask_store' 'Hidden wallpaper slot must receive authenticated GUI capabilities before it issues display and raster syscalls.'
 Assert-Match $windowPath 'wallpaper_render_job:[\s\S]*app_callback_lock[\s\S]*call call_app_l3_packed' 'Wallpaper cache generation must retain the full authored SVG renderer.'
-Assert-Match $processCallbacksPath 'cmp byte \[wallpaper_render_active\], 0[\s\S]*jne \.busy_return[\s\S]*lea rdi, \[rel app_callback_lock\]' 'Callback dispatch must not spin the BSP on the wallpaper renderer callback lock.'
-Assert-Match $windowPath 'wm_click_focus_before[\s\S]*call (call_app_l3|dispatch_app_callback)[\s\S]*cmp rax, \[wm_click_focus_before\][\s\S]*\.click_preserve_focus' 'Window click callbacks that launch/focus another window must not be overwritten by post-callback focus restore.'
+Assert-Match $processCallbacksPath 'if lb\(&wallpaper_render_active\) != 0 \{ return 0; \}[\s\S]*let res = cb_run_guarded' 'Callback dispatch must not spin the BSP on the wallpaper renderer callback lock.'
+Assert-Match $windowPath '(wm_click_focus_before[\s\S]*call (call_app_l3|dispatch_app_callback)[\s\S]*cmp rax, \[wm_click_focus_before\][\s\S]*\.click_preserve_focus|let focus_before = lq\(&wm_focused_window\)[\s\S]*dispatch_app_callback\([\s\S]*if lq\(&wm_focused_window\) == focus_before)' 'Window click callbacks that launch/focus another window must not be overwritten by post-callback focus restore.'
 Assert-Match $windowPath 'cmp rax, app_media_draw[\s\S]*call app_media_draw' 'Media Player draw must stay in kernel context because its blitter reads kernel framebuffer globals.'
 Assert-Match $launchPath 'kernel_open_file_in_notepad:[\s\S]*WIN_OFF_X\], 560[\s\S]*WIN_OFF_Y' 'Notepad windows opened from Explorer must leave the Explorer list visible for more file opens.'
-Assert-Match $launchPath 'kernel_open_file_in_media:[\s\S]*APP_SLOT_BMP_FILE_SZ[\s\S]*0x3141424E[\s\S]*APP_SLOT_BMP_FILE_OFF \+ 12' 'Media opener must clamp NBA frame_count to the bytes loaded into the slot buffer.'
+Assert-Match $launchPath 'kernel_open_file_in_media:[\s\S]*APP_SLOT_BMP_FILE_SZ[\s\S]*LAUNCH_NBA1_MAGIC[\s\S]*\.kom_nba_validate_loaded:[\s\S]*div ecx[\s\S]*APP_SLOT_BMP_FILE_OFF \+ 12' 'Media opener must clamp NBA frame_count to the bytes loaded into the selected slot/full-clip buffer.'
 Assert-Match $mediaViewerPath 'app_hl_media_mp_frame - app_blob_start[\s\S]*nx_media_draw_nba_controls' 'Media Player NBA renderer must use per-window frame state and draw controls.'
 Assert-Match $ghlMediaPath 'fn click\(win, cx, cy\)[\s\S]*APP_SLOT_BMP_FILE_OFF[\s\S]*mp_handle_click' 'Media Player click handler must delegate to media_player lib (mp_handle_click) so the timeline widget stays reusable across apps.'
 Assert-Match $bootAnimGenPath 'poster if i == 0 else render_frame' 'BOOTANIM.NBA frame 0 must be a non-black poster for Media Player preview.'
-Assert-Match $inputDispatchPath 'fn process_mouse\(\)[\s\S]*call mouse_check_moved[\s\S]*cmp al, \[process_mouse_last_buttons\][\s\S]*mov \[process_mouse_last_buttons\], dl' 'Mouse processing must notice button-only changes so release events clear held-click state.'
-Assert-Match $inputDispatchPath '\.pk_key_lclick:[\s\S]*call wm_handle_mouse_event[\s\S]*\.pk_kc_handled:[\s\S]*mov byte \[mouse_buttons\], 0[\s\S]*xor edx, edx[\s\S]*call wm_handle_mouse_event' 'Keyboard/serial left-click must send both mouse down and mouse up so later Explorer clicks are not treated as a held button.'
+Assert-Match $inputDispatchPath 'fn process_mouse\(\)[\s\S]*let moved = mouse_check_moved\(\)[\s\S]*lb\(&mouse_buttons\) == lb\(&process_mouse_last_buttons\)[\s\S]*sb\(&process_mouse_last_buttons, btn\)' 'Mouse processing must notice button-only changes so release events clear held-click state.'
+Assert-Match $inputDispatchPath 'fn pk_key_lclick\(\)[\s\S]*sb\(&mouse_buttons, BTN_LEFT\)[\s\S]*wm_handle_mouse_event\([\s\S]*sb\(&mouse_buttons, 0\)[\s\S]*wm_handle_mouse_event\([^\r\n]*, 0\)' 'Keyboard/serial left-click must send both mouse down and mouse up so later Explorer clicks are not treated as a held button.'
 Assert-Match $inputDispatchPath 'fn pm_idle_cursor\(\)[\s\S]*wm_drag_window_id[\s\S]*cursor_hide\(\)[\s\S]*cursor_draw' 'Drag input must redraw the cursor immediately instead of waiting for a compositor frame.'
 Assert-Match $inputDispatchPath 'let r = wm_handle_mouse_event\(x, y, btn\);[\s\S]*if r != 0[\s\S]*pm_idle_cursor\(\)' 'WM-consumed drag events must still refresh the pointer.'
 $framePresentPath = Join-Path $Root 'src\kernel\grithlk\frame_present.ghl'
@@ -170,50 +190,29 @@ foreach ($wallpaperSource in $wallpaperSources) {
     Assert-NotMatch $wallpaperSource.FullName '<filter\b|filter\s*=|filter\s*:' "Desktop wallpaper $($wallpaperSource.Name) must not use software SVG filters; full-screen filter tiling stalls interactive background changes."
 }
 
-Write-Host '[guards] Checking theme pack vs runtime palette sync...' -ForegroundColor Yellow
-$themeLibPath  = Join-Path $Root 'src\user\grithl\lib\theme.ghl'
-$themeGuiPath  = Join-Path $Root 'src\user\grithl\lib\gui.ghl'
-$themeLightXml = Join-Path $Root 'assets\themes\light\theme.xml'
-$themeDarkXml  = Join-Path $Root 'assets\themes\dark\theme.xml'
-
-# Cross-check distinctive palette values across the three places they live:
-# (1) assets/themes/<id>/theme.xml -- the on-disk pack (source of truth once
-#     the disk loader lands), (2) theme.ghl seed_* functions -- the runtime
-#     palette today, (3) gui.ghl UI_COL_* -- the light-mode reference
-#     constants. Drift between any two silently re-skins half the OS.
-$lightAnchors = @(
-    @{ Name = 'bg_base';     Hex24 = 'F5F6FA' },
-    @{ Name = 'accent';      Hex24 = '2A6FFF' },
-    @{ Name = 'text';        Hex24 = '0F141E' },
-    @{ Name = 'error';       Hex24 = 'E5474D' }
-)
-foreach ($a in $lightAnchors) {
-    Assert-Match $themeLightXml "0x$($a.Hex24)" "light/theme.xml is missing the $($a.Name) anchor (0x$($a.Hex24)) -- palette has drifted out of sync with theme.ghl."
-    Assert-Match $themeLibPath  "0x00$($a.Hex24)" "theme.ghl::theme_seed_light() is missing 0x00$($a.Hex24) for $($a.Name) -- drift vs light/theme.xml."
-    Assert-Match $themeGuiPath  "0x00$($a.Hex24)" "gui.ghl UI_COL_* is missing 0x00$($a.Hex24) for $($a.Name) -- drift vs theme.ghl."
+Write-Host '[guards] Checking unified generated theme...' -ForegroundColor Yellow
+$themeTool = Join-Path $Root 'tools\theme_tool.py'
+& python $themeTool check
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unified theme spec is invalid or generated kernel/app/NPL outputs are stale.'
 }
-
-$darkAnchors = @(
-    @{ Name = 'bg_base'; Hex24 = '121419' },
-    @{ Name = 'accent';  Hex24 = '4FACFE' },
-    @{ Name = 'text';    Hex24 = 'E6E9EF' }
-)
-foreach ($a in $darkAnchors) {
-    Assert-Match $themeDarkXml "0x$($a.Hex24)" "dark/theme.xml is missing the $($a.Name) anchor (0x$($a.Hex24)) -- drift vs theme.ghl."
-    Assert-Match $themeLibPath "0x00$($a.Hex24)" "theme.ghl::theme_seed_dark() is missing 0x00$($a.Hex24) for $($a.Name) -- drift vs dark/theme.xml."
+$themeTestStderr = [System.IO.Path]::GetTempFileName()
+try {
+    $themeTests = Start-Process -FilePath 'python' `
+        -ArgumentList @('-m', 'unittest', 'discover', '-s', (Join-Path $Root 'tests'), '-p', 'test_theme_tool.py') `
+        -RedirectStandardError $themeTestStderr -NoNewWindow -Wait -PassThru
+    Get-Content -LiteralPath $themeTestStderr | Write-Host
+    if ($themeTests.ExitCode -ne 0) {
+        throw 'Unified theme compiler negative tests failed.'
+    }
+} finally {
+    Remove-Item -LiteralPath $themeTestStderr -Force -ErrorAction SilentlyContinue
 }
-
-# The theme_palette backing buffer must stay sized at PALETTE_BYTES (128)
-# and must live in a zeroed state{} field. If this regresses to a string
-# literal, the initialized flag can start nonzero and the UI renders the
-# unseeded buffer as dark grey.
-$themeLibContent = Get-Content -Path $themeLibPath -Raw
-if ($themeLibContent -notmatch '(?ms)state\s*\{[^}]*theme_palette:\s*128;[^}]*theme_state:\s*8;[^}]*\}') {
-    throw 'theme.ghl must declare zeroed state fields `theme_palette: 128;` and `theme_state: 8;`.'
-}
-if ($themeLibContent -match '(?m)^str\s+theme_(palette|state)\s*=') {
-    throw 'theme.ghl theme_palette/theme_state must not be string literals; they must start zeroed.'
-}
+$themeLibPath = Join-Path $Root 'src\user\grithl\lib\theme.ghl'
+$themeGuiPath = Join-Path $Root 'src\user\grithl\lib\gui.ghl'
+Assert-Match $themeLibPath 'theme_palette:\s*512;[\s\S]*theme_state:\s*8;' 'Theme palette must remain fixed-size zeroed app state.'
+Assert-Match $themeLibPath 'if idx < 0[\s\S]*if idx >= TC_COUNT' 'Theme lookup must bounds-check both sides.'
+Assert-NotMatch $themeGuiPath 'UI_REF_' 'GUI theme resolution must never infer semantic tokens by matching raw RGB values.'
 
 Write-Host '[guards] Checking security modules carry a threat note...' -ForegroundColor Yellow
 # Presubmit (ghl-beyond-zero-trust P0): every trusted security module under

@@ -12,10 +12,10 @@ param(
     [switch]$ProbeNkPt,      # Nested-kernel monitor negative test (debug only). After nk_protect_page_tables runs, kmain does ONE un-bracketed write to the now-read-only PML4; expect a ring-0 #PF caught by isr_common_stub (proves page-table self-protection is live). Never ship.
     [switch]$SecurityRegression, # Security PoC regression suite (debug only). Compile-gates every ring-3 PoC harness in src/user/poc/ (catches mitigation-ABI drift at build time) AND builds the kernel shadow-stack trip into the image (asserted at boot by scripts/test/test_security_regression.ps1). Never ship.
     [switch]$NoSmap,         # Disable CR4.SMEP/SMAP enforcement. SMAP is ON by default (CPUID-gated at runtime); pass -NoSmap only for CPUs/emulators that lack SMAP and where the run target can't expose +smap.
-    [switch]$Cet,            # Enable the hardware CET scaffold (CR4.CET + IA32_S_CET). CPUID-gated at runtime (no-op on CPUs/VMs without SHSTK, incl. QEMU TCG); complements the always-on software kernel shadow stack. SHSTK/IBT *detection* is always compiled regardless of this flag. The supervisor shadow-stack RET-check itself is NOT armed yet (needs a seeded PL0_SSP - documented follow-up in src/include/cet.inc).
-    # NOTE: -Cet is retained for old scripts only; CET protection is default-on.
-    [switch]$NoCet,          # Disable CET SHSTK protection. Default ON: hardware SHSTK when CPUID exposes it, software shadow-stack fallback otherwise.
-    [switch]$CetIbt,         # Additionally arm the IBT-side S_CET bits when IBT is present. Requires -Cet. OFF by default: endbr64 markers are not yet emitted at indirect-branch targets, so enabling ENDBR_EN would #CP. Plumbing only.
+    [switch]$Cet,            # Compatibility alias for default CET inventory/status plumbing. Hardware CR4.CET/IA32_S_CET arming is intentionally inert until the full supervisor SSP wiring lands. SHSTK/IBT *detection* is always compiled regardless of this flag.
+    # NOTE: -Cet is retained for old scripts only; CET inventory/status is default-on.
+    [switch]$NoCet,          # Disable CET inventory/status plumbing. The independent software kernel shadow stack remains compiled in.
+    [switch]$CetIbt,         # Reserved for the later IBT arm path. Requires CET plumbing, but is inert today: CR4.CET is not armed and endbr64 markers are not yet emitted at indirect-branch targets.
     [switch]$Kpti,           # Kernel Page-Table Isolation (security_todo.md §3). Compiles the user-view-PML4 builder + CR3-swap entry/exit macros (src/include/kpti.inc). OFF by default -> macros emit nothing, no kpti.inc code/data, default image byte-for-byte unchanged. Even with -Kpti the feature is a runtime no-op (kpti_active=0) until the SYSCALL (syscall.asm) + IRQ/exception (isr.asm) CR3-swap points and the kmain kpti_init flip are wired -- see the scoped-out note in kpti.inc. The usermode.asm iretq exits are already wired (inert until armed). Compile-gate verification only for now.
     [switch]$NoKpti,         # Disable KPTI. Default ON: user-view CR3 while ring 3 runs, full kernel CR3 on entry.
     [switch]$NoSyscallPerm,  # Disable heterogeneous syscall numbering per slot (security_todo.md §12). ON by default: per-launch keyed-random permutation of the syscall table; the loader rewrites each app's compiled SYS_* immediates (via the .scfix fixup table) to the slot's forward-permuted numbers, and the dispatcher applies the kernel-side inverse mapping on entry. Pass -NoSyscallPerm to fall back to identity numbering.
@@ -23,6 +23,7 @@ param(
     [switch]$AppO2,          # Compile GritHL user apps with gritc --O2 (lossless register allocator, implies O1).
     [switch]$AppO3,          # Compile GritHL user apps with gritc --O3 (lossless density passes on the O2 stream, implies O2).
     [switch]$BootAnim,       # Play the pre-GUI /BOOTANIM.NBA splash at boot. OFF by default (deterministic boot). Defines GRIT_BOOT_ANIM so the gated boot_anim_play() call site compiles in. The BOOTANIM.NBA asset is always built (Media Player demo content) regardless of this flag.
+    [switch]$BootTrace,      # Debug-only pre-GUI freeze tracer. Paints a marching grid of colored framebuffer blocks - one per boot stage - from the UEFI loader (top band) through every kmain stage (lower band). On a real-hardware hang before the GUI, the last/rightmost block is the last stage that COMPLETED. Defines GRIT_BOOT_TRACE for both loader + kernel. Not allowed with -Release.
     [switch]$SyscallTrace,   # Emit a per-syscall serial trace ('s'<num>...). OFF by default: it floods COM1 on syscall-heavy apps (e.g. Task Manager polls per-core util/mhz every frame) and serial-out is slow enough to make the app crawl. Pass -SyscallTrace only when debugging the dispatcher.
     [switch]$CopyToE         # Copy built ESP\EFI tree to E:\ for boot from removable media.
     # GFX/DCN bring-up flags (-Gfx, -GfxWave3, -GfxWave3L, -GfxImuKick,
@@ -39,8 +40,22 @@ $BUILD_DIR = Join-Path $Root 'build'
 $INCLUDE_DIR = Join-Path $SRC_DIR 'include'
 $USER_LIB_DIR = Join-Path $SRC_DIR 'user\lib'
 $ESP = Join-Path $BUILD_DIR 'esp\EFI\BOOT'
+$ConstantsPath = Join-Path $INCLUDE_DIR 'constants.inc'
 $KernelDefines = @()
 $LoaderDefines = @()
+
+function Get-AsmEqu {
+    param([string]$Path, [string]$Name)
+
+    $line = Select-String -Path $Path -Pattern "^\s*$Name\s+equ\s+(.+?)(?:\s*;.*)?$" |
+        Select-Object -First 1
+    if (-not $line) { throw "Missing $Name in $Path" }
+
+    $expr = $line.Matches[0].Groups[1].Value.Trim()
+    if ($expr -match '^0x[0-9A-Fa-f]+$') { return [Convert]::ToInt64($expr, 16) }
+    if ($expr -match '^\d+$') { return [int64]$expr }
+    throw "Unsupported $Name expression in ${Path}: $expr"
+}
 if (-not $Release) {
     $KernelDefines += '-dENABLE_DEBUG_SERIAL'
     # Per-syscall serial trace is OFF by default - it floods COM1 and slows
@@ -54,6 +69,15 @@ else {
 if ($BootAnim) {
     $KernelDefines += '-dGRIT_BOOT_ANIM'
     Write-Host '  (BOOTANIM: pre-GUI splash ENABLED via -BootAnim)' -ForegroundColor Magenta
+}
+if ($BootTrace) {
+    if ($Release) {
+        Write-Host '  FAILED - -BootTrace is a debug-only freeze tracer; do not combine with -Release.' -ForegroundColor Red
+        exit 1
+    }
+    $KernelDefines += '-dGRIT_BOOT_TRACE'
+    $LoaderDefines += '-dGRIT_BOOT_TRACE'
+    Write-Host '  (BOOTTRACE: per-stage progress blocks ENABLED via -BootTrace -- loader top band + kernel lower band)' -ForegroundColor Magenta
 }
 if ($PerfProfile -eq 'Cache32Max') {
     $KernelDefines += '-dGRIT_CACHE32_MAX'
@@ -90,8 +114,9 @@ if (-not $NoSmap) {
     Write-Host '  (SMAP: DISABLED via -NoSmap -- CR4 left as loaders configured it)' -ForegroundColor Yellow
 }
 # CET (security_todo.md §3). Detection (cet_detect) is ALWAYS compiled; -Cet
-# default-on SHSTK protection uses hardware support when present and the
-# software shadow-stack fallback otherwise. -NoCet is the explicit opt-out.
+# default-on CET path records that the software kernel shadow stack is the active
+# protection. Hardware CR4.CET/S_CET/SSP arming is intentionally inert until the
+# full supervisor SSP wiring lands. -NoCet opts out of this status plumbing.
 if ($CetIbt -and $NoCet) {
     Write-Host '  FAILED - -CetIbt requires CET; remove -NoCet.' -ForegroundColor Red
     exit 1
@@ -99,15 +124,15 @@ if ($CetIbt -and $NoCet) {
 if (-not $NoCet) {
     $KernelDefines += '-dENABLE_CET'
     if ($Cet) {
-        Write-Host '  (CET: -Cet accepted for compatibility; SHSTK protection is already ON by default)' -ForegroundColor Gray
+        Write-Host '  (CET: -Cet accepted for compatibility; CET inventory/status plumbing is already ON by default)' -ForegroundColor Gray
     }
-    Write-Host '  (CET: SHSTK protection ENABLED by default -- hardware when CPUID exposes it, software fallback otherwise; -NoCet to disable)' -ForegroundColor Magenta
+    Write-Host '  (CET: inventory/status ENABLED by default -- hardware arming inert, software kernel shadow stack remains active; -NoCet to suppress CET status)' -ForegroundColor Magenta
     if ($CetIbt) {
         $KernelDefines += '-dENABLE_CET_IBT'
-        Write-Host '  (CET: IBT S_CET bits armed -- plumbing only, endbr64 markers pending)' -ForegroundColor Magenta
+        Write-Host '  (CET: -CetIbt accepted as reserved plumbing -- CR4.CET/S_CET arming and endbr64 markers pending)' -ForegroundColor Magenta
     }
 } else {
-    Write-Host '  (CET: DISABLED via -NoCet -- SHSTK/IBT detection still compiled)' -ForegroundColor Yellow
+    Write-Host '  (CET: status plumbing DISABLED via -NoCet -- SHSTK/IBT detection still compiled, software kernel shadow stack unchanged)' -ForegroundColor Yellow
 }
 # Heterogeneous syscall numbering per slot (security_todo.md §12). ON by
 # default: the loader rewrites every app's compiled SYS_* immediate (located via
@@ -461,6 +486,7 @@ if ($SecurityRegression) {
     # and exploit_poc_syscall9.asm are kernel-side / reference-only and are not
     # in this list (the shadow harness is asserted at runtime instead).
     $PocHarnesses = @(
+        'wx_poc_manifestless_blob.asm',
         'wx_poc_write_x.asm',
         'wx_poc_exec_w.asm',
         'wx_poc_pos.asm',
@@ -680,9 +706,12 @@ $dataImgPath = Join-Path $BUILD_DIR 'data.img'
 $targetSize = 24 * 1024 * 1024   # 24MB - Phoenix GFX firmware set (~2.5MB) + DCN/RLC blobs + BOOTANIM
 $imgBytes = New-Object byte[] $targetSize
 
-# FAT16 partition starts where the kernel's FAT16_PART_LBA points. Keep this
-# aligned with src/include/constants.inc: KERNEL_START_SECTOR + KERNEL_SECTORS.
-$fatPartStart = (64 + 4096) * 512
+# FAT16 partition starts where the kernel's FAT16_PART_LBA points. Read both
+# source constants so BIOS, UEFI, the kernel block layer, and DATA.IMG cannot
+# silently drift when the kernel reservation changes.
+$kernelStartSector = Get-AsmEqu $ConstantsPath 'KERNEL_START_SECTOR'
+$kernelSectors = Get-AsmEqu $ConstantsPath 'KERNEL_SECTORS'
+$fatPartStart = ($kernelStartSector + $kernelSectors) * 512
 $fatPartSectors = [int](($targetSize - $fatPartStart) / 512)
 
 $bytesPerSect = 512

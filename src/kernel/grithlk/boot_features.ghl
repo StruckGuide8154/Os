@@ -25,7 +25,8 @@
 #   * `<name>=0` / `<name>=1`   per-feature key=value
 #   Whitespace and CR are skipped. Unknown names are ignored (forward-compat).
 #   Feature names (case-insensitive): cursor, present, pacing, mouse, hid,
-#   setmode  (see ft_match_name below - the SINGLE place to add a new name).
+#   setmode, usbhid, usbnic (see ft_match_name below - the SINGLE place to add
+#   a new name).
 #
 # A build-time default-disable fallback is also honoured so the gates are
 # testable even before the file path is verified on a given platform:
@@ -67,8 +68,10 @@ const FEAT_DISPLAY_INIT          = 64;       # display_init()+early display_flip
 const FEAT_FBPERF_WC             = 128;      # fbperf_arm_wc()+fbperf_wc_activate()
 const FEAT_FX_BENCH              = 256;      # 64-flip [FX] FBPERF boot bench
 const FEAT_DEBUG_OVERLAY         = 512;      # per-frame usb_debug_overlay() draw
+const FEAT_USBHID_INIT           = 1024;     # usb_hid_init() ALONE (sub-gate of HID)
+const FEAT_USBNIC_INIT           = 2048;     # rtl8156_init() USB NIC probe
 
-const ALL_FEATURES = 1023;   # OR of every bit above (default-on mask)
+const ALL_FEATURES = 4095;   # OR of every bit above (default-on mask)
 
 # Serial glyphs.
 const CH_LBRACK = 91;  const CH_RBRACK = 93;
@@ -92,6 +95,8 @@ data nm_dispinit: 9 = [100,105,115,112,105,110,105,116,0];     # "dispinit"
 data nm_fbwc:    5 = [102,98,119,99,0];                   # "fbwc"
 data nm_fxbench: 8 = [102,120,98,101,110,99,104,0];       # "fxbench"
 data nm_overlay: 8 = [111,118,101,114,108,97,121,0];      # "overlay"
+data nm_usbhid:  7 = [117,115,98,104,105,100,0];          # "usbhid"
+data nm_usbnic:  7 = [117,115,98,110,105,99,0];           # "usbnic"
 
 # "[FEAT] " prefix and the matching names for the off-log.
 data s_feat:     8 = [91,70,69,65,84,93,32,0];            # "[FEAT] "
@@ -146,6 +151,8 @@ fn ft_match_name(p) {
     if ft_streq(p, &nm_fbwc)    != 0 { return FEAT_FBPERF_WC; }
     if ft_streq(p, &nm_fxbench) != 0 { return FEAT_FX_BENCH; }
     if ft_streq(p, &nm_overlay) != 0 { return FEAT_DEBUG_OVERLAY; }
+    if ft_streq(p, &nm_usbhid)  != 0 { return FEAT_USBHID_INIT; }
+    if ft_streq(p, &nm_usbnic)  != 0 { return FEAT_USBNIC_INIT; }
     return 0;
 }
 
@@ -280,6 +287,10 @@ fn boot_features_init() {
     cfg "FEAT_DEFAULT_DISABLE_HID" {
         sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_HID_INIT));
         ft_log_off(&nm_hid);
+    }
+    cfg "FEAT_DEFAULT_DISABLE_USBNIC" {
+        sq(&feat_mask, lq(&feat_mask) & (ALL_FEATURES ^ FEAT_USBNIC_INIT));
+        ft_log_off(&nm_usbnic);
     }
 
     let base = lq(VBE_INFO + VBE_BOOTCFG_BASE_OFF);

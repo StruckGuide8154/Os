@@ -37,3 +37,29 @@ jobs:
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/ci_security_summary.ps1
           exit $LASTEXITCODE
+
+      # Track 1 "Path to 10/10": emit a signed SLSA-style provenance record for
+      # the trusted-path inputs and verify it through the Track-2/7 Ed25519 root.
+      # This runs the real gen->sign->verify path in CI (no nasm/full image link
+      # required: it stamps the pinned toolchain manifests, which always exist on
+      # a clean checkout). A full release build calls gen_provenance.py with the
+      # real KERNEL.BIN/APPS.BIN artifacts the same way.
+      - name: Signed CI provenance (SLSA-style, Track-2/7 Ed25519 root)
+        shell: powershell
+        run: |
+          $env:GRIT_BUILDER_ID = "github:$($env:GITHUB_WORKFLOW_REF)"
+          python scripts/build/gen_provenance.py `
+            --out PROVENANCE.ENV `
+            --artifact toolchain_pins.txt=tools/security/toolchain_pins.txt `
+            --artifact reproducible_digests.txt=tools/security/reproducible_digests.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python scripts/build/verify_provenance.py PROVENANCE.ENV --expect-revision $env:GITHUB_SHA
+          exit $LASTEXITCODE
+
+      - name: Upload provenance attestation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance
+          path: PROVENANCE.ENV
+          if-no-files-found: ignore

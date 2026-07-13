@@ -14,9 +14,7 @@ xhci_init:
     call debug_print
 
     ; Serial: 'U' start
-    mov dx, 0x3F8
-    mov al, 'U'
-    out dx, al
+    SER 'U'
 
     ; --- Zero XHCI memory region ---
     mov rdi, XHCI_DCBAA_ADDR
@@ -34,9 +32,7 @@ xhci_init:
     call debug_print
 
     ; Serial: '1' (found)
-    mov dx, 0x3F8
-    mov al, '1'
-    out dx, al
+    SER '1'
 
     ; --- Read capability registers ---
     call xhci_read_caps
@@ -49,9 +45,7 @@ xhci_init:
     call xhci_dbg_initlog_stage
 
     ; Serial: '2' (ownership taken)
-    mov dx, 0x3F8
-    mov al, '2'
-    out dx, al
+    SER '2'
 
     ; --- Reset controller ---
     call xhci_reset
@@ -61,9 +55,7 @@ xhci_init:
     call xhci_dbg_initlog_stage
 
     ; Serial: 'S' (setup start)
-    mov dx, 0x3F8
-    mov al, 'S'
-    out dx, al
+    SER 'S'
 
     ; --- Setup data structures ---
     call xhci_setup_scratchpad
@@ -74,9 +66,7 @@ xhci_init:
     call xhci_dbg_initlog_stage
 
     ; Serial: 'R' (rings set up)
-    mov dx, 0x3F8
-    mov al, 'R'
-    out dx, al
+    SER 'R'
 
     ; --- Program registers ---
     mov rsi, [xhci_op_base]
@@ -111,13 +101,23 @@ xhci_init:
     mov dword [rsi + XHCI_OP_CONFIG], eax
 
     ; Serial: '3' (regs programmed)
-    mov dx, 0x3F8
-    mov al, '3'
-    out dx, al
+    SER '3'
 
-    ; --- Start controller ---
+    ; xHCI runs in PURE-POLLED mode (as on master): the event ring is drained by
+    ; usb_poll_mouse() from the main loop. We deliberately do NOT route the PCI
+    ; INTx line to the IOAPIC and do NOT set USBCMD.INTE here. The level-triggered
+    ; INTx path acked only IMAN.IP/USBSTS.EINT in the ISR without advancing
+    ; ERDP/EHB, so the controller re-asserted the line immediately while events
+    ; sat undrained -> a vector-51 interrupt storm that pinned CPU0 and starved
+    ; the BSP main loop to ~1 fps. Re-enabling interrupt-driven USB needs a proper
+    ; top/bottom-half ack (drain ring + write ERDP|EHB, or mask IMAN.IE in the ISR
+    ; and re-arm after the bottom half). xhci_route_irq / xhci_irq_ack are kept
+    ; dormant for that future work. See kernel_lifecycle.ghl ml_input_service.
+    ; call xhci_route_irq            ; DISABLED: storm source (see above)
+
+    ; --- Start controller (polled: Run/Stop only, no interrupter enable) ---
     mov eax, [rsi + XHCI_OP_USBCMD]
-    or eax, XHCI_CMD_RS           ; Run/Stop = 1
+    or eax, XHCI_CMD_RS
     mov [rsi + XHCI_OP_USBCMD], eax
 
     ; Wait for HCH = 0 (controller running) - up to 500ms
@@ -136,9 +136,7 @@ xhci_init:
 .running:
 
     ; Serial: '4' (running)
-    mov dx, 0x3F8
-    mov al, '4'
-    out dx, al
+    SER '4'
 
     ; Controller is running. Return success.
     ; Port enumeration is now handled by the caller (usb_hid.asm)
@@ -150,9 +148,7 @@ xhci_init:
 
 .fail:
     ; Serial: '!'
-    mov dx, 0x3F8
-    mov al, '!'
-    out dx, al
+    SER '!'
 
     mov rsi, szXhciFail
     call debug_print
@@ -303,17 +299,23 @@ xhci_pci_find:
     or [xhci_mmio_base], rax
 
 .bar_done:
-    ; Enable bus mastering + memory space
+    ; Enable bus mastering + memory space, and make sure legacy INTx is not
+    ; disabled. MSI/MSI-X is not wired yet, so a sane firmware INT line is the
+    ; only controller wake source we can route today.
     mov eax, [xhci_pci_addr]
     or eax, 0x04
     call pci_read_conf_dword
     or eax, 0x06
+    and eax, 0xFFFFFBFF              ; clear PCI Command bit 10 (INTx Disable)
     mov ecx, eax
     mov eax, [xhci_pci_addr]
     or eax, 0x04
     call pci_write_conf_dword
 
-    ; Print MMIO base low 32 bits to serial for debug
+    ; Print MMIO base low 32 bits to serial for debug.
+    ; SECURITY: this is the controller's physical MMIO base - a kernel-layout
+    ; info leak that must never egress in a release/logless build. Debug-gated.
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
     push rdx
     mov eax, [xhci_mmio_base]
@@ -321,6 +323,7 @@ xhci_pci_find:
     call serial_hex32
     pop rdx
     pop rax
+%endif
 
     mov eax, 1
     jmp .pci_ret
@@ -562,11 +565,7 @@ xhci_reset:
     mov [rsi + XHCI_OP_USBCMD], eax
 
     ; Serial: 'a' (wait halt start)
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'a'
-    out dx, al
-    pop rdx
+    SER 'a'
 
     ; Wait for HCH = 1 (halted) - up to 100ms
     mov rbx, [tick_count]
@@ -583,11 +582,7 @@ xhci_reset:
 .halted:
 
     ; Serial: 'b' (halted)
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'b'
-    out dx, al
-    pop rdx
+    SER 'b'
 
     ; Set HCRST
     mov eax, [rsi + XHCI_OP_USBCMD]
@@ -609,11 +604,7 @@ xhci_reset:
 .rst_done:
 
     ; Serial: 'c' (reset done)
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'c'
-    out dx, al
-    pop rdx
+    SER 'c'
 
     ; Wait for CNR = 0 - up to 1 second
     mov rbx, [tick_count]
@@ -630,24 +621,16 @@ xhci_reset:
 
 .reset_ok:
     ; Serial: 'd' (CNR clear)
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'd'
-    out dx, al
-    pop rdx
+    SER 'd'
     mov eax, 1
     jmp .reset_ret
 .reset_fail:
     ; Serial: 'e' (reset fail)
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'e'
-    out dx, al
-    pop rdx
+    SER 'e'
     xor eax, eax
 .reset_ret:
     pop rbx
     pop rcx
     pop rsi
     ret
-
+

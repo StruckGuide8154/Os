@@ -24,6 +24,23 @@ global app_segment_verify;
 global sha256_self_test;
 global mb_digest;
 
+# Reentrant SHA-256 for the L3 code-integrity tripwire (usermode_integrity.inc).
+# Unlike the boot/launch SHA above (global sha_* scratch, serialized by
+# crypto_lock), these operate ENTIRELY on a caller-provided context pointer, so
+# they carry no shared state: l3_code_hash_verify_all runs in PIT-IRQ context and
+# l3_code_hash_install in syscall context, and either can preempt app_segment_
+# verify's global-state SHA without corrupting it. The context is a 400-byte
+# stack buffer the asm caller reserves; layout (byte offsets from ctx base c):
+#   c+0   h[8]   (8 x u32 state)
+#   c+32  total  (u64 byte count)
+#   c+40  buflen (u64, 0..64)
+#   c+48  w[64]  (64 x u32 message schedule)
+#   c+304 buf[64](pending block)
+#   c+368 digest[32] (finalized big-endian digest)
+global ci_sha256_init;
+global ci_sha256_update;
+global ci_sha256_final_lo;
+
 extern _start;
 extern _kernel_text_end;
 extern app_blob_start;
@@ -34,6 +51,7 @@ extern app_integrity_table;
 extern kernel_panic_canary;
 extern svg_dump_putc;     # serial putc (al) - diagnostic
 extern ser_print_hex64;   # serial print rdi as 16 hex digits - diagnostic
+extern boot_mark;         # boot-progress mark + visual block (debug -BootTrace only)
 extern wq_lock;
 extern wq_unlock;
 
@@ -377,7 +395,17 @@ fn sha256_self_test() {
 
 fn measured_boot_init() {
     if lb(&mb_done) != 0 { return; }
+    # --- Pre-GUI freeze pinpointing (debug -BootTrace only) -------------------
+    # The kmain "MD" block is painted only AFTER this whole function returns, so a
+    # real-HW wedge inside it shows up as "stopped on the K4 (2nd cyan) block".
+    # These sub-stage blocks bracket every sub-operation so the next -BootTrace
+    # boot reveals the EXACT step that hangs. They compile to nothing without
+    # GRIT_BOOT_TRACE, so release/normal images are byte-identical. Tags:
+    #   m0 entered  m1 self-test ok  m2 span1 hashed  m3 span2 hashed  m4 manifest folded
+    # Last block shown => that step COMPLETED; the wedge is the next sub-step.
+    cfg "GRIT_BOOT_TRACE" { boot_mark(109, 48); }   # "m0" entered measured_boot_init
     sha256_self_test();
+    cfg "GRIT_BOOT_TRACE" { boot_mark(109, 49); }   # "m1" sha256 KAT self-test passed
     sha256_init();
     cfg "RELEASE_BUILD" {
         # The executable text span contains the large built-in app blob. Release
@@ -406,8 +434,11 @@ fn measured_boot_init() {
         }
         cfg !"LEGACY_BLOB_HMAC" {
             sha256_update(&_start, &app_blob_start - &_start);
+            cfg "GRIT_BOOT_TRACE" { boot_mark(109, 50); }   # "m2" span1 (_start .. app_blob_start) hashed
             sha256_update(&app_blob_end, &_kernel_text_end - &app_blob_end);
+            cfg "GRIT_BOOT_TRACE" { boot_mark(109, 51); }   # "m3" span2 (app_blob_end .. _kernel_text_end) hashed
             sha256_update(&app_integrity_table, APP_MANIFEST_MARKER_BYTES + APP_MANIFEST_TABLE_BYTES);
+            cfg "GRIT_BOOT_TRACE" { boot_mark(109, 52); }   # "m4" signed app manifest folded
         }
     }
     sha256_final(&mb_digest);
@@ -530,3 +561,114 @@ fn app_segment_verify_locked(app_id) {
 # lost. The KASLR sliding-fixup table (mb_blob_sig_fixups, patched by
 # tools/build/patch_blob_sig.py) is retained because sha256_blob_segment_canonical
 # still needs it; only the forgeable symmetric MAC is gone.
+
+# --- Reentrant context-based SHA-256 (L3 code-integrity tripwire) -----------
+# Byte-identical compression to sha256_compress, but all state lives at [c..c+400)
+# (a caller stack buffer) instead of the global sha_* data, so it is reentrant.
+
+fn ci_compress(c, block) {
+    let i = 0;
+    while i < 16 {
+        sw(c + 48 + i * 4, read_be32(block + i * 4));
+        i = i + 1;
+    }
+    while i < 64 {
+        let v = ssig1(lw(c + 48 + (i - 2) * 4)) + lw(c + 48 + (i - 7) * 4)
+              + ssig0(lw(c + 48 + (i - 15) * 4)) + lw(c + 48 + (i - 16) * 4);
+        sw(c + 48 + i * 4, v & MASK32);
+        i = i + 1;
+    }
+
+    let a = lw(c + 0) & MASK32;  let b = lw(c + 4) & MASK32;
+    let cc = lw(c + 8) & MASK32; let d = lw(c + 12) & MASK32;
+    let e = lw(c + 16) & MASK32; let f = lw(c + 20) & MASK32;
+    let g = lw(c + 24) & MASK32; let h = lw(c + 28) & MASK32;
+
+    i = 0;
+    while i < 64 {
+        let t1 = (h + bsig1(e) + sha_ch(e, f, g) + (lw(&sha256_k + i * 4) & MASK32)
+                + (lw(c + 48 + i * 4) & MASK32)) & MASK32;
+        let t2 = (bsig0(a) + maj(a, b, cc)) & MASK32;
+        h = g; g = f; f = e; e = (d + t1) & MASK32;
+        d = cc; cc = b; b = a; a = (t1 + t2) & MASK32;
+        i = i + 1;
+    }
+
+    sw(c + 0,  (lw(c + 0)  + a) & MASK32);
+    sw(c + 4,  (lw(c + 4)  + b) & MASK32);
+    sw(c + 8,  (lw(c + 8)  + cc) & MASK32);
+    sw(c + 12, (lw(c + 12) + d) & MASK32);
+    sw(c + 16, (lw(c + 16) + e) & MASK32);
+    sw(c + 20, (lw(c + 20) + f) & MASK32);
+    sw(c + 24, (lw(c + 24) + g) & MASK32);
+    sw(c + 28, (lw(c + 28) + h) & MASK32);
+}
+
+fn ci_sha256_init(c) {
+    sw(c + 0, 0x6A09E667); sw(c + 4, 0xBB67AE85);
+    sw(c + 8, 0x3C6EF372); sw(c + 12, 0xA54FF53A);
+    sw(c + 16, 0x510E527F); sw(c + 20, 0x9B05688C);
+    sw(c + 24, 0x1F83D9AB); sw(c + 28, 0x5BE0CD19);
+    sq(c + 32, 0);
+    sq(c + 40, 0);
+}
+
+fn ci_sha256_update(c, src, len) {
+    let p = src;
+    let left = len;
+    sq(c + 32, lq(c + 32) + len);
+    while left > 0 {
+        let used = lq(c + 40);
+        if used == 0 {
+            while left >= SHA256_BLOCK {
+                ci_compress(c, p);
+                p = p + SHA256_BLOCK;
+                left = left - SHA256_BLOCK;
+            }
+            if left == 0 { return; }
+        }
+        let take = SHA256_BLOCK - used;
+        if take > left { take = left; }
+        let i = 0;
+        while i < take {
+            sb(c + 304 + used + i, lb(p + i));
+            i = i + 1;
+        }
+        used = used + take;
+        sq(c + 40, used);
+        p = p + take;
+        left = left - take;
+        if used == SHA256_BLOCK {
+            ci_compress(c, c + 304);
+            sq(c + 40, 0);
+        }
+    }
+}
+
+# Pad/finalize, write the 32-byte big-endian digest to c+368, and return its
+# leading 8 bytes as the per-slot integrity tag (truncated SHA-256; ~2^64
+# second-preimage resistance, non-invertible - replaces the forgeable FNV-1a).
+fn ci_sha256_final_lo(c) {
+    let bit_len = lq(c + 32) * 8;
+    let used = lq(c + 40);
+    sb(c + 304 + used, 0x80);
+    used = used + 1;
+    if used > 56 {
+        while used < 64 { sb(c + 304 + used, 0); used = used + 1; }
+        ci_compress(c, c + 304);
+        used = 0;
+    }
+    while used < 56 { sb(c + 304 + used, 0); used = used + 1; }
+    let j = 0;
+    while j < 8 {
+        sb(c + 304 + 56 + j, (bit_len >> ((7 - j) * 8)) & 0xFF);
+        j = j + 1;
+    }
+    ci_compress(c, c + 304);
+    let i = 0;
+    while i < 8 {
+        write_be32(c + 368 + i * 4, lw(c + i * 4));
+        i = i + 1;
+    }
+    return lq(c + 368);
+}

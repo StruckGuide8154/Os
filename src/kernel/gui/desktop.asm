@@ -52,13 +52,14 @@ desktop_draw_icons:
     cmp r12d, MAX_DESK_ICONS
     jge .draw_done
 
-    movzx eax, byte [desktop_icons + r12]
+    lea rbx, [rel desktop_icons]
+    movzx eax, byte [rbx + r12]
     test al, al
     jz .draw_next             ; empty slot
 
     ; al = app ID. Look up icon info.
     mov r13d, eax             ; save app ID
-    lea rbx, [icon_table]
+    lea rbx, [rel icon_table]
     ; index = app_id - 2 (apps start at ID 2)
     sub eax, 2
     js .draw_next
@@ -111,7 +112,8 @@ desktop_handle_click:
     push r13
 
     ; Close start menu
-    mov byte [tb_start_menu_open], 0
+    lea rbx, [rel tb_start_menu_open]
+    mov byte [rbx], 0
 
     ; Accept clicks on the icon and its label, not just the 48px icon box.
     cmp edi, ICON_HIT_X
@@ -122,12 +124,13 @@ desktop_handle_click:
     ; Find which icon slot
     xor r12d, r12d
     mov r13d, ICON_BASE_Y
+    lea rbx, [rel desktop_icons]
 
 .click_loop:
     cmp r12d, MAX_DESK_ICONS
     jge .click_none
 
-    movzx eax, byte [desktop_icons + r12]
+    movzx eax, byte [rbx + r12]
     test al, al
     jz .click_next
 
@@ -139,7 +142,7 @@ desktop_handle_click:
     jg .click_next
 
     ; Hit! Launch this app
-    movzx edi, byte [desktop_icons + r12]
+    movzx edi, byte [rbx + r12]
     call app_launch
     mov rax, 1
     jmp .click_ret
@@ -161,11 +164,12 @@ desktop_handle_click:
 ; desktop_has_icon: EDI=app_id -> EAX=1 if on desktop, 0 if not
 ; ============================================================================
 desktop_has_icon:
+    lea r8, [rel desktop_icons]
     xor ecx, ecx
 .has_loop:
     cmp ecx, MAX_DESK_ICONS
     jge .has_no
-    cmp byte [desktop_icons + rcx], dil
+    cmp byte [r8 + rcx], dil
     je .has_yes
     inc ecx
     jmp .has_loop
@@ -187,16 +191,17 @@ desktop_add_icon:
     test eax, eax
     jnz .add_done             ; already there
 
+    lea r8, [rel desktop_icons]
     xor ecx, ecx
 .add_loop:
     cmp ecx, MAX_DESK_ICONS
     jge .add_done             ; no room
-    cmp byte [desktop_icons + rcx], 0
+    cmp byte [r8 + rcx], 0
     je .add_found
     inc ecx
     jmp .add_loop
 .add_found:
-    mov byte [desktop_icons + rcx], dil
+    mov byte [r8 + rcx], dil
 .add_done:
     ret
 
@@ -204,29 +209,30 @@ desktop_add_icon:
 ; desktop_remove_icon: EDI=app_id -> removes from desktop
 ; ============================================================================
 desktop_remove_icon:
+    lea r8, [rel desktop_icons]
     xor ecx, ecx
 .rem_loop:
     cmp ecx, MAX_DESK_ICONS
     jge .rem_done
-    cmp byte [desktop_icons + rcx], dil
+    cmp byte [r8 + rcx], dil
     je .rem_found
     inc ecx
     jmp .rem_loop
 .rem_found:
-    mov byte [desktop_icons + rcx], 0
+    mov byte [r8 + rcx], 0
     ; Compact: shift remaining entries down
     lea edx, [ecx + 1]
 .compact:
     cmp edx, MAX_DESK_ICONS
     jge .compact_zero
-    movzx eax, byte [desktop_icons + rdx]
-    mov byte [desktop_icons + rcx], al
-    mov byte [desktop_icons + rdx], 0
+    movzx eax, byte [r8 + rdx]
+    mov byte [r8 + rcx], al
+    mov byte [r8 + rdx], 0
     inc ecx
     inc edx
     jmp .compact
 .compact_zero:
-    mov byte [desktop_icons + rcx], 0
+    mov byte [r8 + rcx], 0
 .rem_done:
     ret
 

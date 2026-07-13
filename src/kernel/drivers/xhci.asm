@@ -8,9 +8,11 @@ bits 64
 
 extern pci_read_conf_dword
 extern pci_write_conf_dword
+extern ioapic_set_irq
 extern tick_count
 extern debug_print
 extern usb_hid_port_owned
+extern kernel_event_flags
 
 ; --- MMIO bounds gate (security_todo.md §8) ---------------------------------
 ; The xHCI BAR is registered as MMIO_DRV_XHCI by mmio_drv_caps_init once the

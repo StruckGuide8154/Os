@@ -5,6 +5,12 @@ l3_app_blob_copy_cap_guard: dq L3_APP_BLOB_COPY_CAP
 app_blob_base_v:     dq 0
 app_blob_end_v:      dq 0
 app_blob_size_v:     dq 0
+; W^X code/data split offset = app_blob_code_end - app_blob_start (page-aligned).
+; Computed once in app_blob_init from the in-image blob labels (their relative
+; positions survive the post-build strip), and reused by l3_copy_app_blob_to_slot
+; to build each slot's v1 W^X manifest. Same offset in the embedded blob and the
+; loaded APPS.BIN (identical layout), so it is slide/relocation independent.
+app_blob_code_size_v: dq 0
 l3_app_arena_base_v: dq APP_DATA_ADDR
 l3_app_arena_size_v: dq (MAX_WINDOWS * APP_SLOT_SIZE)
 %ifdef ENABLE_DEBUG_SERIAL

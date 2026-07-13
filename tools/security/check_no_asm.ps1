@@ -125,7 +125,12 @@ if (-not (Test-Path -LiteralPath $securityModuleDir -PathType Container)) {
 }
 
 $ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'worktrees')
-$quarantinePrefixes = @('build', 'dist', 'deprecated')
+# Archival reference assembly that is NOT trusted-path source. `deprecated/` is
+# the retired-subsystem archive; `docs/gpu-driver/reference-780M-asm` is the
+# documentation-only reference copy of the retired AMD 780M iGPU assembly (moved
+# out of deprecated/ into docs as a read-only reference). Both are archival, not
+# active source, so a listed extension there is quarantined, never new work.
+$quarantinePrefixes = @('build', 'dist', 'deprecated', 'docs/gpu-driver/reference-780M-asm')
 $trustedNxhPrefixes = @(
     'src/boot/ghl',
     'src/kernel/grithlk',

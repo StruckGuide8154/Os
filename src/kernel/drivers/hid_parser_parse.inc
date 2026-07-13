@@ -43,8 +43,13 @@ hid_parse_report_desc_v2:
     mov dword [hid_parsed_y_logical_max], 4095
 
     ; RBP = end pointer
+    ; Contract is ECX = length (32-bit). Defensively zero-extend so a future
+    ; caller that leaves garbage in the upper 32 bits of RCX cannot push the
+    ; past-end pointer beyond the buffer and defeat every bounds check below.
+    mov ecx, ecx               ; zero-extend ECX -> RCX
     mov rbp, rsi
     add rbp, rcx               ; RBP = past-end pointer
+    jc .parse_fail             ; length so large rsi+len wraps -> reject
 
     ; Parser state in memory (registers are too few)
     mov word [hp_usage_page], 0

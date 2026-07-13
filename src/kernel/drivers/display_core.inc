@@ -74,18 +74,35 @@ FN_BEGIN display_init, 0, 0, FN_RET_SCALAR
 
     ret
 
+; kernel_data_segments - restore kernel flat data selectors for compositor code.
+; SYSRET/IRET leave DS/ES as user selectors by design (see smap.inc); after a
+; ring-3 callback returns into the kernel, ordinary GHLK stores and rep movs*
+; must not run with those selectors. Do NOT touch GS here: the raster primitives
+; address raster_target_tbl absolutely (slot 0), NOT via GS base - a GS-base
+; scheme is unusable in this flat no-swapgs model because every kernel entry/exit
+; reloads the GS selector (smap.inc SANITIZE_SEG_*) which zeroes GS base.
+global kernel_data_segments
+kernel_data_segments:
+    push rax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    cld
+    pop rax
+    ret
+
 ; Select the backbuffer as the destination for raster primitives.
 global raster_select_default_target
 raster_select_default_target:
     push rax
     mov rax, [bb_addr]
-    mov [raster_target_addr], rax
+    mov [raster_target_tbl + RTGT_ADDR], rax
     mov eax, [scr_width]
-    mov [raster_target_width], eax
+    mov [raster_target_tbl + RTGT_WIDTH], eax
     mov eax, [scr_height]
-    mov [raster_target_height], eax
+    mov [raster_target_tbl + RTGT_HEIGHT], eax
     mov rax, [scr_pitch_q]
-    mov [raster_target_pitch_q], rax
+    mov [raster_target_tbl + RTGT_PITCH], rax
     pop rax
     ret
 
@@ -118,24 +135,24 @@ raster_select_syscall_target:
     cmp dword [wallpaper_render_h], 0
     jle .use_default
     mov rax, [wallpaper_render_target_addr]
-    mov [raster_target_addr], rax
+    mov [raster_target_tbl + RTGT_ADDR], rax
     mov eax, [wallpaper_render_w]
-    mov [raster_target_width], eax
+    mov [raster_target_tbl + RTGT_WIDTH], eax
     shl eax, 2
-    mov [raster_target_pitch_q], rax
+    mov [raster_target_tbl + RTGT_PITCH], rax
     mov eax, [wallpaper_render_h]
-    mov [raster_target_height], eax
+    mov [raster_target_tbl + RTGT_HEIGHT], eax
     pop rax
     ret
 .use_default:
     mov rax, [bb_addr]
-    mov [raster_target_addr], rax
+    mov [raster_target_tbl + RTGT_ADDR], rax
     mov eax, [scr_width]
-    mov [raster_target_width], eax
+    mov [raster_target_tbl + RTGT_WIDTH], eax
     mov eax, [scr_height]
-    mov [raster_target_height], eax
+    mov [raster_target_tbl + RTGT_HEIGHT], eax
     mov rax, [scr_pitch_q]
-    mov [raster_target_pitch_q], rax
+    mov [raster_target_tbl + RTGT_PITCH], rax
     pop rax
     ret
 .pause:
@@ -148,13 +165,13 @@ global raster_sc_release_target
 raster_sc_release_target:
     push rax
     mov rax, [bb_addr]
-    mov [raster_target_addr], rax
+    mov [raster_target_tbl + RTGT_ADDR], rax
     mov eax, [scr_width]
-    mov [raster_target_width], eax
+    mov [raster_target_tbl + RTGT_WIDTH], eax
     mov eax, [scr_height]
-    mov [raster_target_height], eax
+    mov [raster_target_tbl + RTGT_HEIGHT], eax
     mov rax, [scr_pitch_q]
-    mov [raster_target_pitch_q], rax
+    mov [raster_target_tbl + RTGT_PITCH], rax
     mov byte [raster_target_lock], 0
     pop rax
     ret
@@ -186,7 +203,11 @@ FN_BEGIN display_recompute_layout, 0, 0, FN_RET_SCALAR
     add ecx, 10                   ; +10 = clock Y inset
     mov [scr_clock_y], ecx
     mov ecx, eax
-    sub ecx, [tb_start_menu_h]    ; -START_MENU_H = start menu top (data-driven)
+    ; The kernel Start menu is retired (the ring-3 shell owns it); tb_start_menu_h
+    ; is gone with taskbar.asm. scr_start_menu_y is now a vestigial layout field;
+    ; keep it self-consistent with a fixed legacy menu height so any remaining
+    ; reader gets a sane value instead of an undefined symbol.
+    sub ecx, 200                  ; legacy START_MENU_H default
     mov [scr_start_menu_y], ecx
 
     mov eax, [scr_width]
@@ -208,19 +229,19 @@ FN_BEGIN pixel_set, 0, 0, FN_RET_SCALAR
     ; Bounds check
     cmp edi, 0
     jl .done
-    cmp edi, [raster_target_width]
+    cmp edi, [raster_target_tbl + RTGT_WIDTH]
     jge .done
     cmp esi, 0
     jl .done
-    cmp esi, [raster_target_height]
+    cmp esi, [raster_target_tbl + RTGT_HEIGHT]
     jge .done
 
     ; Calculate offset: y * pitch + x * 4
     movsxd rax, esi
-    imul rax, [raster_target_pitch_q]
+    imul rax, [raster_target_tbl + RTGT_PITCH]
     movsxd rbx, edi
     lea rax, [rax + rbx * 4]
-    mov rbx, [raster_target_addr]
+    mov rbx, [raster_target_tbl + RTGT_ADDR]
     mov [rbx + rax], edx
 
 .done:
@@ -240,18 +261,18 @@ FN_BEGIN blend_pixel, 0, 0, FN_RET_SCALAR
     push r10
     cmp edi, 0
     jl .bp_done
-    cmp edi, [raster_target_width]
+    cmp edi, [raster_target_tbl + RTGT_WIDTH]
     jge .bp_done
     cmp esi, 0
     jl .bp_done
-    cmp esi, [raster_target_height]
+    cmp esi, [raster_target_tbl + RTGT_HEIGHT]
     jge .bp_done
 
     movsxd rax, esi
-    imul rax, [raster_target_pitch_q]
+    imul rax, [raster_target_tbl + RTGT_PITCH]
     movsxd rbx, edi
     lea rax, [rax + rbx * 4]
-    mov r10, [raster_target_addr]
+    mov r10, [raster_target_tbl + RTGT_ADDR]
     add r10, rax              ; r10 = &dst pixel
 
     mov ecx, edx              ; src ARGB
@@ -323,4 +344,4 @@ FN_BEGIN blend_pixel, 0, 0, FN_RET_SCALAR
     pop rbx
     pop rax
     ret
-
+

@@ -83,8 +83,9 @@ section .text
 ; vmx_exit_trampoline). Emits actual VMXON/VMCS/VMLAUNCH via the gritc kernel_vmx
 ; intrinsics. Dead unless mon_hal_detect reports VMX usable AND the boot path
 ; calls vmx_backend_arm (it does not on the TCG CI boot, where VMX #UDs), so its
-; presence in the image does not change boot behavior. Verified tested-accel on
-; a nested-VMX / real-Intel host per scripts/test/run_vmx_accel.md.
+; presence in the image does not change boot behavior. The accel/HW verification
+; procedure is documented in scripts/test/run_vmx_accel.md; until that run lands
+; this is compile-covered only, not `tested-accel`.
 %include "build/ghl/mon_hal_vmx_backend.asm"
 section .text
 ; Track 2 signed-envelope enforcement: structural policy kernel
@@ -337,10 +338,6 @@ section .text
 ; GritHLK boot animation player (zero-asm; compiled with --forbid-asm).
 %include "build/ghl/boot_anim.asm"
 
-; --- Built-in User Apps ---
-section .text
-%include "src/user/apps.asm"
-
 ; --- Libraries ---
 section .text
 ; GritHLK (zero-asm) string/memory utilities (ported from lib/string.asm).
@@ -372,6 +369,17 @@ fn_strlen_wrapper:
 memcpy equ fn_memcpy
 memset equ fn_memset
 strlen equ fn_strlen
+
+; --- Built-in User Apps (LAST .text unit) ---
+; Placed after the kernel libraries/helpers so the app blob's code is the TAIL
+; of `.text`. NASM -f bin then places the `.appdata` section (declared
+; `follows=.text` in apps.asm) -- the writable-data half of the blob -- page-
+; aligned immediately after the app code, with no kernel bytes in between, so
+; tools/build/extract_apps.ps1 (sentinel scan) captures exactly [code | data].
+; _kernel_text_end still follows, so app code stays inside the measured/locked
+; kernel text range [_start, _kernel_text_end) exactly as before.
+section .text
+%include "src/user/apps.asm"
 
 ; End-of-text marker. NASM `-f bin` concatenates section CONTENT by name in the
 ; order [.text | .data | .rodata | .bss] regardless of include order, so every

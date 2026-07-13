@@ -14,6 +14,7 @@ section .text
 global wm_init
 global wm_create_window
 global wm_create_window_ex
+global wm_window_finalize
 global wm_draw_window
 global wm_draw_desktop
 global wm_handle_mouse_event
@@ -55,6 +56,7 @@ extern dispatch_app_callback           ; Stage 2d cross-core chokepoint
 extern cpi_verify_callback             ; CPI-lite: authenticate tagged callback ptrs
 extern call_app_l3_packed
 extern process_submit_job
+extern workqueue_submit_to
 extern workqueue_done
 extern workqueue_reap
 extern wq_lock
@@ -67,7 +69,6 @@ extern process_create
 extern l3_slot_base
 extern l3_release_slot
 extern cap_mask_store
-extern desktop_draw_icons
 extern nx_icon_close_16
 extern app_hl_wallpaper_draw
 extern app_media_draw

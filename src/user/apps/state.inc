@@ -1,8 +1,15 @@
-; All per-instance app state must live in .text (between app_blob_start and
-; app_blob_end) so that slot-relative addressing `slot_base + (sym - app_blob_start)`
-; produces an offset inside the 1 MB slot. Symbols left in .data end up past
-; app_blob_end and every slot-relative access points to garbage.
-section .text
+; All per-instance app state must live INSIDE the blob (between app_blob_start
+; and app_blob_end) so that slot-relative addressing
+; `slot_base + (sym - app_blob_start)` produces an offset inside the 2 MB slot.
+; W^X (Codex review finding 2): this is *writable* state, so it must not share
+; an executable page with app code. It is emitted into `.appdata` -- the section
+; apps.asm groups page-aligned after all app `.text` and inside
+; [app_blob_start, app_blob_end). The per-slot W^X manifest marks this whole
+; region W+NX. Symbols left in `.data` (or `.text`) would break: `.data` ends up
+; past app_blob_end (slot-relative access points to garbage), `.text` would put
+; writable buffers in the X+!W code window and fault on first write. The file
+; restores `.text` at its end so the code in launch.inc/etc. assembles normally.
+section .appdata
 
 ; ----------------------------------------------------------------------------
 ; Named paint palette color constants (ARGB 0xAARRGGBB, opaque alpha 0xFF).
@@ -26,6 +33,7 @@ szAboutTitle    db "About Grit", 0
 szTaskMgrTitle  db "Task Manager", 0
 szPingTitle     db "Networking", 0
 szMediaTitle    db "Media Player", 0
+szShellTitle    db "Grit Shell", 0
 
 ; --- Explorer strings ---
 szPathRoot      db "C:\", 0
@@ -58,6 +66,16 @@ szPropSizeDir   db "--", 0
 
 prop_entry_ptr  dq 0            ; pointer to VFS entry being viewed
 exp_prop_visible db 0           ; 1 = Properties overlay shown inside Explorer window
+
+; In-flight launch window tracker. app_launch arms a kfault landing pad
+; (.al_land) before running the launch body; a recovered ring-0 fault between
+; wm_create_window_ex and wm_window_finalize longjmps there and returns -1, but
+; the window wm_create_window_ex already allocated (WF_ACTIVE, not WF_READY) was
+; never closed -- it leaked its slot and, before the taskbar gate was tightened,
+; showed as a "fake open" button. wm_create_window_ex records the id it just
+; created here; .al_land closes it; the normal .done path clears it to -1 so a
+; finalized (ready) window is never torn down. -1 = nothing in flight.
+launch_pending_win dq -1
 
 ; --- Virtual Filesystem ---
 ; Each entry: 24 bytes name (null-padded) + 1 byte type (0=dir,1=file) + 7 bytes size string
@@ -333,3 +351,8 @@ np_saveas_buf:     times 24 db 0
 np_saveas_83:      times 12 db 0
 np_saveloc_buf:    times 24 db 0
 np_saveloc_83:     times 12 db 0
+
+; Restore the code section: this file is %include'd mid-blob in apps.asm, and
+; the units that follow (launch.inc, generated apps, shell.inc, media_viewer.inc)
+; emit executable code that must land back in `.text`, not `.appdata`.
+section .text

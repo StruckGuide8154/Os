@@ -1,0 +1,23 @@
+<!-- @dsCard group="Brand" viewport="700x200" name="Wallpapers" subtitle="Clean 3D-depth desktop backgrounds — Depth, Dune, Studio, Mono" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 16px 18px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .tile { height: 150px; border-radius: var(--r-lg); border: 1px solid var(--border-control); position: relative; overflow: hidden; box-shadow: var(--shadow-sm); }
+  .cap { position: absolute; left: 12px; bottom: 10px; font: var(--fw-semibold) var(--fs-micro)/1 var(--font-ui); letter-spacing: var(--ls-wide); text-transform: uppercase; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+</style>
+</head>
+<body>
+<div class="grid">
+  <div class="tile grit-wall grit-wall-depth"><span class="cap">Depth</span></div>
+  <div class="tile grit-wall grit-wall-dune"><span class="cap">Dune</span></div>
+  <div class="tile grit-wall grit-wall-studio"><span class="cap">Studio</span></div>
+  <div class="tile grit-wall grit-wall-mono"><span class="cap">Mono</span></div>
+</div>
+</body>
+</html>

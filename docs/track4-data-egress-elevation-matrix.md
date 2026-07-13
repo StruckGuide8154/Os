@@ -6,10 +6,13 @@ privilege elevation.**_ This document is the **static-audit half** of
 attacker can recover from a fully-reversed dump, it names the independent
 barriers that defeat reuse of that artifact on a *fresh boot*, and cites the
 live code that enforces each barrier. The **dynamic half** (a planted-leak
-negative test that boots with the dumped secret installed and proves elevation
-still fails) is tracked separately and remains `[ ]` - see "Honest gaps" below.
+negative test that boots twice and proves the per-boot/per-slot rotation makes a
+dumped secret stale, so elevation still fails) is now **DONE and re-verified**
+(`scripts/dev/test_track4_planted_leak.ps1`, all tiers PASS incl. the two-boot
+QEMU ephemerality proof) - see "Honest gaps" below for the script set and its
+TCG hardware caveat.
 
-_Reconciled: 2026-06-09. Authority: this is a Track 4 doc, subordinate to
+_Reconciled: 2026-06-27. Authority: this is a Track 4 doc, subordinate to
 `STATUS.md` §9 (scope) and `architecture-defense-in-depth.md` (topology)._
 
 ---
@@ -140,9 +143,9 @@ each artifact's row above is defeated by ≥2 independent barriers.
   elevation" for the three diversification pivots; the planted-leak *boot* test
   below remains the empirical complement.
 - **Dynamic proof DONE (2026-06-09).** The two dynamic test scripts now live at
-  `scripts/test/test_track4_planted_leak.ps1` (planted-leak negative test -
+  `scripts/dev/test_track4_planted_leak.ps1` (planted-leak negative test -
   three tiers: symbol audit, two-boot ephemerality proof, structural barrier
-  argument) and `scripts/test/test_track4_pmemsave.ps1` (QEMU `pmemsave`
+  argument) and `scripts/dev/test_track4_pmemsave.ps1` (QEMU `pmemsave`
   pre/post-wipe dump grep). Both carry the mandatory QEMU TCG caveat: software
   barriers only; TME/SME Part C requires real silicon or KVM+SEV.
 - **Barrier (9) KPTI is default-off** (triple-faults until the trampoline moves

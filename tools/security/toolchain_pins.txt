@@ -1,0 +1,59 @@
+# =============================================================================
+# toolchain_pins.txt - frozen trusted-toolchain manifest (Track 1, sec->10).
+#
+# Beyond-zero-trust Track 1 (docs/track1-repo-enforcement-todo.md, "Path to
+# 10/10"): the legacy inventory protects the file *extensions* and the build
+# graph, but NOT the toolchain that produced the trusted-path artifacts. A
+# swapped gritc.py (the GHL/GritHLK compiler that emits every kernel/app/policy
+# module) or a swapped nasm (the legacy assembler of record) would silently
+# change what ships while passing every other guard.
+#
+# This manifest pins the trusted toolchain by HASH/VERSION so that a swapped
+# compiler is rejected exactly like a new .asm: check_toolchain_pins.ps1 parses
+# this file, recomputes the live values, and FAILS on any drift. The pins can
+# only be changed by an explicit, reviewed edit to this manifest (a re-baking),
+# which is the whole point - the toolchain becomes a property the repo enforces.
+#
+# Record format (pipe-delimited, mirrors legacy_asm_inventory.txt):
+#
+#     kind | id | algo | value | path-or-note
+#
+#   kind   = file-sha256 | tool-version
+#   id     = stable logical name of the pinned tool
+#   algo   = sha256 (for file-sha256) | version (for tool-version)
+#   value  = the frozen lowercase hex digest, or the exact required
+#            version token
+#   path   = repo-relative path of the file (file-sha256), or a probe
+#            note (tool-version)
+#
+# - file-sha256 pins a TRACKED in-repo file by content. Fully reproducible on
+#   any checkout: a clean CI runner and a developer tree compute the identical
+#   digest. This is the strong pin - the compiler that produces the trusted
+#   path is content-addressed.
+# - tool-version pins an EXTERNAL binary (nasm) by its self-reported version
+#   string. A raw binary-file hash is intentionally NOT used for nasm: the
+#   official nasm.exe differs per OS/arch/distro package, so a file hash would
+#   be unstable across the developer box and the windows-latest CI runner and
+#   produce false drift. The version token is the stable, meaningful identity
+#   (it is what determines emitted bytes), so that is what is frozen. When nasm
+#   is absent (e.g. a pure-Python CI lane that never assembles) the guard treats
+#   the version pin as advisory, not a hard failure - see -RequireNasm.
+#
+# To re-bake after an intentional, reviewed toolchain change:
+#   powershell -File tools/security/check_toolchain_pins.ps1 -Update
+# then review and commit the diff to THIS file.
+# =============================================================================
+
+# The GHL/GritHLK compiler - the trusted-path compiler of record. Every kernel
+# module, user app, and security policy module is emitted by this exact file.
+file-sha256 | gritc.py | sha256 | 692875d497fd2e40e879083c07909418f046e9713bddbcda5ea61ccff8d60b8e | src/user/grithl/compiler/gritc.py
+
+# The host-side Ed25519 reference + signer used by the envelope/provenance
+# machinery (write_envelope.py, the provenance signer). Pinning it makes the
+# signing identity's code content-addressed alongside the compiler.
+file-sha256 | ed25519_host.py | sha256 | 4109e01330e1a30bb0a72a14c6bedcc39fcedadb06813d3b1d4f4ab8039b4da4 | scripts/build/ed25519_host.py
+
+# The legacy assembler of record. Pinned by version token (see header note on
+# why a binary file-hash is intentionally avoided for nasm). build_uefi.ps1
+# invokes C:\Tools\nasm-2.16.03\nasm.exe.
+tool-version | nasm | version | NASM version 2.16.03 compiled on Apr 17 2024 | nasm -v (first line)

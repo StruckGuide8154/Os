@@ -99,9 +99,9 @@ sec_net_set_port_range:
     xchg si, dx                        ; normalize lo <= hi
 .spr_ordered:
     mov eax, edi
-    mov [rel sec_net_port_lo + rax*2], si
-    mov [rel sec_net_port_hi + rax*2], dx
-    or byte [rel sec_net_policy_flags + rax], SEC_NET_POLICY_PORTS
+    mov [abs sec_net_port_lo + rax*2], si
+    mov [abs sec_net_port_hi + rax*2], dx
+    or byte [abs sec_net_policy_flags + rax], SEC_NET_POLICY_PORTS
 .spr_done:
     ret
 
@@ -153,10 +153,10 @@ sec_net_set_suffix:
     movzx eax, al
     test ecx, ecx
     jz .ssfx_clear
-    or byte [rel sec_net_policy_flags + rax], SEC_NET_POLICY_SUFFIX
+    or byte [abs sec_net_policy_flags + rax], SEC_NET_POLICY_SUFFIX
     jmp .ssfx_restore
 .ssfx_clear:
-    and byte [rel sec_net_policy_flags + rax], ~SEC_NET_POLICY_SUFFIX & 0xFF
+    and byte [abs sec_net_policy_flags + rax], ~SEC_NET_POLICY_SUFFIX & 0xFF
 .ssfx_restore:
     pop r8
     pop rcx
@@ -177,11 +177,11 @@ sec_net_check_port:
     push rcx
     call sec_net_active_slot_id        ; EAX = slot
     mov ecx, eax
-    test byte [rel sec_net_policy_flags + rcx], SEC_NET_POLICY_PORTS
+    test byte [abs sec_net_policy_flags + rcx], SEC_NET_POLICY_PORTS
     jz .scp_allow                      ; no port policy -> allow
-    cmp dx, [rel sec_net_port_lo + rcx*2]
+    cmp dx, [abs sec_net_port_lo + rcx*2]
     jb .scp_deny
-    cmp dx, [rel sec_net_port_hi + rcx*2]
+    cmp dx, [abs sec_net_port_hi + rcx*2]
     ja .scp_deny
 .scp_allow:
     mov eax, 1
@@ -214,7 +214,7 @@ sec_net_check_suffix:
     push r10
     call sec_net_active_slot_id        ; EAX = slot
     mov ecx, eax
-    test byte [rel sec_net_policy_flags + rcx], SEC_NET_POLICY_SUFFIX
+    test byte [abs sec_net_policy_flags + rcx], SEC_NET_POLICY_SUFFIX
     jz .scs_allow                      ; no suffix policy -> allow
 
     ; r8 = stored suffix base for this slot

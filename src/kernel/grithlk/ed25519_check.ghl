@@ -45,6 +45,7 @@ global ed25519_envelope_sigs_ok;
 global envelope_verify_signed;
 global ed25519_last_verified_roles;
 global ed25519_check_abi_version;
+global ed25519_selftest;
 
 const ED_M32 = 0xFFFFFFFF;
 const ED_M64 = 0xFFFFFFFFFFFFFFFF;
@@ -143,6 +144,20 @@ data ed_sc_s: 8 x 4;       # signature scalar S
 data ed_sc_h: 8 x 4;       # H(R||A||M) mod L
 data ed_eq_t1: 8 x 4;      # projective-equality cross products
 data ed_eq_t2: 8 x 4;
+
+# ---- Straus/Shamir simultaneous double-scalar multiplication state ----------
+# Verification computes [S]B - [h]A in ONE shared doubling chain (instead of
+# two independent 256-bit double-and-adds), with 4-bit fixed windows over both
+# scalars. tblB holds k*B for k=0..15; it depends only on the (constant) base-
+# point, so it is built once and cached for the whole boot. tblNA holds k*(-A)
+# for k=0..15 and is rebuilt per verification (A is the per-signature pubkey).
+# Each point is 4 fe's (X,Y,Z,T) = 128 bytes.
+data ed_tblB: 512 x 4;     # 16 points x 128 bytes, byte-addressed
+data ed_tblNA: 512 x 4;
+data ed_tblB_ready: 1;     # 1 once ed_tblB is populated (cached across calls)
+data ed_negA: 32 x 4;      # -A in extended coords
+data ed_neg_z: 8 x 4;      # zero scratch for point negation
+data ed_straus_r: 32 x 4;  # double-scalar accumulator [S]B + [h](-A)
 
 # ============================================================================
 # little-endian loads/stores built from byte ops (alignment-free)
@@ -261,23 +276,58 @@ fn ed_fe_sub(r, a, b) {
     return 0;
 }
 
-# ed_mul_t = a * b (8x8 -> 16 digits). One product per step + carry keeps the
-# 64-bit accumulator below 2^64.
+# Carry out of the 64-bit truncating sum s=(x+y)&2^64 of two 64-bit operands.
+# Pure bitwise MAJ(x63, y63, ~s63) - no compare, so it is identical on the
+# kernel (real 64-bit wrap) and the host evaluator (arbitrary-precision ints
+# kept in lockstep by the explicit ED_M64 masks). Returns 0/1.
+fn ed_carry64(x, y, s) {
+    let ns = s ^ ED_M64;
+    return (((x & y) | (x & ns) | (y & ns)) >> 63) & 1;
+}
+
+# ed_mul_t = a * b (8x8 32-bit digits -> 16 digits), computed via a 4x4
+# radix-2^64 schoolbook multiply using the mulhi intrinsic for the high half
+# of each 64x64->128 limb product. This replaces the 64-iteration 32-bit
+# inner loop with 16 widening multiplies. The 8x32-bit digit interface is
+# preserved exactly (pack on the way in, unpack on the way out), so
+# ed_fe_reduce512 and every other caller are unchanged. Every 64-bit add is
+# masked with ED_M64 so the kernel's hardware wrap and the host evaluator's
+# bignums agree bit-for-bit.
+data ed_mul64: 8 x 8;      # 8 x 64-bit product limbs (radix-2^64)
+fn ed_pack64(p, i) {
+    return (ed_dig(p, i * 2) | (ed_dig(p, i * 2 + 1) << 32)) & ED_M64;
+}
 fn ed_big_mul8(a, b) {
-    ed_big_zero(&ed_mul_t, 16);
     let i = 0;
-    while i < 8 {
+    while i < 8 { sq(&ed_mul64 + i * 8, 0); i = i + 1; }
+    i = 0;
+    while i < 4 {
+        let ai = ed_pack64(a, i);
         let carry = 0;
-        let ai = ed_dig(a, i);
         let j = 0;
-        while j < 8 {
-            let acc = ed_dig(&ed_mul_t, i + j) + ai * ed_dig(b, j) + carry;
-            ed_setdig(&ed_mul_t, i + j, acc);
-            carry = acc >> 32;
+        while j < 4 {
+            let bj = ed_pack64(b, j);
+            let lo = (ai * bj) & ED_M64;
+            let hi = mulhi(ai, bj);
+            let rij = lq(&ed_mul64 + (i + j) * 8);
+            let s1 = (rij + lo) & ED_M64;
+            let ca = ed_carry64(rij, lo, s1);
+            let s2 = (s1 + carry) & ED_M64;
+            let cb = ed_carry64(s1, carry, s2);
+            sq(&ed_mul64 + (i + j) * 8, s2);
+            carry = (hi + ca + cb) & ED_M64;
             j = j + 1;
         }
-        ed_setdig(&ed_mul_t, i + 8, carry);
+        sq(&ed_mul64 + (i + 4) * 8, carry);
         i = i + 1;
+    }
+    # unpack 8 x 64-bit limbs -> 16 x 32-bit digits
+    let k = 0;
+    while k < 8 {
+        let lv = lq(&ed_mul64 + k * 8);
+        ed_setdig(&ed_mul_t, k * 2, lv & ED_M32);
+        ed_setdig(&ed_mul_t, k * 2 + 1, (lv >> 32) & ED_M32);
+        k = k + 1;
     }
     return 0;
 }
@@ -418,6 +468,66 @@ fn ed_pt_scalarmult(r, s, q) {
             ed_pt_add(r, r, &ed_sm_q);
         }
         i = i - 1;
+    }
+    return 0;
+}
+
+# Point negation in twisted Edwards: -(X,Y,Z,T) = (-X, Y, Z, -T).
+fn ed_pt_neg(r, p) {
+    ed_fe_set_small(&ed_neg_z, 0);
+    ed_fe_sub(r, &ed_neg_z, p);            # -X
+    ed_big_copy(r + 32, p + 32, 8);        # Y
+    ed_big_copy(r + 64, p + 64, 8);        # Z
+    ed_fe_set_small(&ed_neg_z, 0);
+    ed_fe_sub(r + 96, &ed_neg_z, p + 96);  # -T
+    return 0;
+}
+
+# tbl[k] = [k]p for k=0..15 (tbl[0] = identity). 14 point-adds.
+fn ed_build_table16(tbl, p) {
+    ed_pt_identity(tbl);
+    ed_pt_copy(tbl + 128, p);
+    let k = 2;
+    while k < 16 {
+        ed_pt_add(tbl + k * 128, tbl + (k - 1) * 128, p);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The j-th 4-bit window (j=0 = least significant nibble) of an 8x32-bit scalar.
+fn ed_scalar_nibble(s, j) {
+    let d = ed_dig(s, j >> 3);
+    return (d >> ((j & 7) * 4)) & 0xF;
+}
+
+# result = [s]B + [h](-A), shared doubling chain, 4-bit windows MSB-first.
+# Caller must have decompressed the pubkey into ed_pt_a first. B's window table
+# is cached across the whole boot (the basepoint never changes); only the -A
+# table is rebuilt per call.
+fn ed_straus_dvm(result, s, h) {
+    if lb(&ed_tblB_ready) == 0 {
+        ed_big_copy(&ed_pt_b, &ed_gx, 8);
+        ed_big_copy(&ed_pt_b + 32, &ed_gy, 8);
+        ed_fe_set_small(&ed_pt_b + 64, 1);
+        ed_fe_mul(&ed_pt_b + 96, &ed_gx, &ed_gy);
+        ed_build_table16(&ed_tblB, &ed_pt_b);
+        sb(&ed_tblB_ready, 1);
+    }
+    ed_pt_neg(&ed_negA, &ed_pt_a);
+    ed_build_table16(&ed_tblNA, &ed_negA);
+    ed_pt_identity(result);
+    let j = 63;
+    while j >= 0 {
+        ed_pt_add(result, result, result);   # x16 over 4 bits
+        ed_pt_add(result, result, result);
+        ed_pt_add(result, result, result);
+        ed_pt_add(result, result, result);
+        let sn = ed_scalar_nibble(s, j);
+        if sn != 0 { ed_pt_add(result, result, &ed_tblB + sn * 128); }
+        let hn = ed_scalar_nibble(h, j);
+        if hn != 0 { ed_pt_add(result, result, &ed_tblNA + hn * 128); }
+        j = j - 1;
     }
     return 0;
 }
@@ -656,6 +766,35 @@ fn ed25519_check_abi_version() {
     return 1;
 }
 
+# ---- power-on known-answer self-test (RFC 8032 TEST 1) ----------------------
+# A baked, immutable RFC 8032 test vector exercised before the verifier gates
+# the boot chain. It proves the WHOLE verify path (SHA-512, the radix-2^64
+# field multiply incl. the mulhi intrinsic, decompression, the Straus double-
+# scalar multiplication, scalar reduction and the projective equality test)
+# computes a correct accept on a valid signature AND a correct reject on a
+# one-bit tamper. A miscompiled or faulty verifier therefore cannot silently
+# admit a signed artifact: ed25519_selftest() returns 0 and the boot-chain
+# call site fails closed. This adds assurance the prior verifier did not have.
+data ed_kat_pub: 32 = [
+    0xd7,0x5a,0x98,0x01,0x82,0xb1,0x0a,0xb7,0xd5,0x4b,0xfe,0xd3,0xc9,0x64,0x07,0x3a,
+    0x0e,0xe1,0x72,0xf3,0xda,0xa6,0x23,0x25,0xaf,0x02,0x1a,0x68,0xf7,0x07,0x51,0x1a];
+data ed_kat_sig: 64 = [
+    0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
+    0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
+    0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
+    0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b];
+data ed_kat_tmp: 64;
+
+fn ed25519_selftest() {
+    # msg is empty (len 0); ed_kat_pub doubles as a valid non-null msg pointer.
+    if ed25519_verify(&ed_kat_pub, &ed_kat_pub, 0, &ed_kat_sig) != 1 { return 0; }
+    let i = 0;
+    while i < 64 { sb(&ed_kat_tmp + i, lb(&ed_kat_sig + i)); i = i + 1; }
+    sb(&ed_kat_tmp + 10, lb(&ed_kat_tmp + 10) ^ 1);   # one-bit tamper
+    if ed25519_verify(&ed_kat_pub, &ed_kat_pub, 0, &ed_kat_tmp) != 0 { return 0; }
+    return 1;
+}
+
 # pub32: public key bytes; msg/msg_len: signed bytes; sig64: R(32) || S(32).
 # Returns 1 only if the signature is valid.
 fn ed25519_verify(pub32, msg, msg_len, sig64) {
@@ -673,16 +812,12 @@ fn ed25519_verify(pub32, msg, msg_len, sig64) {
     ed_sha512_update(msg, msg_len);
     ed_sha512_final(&ed_sh_out);
     ed_sc_reduce64(&ed_sc_h, &ed_sh_out);
-    # basepoint B in extended coordinates
-    ed_big_copy(&ed_pt_b, &ed_gx, 8);
-    ed_big_copy(&ed_pt_b + 32, &ed_gy, 8);
-    ed_fe_set_small(&ed_pt_b + 64, 1);
-    ed_fe_mul(&ed_pt_b + 96, &ed_gx, &ed_gy);
-    # accept iff [S]B == R + [h]A
-    ed_pt_scalarmult(&ed_pt_p1, &ed_sc_s, &ed_pt_b);
-    ed_pt_scalarmult(&ed_pt_p2, &ed_sc_h, &ed_pt_a);
-    ed_pt_add(&ed_pt_p2, &ed_pt_p2, &ed_pt_r);
-    return ed_pt_eq(&ed_pt_p1, &ed_pt_p2);
+    # accept iff [S]B == R + [h]A, i.e. [S]B - [h]A == R. The double-scalar
+    # multiplication shares one doubling chain across both scalars (Straus),
+    # so this is the same equation the two-scalarmult form checked, computed
+    # in ~half the point operations.
+    ed_straus_dvm(&ed_straus_r, &ed_sc_s, &ed_sc_h);
+    return ed_pt_eq(&ed_straus_r, &ed_pt_r);
 }
 
 # ============================================================================

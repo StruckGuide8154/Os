@@ -84,15 +84,35 @@ ioapic_write:
 ; rcx = Flags (0 = Edge High, 0x8000 = Level High, 0x2000 = Edge Low, 0xA000 = Level Low)
 ioapic_set_irq:
     push rbx
-    
+
+    ; --- GSI bounds (GSEC 2026-06-22) ---------------------------------------
+    ; The IRQ/GSI in rdi can originate from a firmware-controlled ACPI _CRS
+    ; Extended-Interrupt word (see acpi.asm -> touchpad_irq), so it is
+    ; attacker-influenced. IOREGSEL ([base+0]) is an 8-bit window selector:
+    ; the index 0x10 + 2*IRQ wraps mod 256, so an out-of-range IRQ can ALIAS
+    ; the IOAPIC ID / VER / ARB config registers (e.g. IRQ 0x78 -> selector
+    ; 0x00 = IOAPIC ID), letting a malicious table corrupt APIC routing state.
+    ; Reject any IRQ beyond the IOAPIC's reported max redirection entry.
+    ; Fail-closed (the route is simply not programmed), logless.
+    mov r8, [ioapic_base]
+    test r8, r8
+    jz .done                ; no/invalid IOAPIC base -> never emit wild MMIO
+    mov dword [r8], 1       ; select IOAPICVER (index 1)
+    mov eax, [r8 + 0x10]
+    shr eax, 16
+    and eax, 0xFF           ; eax = max redirection entry index (entries - 1)
+    cmp rdi, rax
+    ja .done                ; unsigned compare also rejects huge 64-bit IRQs
+                            ; IRQ now <= 239 => 0x10 + 2*IRQ cannot overflow.
+
     ; Register offset = 0x10 + (IRQ * 2)
     mov rbx, rdi
     shl rbx, 1
     add rbx, 0x10
-    
+
     ; Lower DWORD (Vector + Masks + Trigger Mode)
     mov rdi, rbx
-    
+
     ; Combine Vector (rsi) and Flags (rcx)
     ; Bit 13 = Polarity (0=High, 1=Low)
     ; Bit 15 = Trigger Mode (0=Edge, 1=Level)
@@ -107,7 +127,8 @@ ioapic_set_irq:
     mov rsi, rdx
     shl rsi, 24
     call ioapic_write
-    
+
     pop rsi
+.done:
     pop rbx
     ret

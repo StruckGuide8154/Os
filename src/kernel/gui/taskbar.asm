@@ -21,7 +21,7 @@ START_MENU_X      equ 4
 MENU_ITEM_H       equ 28
 MENU_PAD_TOP      equ 8
 MENU_PAD_BOTTOM   equ 8
-MENU_COLOR_BG     equ COLOR_SURFACE
+MENU_COLOR_BG     equ COLOR_MENU_BG
 MENU_COLOR_HL     equ COLOR_ACCENT
 
 ; Per-entry layout. Keep MENU_ENTRY_SIZE a power-of-friendly small struct.

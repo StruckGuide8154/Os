@@ -41,6 +41,9 @@
 ; GDT, protocol GUIDs, UCS-2 paths, and loader variables.
 %include "src/boot/uefi_loader_data.inc"
 
+; Debug-only per-stage boot-progress block painter (no-op without GRIT_BOOT_TRACE).
+%include "src/boot/uefi_loader_boottrace.inc"
+
 %ifdef RELEASE_BUILD
 %include "build/loader_manifest.inc"
 %endif

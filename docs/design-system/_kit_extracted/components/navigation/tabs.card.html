@@ -1,0 +1,44 @@
+<!-- @dsCard group="Components" viewport="700x130" name="Tabs" subtitle="Segmented control / tab switcher" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../../styles.css" />
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); color: var(--text-body); font-family: var(--font-ui); padding: 22px 24px; display:flex; gap:16px; flex-wrap:wrap; }
+  [data-lucide] { width: 15px; height: 15px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const { Tabs } = window.NexusOSDesignSystem_497743;
+  const I = (n) => <i data-lucide={n}></i>;
+  function Demo() {
+    const [a, setA] = React.useState('general');
+    const [b, setB] = React.useState('grid');
+    return (
+      <div style={{display:'flex', flexDirection:'column', gap:16}}>
+        <Tabs value={a} onChange={setA} items={[
+          { id:'general', label:'General', icon:I('sliders-horizontal') },
+          { id:'network', label:'Network', icon:I('wifi') },
+          { id:'power', label:'Power', icon:I('battery-charging') },
+        ]} />
+        <Tabs size="sm" value={b} onChange={setB} items={[
+          { id:'grid', label:'Grid', icon:I('layout-grid') },
+          { id:'list', label:'List', icon:I('list') },
+        ]} />
+      </div>
+    );
+  }
+  ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+  setTimeout(() => window.lucide && window.lucide.createIcons(), 60);
+</script>
+</body>
+</html>

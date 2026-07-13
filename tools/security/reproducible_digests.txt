@@ -1,0 +1,17 @@
+# =============================================================================
+# reproducible_digests.txt - frozen reproducible-build digest set (Track 1).
+#
+# Recorded sha256 of the pinned trusted-path GHL modules as emitted by the
+# pinned gritc.py. check_reproducible_build.py double-compiles each module
+# (self-consistency) AND compares its digest against the value frozen here
+# (drift-vs-recorded). Re-bake only via:
+#     python scripts/test/check_reproducible_build.py --update
+# Format: compiler | gritc.py | <sha256>   and   module | <path> | <sha256>
+# =============================================================================
+compiler | gritc.py | 692875d497fd2e40e879083c07909418f046e9713bddbcda5ea61ccff8d60b8e
+module | src/tools/security/signed_envelope.ghl | c1f796c3c1a7f121aceab91c6873c0b3306e77d9662d8302bc728f0b12024428
+module | src/tools/security/signed_artifact_check.ghl | 2da0c0e1993cfdfe344c29b5e8e9fc07a8a61ff821e729b6f023e7f988ee6170
+module | src/tools/security/threshold_check.ghl | a9daef1fbba4183d547ffcee8aa67e6aab0802208ace649e055463bf2cf184e5
+module | src/kernel/grithlk/envelope_reader.ghl | a2b5235b1e2bac3537846661151a7fd8c2bb608b0d240f30dd919f56451e225e
+module | src/kernel/grithlk/ed25519_check.ghl | bb59dd446f828fe8f8540903134b8941f9e7b6803bff9c2cf2c3e8bac3e13b3f
+module | src/kernel/grithlk/crypto.ghl | 150c6656213630785c2591be0aa1bea6b017289c383b4fca94bfb3557a8aeb4c

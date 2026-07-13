@@ -1,0 +1,26 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Accent — Grit gold" subtitle="The default gold accent + swappable theme packs" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 18px 20px; }
+  .row { display: flex; gap: 12px; }
+  .sw { flex: 1; height: 92px; border-radius: var(--r-md); border: 1px solid var(--border); display: flex; flex-direction: column; justify-content: flex-end; padding: 10px; box-shadow: var(--shadow-sm); }
+  .name { font: var(--fw-semibold) var(--fs-xs)/1.2 var(--font-ui); color: var(--text-invert); }
+  .hex { font: var(--fw-regular) 10px/1.2 var(--font-mono); color: rgba(23,21,15,0.66); margin-top: 3px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="sw" style="background: var(--gold-grad);"><span class="name">Gold (default)</span><span class="hex">#C9A26A</span></div>
+  <div class="sw" style="background: var(--gold-bright);"><span class="name">Hover</span><span class="hex">#DCBA84</span></div>
+  <div class="sw" style="background: var(--gold-deep);"><span class="name">Press</span><span class="hex">#A8854F</span></div>
+  <div class="sw" style="background: var(--copper-base);"><span class="name">Copper pack</span><span class="hex">#C17A57</span></div>
+  <div class="sw" style="background: var(--sage-base);"><span class="name">Sage pack</span><span class="hex">#79A98C</span></div>
+  <div class="sw" style="background: var(--slate-base);"><span class="name">Slate pack</span><span class="hex">#7C879B</span></div>
+</div>
+</body>
+</html>

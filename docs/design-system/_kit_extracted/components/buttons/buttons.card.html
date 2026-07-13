@@ -1,0 +1,54 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Buttons" subtitle="Accent, secondary, ghost, danger · sizes · icon · disabled" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../../styles.css" />
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); color: var(--text-body); font-family: var(--font-ui); padding: 22px 24px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .row:last-child { margin-bottom: 0; }
+  [data-lucide] { width: 16px; height: 16px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const { Button, IconButton } = window.NexusOSDesignSystem_497743;
+  const I = (n) => <i data-lucide={n}></i>;
+  function Demo() {
+    return (
+      <div>
+        <div className="row">
+          <Button variant="primary" icon={I('rocket')}>Launch</Button>
+          <Button variant="secondary">Secondary</Button>
+          <Button variant="ghost">Ghost</Button>
+          <Button variant="danger" icon={I('trash-2')}>Delete</Button>
+          <Button variant="secondary" disabled>Disabled</Button>
+        </div>
+        <div className="row">
+          <Button variant="primary" size="sm">Small</Button>
+          <Button variant="primary" size="md">Medium</Button>
+          <Button variant="primary" size="lg" trailingIcon={I('arrow-right')}>Large</Button>
+        </div>
+        <div className="row">
+          <IconButton icon={I('settings')} label="Settings" />
+          <IconButton icon={I('wifi')} tone="accent" active label="Network" />
+          <IconButton icon={I('bell')} label="Notifications" />
+          <IconButton icon={I('x')} tone="danger" label="Close" />
+          <IconButton icon={I('search')} size="lg" label="Search" />
+        </div>
+      </div>
+    );
+  }
+  ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+  setTimeout(() => window.lucide && window.lucide.createIcons(), 60);
+</script>
+</body>
+</html>

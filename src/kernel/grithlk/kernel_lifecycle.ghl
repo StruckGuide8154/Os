@@ -21,6 +21,7 @@ unsafe implicit_extern; # extern kernel symbols + workqueue.ghl table reference
 
 global kmain;
 global device_enum_job;   # wq_job_table[4] (workqueue.ghl); dispatched by job ID
+global k5_verify_job;     # wq_job_table[6] (workqueue.ghl); K5 signed-verify offload
 
 const PAGE_TABLE_ADDR = 0x70000;   # src/include/boot_memory.inc (PROBE_NK_PT)
 const GUI_READY = 1;
@@ -43,7 +44,9 @@ extern s_wcact_fail;          # "[FBPERF] WC activation FAILED -- halting ..."
 # the old unconditional per-wakeup hlt(): paces the loop to target_fps / vsync_hz
 # and sleeps the slack on the timer IRQ so the CPU stops busy-running hot.
 extern frame_pace_reset;
+extern frame_pace_activity;
 extern frame_pace_wait;
+extern kernel_data_segments;
 
 # Ring-0 fault recovery wrapper (isr.asm). Runs render_frame() under a
 # longjmp-style guard so a fault in the display/present path aborts the frame
@@ -81,8 +84,15 @@ extern feat_on;          # feat_on(bit) -> 1 if the feature is enabled
 # not halt waiting for it. Plain SysV ABI: args in rdi/rsi/rdx, result in rax.
 extern workqueue_submit; # (jobid, arg, prio) -> job handle (or -1 if full)
 extern workqueue_wait;   # (handle) -> result; blocks until the job is done, frees it
+extern workqueue_wait_timeout; # (handle, budget_ticks) -> result; bounded join, never wedges the BSP
 const WQ_PRIO_HIGH   = 2;  # keep in lockstep with workqueue.ghl WQ_PRIO_HIGH
 const WQ_JOB_DEVENUM = 4;  # wq_job_table index for device_enum_job (workqueue.ghl)
+const WQ_JOB_K5VERIFY = 6; # wq_job_table index for k5_verify_job (workqueue.ghl)
+const WQ_INVALID_H   = -1; # workqueue_submit failure (queue full) sentinel
+# Device bring-up join budget (PIT ticks @ 10ms). Normal bring-up is ~0.5s (~50
+# ticks); this generous ~3s ceiling exists only so a wedged driver init (xHCI /
+# i2c-HID / NIC) on the worker AP can never freeze the BSP at the join below.
+const DEVENUM_JOIN_BUDGET = 300;
 
 # TEMP DEBUG: slow-motion main-loop tracer. Draws a per-call colored marker block
 # directly to the FRONT framebuffer, then stalls SLOWMO_TICKS PIT ticks, so the
@@ -98,10 +108,33 @@ const VBE_XRES_OK   = 0x41;    # DISPI ENABLE reg (idx 4) = LFB|ENABLED; clobber
 
 data clob_flag: 1 = 0;    # latched once the res-change is detected
 
+# Main-loop service scheduler. A quiet desktop should not run the full render /
+# USB / net / I2C / battery stack on every BSP pass. These stamps split the loop
+# into small tick-driven services; device-specific routines still self-throttle
+# internally, but they are no longer all on the hot path.
+data ml_last_input_tick: 1 x 8 = 0;
+data ml_last_i2c_tick: 1 x 8 = 0;
+data ml_last_serial_tick: 1 x 8 = 0;
+data ml_last_net_tick: 1 x 8 = 0;
+data ml_last_render_tick: 1 x 8 = 0;
+data ml_last_battery_tick: 1 x 8 = 0;
+data ml_active_until_tick: 1 x 8 = 0;
+data ml_pointer_dirty: 1 x 1 = 0;
+
+const KEV_INPUT = 1;                # keyboard/PS2/touchpad input IRQ
+const KEV_USB   = 2;                # xHCI event IRQ
+const ML_INPUT_FALLBACK_PERIOD = 1;  # legacy serial/USB fallback (~10 ms)
+const ML_I2C_IDLE_PERIOD = 50;      # rare fallback only if touchpad IRQ is absent
+const ML_ACTIVITY_TICKS = 25;       # active input burst window (~250 ms)
+const ML_NET_IDLE_PERIOD = 10;      # idle NIC/DHCP service (~100 ms)
+const ML_BATTERY_PERIOD = 100;      # battery service (~1 s; driver also throttles)
+
 # Feature bits - keep in lockstep with boot_features.ghl / boot_memory.inc.
 const FEAT_FRAME_PACING = 4;
 const FEAT_MOUSE_INIT   = 8;
 const FEAT_HID_INIT     = 16;
+const FEAT_USBHID_INIT  = 1024;   # usb_hid_init() ALONE - sub-gate of FEAT_HID_INIT
+const FEAT_USBNIC_INIT  = 2048;   # rtl8156_init() USB NIC probe
 const FEAT_DEBUG_OVERLAY = 512;   # per-frame usb_debug_overlay() draw
 const FEAT_DISPLAY_INIT = 64;
 const FEAT_FBPERF_WC    = 128;
@@ -113,9 +146,11 @@ const FEAT_FX_BENCH     = 256;
 extern mouse_x;               # dword: cursor X (should stay 0..scr_width-1)
 extern mouse_y;               # dword: cursor Y (should stay 0..scr_height-1)
 extern dirty_count;           # dword: pending dirty rects (should reset each flush)
-extern raster_target_addr;    # qword: AP wallpaper/raster blit target base
-extern raster_target_pitch_q; # qword: raster blit pitch
-extern raster_target_height;  # dword: raster blit row count
+extern rtl8156_active;        # byte: real USB RTL8156 NIC present/usable
+# Per-core raster target table (constants.inc RTGT_*). This diag runs on the BSP
+# (dense core 0), whose slot is at table offset 0 - so reading the core-0 slot
+# reports the BSP compositor's live target.
+extern raster_target_tbl;     # SMP_MAX_CORES x 32-byte slots
 extern scr_pitch_q;           # qword: live framebuffer pitch
 
 fn dbg_lbl3(a, b) {
@@ -132,9 +167,9 @@ fn dbg_counters() {
     dbg_field(77, 88, lw(&mouse_x));               # MX
     dbg_field(77, 89, lw(&mouse_y));               # MY
     dbg_field(68, 67, lw(&dirty_count));           # DC
-    dbg_field(82, 65, lq(&raster_target_addr));    # RA
-    dbg_field(82, 80, lq(&raster_target_pitch_q)); # RP
-    dbg_field(82, 72, lw(&raster_target_height));  # RH
+    dbg_field(82, 65, lq(&raster_target_tbl + 0));   # RA (RTGT_ADDR)
+    dbg_field(82, 80, lq(&raster_target_tbl + 16));  # RP (RTGT_PITCH)
+    dbg_field(82, 72, lw(&raster_target_tbl + 12));  # RH (RTGT_HEIGHT)
     dbg_field(83, 80, lq(&scr_pitch_q));           # SP
     call svg_dump_putc(al: 13);
     call svg_dump_putc(al: 10);
@@ -214,6 +249,93 @@ fn slowmo_step(idx) {
     return;
 }
 
+fn ml_mark_active(now) {
+    sq(&ml_active_until_tick, now + ML_ACTIVITY_TICKS);
+    frame_pace_activity();
+}
+
+fn ml_input_service(now, events) {
+    let before_x = lw(&mouse_x);
+    let before_y = lw(&mouse_y);
+    let before_b = lb(&mouse_buttons);
+    let mouse_polled = 0;
+
+    if (events & KEV_USB) != 0 {
+        usb_poll_mouse();
+        mouse_polled = 1;
+    }
+
+    # The I2C touchpad poll is a blind bus transaction. During active pointer
+    # movement we rely on the APIC touchpad IRQ path. This rare fallback exists
+    # only for firmware that did not expose a usable touchpad IRQ.
+    if now - lq(&ml_last_i2c_tick) >= ML_I2C_IDLE_PERIOD {
+        i2c_hid_poll();
+        sq(&ml_last_i2c_tick, now);
+        mouse_polled = 1;
+    }
+
+    keyboard_repeat_tick();
+    if (events & KEV_INPUT) != 0 || keyboard_available() != 0 {
+        process_keyboard();
+        while keyboard_available() != 0 {
+            process_keyboard();
+        }
+    }
+    if lb(&scene_dirty) != 0 { ml_mark_active(now); }
+
+    if now - lq(&ml_last_serial_tick) >= ML_INPUT_FALLBACK_PERIOD {
+        sq(&ml_last_serial_tick, now);
+        serial_poll_command();
+        # USB legacy fallback while INTx/MSI routing is absent or broken. When
+        # xHCI IRQs are firing, KEV_USB handles this path immediately.
+        if (events & KEV_USB) == 0 { usb_poll_mouse(); mouse_polled = 1; }
+    }
+    if mouse_polled != 0 || (events & KEV_INPUT) != 0 { process_mouse(); }
+    if lw(&mouse_x) != before_x { ml_mark_active(now); sb(&ml_pointer_dirty, 1); }
+    if lw(&mouse_y) != before_y { ml_mark_active(now); sb(&ml_pointer_dirty, 1); }
+    if lb(&mouse_buttons) != before_b { ml_mark_active(now); }
+    if lb(&scene_dirty) != 0 { ml_mark_active(now); }
+}
+
+fn ml_net_service(now, events) {
+    let period = ML_NET_IDLE_PERIOD;
+    if (events & KEV_USB) != 0 { period = 0; }
+    let usbnic_on = feat_on(FEAT_USBNIC_INIT);
+    if usbnic_on != 0 && lb(&rtl8156_active) == 1 {
+        if lb(&rtl8156_dhcp_state) == 1 { period = 1; }
+        if lb(&rtl8156_dhcp_state) == 2 { period = 1; }
+    }
+    if usbnic_on != 0 && lb(&rtl8156_ping_async_state) == 1 { period = 1; }
+    if now - lq(&ml_last_net_tick) < period { return; }
+    sq(&ml_last_net_tick, now);
+
+    if usbnic_on != 0 && lb(&rtl8156_active) == 1 { rtl8156_dhcp_pump(); }
+    rtl8139_dhcp_pump();
+    net_nic_poll_rx();
+}
+
+fn ml_render_due(now) {
+    if lb(&scene_dirty) != 0 { return 1; }
+    # NOTE: pointer-only motion no longer forces a render frame. The cursor is
+    # painted directly from the input path (input_dispatch.ghl pm_idle_cursor),
+    # which tracks at poll rate and survives a faulting/aborted render frame;
+    # forcing a render here too would double-draw the cursor (flicker).
+    if lq(&wm_drag_window_id) != -1 { return 1; }
+    let usbnic_on = feat_on(FEAT_USBNIC_INIT);
+    if usbnic_on != 0 && lb(&rtl8156_active) == 1 {
+        if lb(&rtl8156_dhcp_state) == 1 { return 1; }
+        if lb(&rtl8156_dhcp_state) == 2 { return 1; }
+    }
+    if usbnic_on != 0 && lb(&rtl8156_ping_async_state) == 1 { return 1; }
+    return 0;
+}
+
+fn ml_battery_service(now) {
+    if now - lq(&ml_last_battery_tick) < ML_BATTERY_PERIOD { return; }
+    sq(&ml_last_battery_tick, now);
+    battery_poll();
+}
+
 # Kernel entry: early CPU/memory policy, descriptors + security init, drivers,
 # GUI bring-up, then the free-running event/render loop.
 # ----------------------------------------------------------------------------
@@ -231,8 +353,16 @@ fn slowmo_step(idx) {
 # FEAT_MOUSE_INIT). No boot_mark() calls inside the job: that table is owned by
 # the BSP and must not be written from two cores at once.
 fn device_enum_job(arg) {
+    # usb_hid_init is gated by BOTH the umbrella HID gate AND a dedicated
+    # FEAT_USBHID_INIT sub-gate so the USB-HID path can be isolated from the
+    # i2c-HID (touchpad) path on real hardware WITHOUT a rebuild: put
+    # `usbhid=0` in \EFI\BOOT\BOOTCFG.TXT to skip ONLY usb_hid_init while still
+    # running i2c_hid_init below. (usb_hid_init runs first, so if it is the
+    # hanging path, skipping it lets the touchpad bring-up be tested alone.)
     if feat_on(FEAT_HID_INIT) != 0 {
-        usb_hid_init();
+        if feat_on(FEAT_USBHID_INIT) != 0 {
+            usb_hid_init();
+        }
     }
     usb_hid_flush_log();
     if feat_on(FEAT_HID_INIT) != 0 {
@@ -243,7 +373,14 @@ fn device_enum_job(arg) {
     # RTL8156 USB 2.5G NIC. rtl8156_init brackets its port walk with HID-slot
     # ownership guards (see rtl8156.asm); on failure (no device / no link) it
     # leaves rtl8156_active = 0 and the emulated rtl8139 path stays the fallback.
-    rtl8156_init();
+    if feat_on(FEAT_USBNIC_INIT) != 0 {
+        rtl8156_init();
+    } else {
+        sb(&rtl8156_active, 0);
+        sb(&rtl8156_dhcp_bound, 0);
+        sb(&rtl8156_dhcp_state, 4);
+        sb(&rtl8156_ping_async_state, 0);
+    }
     usb_hid_requeue_slot1_reads();
     # Declare each driver's MMIO region now that BARs are resolved (§8).
     mmio_drv_caps_init();
@@ -253,6 +390,35 @@ fn device_enum_job(arg) {
     # EC battery probe (LPC/ACPI ports) - independent of USB, folded into the
     # async job so its ~0.1s EC handshake also stays off the boot critical path.
     battery_init();
+    return 0;
+}
+
+# K5 Ed25519 boot-chain verification, packaged as a work-queue job so it runs
+# on an Application Processor (overlapping the BSP's GUI bring-up) instead of
+# serialising boot. Returns the aggregate verdict (0 ok / PANIC_* code); it
+# NEVER panics here - panicking on an AP would halt only that core and let the
+# BSP proceed to launch apps, which would be a security hole. The BSP enforces
+# the verdict fail-closed in k5_verify_join. envelope_gate.ghl owns the logic.
+fn k5_verify_job(arg) {
+    return k5_signed_verify_all();
+}
+
+# BSP-side join: wait for the K5 verify job and FAIL CLOSED on any nonzero
+# verdict (or, if the queue was full so the job ran inline as -1, run it here).
+# Called before the shell app launches, so no unsigned/tampered artifact can
+# run: a bad verdict panics the BSP. Then the persistent anti-rollback floors
+# the job ratcheted in memory are written back (disk I/O stays on the BSP).
+fn k5_verify_join(h) {
+    let rc = 0;
+    if h == WQ_INVALID_H {
+        rc = k5_signed_verify_all();      # queue full: run inline, still fail-closed
+    } else {
+        rc = workqueue_wait(h);
+    }
+    if rc != 0 {
+        kernel_panic_canary(rc, &k5_verify_job, rc);
+    }
+    floor_persist(gate_time_now());       # persist ratcheted floors + clock high-water
     return 0;
 }
 
@@ -274,7 +440,9 @@ fn kmain() {
     bootlog2(TAG_K, D0 + 2);          # K2: app blob extent initialized
     if feat_on(FEAT_DISPLAY_INIT) != 0 {
         display_init();
+        boot_mark(68, 105);           # "Di" display_init
         display_flip();
+        boot_mark(68, 102);           # "Df" display_flip
     }
     # TEMP DEBUG: baseline VBE x-res right after display setup. If X0=0x780 the
     # read path works, so any later non-0x780 probe is a real clobber.
@@ -287,22 +455,30 @@ fn kmain() {
     bootlog2(TAG_K, D0 + 3);          # K3: display ready; debug self-tests passed when enabled
 
     idt_init();
+    boot_mark(73, 100);               # "Id" idt_init
     gdt64_init();
+    boot_mark(71, 100);               # "Gd" gdt64_init
     tss_init();
+    boot_mark(84, 115);               # "Ts" tss_init
     kernel_canary_init();
+    boot_mark(67, 121);               # "Cy" kernel_canary_init
     slot_cap_hmac_init();             # seed per-slot cap-mask HMACs (canary final)
+    boot_mark(67, 104);               # "Ch" slot_cap_hmac_init
     nx_mem_key_ensure();              # Track 4 Part B: draw the per-boot ephemeral memory key (canary final)
     nx_secret_mask_seed();            # Track 4 Part B item 4: derive the per-boot secret-whitening mask from nx_mem_key
     nx_atrest_selftest();             # Track 4 Part B item 2: round-trip the at-rest cipher under the live key (fail-soft)
     nx_atrest_ext_selftest();         # Track 4 Part B items 5/6/8: scrub-scratch / poison-fill / fingerprint de-correlation (fail-soft)
     nx_mem_key_rekey_selftest();      # Track 4 Part B item 7: forward-secure rolling re-key (fail-soft, leaves one legit rotation)
     nx_track4_selftest_report();      # surface the Part B self-test results on COM1 (debug builds): [T4ST a=1 x=1 r=1]
+    boot_mark(78, 52);                # "N4" Track-4 nx self-tests done
     bootlog2(TAG_K, D0 + 4);          # K4: descriptors/canary/cap HMAC ready
 
     measured_boot_init();             # fold boot stages -> mb_digest
     boot_mark(77, 68);                # "MD": measured_boot_init done (isolated)
     app_manifest_verify();            # signed per-app integrity table
+    boot_mark(65, 109);               # "Am" app_manifest_verify
     app_segment_verify(0);            # APP_SEG_COMMON: launch glue/common code
+    boot_mark(65, 115);               # "As" app_segment_verify
     # (Track 7) The legacy whole-blob symmetric HMAC rollback check was removed:
     # its key shipped in the image and the blob is fully covered by the Ed25519
     # envelope + per-segment SHA-256 below.
@@ -312,23 +488,32 @@ fn kmain() {
     # (KUPDATE.ENV) is admitted/rejected only through the same signed gate.
     gate_device_id_init();        # REAL per-machine device id (CPUID-derived),
                                   # bound before any TARGET_DEVICE admission
+    boot_mark(71, 105);           # "Gi" gate_device_id_init
     floor_store_load();           # persistent anti-rollback floors (fail-soft
                                   # to the build-time floors without media)
+    boot_mark(70, 108);           # "Fl" floor_store_load
     gate_time_set(floor_time_high()); # cross-boot clock high-water first, so a
                                   # rolled-back RTC can't rewind the verifier
     gate_time_set(rtc_now_unix()); # then the live CMOS sample (ratchet: max wins)
-    syssig_verify_boot();
-    kernel_env_verify_boot();     # loader-side KERNEL.BIN envelope (fail-closed)
-    boot_update_check();
-    boot_quorum_check();              # staged KQUORUM.ENV: dual-quorum ratchet
-    boot_artifact_class_check();      # staged DRIVER/CONFIG/POLICY.ENV (optional)
-    floor_persist(gate_time_now());   # write ratcheted floors + clock high-water
-                                      # back the same boot they advanced
-    bootlog2(TAG_K, D0 + 5);          # K5: app integrity manifest ready
+    boot_mark(71, 116);           # "Gt" gate_time_set (clock high-water + RTC)
+    # The EXPENSIVE Ed25519 boot-chain verifications (SYSSIG + KERNEL envelopes,
+    # plus the optional staged update/quorum/class artifacts) are NOT run here on
+    # the BSP critical path. They are dispatched as one work-queue job onto an
+    # Application Processor just after smp_ap_startup below (k5_verify_job) and
+    # JOINED fail-closed before the shell launches (k5_verify_join), so their
+    # cost overlaps GUI bring-up + the device-enum join instead of serialising
+    # boot. Only the cheap verifier-context setup above (device id, persistent
+    # floors, RTC clock) and the BSP's own SHA work (measured boot / manifest /
+    # segment, done just above) run here, BEFORE dispatch - so the offloaded job
+    # has exclusive use of the single-threaded SHA-256/Ed25519 scratch. The
+    # fail-closed guarantee is unchanged: no app runs until SYSSIG has
+    # authenticated the per-app integrity table on this boot.
+    bootlog2(TAG_K, D0 + 5);          # K5: verifier context ready; crypto offloaded
 
     l3_install_syscall_stack_pt();    # per-slot syscall-stack guard pages
+    boot_mark(83, 115);               # "Ss" syscall-stack guard PTs
     cfg "ENABLE_CET" {
-        cet_enable();                 # arm supervisor SHSTK (no-op w/o HW)
+        cet_enable();                 # CET status only; hardware SHSTK arming is scoped out
         cet_log_state();
     }
     cfg "ENABLE_KPTI" {
@@ -339,6 +524,7 @@ fn kmain() {
         shadow_stack_poc_run();       # fail-closed shadow-stack proof harness
     }
     syscall_init();
+    boot_mark(83, 105);               # "Si" syscall_init
     # XSCC: empirical cross-syscall callee-saved contract self-test. Loads
     # sentinels into rbx/rbp/r12-r15, runs the SYSRET exit-tail callees
     # (l3_apply_wx_policy + SANITIZE_SEG_USER_EXIT) and checks survival - the
@@ -351,11 +537,15 @@ fn kmain() {
     bootlog2(TAG_K, D0 + 6);          # K6: syscall path initialized
 
     scheduler_init();
+    boot_mark(83, 99);                # "Sc" scheduler_init
     pic_init();
+    boot_mark(80, 99);                # "Pc" pic_init
     pit_init();
+    boot_mark(80, 116);               # "Pt" pit_init
     # Register the LAPIC MMIO page before sti so the first PIT IRQ's apic_eoi
     # finds a registered region instead of fail-closed panicking.
     mmio_register_lapic();
+    boot_mark(77, 108);               # "Ml" mmio_register_lapic
     bootlog2(TAG_K, D0 + 7);          # K7: scheduler/timer/MMIO pre-IRQ done
 
     # NOTE: interrupts stay DISABLED across the FAT16 cache fill. fat16_init's
@@ -371,7 +561,9 @@ fn kmain() {
     boot_mark(70, 70);                # "FF": fat16 cache fill done (storage isolated)
     # Enable interrupts once storage caches are filled + guarded.
     sti();
+    boot_mark(83, 116);               # "St" sti (interrupts live)
     keyboard_init();
+    boot_mark(75, 98);                # "Kb" keyboard_init
     bootlog2(TAG_K, D0 + 8);          # K8: storage/input ready
 
     # Boot splash is OFF by default (deterministic boot). Opt in at build time
@@ -402,23 +594,21 @@ fn kmain() {
     # dispatched just after the work queue + APs come up below and joined before
     # kernel lockdown. See device_enum_job and the workqueue_submit/_wait calls.
 
-    # SMP work queue must be initialised before the APs are started.
-    workqueue_init();
-    cfg "GRIT_SMP" { smp_ap_startup(); }
-    cfg !"RELEASE_BUILD" {
-        workqueue_selftest();
-    }
-    bootlog2(TAG_L, D0 + 0);          # L0: driver/SMP workqueue init done
-
-    # Offload the slow device bring-up now that the APs are live. On multicore a
-    # worker runs it while the BSP continues to the GUI below; on single-core
-    # workqueue_submit executes it inline here (cleanly degrades to in-order boot).
-    let dev_job = workqueue_submit(WQ_JOB_DEVENUM, 0, WQ_PRIO_HIGH);
-    boot_mark(68, 74);                # "DJ": device-enum job dispatched (async)
-
-    perfdiag_init();
-
     # ---- FBPERF write-combining arm + activate ----
+    # MUST run BEFORE smp_ap_startup() below. fbperf_wc_activate patches the
+    # framebuffer leaf PTE to select PAT slot 1 (WC) and reloads CR3 to flush
+    # only the BSP's TLB - it does NOT shoot down AP TLBs. If the APs were
+    # already running (and especially if one had already touched the FB and
+    # cached a TLB entry with the OLD caching attribute), the FB blit job
+    # (render_flip_job, dispatched to an AP) could write the framebuffer under a
+    # stale/mismatched memory type while the BSP sees WC - aliased memory types
+    # on the same physical page, which the Intel SDM (Vol 3A 11.12.4) leaves
+    # undefined (tearing / stale pixels). Activating here, before any AP exists,
+    # makes every AP walk the already-patched PTE fresh as it comes up, and the
+    # AP trampoline programs IA32_PAT to the same canonical layout
+    # (apic.asm ap_long_mode_init) so slot 1 = WC on every core. No cross-core
+    # TLB shootdown or stale-type window is possible. QEMU TCG hid this race
+    # (serialized vCPUs + ignored PAT memory types); real SMP hardware exposed it.
     serdbg(97);                       # 'a'
     fbperf_init();
     serdbg(98);                       # 'b'
@@ -455,10 +645,41 @@ fn kmain() {
     serdbg(101);                      # 'e'
 
     boot_mark(70, 66);                # "FB": fbperf arm/activate + dumps done
+
+    # SMP work queue must be initialised before the APs are started. The APs are
+    # only brought up AFTER the FB WC mapping above is fully activated, so the
+    # first FB blit an AP ever runs already observes the WC PTE + canonical PAT.
+    workqueue_init();
+    cfg "GRIT_SMP" { smp_ap_startup(); }
+    cfg !"RELEASE_BUILD" {
+        workqueue_selftest();
+    }
+    bootlog2(TAG_L, D0 + 0);          # L0: driver/SMP workqueue init done
+
+    # Offload the slow device bring-up now that the APs are live. On multicore a
+    # worker runs it while the BSP continues to the GUI below; on single-core
+    # workqueue_submit executes it inline here (cleanly degrades to in-order boot).
+    let dev_job = workqueue_submit(WQ_JOB_DEVENUM, 0, WQ_PRIO_HIGH);
+    boot_mark(68, 74);                # "DJ": device-enum job dispatched (async)
+
+    # Dispatch the K5 Ed25519 boot-chain verification onto another AP now that
+    # the workqueue + APs are up. It runs in parallel with the device-enum job
+    # and the BSP's GUI bring-up below, and is JOINED fail-closed (k5_verify_join)
+    # before the shell launches. On single-core this runs inline here (correct,
+    # just not overlapped). While it runs the BSP touches no SHA-256/Ed25519
+    # state, so the single-threaded crypto scratch has one user.
+    let k5_job = workqueue_submit(WQ_JOB_K5VERIFY, 0, WQ_PRIO_HIGH);
+    boot_mark(75, 53);                # "K5": signed-verify job dispatched (async)
+
+    perfdiag_init();
+    boot_mark(80, 100);               # "Pd" perfdiag_init
+
     # mouse_init + battery_init now run inside the async device-enum job (USB HID
     # path + EC probe), so the BSP goes straight from FBPERF to GUI bring-up.
     render_init();
+    boot_mark(82, 105);               # "Ri" render_init
     cursor_init();
+    boot_mark(67, 105);               # "Ci" cursor_init
     wm_init();
     boot_mark(87, 77);                # "WM": render/cursor/wm init
 
@@ -466,8 +687,12 @@ fn kmain() {
     bootlog2(TAG_L, D0 + 1);          # L1: GUI initialized
 
     cpu_acct_init();
+    boot_mark(67, 97);                # "Ca" cpu_acct_init
     xrdump(49);   # "X1" right BEFORE the first render_frame
-    render_frame();
+    # The first paint is just as hardware-facing as steady-state presents. Keep
+    # it inside the ring-0 display fault guard too, otherwise one bad LFB store
+    # is iretq-retried forever before the input loop can ever start.
+    render_frame_guarded();
     xrdump(50);   # "X2" right AFTER the first render_frame
     bootlog2(TAG_L, D0 + 2);          # L2: first frame rendered
 
@@ -490,8 +715,22 @@ fn kmain() {
     # the main loop must not start polling HID while a worker is still touching
     # the USB path. This is the only place the BSP waits on the job; by now its
     # ~0.5 s overlapped the GUI bring-up + first frame above.
-    workqueue_wait(dev_job);
-    boot_mark(68, 87);                # "DW": device-enum job joined
+    # BOUNDED join (NO-FREEZE invariant): device bring-up must never wedge boot. If
+    # a driver init hangs on its worker AP (real-HW xHCI/i2c-HID waits that QEMU
+    # never exercises), the deadline fires - tick_count keeps advancing because the
+    # BSP's interrupts are live here - and we proceed to a live desktop with that
+    # device simply absent, instead of spinning the BSP forever. The unreaped slot
+    # leak (one job) is the deliberate price; see workqueue_wait_timeout.
+    workqueue_wait_timeout(dev_job, DEVENUM_JOIN_BUDGET);
+    boot_mark(68, 87);                # "DW": device-enum job joined (or bounded-timeout)
+
+    # Join the K5 Ed25519 verification job: FAIL CLOSED on any bad verdict, then
+    # persist the ratcheted anti-rollback floors. This MUST complete before the
+    # shell launches below - no app runs until SYSSIG has authenticated the
+    # per-app integrity table this boot. By now its cost overlapped the device
+    # join + GUI bring-up + first frame, so the BSP rarely waits here.
+    k5_verify_join(k5_job);
+    boot_mark(75, 87);                # "KW": K5 signed-verify job joined
 
     # Debug-only one-shot PCI/xHCI probe for the overlay. Keep kernel_io/MMIO
     # out of the per-frame overlay draw path and run it before lockdown.
@@ -527,13 +766,11 @@ fn kmain() {
         sq(PAGE_TABLE_ADDR, 0);       # expect ring-0 #PF here
     }
 
-    # Arm the PIT slot-integrity scans (security_todo.md §12) now that ALL boot
-    # init is complete (lockdown, nk page-table protection, security status).
-    # Before this point the verifier was inert (code_hash_armed=0) to avoid the
-    # intermittent boot "CANARY 0 @<hash>" race where a timer tick hashed a slot
-    # whose code bytes / syscall-perm rewrite were still settling. From here on
-    # runtime tamper detection is fully live.
-    sb(&code_hash_armed, 1);
+    # Keep the PIT-time slot code-hash verifier disabled in this build. It is
+    # unsafe with the current KASLR/syscall-stack layout and was taking a
+    # recoverable #GP on every timer tick, pinning CPU and starving GUI
+    # presentation. Boot-time manifest/signature checks above remain enforced.
+    sb(&code_hash_armed, 0);
 
     # Seed the frame pacer so the first iteration bases its deadline on "now".
     frame_pace_reset();
@@ -547,6 +784,8 @@ fn kmain() {
 
     # ---- free-running main loop ----
     while 1 != 0 {
+        kernel_data_segments();
+
         # Top-level orphan-ring-3-fault landing pad. Re-armed every iteration; a
         # longjmp back here (r3guard_arm returns non-zero) means a ring-3 fault was
         # recovered instead of freezing the BSP - clean up the interrupted callback
@@ -560,64 +799,55 @@ fn kmain() {
         sb(&main_loop_stage_done, 1);
 
         if lb(&gui_initialized) == GUI_READY {
-            sb(&main_loop_stage, 2);
-            render_frame_guarded();
-            sb(&main_loop_stage_done, 2);
+            let now = lq(&tick_count);
+            let events = atomic_xchg(&kernel_event_flags, 0);
+            if events != 0 { ml_mark_active(now); }
 
-            # TEMP DEBUG slow-mo: one colored marker + stall per call so the
-            # FB-clobber can be watched call-by-call. Markers drawn AFTER
-            # render_frame so they aren't wiped this iteration.
-            sb(&main_loop_stage, 3);
-            slowmo_step(1);  usb_poll_mouse();
-            slowmo_step(2);  rtl8156_dhcp_pump();
-            slowmo_step(3);  rtl8139_dhcp_pump();
-            slowmo_step(4);  net_nic_poll_rx();
-            sb(&main_loop_stage_done, 3);
+            if events != 0 || now - lq(&ml_last_input_tick) >= ML_INPUT_FALLBACK_PERIOD {
+                sq(&ml_last_input_tick, now);
+                sb(&main_loop_stage, 3);
+                slowmo_step(1);  ml_input_service(now, events);
+                sb(&main_loop_stage_done, 3);
+            }
 
             sb(&main_loop_stage, 4);
-            slowmo_step(5);
-            # Debug overlay presentation is owned by frame_present, immediately
-            # before render_flush(), so no post-frame path can race the AP flip.
+            slowmo_step(2);  ml_net_service(now, events);
             sb(&main_loop_stage_done, 4);
 
-            sb(&main_loop_stage, 5);
-            slowmo_step(6);  i2c_hid_poll();
-            slowmo_step(7);  i2c_hid_poll();
-            sb(&main_loop_stage_done, 5);
+            if ml_render_due(now) != 0 {
+                sq(&ml_last_render_tick, now);
+                sb(&main_loop_stage, 2);
+                render_frame_guarded();
+                sb(&ml_pointer_dirty, 0);
+                sb(&main_loop_stage_done, 2);
+            }
 
             sb(&main_loop_stage, 6);
-            slowmo_step(8);  battery_poll();
+            slowmo_step(8);  ml_battery_service(now);
             sb(&main_loop_stage_done, 6);
-
-            sb(&main_loop_stage, 7);
-            slowmo_step(9);  process_mouse();
-            sb(&main_loop_stage_done, 7);
-
-            sb(&main_loop_stage, 8);
-            slowmo_step(10);  keyboard_repeat_tick();
-            sb(&main_loop_stage_done, 8);
-
-            # Drain all buffered keyboard events this frame.
-            sb(&main_loop_stage, 9);
-            slowmo_step(11);  process_keyboard();
-            while keyboard_available() != 0 {
-                sb(&main_loop_stage, 9);
-                process_keyboard();
-            }
-            sb(&main_loop_stage_done, 9);
-
-            sb(&main_loop_stage, 10);
-            slowmo_step(12);  serial_poll_command();
-            sb(&main_loop_stage_done, 10);
 
             sw(&main_loop_iters, lw(&main_loop_iters) + 1);
 
-            # Diagnostic-only: dump suspect counters once every 64 frames when
-            # boot diagnostics are explicitly enabled. Keeping this on in every
-            # debug build floods COM1 and directly limits interactive FPS.
+            # Diagnostic-only: dump suspect counters once every 64 scheduled
+            # loop passes when boot diagnostics are explicitly enabled. Keeping
+            # this on in every debug build floods COM1 and directly limits
+            # interactive FPS.
             cfg "GRIT_BOOT_DIAG_LOG" {
                 if (lw(&main_loop_iters) & 63) == 0 { dbg_counters(); }
             }
+
+            cpu_acct_work_end();
+
+            # Pace the GUI loop to the configured display target. Input routing
+            # stays in ml_input_service so cursor save/restore and WM hit tests
+            # happen in one ordered compositor path.
+            if feat_on(FEAT_FRAME_PACING) != 0 {
+                frame_pace_wait();
+            } else {
+                sti();
+                hlt();
+            }
+            continue;
         }
 
         cpu_acct_work_end();

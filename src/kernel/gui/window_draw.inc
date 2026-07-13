@@ -12,6 +12,17 @@ FN_BEGIN wm_draw_window, 1, 0, FN_RET_VOID
     add rax, WINDOW_POOL_ADDR
     mov rbx, rax
 
+    ; Launch-ordering race gate. A window is drawable only once WF_READY is set
+    ; (wm_window_finalize, after the manifest is applied, the L3 slot is seeded,
+    ; and the signed handlers are installed). During the launch gap rendering
+    ; would either present uninitialized slot state (blank/garbage client) or
+    ; dispatch the app draw callback whose syscalls the capability gate then
+    ; rejects (dropped draw -> white window). Skip the whole window until ready;
+    ; wm_window_finalize marks the scene dirty so the first frame it appears in is
+    ; the fully-formed one. See WF_READY in constants.inc.
+    test qword [rbx + WIN_OFF_FLAGS], WF_READY
+    jz .content_done
+
     ; Load dimensions
     mov r12, [rbx + WIN_OFF_X]
     mov r13, [rbx + WIN_OFF_Y]
@@ -102,14 +113,16 @@ FN_BEGIN wm_draw_window, 1, 0, FN_RET_VOID
     mov rsi, r13
     add rsi, 5
     lea rdx, [rbx + WIN_OFF_TITLE]
-    mov ecx, COLOR_TEXT_WHITE
-    ; bg = titlebar color
+    ; Active/inactive titlebars have separate foreground tokens so both remain
+    ; readable in light and dark themes.
     mov rax, [rbx + WIN_OFF_FLAGS]
     test rax, WF_FOCUSED
     jnz .tt_focused
+    mov ecx, COLOR_TITLE_TEXT_UNF
     mov r8d, COLOR_TITLEBAR_UNF
     jmp .tt_draw
 .tt_focused:
+    mov ecx, COLOR_TITLE_TEXT
     mov r8d, COLOR_TITLEBAR
 .tt_draw:
     call render_text
@@ -350,4 +363,4 @@ FN_BEGIN wm_cb_trampoline, 4, 0, FN_RET_SCALAR
     xor eax, eax
     FN_END wm_cb_trampoline
     ret
-
+

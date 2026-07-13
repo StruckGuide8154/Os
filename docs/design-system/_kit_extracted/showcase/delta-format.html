@@ -1,0 +1,195 @@
+<!-- @dsCard group="Brand" viewport="1280x760" name="Depth format (.gdx)" subtitle="Prerendered 3D-depth wallpaper, delta-encoded — only changed tiles are stored/sent, losslessly" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="gold">
+<head>
+<meta charset="utf-8" />
+<title>Grit — Depth Format</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  *,*::before,*::after { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:#08090B; overflow:hidden; font-family:var(--font-ui); }
+  #wrap { position:fixed; inset:0; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #grid { z-index:2; pointer-events:none; }
+
+  .panel {
+    position:absolute; top:20px; left:20px; z-index:5; width:300px;
+    background:var(--glass-tint-2); backdrop-filter:var(--blur-glass); -webkit-backdrop-filter:var(--blur-glass);
+    border:1px solid var(--border-control); border-radius:var(--r-lg); box-shadow:var(--shadow-pop); padding:16px 17px;
+  }
+  .ph { display:flex; align-items:center; gap:9px; margin-bottom:4px; }
+  .ph .dot { width:8px; height:8px; border-radius:50%; background:var(--grit-success); }
+  .ph h2 { margin:0; font:var(--fw-semibold) var(--fs-base)/1 var(--font-ui); color:var(--text-heading); letter-spacing:-.01em; white-space:nowrap; }
+  .ph .ext { margin-left:auto; font:var(--fw-semibold) 10px/1 var(--font-mono); letter-spacing:.1em; color:var(--text-invert);
+             background:var(--accent); padding:3px 7px; border-radius:var(--r-xs); }
+  .psub { font:var(--fw-regular) var(--fs-xs)/1.5 var(--font-ui); color:var(--text-muted); margin:0 0 14px; }
+
+  .met { display:flex; align-items:baseline; gap:8px; padding:7px 0; border-top:1px solid var(--border); }
+  .met:first-of-type { border-top:none; }
+  .met .k { flex:1; font:var(--fw-regular) var(--fs-xs)/1.3 var(--font-ui); color:var(--text-muted); }
+  .met .v { font:var(--fw-semibold) var(--fs-sm)/1 var(--font-mono); color:var(--text-heading); font-variant-numeric:tabular-nums; }
+  .met .v.acc { color:var(--text-accent); }
+  .met .v.kf { color:var(--grit-warning); }
+
+  .barwrap { margin-top:12px; }
+  .barwrap .lab { display:flex; justify-content:space-between; font:var(--fw-medium) 10px/1 var(--font-mono); color:var(--text-faint); margin-bottom:5px; letter-spacing:.04em; }
+  .meter { height:9px; border-radius:var(--r-pill); background:var(--surface-input); overflow:hidden; box-shadow:inset 0 1px 2px rgba(0,0,0,.4); }
+  .meter i { display:block; height:100%; border-radius:var(--r-pill); background:var(--accent-grad); transition:width .25s linear; }
+  .note { margin-top:13px; padding-top:12px; border-top:1px solid var(--border);
+          font:var(--fw-regular) var(--fs-xs)/1.55 var(--font-ui); color:var(--text-faint); }
+  .note b { color:var(--text-body); font-weight:var(--fw-semibold); }
+
+  .legend { position:absolute; bottom:18px; left:20px; z-index:5; display:flex; gap:16px; align-items:center;
+            background:var(--glass-tint); backdrop-filter:var(--blur-thin); -webkit-backdrop-filter:var(--blur-thin);
+            border:1px solid var(--border); border-radius:var(--r-pill); padding:8px 15px; }
+  .legend span { display:flex; align-items:center; gap:7px; font:var(--fw-medium) var(--fs-xs)/1 var(--font-ui); color:var(--text-body); }
+  .legend i { width:11px; height:11px; border-radius:3px; }
+  .toggle { position:absolute; bottom:18px; right:20px; z-index:5; display:flex; gap:2px; padding:3px;
+            background:var(--glass-tint); backdrop-filter:var(--blur-thin); -webkit-backdrop-filter:var(--blur-thin);
+            border:1px solid var(--border); border-radius:var(--r-pill); }
+  .toggle button { border:none; background:transparent; cursor:pointer; padding:7px 14px; border-radius:var(--r-pill);
+                   font:var(--fw-medium) var(--fs-xs)/1 var(--font-ui); color:var(--text-muted); transition:.15s; }
+  .toggle button.on { background:var(--surface-active); color:var(--text-heading); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="bg"></canvas>
+  <canvas id="grid"></canvas>
+
+  <div class="panel">
+    <div class="ph"><span class="dot"></span><h2>Grit depth field</h2><span class="ext">.gdx</span></div>
+    <p class="psub">Prerendered 3D-depth wallpaper, delta-encoded. One keyframe, then every frame stores only the tiles that actually changed — losslessly.</p>
+    <div class="met"><span class="k">Frame</span><span class="v" id="m-frame">key</span></div>
+    <div class="met"><span class="k">Tiles changed</span><span class="v acc" id="m-tiles">—</span></div>
+    <div class="met"><span class="k">This frame</span><span class="v" id="m-size">—</span></div>
+    <div class="met"><span class="k">Full RGBA frame</span><span class="v" id="m-full">3.66 MB</span></div>
+    <div class="met"><span class="k">Avg / frame</span><span class="v acc" id="m-avg">—</span></div>
+    <div class="barwrap">
+      <div class="lab"><span>.gdx stream</span><span id="m-pct">—</span></div>
+      <div class="meter"><i id="m-bar" style="width:2%"></i></div>
+    </div>
+    <div class="note"><b>Lossless.</b> Decode = keyframe + replay tile deltas. A still desktop costs ≈0 bytes/frame and ≈0 compute — the GPU only recomposites changed tiles.</div>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:var(--accent)"></i>Changed tile (encoded)</span>
+    <span><i style="background:var(--surface-input)"></i>Unchanged (skipped)</span>
+  </div>
+  <div class="toggle">
+    <button class="on" data-mode="delta">.gdx delta</button>
+    <button data-mode="full">Full frames</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const bg=document.getElementById('bg'), grid=document.getElementById('grid');
+  const bx=bg.getContext('2d'), gx=grid.getContext('2d');
+  const $=s=>document.getElementById(s);
+  let W,H, TS=40, cols,rows, prev=null, frame=0, mode='delta';
+  const KEY_EVERY=120;            // keyframe cadence
+  const TILE_BYTES=40*40*2;       // per-tile delta payload (16bpp depth) ~3.2KB
+  const FULL_BYTES=1280*800*4;    // naive RGBA full frame
+  let sizes=[];
+
+  function resize(){
+    W=bg.width=grid.width=window.innerWidth; H=bg.height=grid.height=window.innerHeight;
+    cols=Math.ceil(W/TS); rows=Math.ceil(H/TS); prev=null;
+  }
+  window.addEventListener('resize', resize); resize();
+
+  // Mostly-STATIC 3D-depth field (warm-cream key light + low gold pool) with a
+  // single small glint that slowly drifts. Only tiles under the glint change
+  // each frame, so the per-frame delta stays small and localized.
+  function depth(x,y,t){
+    const cx=W*0.5, cy=-H*0.16;
+    const key=Math.max(0,1-Math.hypot((x-cx)/W,(y-cy)/H)*1.05);
+    const pool=Math.max(0,1-Math.hypot((x-W*0.5)/W,(y-H*1.04)/H)*1.5);
+    const vig=Math.max(0,1-Math.hypot((x-W/2)/W,(y-H/2)/H)*1.18);
+    const gxp=W*(0.5+0.34*Math.cos(t*0.5)), gyp=H*(0.46+0.30*Math.sin(t*0.7));
+    const glint=Math.max(0,1-Math.hypot((x-gxp)/W,(y-gyp)/H)*4.6);
+    let r=15+key*30+pool*30+glint*17 + (1-vig)*-8;
+    let g=17+key*28+pool*21+glint*16 + (1-vig)*-8;
+    let b=22+key*23+pool*9 +glint*13 + (1-vig)*-9;
+    return [r, g, b];
+  }
+
+  function render(now){
+    const t=now/1000;
+    // draw depth field cheaply with a coarse gradient buffer, upscaled
+    const SB=4; // supersample step for speed
+    const img=bx.createImageData(W,H);
+    // compute per-tile center color, fill tile (cheap + matches the delta grid)
+    const cur=new Float32Array(cols*rows*3);
+    for(let ty=0;ty<rows;ty++){
+      for(let tx=0;tx<cols;tx++){
+        const cxp=tx*TS+TS/2, cyp=ty*TS+TS/2;
+        const c=depth(cxp,cyp,t);
+        const ci=(ty*cols+tx)*3; cur[ci]=c[0];cur[ci+1]=c[1];cur[ci+2]=c[2];
+      }
+    }
+    // paint tiles to bg
+    for(let ty=0;ty<rows;ty++) for(let tx=0;tx<cols;tx++){
+      const ci=(ty*cols+tx)*3;
+      bx.fillStyle=`rgb(${cur[ci]|0},${cur[ci+1]|0},${cur[ci+2]|0})`;
+      bx.fillRect(tx*TS,ty*TS,TS+1,TS+1);
+    }
+
+    // delta detection vs previous tile colors
+    const isKey = (frame % KEY_EVERY)===0 || !prev || mode==='full';
+    let changed=0; const changedTiles=[];
+    if(isKey){ changed=cols*rows; }
+    else {
+      for(let i=0;i<cols*rows;i++){
+        const a=i*3;
+        const dd=Math.abs(cur[a]-prev[a])+Math.abs(cur[a+1]-prev[a+1])+Math.abs(cur[a+2]-prev[a+2]);
+        if(dd>0.35){ changed++; changedTiles.push(i); }
+      }
+    }
+    prev=cur;
+
+    // overlay: highlight changed tiles faintly (the encoded region)
+    gx.clearRect(0,0,W,H);
+    if(mode==='delta' && !isKey){
+      gx.strokeStyle='rgba(201,162,106,.16)'; gx.lineWidth=1;
+      for(let ty=0;ty<rows;ty++) for(let tx=0;tx<cols;tx++) gx.strokeRect(tx*TS+.5,ty*TS+.5,TS,TS);
+      gx.fillStyle='rgba(201,162,106,.20)';
+      for(const i of changedTiles){ const tx=i%cols, ty=(i/cols)|0; gx.fillRect(tx*TS,ty*TS,TS,TS); }
+      gx.strokeStyle='rgba(220,186,132,.55)';
+      for(const i of changedTiles){ const tx=i%cols, ty=(i/cols)|0; gx.strokeRect(tx*TS+.5,ty*TS+.5,TS,TS); }
+    } else if(mode==='full'){
+      gx.fillStyle='rgba(207,111,102,.14)'; gx.fillRect(0,0,W,H);
+    }
+
+    // metrics
+    const bytes = mode==='full' ? FULL_BYTES : (isKey ? FULL_BYTES*0.18 : changed*TILE_BYTES);
+    sizes.push(bytes); if(sizes.length>90) sizes.shift();
+    const avg = sizes.reduce((a,b)=>a+b,0)/sizes.length;
+    const fmtB=b=> b>=1048576 ? (b/1048576).toFixed(2)+' MB' : b>=1024 ? (b/1024).toFixed(1)+' KB' : (b|0)+' B';
+    $('m-frame').textContent = isKey ? (mode==='full'?'full':'key') : '#'+frame;
+    $('m-frame').className = 'v '+(isKey&&mode!=='full'?'kf':'');
+    $('m-tiles').textContent = mode==='full' ? cols*rows+' / '+cols*rows : changed+' / '+(cols*rows);
+    $('m-size').textContent = fmtB(bytes);
+    $('m-avg').textContent = fmtB(avg);
+    const pct = Math.min(100, avg/FULL_BYTES*100);
+    $('m-pct').textContent = pct.toFixed(1)+'% of RGBA';
+    $('m-bar').style.width = Math.max(1.5,pct)+'%';
+
+    frame++;
+  }
+
+  // single timer clock so it runs identically in real browsers and in
+  // throttled/offscreen capture contexts (rAF is paused when offscreen)
+  const t0=performance.now();
+  setInterval(()=>render(performance.now()-t0), 60);
+  render(0);
+
+  document.querySelectorAll('.toggle button').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('.toggle button').forEach(x=>x.classList.toggle('on',x===b));
+    mode=b.dataset.mode; sizes=[]; prev=null; frame=0;
+  }));
+})();
+</script>
+</body>
+</html>

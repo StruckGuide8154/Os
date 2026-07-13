@@ -1,0 +1,19 @@
+<svg width="300" height="88" viewBox="0 0 300 88" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="lkGold" x1="8" y1="14" x2="74" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E0BC86"></stop>
+      <stop offset="0.55" stop-color="#C9A26A"></stop>
+      <stop offset="1" stop-color="#A8854F"></stop>
+    </linearGradient>
+    <linearGradient id="lkSheen" x1="14" y1="16" x2="44" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.30"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="14" width="66" height="66" rx="19" fill="url(#lkGold)"></rect>
+  <rect x="8" y="14" width="66" height="66" rx="19" fill="url(#lkSheen)"></rect>
+  <path d="M55.5 38.5 A16.5 16.5 0 1 0 55.5 56 L55.5 49.4 L44 49.4" fill="none" stroke="#17150F" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path>
+  <circle cx="55" cy="38.2" r="3" fill="#17150F"></circle>
+  <text x="92" y="51" font-family="&#39;Hanken Grotesk&#39;, system-ui, sans-serif" font-size="34" font-weight="700" letter-spacing="-0.5" fill="#ECEDEF">Grit</text>
+  <text x="93" y="70" font-family="&#39;Geist Mono&#39;, ui-monospace, monospace" font-size="10.5" font-weight="600" letter-spacing="3.2" fill="#A8854F">GRITHL · x86-64</text>
+</svg>

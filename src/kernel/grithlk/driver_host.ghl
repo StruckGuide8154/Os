@@ -38,6 +38,7 @@ global drvhost_effective_caps;
 global drvhost_state;
 # --- grants (policy-authorized only) ---------------------------------------
 global drvhost_grant_mmio;
+global drvhost_grant_mmio_for;
 global drvhost_grant_pio;
 global drvhost_grant_dma;
 global drvhost_grant_irq;
@@ -47,6 +48,7 @@ global drvhost_mmio_read32;
 global drvhost_mmio_write32;
 global drvhost_pio_read8;
 global drvhost_pio_write8;
+global drvhost_pci_cfg_read32;
 # --- descriptor rings (fast path) ------------------------------------------
 global drvhost_ring_establish;
 global drvhost_ring_submit;
@@ -67,6 +69,10 @@ const DRV_CAP_DMA   = 4;        # a DMA window the broker maps for the device
 const DRV_CAP_IRQ   = 8;        # receive forwarded IRQ signals
 const DRV_CAP_RING  = 16;       # establish shared-memory descriptor rings
 const DRV_CAP_RESET = 32;       # device reset / firmware load (threshold-gated)
+const DRV_CAP_PCICFG = 64;      # brokered PCI config-space READ (enumeration only;
+                                 # gated so only a signed PnP/enumeration controller
+                                 # is ever registered with this bit, see docs/gpu-driver/
+                                 # TODO.md §2b item 1). Grants no MMIO/DMA/PIO authority.
 
 # Driver lifecycle states.
 const DRV_ST_NONE       = 0;    # slot unused
@@ -196,6 +202,37 @@ fn drvhost_grant_mmio(id, base, len) {
     sq(&mg_end  + n * 8, end);
     sd(&mg_count, n + 1);
     return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_grant_mmio_for - cross-compartment MMIO grant (TODO.md §2b item 3).
+#
+# The plain drvhost_grant_mmio above authorizes a window for a `id` chosen by
+# the CALLER; nothing in it checks that `id` is the caller's own slot, so on
+# its own it would let ANY driver mint grants for ANY other driver_id (a
+# confused-deputy hole). This wrapper is the actual entry point a controller
+# process is meant to use: `granter` is the caller's OWN driver_id and must
+# hold DRV_CAP_PCICFG - the same bit that marks a signed enumeration/PnP
+# controller (TODO.md's `gpu-pnp` compartment). Only that class of process may
+# route a grant to a DIFFERENT driver_id than its own; every other driver_id
+# keeps using drvhost_grant_mmio(id,...) to grant only to itself (id==caller,
+# enforced at whatever syscall ABI wraps this - the ABI is not yet wired, see
+# TODO.md §2b, but the capability discipline here holds regardless of which
+# syscall row eventually calls it).
+#
+# This is what lets a PnP controller (which itself never touches GPU MMIO -
+# CAP_PCICFG grants no MMIO/DMA/PIO authority of its own) hand the BAR0 window
+# it discovered to the ALREADY-SPAWNED engine compartment's driver_id instead
+# of mis-granting to its own id (the placeholder bug in gpu_pnp.ghl before this
+# change). `target` must already be a DRV_ST_RUNNING driver holding
+# DRV_CAP_MMIO for its own signed policy - this does not create a driver or
+# widen ITS policy, it only authorizes one more window within what its own
+# policy already allows (drvhost_grant_mmio's existing DRV_CAP_MMIO check on
+# `target` still applies unchanged).
+# ---------------------------------------------------------------------------
+fn drvhost_grant_mmio_for(granter, target, base, len) {
+    if drv_has_cap(granter, DRV_CAP_PCICFG) == 0 { return DRV_ERR_CAP; }
+    return drvhost_grant_mmio(target, base, len);
 }
 
 # Find a granted MMIO window owned by `id` that fully contains [addr, addr+len).
@@ -328,6 +365,55 @@ fn drvhost_pio_write8(id, port, val) {
     if drv_pio_allowed(id, port) == 0 { return DRV_ERR_GRANT; }
     outb(port, val & 255);                              # the named HW boundary
     return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Brokered PCI config-space READ (TODO.md §2b item 1). This is the ONLY path a
+# ring-3 process may reach PCI config space: the caller never issues raw
+# 0xCF8/0xCFC port I/O itself (that would be ambient PIO authority, exactly
+# what the no-ambient-authority rule forbids - TODO.md §0.2). Instead the
+# broker performs the CF8/CFC access on the caller's behalf and returns just
+# the resulting dword, gated by DRV_CAP_PCICFG - a capability class deliberately
+# DISJOINT from DRV_CAP_PIO/DRV_CAP_MMIO, so a normal device driver's policy
+# never carries it; only a signed enumeration/PnP controller's manifest grants
+# it. Unlike the {base,len} grant tables above, this primitive has no separate
+# window grant step - the capability bit alone is the authorization, because
+# the entire accessible surface is already bounded (bus/dev/func/reg below),
+# never an absolute address, and the access is READ-ONLY (no config-space
+# write primitive exists here - enumeration never needs one, and adding one
+# would let a compromised PnP process reprogram BARs/command registers, which
+# is explicitly out of its threat-model reach per TODO.md's compartment table).
+#
+# Bounds every field to its real hardware width before assembling the CF8
+# address so an out-of-range bus/dev/func/reg can never alias into another
+# field (bus:8 dev:5 func:3 reg:8, reg forced dword-aligned exactly as the
+# CF8 mechanism does in hardware). Absent function -> the bus returns
+# 0xFFFFFFFF, same as unbrokered hardware - this is deliberately
+# indistinguishable from a denied/out-of-range request (the safe direction,
+# same convention as drvhost_mmio_read32).
+# ---------------------------------------------------------------------------
+const PCICFG_CF8    = 0xCF8;
+const PCICFG_CFC    = 0xCFC;
+const PCICFG_ENABLE = 0x80000000;
+const PCICFG_OPEN_BUS = 0xFFFFFFFF;
+
+fn drvhost_raw_pci_cfg_read32(bus, dev, func, reg) {  # the named HW boundary
+    let addr = PCICFG_ENABLE | (bus << 16) | (dev << 11) | (func << 8) | (reg & 0xFC);
+    outd(PCICFG_CF8, addr);
+    return ind(PCICFG_CFC);
+}
+
+fn drvhost_pci_cfg_read32(id, bus, dev, func, reg) {
+    if drv_has_cap(id, DRV_CAP_PCICFG) == 0 { return PCICFG_OPEN_BUS; }
+    if bus < 0 { return PCICFG_OPEN_BUS; }
+    if bus > 255 { return PCICFG_OPEN_BUS; }
+    if dev < 0 { return PCICFG_OPEN_BUS; }
+    if dev > 31 { return PCICFG_OPEN_BUS; }
+    if func < 0 { return PCICFG_OPEN_BUS; }
+    if func > 7 { return PCICFG_OPEN_BUS; }
+    if reg < 0 { return PCICFG_OPEN_BUS; }
+    if reg > 255 { return PCICFG_OPEN_BUS; }
+    return drvhost_raw_pci_cfg_read32(bus, dev, func, reg);
 }
 
 # ---------------------------------------------------------------------------

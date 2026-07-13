@@ -43,6 +43,14 @@ global cursor_mode;
 extern feat_on;
 const FEAT_CURSOR_DRAW = 1;
 
+# Async-flip barrier (render.ghl). The cursor is composited onto the FRONT
+# buffer; render_flush blits the back buffer to the FRONT on an AP and returns
+# before that copy finishes. cursor_hide/cursor_draw must not write the FRONT
+# buffer while the AP sweep is in flight or the two writers race (a scanline
+# tear/smear that only shows in release, where the BSP is fast enough to reach
+# the cursor before the AP finishes). Drain the blit first.
+extern render_flip_wait;
+
 # Arrow geometry (mirrors constants.inc CURSOR_WIDTH/HEIGHT).
 const CURSOR_W = 12;
 const CURSOR_H = 19;
@@ -66,6 +74,9 @@ fn cursor_init() preserves(all) {
 # Uses cursor_old_x/y + cursor_save_w/h captured by the last cursor_draw.
 fn cursor_hide() {
     if lb(&cursor_visible) == 0 { return; }
+
+    # Serialize against any in-flight AP back->front blit before writing FRONT.
+    render_flip_wait();
 
     let basex = lw(&cursor_old_x);
     let y     = lw(&cursor_old_y);
@@ -146,6 +157,11 @@ fn cursor_draw(x, y) {
     # secure-boot profile). cursor_hide still restores any prior save, so this
     # cannot leave a stale cursor.
     if feat_on(FEAT_CURSOR_DRAW) == 0 { return; }
+
+    # Serialize against any in-flight AP back->front blit before writing FRONT
+    # (covers both the arrow path below and the move-cross dispatch).
+    render_flip_wait();
+
     if lb(&cursor_mode) == 1 {
         cursor_draw_move(x, y);
         return;

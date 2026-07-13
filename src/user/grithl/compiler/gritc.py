@@ -2297,7 +2297,7 @@ _INTRINSIC_NAMES=(
         "inb","outb","inw","outw","ind","outd","rdmsr","wrmsr","wrmsr_split",
         "write_cr0","write_cr3","write_cr4","read_cr0","read_cr2","read_cr3","read_cr4",
         "invlpg","lgdt","lidt","ltr","intn","load_ds","load_es","load_fs","load_gs","load_ss",
-        "xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","xmm_bcast32","isqrt",
+        "xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","xmm_bcast32","isqrt","mulhi",
         "rep_movsq","rep_movsd","rep_stosd","atomic_xchg","atomic_cmpxchg","atomic_add",
         "syscall_raw","call_table",
         "cpuid_eax","cpuid_ebx","cpuid_ecx","cpuid_edx","write_rsp","push_val","pop_val",
@@ -3051,17 +3051,39 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if cg.o4 and optimize:
         body=_o4_dead_result_elim(body, target)
     out.extend(body)
-    # Strings: emit as inert bytes in current section. In standalone mode put
-    # them in .rodata; in embed mode keep them in .text (safe - no code falls
-    # through into them since every fn ends with `ret`).
+    # Strings: emit as inert bytes in standalone .rodata. In the embedded app
+    # blob they are still data objects: some apps intentionally mutate string
+    # storage as scratch buffers, and even read-only literals must not force a
+    # page to be both writable and executable. Route all embedded user rodata
+    # into `.appdata` so the slot W^X split can keep [code) X+!W and [data) W+NX.
     if cg.rodata:
-        if not embed:
+        if embed and not kernel:
+            out.append("section .appdata")
+            out.extend(cg.rodata)
+            out.append("section .text")
+        else:
             out.append("section .rodata")
-        out.extend(cg.rodata)
+            out.extend(cg.rodata)
     if cg.data:
-        if target!="boot" and (not embed or kernel):
+        if target=="boot":
+            # boot images have a fixed org; keep data inline in the current section.
+            out.extend(cg.data)
+        elif embed and not kernel:
+            # W^X (airtight): writable app data must NOT share an executable page
+            # with code. In embed mode the previous behavior left `cg.data` inline
+            # in `.text`, so a single 4 KiB page could hold both code and writable
+            # data and the per-slot W^X policy was forced to leave it W+X. Route it
+            # into a distinct `.appdata` section instead; the blob framing in
+            # src/user/apps.asm groups `.appdata` page-aligned AFTER all app code
+            # (global app_blob_code_end), so slot install can mark [code) X+!W and
+            # the data tail W+NX with one clean boundary. Restore `.text` so the next %include'd
+            # app (and the app_seg_<name>_end label) lands back in the code stream.
+            out.append("section .appdata")
+            out.extend(cg.data)
+            out.append("section .text")
+        else:
             out.append("section .data")
-        out.extend(cg.data)
+            out.extend(cg.data)
     # Uninitialized `reserve` arenas. Emitted LAST and into `.bss` (NOBITS) so
     # under the kernel's `-f bin` single-TU link they occupy address space but
     # contribute zero file bytes - a multi-MiB reserve does not grow KERNEL.BIN.
@@ -3070,6 +3092,11 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             raise SyntaxError("`reserve` is not valid for --target boot")
         out.append("section .bss")
         out.extend(cg.bss)
+        # In embed mode the generated unit is %include'd straight into apps.asm's
+        # code stream; leaving `.bss` active would drop the following app's code
+        # (and its app_seg_<name>_end label) into NOBITS. Restore `.text`.
+        if embed and not kernel:
+            out.append("section .text")
     LAST_SIGS=cg.sigs
     LAST_MEMMAP={"buffers":cg.buffers,"used":cg.buffer_used,"cap":BUFFER_REGION_CAP}
     broad_caps={"raw_mem","implicit_extern","kernel_priv"}
@@ -4771,6 +4798,20 @@ def gen_expr(st,e):
                 cg.emit("    rol eax, cl")
             cg.emit("    mov eax, eax")
             return
+        if name=="mulhi":
+            # mulhi(a, b) -> rax = high 64 bits of the UNSIGNED 128-bit product
+            # a*b. The low 64 bits are the ordinary `*` operator; together they
+            # give a full 64x64->128 widening multiply (needed for radix-2^51
+            # field arithmetic). `mul rcx` writes rdx:rax = rax*rcx; the high
+            # half lands in rdx. Clobbers rdx/rcx (both caller-saved; the stack
+            # machine keeps live values in rbp slots). Pure arithmetic, so it is
+            # available in every target (no kernel_priv).
+            if len(args)!=2: raise SyntaxError("mulhi takes 2 args (a, b)")
+            gen_expr(st,args[0]); cg.emit("    push rax")
+            gen_expr(st,args[1]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
+            cg.emit("    mul rcx")
+            cg.emit("    mov rax, rdx")
+            return
         # Builtin: bounds-checked dispatch. call_table(TBL, idx) calls the
         # idx-th handler fn registered in `table TBL { ... }`, after checking
         # idx < entry-count (out-of-range -> #UD). The only reachable targets
@@ -4892,8 +4933,15 @@ def gen_expr(st,e):
                 cg.emit("    seta al"); cg.emit("    movzx rax, al"); cg.emit("    xor rax, 1")
             return
         if name in ("write_rsp","push_val"):
+            # Direct stack-pointer mutation. Requires --target kernel AND the
+            # kernel_priv unsafe capability, exactly like the comparable
+            # privileged stack intrinsics (pop_to_mem / save_rsp / write_flags /
+            # push_reg). Without the cap gate these two slipped past the safety
+            # manifest's review marker (a kernel-source supply-chain hazard).
             if not getattr(cg,"kernel",False):
                 raise SyntaxError(f"{name}() intrinsic requires --target kernel")
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv",f"kernel intrinsic {name}()")
             if len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
             gen_expr(st,args[0])
             if name=="write_rsp":
@@ -5432,7 +5480,7 @@ def main():
     ap.add_argument("-L","--lib",default=os.path.join(os.path.dirname(__file__),"..","lib"))
     ap.add_argument("--prefix",default=None)
     ap.add_argument("--embed",action="store_true",
-                    help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives, strings inline in .text")
+                    help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives; user app data/strings go to .appdata")
     ap.add_argument("--emit-sigs",action="store_true",
                     help="write a .sig.json sidecar next to the generated assembly")
     ap.add_argument("--memmap",default=None,metavar="PATH",

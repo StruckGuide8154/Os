@@ -70,6 +70,7 @@ extern blk_held_pop;        # (p) - forget a released lock
 # Tier-2 cross-core liveness watchdog (watchdog.ghl) - idle APs run the watcher.
 extern kwd_ap_watch;        # () - observe the BSP heartbeat; NMI the BSP if wedged
 extern wd_arm_ap_tick;      # () - arm this AP's one-shot self-wake LAPIC timer
+extern kernel_data_segments; # () - restore DS/ES + clear DF after ring-3 work
 
 # Bounded-lock deadline: steal the lock if a holder has not released within this
 # many ticks' worth of TSC cycles. Far longer than any legitimate critical
@@ -90,6 +91,7 @@ extern app_media_draw;      # wq_job_table[2]: kernel-context media blit
 extern render_flip_job;     # wq_job_table[3]: backbuffer->FB flip blit (grithlk/render.ghl)
 extern device_enum_job;     # wq_job_table[4]: async device bring-up (kernel_lifecycle.ghl)
 extern wallpaper_render_job; # wq_job_table[5]: full-quality SVG wallpaper raster (gui/window_desktop.inc)
+extern k5_verify_job;        # wq_job_table[6]: K5 Ed25519 boot-chain verify (kernel_lifecycle.ghl)
 
 const PROCESS_POOL  = extern;
 const MAX_PROCESSES = extern;
@@ -105,6 +107,7 @@ table wq_job_table {
     render_flip_job,        # 3 - dirty-rect flip blit
     device_enum_job,        # 4 - async device bring-up
     wallpaper_render_job,   # 5 - full-quality wallpaper SVG raster
+    k5_verify_job,          # 6 - K5 Ed25519 boot-chain signed-verify
 };
 const WQ_JOB_TEST      = 0;
 const WQ_JOB_L3        = 1;
@@ -112,6 +115,7 @@ const WQ_JOB_MEDIA     = 2;
 const WQ_JOB_FLIP      = 3;
 const WQ_JOB_DEVENUM   = 4;
 const WQ_JOB_WALLPAPER = 5;
+const WQ_JOB_K5VERIFY  = 6;
 
 # --- slot layout (64 bytes / one cache line) ---------------------------------
 const WQ_OFF_STATUS = 0;    # dd - lifecycle state
@@ -405,6 +409,12 @@ fn smp_worker_loop(cs) {
         pause();
     }
 
+    # NOTE: the raster primitives address raster_target_tbl absolutely (a single
+    # shared slot 0), guarded by raster_target_lock + the wallpaper-busy frame
+    # defer - NOT a per-core GS base. A GS-base scheme is unusable here: the flat
+    # no-swapgs model reloads the GS selector on every kernel entry/exit
+    # (smap.inc SANITIZE_SEG_*), which zeroes GS base and made every blit fault.
+
     while 1 {
         sq(cs + CS_HEARTBEAT, lq(cs + CS_HEARTBEAT) + 1);
 
@@ -453,6 +463,7 @@ fn smp_worker_loop(cs) {
             # --- try to claim the chosen slot: PENDING -> RUNNING -------------
             let s = wq_slot(best);
             if atomic_cmpxchg(s + WQ_OFF_STATUS, WQ_PENDING, WQ_RUNNING) == WQ_PENDING {
+                kernel_data_segments();
                 sw(cs + CS_STATE, 2);                  # RUNNING/busy
                 let t0 = rdtsc();
                 sq(cs + CS_IDLE, lq(cs + CS_IDLE) + (t0 - lq(cs + CS_LAST_TSC)));

@@ -291,6 +291,9 @@ FEAT_SYSCALL_SET_MODE      equ 32
 FEAT_DISPLAY_INIT          equ 64
 FEAT_FBPERF_WC             equ 128
 FEAT_FX_BENCH              equ 256
+FEAT_DEBUG_OVERLAY         equ 512
+FEAT_USBHID_INIT           equ 1024
+FEAT_USBNIC_INIT           equ 2048
 
 STORAGE_EXTENTS_ADDR    equ 0x9200   ; 4 KiB scratch for extent table
 STORAGE_EXTENTS_MAX     equ 256      ; max extents (256 * 16B = 4 KiB)

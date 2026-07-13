@@ -72,6 +72,10 @@ extern kb_numlock;                  # byte
 extern serial_putc;
 extern ser_print_hex64;
 extern dbg_event_emit6;
+# Cursor compositing (cursor.ghl). Both serialize against the in-flight AP flip
+# via render_flip_wait, so drawing from the input path is tear-safe.
+extern cursor_hide;
+extern cursor_draw;
 
 const EVT_INPUT_ROUTE = 0x494E5054; # INPT
 
@@ -99,13 +103,17 @@ fn key_dbg_cpi_req(focused, win, stored, ev) {
     }
 }
 
-# Idle-cursor tail: redraw immediately even during a drag. The compositor still
-# owns the drag outline, but pointer motion must not wait for a frame repaint.
+# Idle-cursor tail: paint the pointer straight to the FRONT buffer from the input
+# path, so it tracks at poll rate AND survives a render frame that faults/aborts
+# (e.g. a display-path #PF the kfault guard recovers from - the cursor is drawn
+# here BEFORE render_frame runs each loop pass, so an aborted frame never leaves
+# the pointer unpainted). cursor_hide/cursor_draw call render_flip_wait first, so
+# this is serialized against the in-flight AP back->front blit (no tear/smear).
+# The compositor still re-stamps the cursor after its own full/dirty repaints
+# (frame_present.ghl); ml_render_due no longer forces a render on pointer-only
+# motion, so the two owners never double-draw the same frame.
 fn pm_idle_cursor() {
     if lq(&wm_drag_window_id) != NO_FOCUS { sb(&scene_dirty, 1); }
-    # Frame timing is centralized in the pacer (frame_pacing.ghl); the old
-    # wait_vsync() here only added latency and held the cursor at its stale
-    # position during the spin. Redraw immediately for a snappy pointer.
     cursor_hide();
     cursor_draw(lw(&mouse_x), lw(&mouse_y));
 }

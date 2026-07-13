@@ -252,3 +252,24 @@ the TCG-safe parts; the `-accel`/HW parts are a separate, explicitly-labeled run
 - [ ] On no-virt hardware and TCG the system is safe on the Track 6 floor; the two
       residuals (floor-disable, device DMA) are documented, not hidden.
 - [ ] No capability claims a maturity tag it has not reached, per vendor.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 4 / speed 4**. This is the global ceiling-lifter:
+G1 (privilege-below-ring-0) is what makes every other track's nk-monitor root
+*un-disableable* rather than merely expensive-to-disable — so landing it raises the
+whole stack's ceiling. It is `modeled`/`tested-tcg` only; real enforcement is gated
+on accel/HW.
+
+- [ ] **(sec→10, the keystone)** Get ≥1 vendor (Intel VT-x is closest — backend code
+      exists) to `tested-accel`: real VMLAUNCH with the CR0.WP/CR3/CR4 trap floor
+      proven by a negative test where a compromised ring-0 *cannot* clear WP.
+- [ ] **(sec→10)** G2 IOMMU DMA-confinement to `tested-hw` on ≥1 vendor (VT-d
+      DMAR parse + root/context writer) with a device-issued out-of-grant DMA fault.
+- [ ] **(sec→10)** Honest bound: on no-virt HW the two residuals stay documented;
+      this track's 10 is "10 where virtualization+IOMMU present," never unconditional.
+- [ ] **Verify:** an independent agent re-rates this track **security 10 (HW present)**.
+- **(speed→max under sec 10)** Use identity EPT/NPT (near-zero steady-state cost),
+      batch attested descriptor rings to amortize VM-exits, and let O3 hoist the
+      monitor-window bracketing out of loops. Realistic ceiling **sec 10 (HW) / speed 8**
+      (root-mode trap crossings have irreducible cost).
