@@ -94,6 +94,18 @@ UEFI smoke output is written to `build\smoke_uefi_serial.log`.
 .\scripts\run\run_uefi.ps1
 ```
 
+Use the modern VirtIO 1.x PCI network transport instead of the RTL8139 fallback:
+
+```powershell
+.\scripts\run\run_uefi.ps1 -NoPassthrough -EmulatedNic VirtIOModern
+```
+
+The transitional/legacy VirtIO PCI transport remains available for regression testing:
+
+```powershell
+.\scripts\run\run_uefi.ps1 -NoPassthrough -EmulatedNic VirtIO
+```
+
 This launches QEMU with:
 
 - OVMF firmware

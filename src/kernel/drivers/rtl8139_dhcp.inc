@@ -21,7 +21,7 @@ rtl8139_dhcp_configure:
     mov rbx, [tick_count]
     add rbx, 300
 .offer_wait:
-    call rtl8139_poll_rx
+    call rtl8139_poll_selected
     cmp byte [rtl_dhcp_offer_seen], 1
     je .request
     mov rax, [tick_count]
@@ -37,7 +37,7 @@ rtl8139_dhcp_configure:
     mov rbx, [tick_count]
     add rbx, 200
 .ack_wait:
-    call rtl8139_poll_rx
+    call rtl8139_poll_selected
     cmp byte [rtl_dhcp_ack_seen], 1
     je .ok
     mov rax, [tick_count]
@@ -145,9 +145,8 @@ rtl8139_build_dhcp_base:
     mov ecx, 6
     mov al, 0xFF
     rep stosb
-    lea rsi, [rtl_mac]
-    mov ecx, 6
-    rep movsb
+    call net_nic_mac
+    add rdi, 6
     mov word [rdi], 0x0008
     ; IPv4 header @ +14
     mov byte [abs RTL_TX_BUF_ADDR + 14], 0x45
@@ -172,10 +171,8 @@ rtl8139_build_dhcp_base:
     mov eax, [rtl_dhcp_xid]
     mov [rdi + 4], eax
     mov word [rdi + 10], 0x0080              ; broadcast flag
-    lea rsi, [rtl_mac]
     lea rdi, [rdi + 28]
-    mov ecx, 6
-    rep movsb
+    call net_nic_mac
     mov dword [abs RTL_TX_BUF_ADDR + 42 + 236], 0x63538263 ; magic cookie
     pop rdi
     pop rsi
@@ -207,7 +204,7 @@ rtl8139_finish_dhcp_udp:
     jae .len_ok
     mov ecx, 60
 .len_ok:
-    call rtl8139_tx
+    call rtl8139_tx_selected
     pop rdi
     pop rcx
     pop rax

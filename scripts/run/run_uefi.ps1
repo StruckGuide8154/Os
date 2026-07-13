@@ -6,6 +6,8 @@ param(
     [switch]$SerialTcp,
     [ValidateSet('User', 'Tap')]
     [string]$NetworkMode = 'User',
+    [ValidateSet('RTL8139', 'VirtIO', 'VirtIOModern')]
+    [string]$EmulatedNic = 'RTL8139',
     [string]$TapIfName = 'OpenVPN TAP-Windows6',
     # USB passthrough: pass real host USB devices into the guest. Requires
     # WinUSB driver bound via Zadig AND elevated PowerShell.
@@ -148,14 +150,24 @@ $qemuArgs += @(
 if ($NoEmulatedNic) {
     Write-Host "Emulated rtl8139/usernet NIC OMITTED (-NoEmulatedNic): guest sees only the passthrough NIC." -ForegroundColor Yellow
 } elseif ($NetworkMode -eq 'Tap') {
+    $nicDevice = switch ($EmulatedNic) {
+        'VirtIO'       { 'virtio-net-pci,netdev=net0,disable-modern=on,disable-legacy=off,mac=52:54:00:12:34:56' }
+        'VirtIOModern' { 'virtio-net-pci,netdev=net0,disable-modern=off,disable-legacy=on,mac=52:54:00:12:34:56' }
+        default        { 'rtl8139,netdev=net0' }
+    }
     $qemuArgs += @(
         '-netdev', "tap,id=net0,ifname=$TapIfName",
-        '-device', 'rtl8139,netdev=net0'
+        '-device', $nicDevice
     )
 } else {
+    $nicDevice = switch ($EmulatedNic) {
+        'VirtIO'       { 'virtio-net-pci,netdev=net0,disable-modern=on,disable-legacy=off,mac=52:54:00:12:34:56' }
+        'VirtIOModern' { 'virtio-net-pci,netdev=net0,disable-modern=off,disable-legacy=on,mac=52:54:00:12:34:56' }
+        default        { 'rtl8139,netdev=net0' }
+    }
     $qemuArgs += @(
         '-netdev', 'user,id=net0',
-        '-device', 'rtl8139,netdev=net0'
+        '-device', $nicDevice
     )
 }
 # USB device layout. Ports 1..8 are USB2; ports 9..16 are USB3 (with p2=8,p3=8

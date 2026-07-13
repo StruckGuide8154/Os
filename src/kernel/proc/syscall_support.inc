@@ -492,6 +492,36 @@ syscall_table:
     ; count * WM_LIST_REC(48) bytes at the dispatcher (was count*1 - an
     ; under-check the handler had to cover); STRICT denies a raw nibble.
     SYSCALL_ENTRY syscall_entry.sc_wm_list,          2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_WM_QUERY, (SC_DESC_LENx(0, 2, SCSZ_48) | SC_DESC_WRITE(0)), SC_FLAG_STRICT
+
+    ; Fixed sparse driver ABI. Reserved rows fail closed. CAP_DRIVER is absent
+    ; from every built-in app manifest and is installed only for an admitted
+    ; driver slot by the future external-driver loader.
+    %rep (232 - 81)
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied, 0, 0, CAP_DRIVER
+    %endrep
+    ; 232 REGISTER(requested_caps): policy and identity are kernel-owned.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_register,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    ; 233..236 MMIO/DMA/IRQ/PIO grant requests are control-plane only.
+    %rep 4
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
+    %endrep
+    ; 237..239 reserved.
+    %rep 3
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
+    %endrep
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_read32,  1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_write32, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 242 DMA map and 243 IRQ wait await the manager mapping/event path.
+    %rep 2
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
+    %endrep
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_read8,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_write8,   2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_ring_establish, 1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_ring_submit,  2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_DRIVER, (SC_DESC_LENx(0, 2, SCSZ_16) | SC_DESC_WRITE(0)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pci_cfg_read32, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 249 cross-driver MMIO grant is control-plane only.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
 syscall_table_end:
 syscall_table_count equ (syscall_table_end - syscall_table) / SYSCALL_ENTRY_SIZE
 

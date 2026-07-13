@@ -587,6 +587,26 @@ RTL8156_RX_MAX_FRAME       equ (RTL8156_RX_DMA_LEN - RTL8156_RX_DESC_LEN)
 RTL8156_XHCI_DEV_CTX_ADDR  equ 0x1B60000
 RTL8156_XHCI_CTRL_RING_ADDR equ 0x1B70000
 
+; --- VirtIO-net PCI DMA region --------------------------------------------
+; Keep this below the kernel's linked/KASLR address window and directly after
+; the RTL8156 workspace. Each split virtqueue gets a full 64 KiB slot;
+; QueueNum is still validated at runtime and capped at 256 before any derived
+; address is used. RX exposes only eight bounded 2 KiB buffers even when QEMU's
+; queue contains 256 descriptor entries.
+VIRTIO_NET_RX_VQ_ADDR      equ 0x1B80000
+VIRTIO_NET_TX_VQ_ADDR      equ 0x1B90000
+VIRTIO_NET_RX_BUF_ADDR     equ 0x1BA0000
+VIRTIO_NET_TX_BUF_ADDR     equ 0x1BB0000
+VIRTIO_NET_VQ_REGION_SIZE  equ 0x10000
+VIRTIO_NET_RX_SLOTS        equ 8
+VIRTIO_NET_RX_BUF_SIZE     equ 2048
+VIRTIO_NET_HDR_SIZE        equ 10
+VIRTIO_NET_MAX_FRAME       equ 1514
+
+%if (VIRTIO_NET_RX_SLOTS * VIRTIO_NET_RX_BUF_SIZE) > (VIRTIO_NET_TX_BUF_ADDR - VIRTIO_NET_RX_BUF_ADDR)
+  %error "VirtIO-net RX buffers overrun the TX buffer region"
+%endif
+
 ; --- XHCI Capability Register Offsets (from MMIO base) ---
 XHCI_CAP_CAPLENGTH  equ 0x00
 XHCI_CAP_HCSPARAMS1 equ 0x04

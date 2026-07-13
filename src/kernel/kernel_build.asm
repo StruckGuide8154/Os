@@ -179,6 +179,10 @@ section .text
 ; dispatcher/handler/security .inc files (and kernel_main) reference them.
 %include "build/ghl/syscall_secure.asm"
 section .text
+; Installable-driver hardware security boundary. Ring-3 syscall wrappers derive
+; identity from the active slot; signed policy installation remains kernel-only.
+%include "build/ghl/driver_host.asm"
+section .text
 %include "src/kernel/proc/syscall.asm"
 ; GritHLK syscall data section (Stage 1 of docs/ghlk-syscall-rearchitecture.md):
 ; the unconditional, const-sized syscall data symbols migrated out of
@@ -264,6 +268,8 @@ section .text
 ; -dGRIT_GFX_BRINGUP to any build - the retired gated source
 ; references symbols that no longer link in the active tree.
 %include "src/kernel/drivers/rtl8139.asm"
+section .text
+%include "src/kernel/drivers/virtio_net.asm"
 section .text
 %include "src/kernel/drivers/xhci.asm"
 section .text

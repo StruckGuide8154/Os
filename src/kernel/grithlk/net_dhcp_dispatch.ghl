@@ -64,6 +64,10 @@ fn net_dhcp_configure(rax result)
             return;
         }
     }
+    if lb(&virtio_net_active) == 1 {
+        result = rtl8139_dhcp_configure();
+        return;
+    }
     if lb(&rtl_active) == 1 {
         result = rtl8139_dhcp_configure();
         return;
@@ -76,6 +80,10 @@ fn net_dhcp_configure(rax result)
             result = rtl8156_dhcp_configure();
             return;
         }
+    }
+    if virtio_net_init() != 0 {
+        result = rtl8139_dhcp_configure();
+        return;
     }
     if rtl8139_init() != 0 {
         result = rtl8139_dhcp_configure();
@@ -113,7 +121,11 @@ fn net_dhcp_start(rax result)
             return;
         }
     }
-    if lb(&rtl_active) == 1 {
+    let emu_active = lb(&rtl_active);
+    if emu_active != 1 {
+        emu_active = lb(&virtio_net_active);
+    }
+    if emu_active == 1 {
         # RTL8139 now has an async tick FSM too (rtl8139_dhcp_start + the
         # main-loop rtl8139_dhcp_pump), so the renew/start kick no longer runs
         # the synchronous rtl8139_dhcp_configure (which busy-waited up to ~5s on
@@ -150,7 +162,11 @@ fn rtl8139_dhcp_promote_lease() preserves(all) {
 # (state DISCOVER/REQUEST), else resets the transaction, bumps the xid, sends one
 # DISCOVER and arms the deadline. Never waits.
 fn rtl8139_dhcp_start() preserves(all) {
-    if lb(&rtl_active) != 1 { return; }
+    let emu_active = lb(&rtl_active);
+    if emu_active != 1 {
+        emu_active = lb(&virtio_net_active);
+    }
+    if emu_active != 1 { return; }
     let s = lb(&rtl_dhcp_state);
     if s == 1 { return; }                    # DISCOVER already in flight
     if s == 2 { return; }                    # REQUEST already in flight

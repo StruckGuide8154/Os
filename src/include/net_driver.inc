@@ -54,6 +54,7 @@ NET_NIC_INFO_SIZE           equ 28
 NET_NIC_NONE                equ 0
 NET_NIC_RTL8156             equ 1
 NET_NIC_RTL8139             equ 2
+NET_NIC_VIRTIO             equ 3
 
 NET_ETH_TYPE_IPV4           equ 0x0008
 NET_ETH_TYPE_ARP            equ 0x0608

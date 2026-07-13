@@ -23,6 +23,11 @@ extern rtl8139_net_tx_frame
 extern rtl8139_net_poll_rx
 extern rtl8139_net_mac
 extern rtl8139_net_info
+extern virtio_net_init
+extern virtio_net_active
+extern virtio_net_mac
+extern virtio_net_tx_frame
+extern virtio_net_poll_rx
 extern rtl8156_icmp_ping_ipv4
 extern rtl8156_init
 extern rtl8156_dhcp_configure
@@ -62,6 +67,7 @@ section .text
 section .data
 net_driver_rtl8156_name db "rtl8156", 0
 net_driver_rtl8139_name db "rtl8139", 0
+net_driver_virtio_name db "virtio-net", 0
 
 align 8
 net_driver_rtl8156_ops:
@@ -92,8 +98,23 @@ net_driver_rtl8139_ops:
     dq 0
     dq rtl8139_net_info
 
+net_driver_virtio_ops:
+    dq net_driver_virtio_name
+    dd NET_NIC_VIRTIO
+    dd 150
+    dq virtio_net_init
+    dq virtio_net_active
+    dq virtio_net_mac
+    dq virtio_net_tx_frame
+    dq virtio_net_poll_rx
+    dq rtl8139_icmp_ping_ipv4
+    dq rtl8139_dhcp_configure
+    dq rtl8139_dhcp_start
+    dq rtl8139_net_info
+
 net_driver_table:
     dq net_driver_rtl8156_ops
+    dq net_driver_virtio_ops
     dq net_driver_rtl8139_ops
 net_driver_table_end:
 
@@ -224,6 +245,8 @@ net_info:
     je .rtl8156
     cmp ebx, NET_NIC_RTL8139
     je .rtl8139
+    cmp ebx, NET_NIC_VIRTIO
+    je .rtl8139                  ; shared generic-emulated-NIC lease state
     xor eax, eax
     cmp rdi, 7
     jne .done
@@ -370,8 +393,11 @@ net_ping_ipv4:
     push rdi
     cmp byte [rtl8156_active], 1
     je .try_rtl8156
+    cmp byte [virtio_net_active], 1
+    je .try_rtl8139
     cmp byte [rtl_active], 1
     je .try_rtl8139
+    jmp .fail
 .try_rtl8156:
     call rtl8156_icmp_ping_ipv4
     test eax, eax

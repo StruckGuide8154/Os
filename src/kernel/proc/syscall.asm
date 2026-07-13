@@ -279,6 +279,7 @@ FN_DECL syscall_entry, 0, 0, FN_RET_SCALAR
 %include "src/kernel/proc/syscall_handlers_sys_fs.inc"
 %include "src/kernel/proc/syscall_handlers_xml_draw.inc"
 %include "src/kernel/proc/syscall_handlers_wx_net.inc"
+%include "src/kernel/proc/syscall_handlers_driver.inc"
 %include "src/kernel/proc/syscall_epilogue.inc"
 %include "src/kernel/proc/syscall_support.inc"
 %include "src/kernel/proc/syscall_xscc_selftest.inc"

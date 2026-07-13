@@ -34,6 +34,9 @@ unsafe implicit_extern;  # &drv_* module-local table addresses
 
 # --- registration / lifecycle ----------------------------------------------
 global drvhost_register;
+global drvhost_policy_install;
+global drvhost_register_slot;
+global drvhost_id_for_slot;
 global drvhost_effective_caps;
 global drvhost_state;
 # --- grants (policy-authorized only) ---------------------------------------
@@ -104,6 +107,12 @@ data drv_code_hash: 16 x 8;     # bound identity (component_id tie-in)
 data drv_faults:  16 x 4;       # running fault count
 data drv_restarts: 16 x 4;      # restart generation
 
+# Kernel-owned admission policy, indexed by the authoritative ring-3 slot.
+# Only the verified package/device-manager control plane installs these rows;
+# BSS-zero means "not a driver" and registration fails closed.
+data drv_slot_policy_caps: 16 x 4;
+data drv_slot_code_hash: 16 x 8;
+
 # --- MMIO grant table -------------------------------------------------------
 data mg_drv:   32 x 4;
 data mg_base:  32 x 8;
@@ -140,9 +149,50 @@ fn drv_valid_id(id) {
     return 1;
 }
 
+fn drv_valid_slot(slot) {
+    if slot < 0 { return 0; }
+    # driver_id is slot+1; id 0 remains the sentinel.
+    if slot >= DRV_MAX - 1 { return 0; }
+    return 1;
+}
+
+# Kernel-only control-plane hook. `caps` and `code_hash` must already have
+# passed signed ART_DRIVER admission and concrete device permission review.
+# Installing policy grants no MMIO/PIO/DMA window by itself.
+fn drvhost_policy_install(slot, caps, code_hash) {
+    if drv_valid_slot(slot) == 0 { return DRV_ERR_NODRV; }
+    if caps == 0 { return DRV_ERR_CAP; }
+    sw(&drv_slot_policy_caps + slot * 4, caps);
+    sq(&drv_slot_code_hash + slot * 8, code_hash);
+    return DRV_OK;
+}
+
+# Ring-3 registration wrapper. Caller identity is the slot derived by syscall
+# entry, never an id supplied by the driver. Policy and image identity come
+# only from the kernel-owned admission row. Returns id, or 0 on denial.
+fn drvhost_register_slot(slot, requested) {
+    if drv_valid_slot(slot) == 0 { return 0; }
+    let policy = lw(&drv_slot_policy_caps + slot * 4);
+    if policy == 0 { return 0; }
+    let id = slot + 1;
+    let rc = drvhost_register(id, requested, policy,
+                              lq(&drv_slot_code_hash + slot * 8));
+    if rc != DRV_OK { return 0; }
+    return id;
+}
+
+# Map the authoritative caller slot to its live broker identity. Data-plane
+# syscall wrappers use this on every operation, preventing sibling impersonation.
+fn drvhost_id_for_slot(slot) {
+    if drv_valid_slot(slot) == 0 { return 0; }
+    let id = slot + 1;
+    if drv_is_running(id) == 0 { return 0; }
+    return id;
+}
+
 fn drv_is_running(id) {
     if drv_valid_id(id) == 0 { return 0; }
-    if ld(&drv_state + id * 4) != DRV_ST_RUNNING { return 0; }
+    if lw(&drv_state + id * 4) != DRV_ST_RUNNING { return 0; }
     return 1;
 }
 
@@ -159,28 +209,28 @@ fn drv_is_running(id) {
 fn drvhost_register(id, requested, policy_grant, code_hash) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
     let eff = requested & policy_grant;
-    sd(&drv_caps_req + id * 4, requested);
-    sd(&drv_policy   + id * 4, policy_grant);
-    sd(&drv_caps_eff + id * 4, eff);
+    sw(&drv_caps_req + id * 4, requested);
+    sw(&drv_policy   + id * 4, policy_grant);
+    sw(&drv_caps_eff + id * 4, eff);
     sq(&drv_code_hash + id * 8, code_hash);
-    sd(&drv_faults   + id * 4, 0);
-    sd(&drv_state    + id * 4, DRV_ST_RUNNING);
+    sw(&drv_faults   + id * 4, 0);
+    sw(&drv_state    + id * 4, DRV_ST_RUNNING);
     return DRV_OK;
 }
 
 fn drvhost_effective_caps(id) {
     if drv_valid_id(id) == 0 { return 0; }
-    return ld(&drv_caps_eff + id * 4);
+    return lw(&drv_caps_eff + id * 4);
 }
 
 fn drvhost_state(id) {
     if drv_valid_id(id) == 0 { return DRV_ST_NONE; }
-    return ld(&drv_state + id * 4);
+    return lw(&drv_state + id * 4);
 }
 
 fn drv_has_cap(id, cap_bit) {
     if drv_is_running(id) == 0 { return 0; }
-    if (ld(&drv_caps_eff + id * 4) & cap_bit) == 0 { return 0; }
+    if (lw(&drv_caps_eff + id * 4) & cap_bit) == 0 { return 0; }
     return 1;
 }
 
@@ -195,12 +245,12 @@ fn drvhost_grant_mmio(id, base, len) {
     if len == 0 { return DRV_ERR_GRANT; }
     let end = base + len;
     if end < base { return DRV_ERR_GRANT; }      # address-space overflow
-    let n = ld(&mg_count);
+    let n = lw(&mg_count);
     if n >= MMIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&mg_drv  + n * 4, id);
+    sw(&mg_drv  + n * 4, id);
     sq(&mg_base + n * 8, base);
     sq(&mg_end  + n * 8, end);
-    sd(&mg_count, n + 1);
+    sw(&mg_count, n + 1);
     return DRV_OK;
 }
 
@@ -241,10 +291,10 @@ fn drv_mmio_contained(id, addr, len) {
     if len == 0 { return 0; }
     let aend = addr + len;
     if aend < addr { return 0; }
-    let n = ld(&mg_count);
+    let n = lw(&mg_count);
     let i = 0;
     while i < n {
-        if ld(&mg_drv + i * 4) == id {
+        if lw(&mg_drv + i * 4) == id {
             let b = lq(&mg_base + i * 8);
             let e = lq(&mg_end + i * 8);
             if addr >= b {
@@ -264,8 +314,8 @@ fn drv_mmio_contained(id, addr, len) {
 # via drv_mmio_contained semantics: a deny is indistinguishable from open bus,
 # which is the safe direction). write returns DRV_OK / DRV_ERR_*.
 # ---------------------------------------------------------------------------
-fn drvhost_raw_mmio_read32(addr) { return ld(addr); }      # the named HW boundary
-fn drvhost_raw_mmio_write32(addr, val) { sd(addr, val); }  # the named HW boundary
+fn drvhost_raw_mmio_read32(addr) { return lw(addr); }      # the named HW boundary
+fn drvhost_raw_mmio_write32(addr, val) { sw(addr, val); }  # the named HW boundary
 
 fn drvhost_mmio_read32(id, addr) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFFFFFFFF; }
@@ -292,12 +342,12 @@ fn drvhost_grant_dma(id, base, len) {
     if len == 0 { return DRV_ERR_GRANT; }
     let end = base + len;
     if end < base { return DRV_ERR_GRANT; }      # address-space overflow
-    let n = ld(&dg_count);
+    let n = lw(&dg_count);
     if n >= MMIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&dg_drv  + n * 4, id);
+    sw(&dg_drv  + n * 4, id);
     sq(&dg_base + n * 8, base);
     sq(&dg_end  + n * 8, end);
-    sd(&dg_count, n + 1);
+    sw(&dg_count, n + 1);
     return DRV_OK;
 }
 
@@ -310,10 +360,10 @@ fn drvhost_dma_contained(id, addr, len) {
     if len == 0 { return 0; }
     let aend = addr + len;
     if aend < addr { return 0; }
-    let n = ld(&dg_count);
+    let n = lw(&dg_count);
     let i = 0;
     while i < n {
-        if ld(&dg_drv + i * 4) == id {
+        if lw(&dg_drv + i * 4) == id {
             let b = lq(&dg_base + i * 8);
             let e = lq(&dg_end + i * 8);
             if addr >= b {
@@ -331,22 +381,22 @@ fn drvhost_dma_contained(id, addr, len) {
 fn drvhost_grant_pio(id, lo, hi) {
     if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
     if hi < lo { return DRV_ERR_GRANT; }
-    let n = ld(&pg_count);
+    let n = lw(&pg_count);
     if n >= PIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&pg_drv + n * 4, id);
-    sd(&pg_lo  + n * 4, lo);
-    sd(&pg_hi  + n * 4, hi);
-    sd(&pg_count, n + 1);
+    sw(&pg_drv + n * 4, id);
+    sw(&pg_lo  + n * 4, lo);
+    sw(&pg_hi  + n * 4, hi);
+    sw(&pg_count, n + 1);
     return DRV_OK;
 }
 
 fn drv_pio_allowed(id, port) {
-    let n = ld(&pg_count);
+    let n = lw(&pg_count);
     let i = 0;
     while i < n {
-        if ld(&pg_drv + i * 4) == id {
-            if port >= ld(&pg_lo + i * 4) {
-                if port <= ld(&pg_hi + i * 4) { return 1; }
+        if lw(&pg_drv + i * 4) == id {
+            if port >= lw(&pg_lo + i * 4) {
+                if port <= lw(&pg_hi + i * 4) { return 1; }
             }
         }
         i = i + 1;
@@ -426,7 +476,7 @@ fn drvhost_grant_irq(id, vector) {
     if drv_has_cap(id, DRV_CAP_IRQ) == 0 { return DRV_ERR_CAP; }
     if vector < 0 { return DRV_ERR_GRANT; }
     if vector >= IRQ_MAX { return DRV_ERR_GRANT; }
-    sd(&irq_owner + vector * 4, id);
+    sw(&irq_owner + vector * 4, id);
     return DRV_OK;
 }
 
@@ -436,7 +486,7 @@ fn drvhost_grant_irq(id, vector) {
 fn drvhost_irq_deliver(vector) {
     if vector < 0 { return 0; }
     if vector >= IRQ_MAX { return 0; }
-    let id = ld(&irq_owner + vector * 4);
+    let id = lw(&irq_owner + vector * 4);
     if drv_is_running(id) == 0 { return 0; }
     return id;
 }
@@ -454,6 +504,7 @@ fn drvhost_irq_deliver(vector) {
 # ---------------------------------------------------------------------------
 const RING_ABI_VERSION = 1;
 const DESC_STRIDE = 16;          # {addr:8 @0, data:4 @8, op:4 @12}
+const RING_MAX_DESC = 256;       # bound one syscall's validation/execution work
 const DESC_OP_READ32  = 0;
 const DESC_OP_WRITE32 = 1;
 
@@ -468,12 +519,18 @@ fn drvhost_ring_establish(id, abi_version) {
 fn drvhost_ring_submit(id, desc_base, count) {
     if drv_has_cap(id, DRV_CAP_RING) == 0 { return DRV_ERR_CAP; }
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if count < 1 { return DRV_ERR_GRANT; }
+    if count > RING_MAX_DESC { return DRV_ERR_GRANT; }
     # Pass 1: validate every descriptor's window before touching hardware.
     let i = 0;
     while i < count {
         let d = desc_base + i * DESC_STRIDE;
         let addr = lq(d);                                  # field @0
         if drv_mmio_contained(id, addr, 4) == 0 { return DRV_ERR_GRANT; }
+        let op = lw(d + 12);
+        if op != DESC_OP_READ32 {
+            if op != DESC_OP_WRITE32 { return DRV_ERR_GRANT; }
+        }
         i = i + 1;
     }
     # Pass 2: all validated - execute. `data` is field @8, `op` is field @12.
@@ -481,12 +538,12 @@ fn drvhost_ring_submit(id, desc_base, count) {
     while i < count {
         let d = desc_base + i * DESC_STRIDE;
         let addr = lq(d);
-        let op = ld(d + 12);
+        let op = lw(d + 12);
         if op == DESC_OP_WRITE32 {
-            drvhost_raw_mmio_write32(addr, ld(d + 8));     # data slot = value to write
+            drvhost_raw_mmio_write32(addr, lw(d + 8));     # data slot = value to write
         }
         if op == DESC_OP_READ32 {
-            sd(d + 8, drvhost_raw_mmio_read32(addr));       # data slot <- read result
+            sw(d + 8, drvhost_raw_mmio_read32(addr));       # data slot <- read result
         }
         i = i + 1;
     }
@@ -502,15 +559,15 @@ fn drvhost_ring_submit(id, desc_base, count) {
 # ---------------------------------------------------------------------------
 fn drvhost_fault(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    let f = ld(&drv_faults + id * 4) + 1;
-    sd(&drv_faults + id * 4, f);
+    let f = lw(&drv_faults + id * 4) + 1;
+    sw(&drv_faults + id * 4, f);
     if f >= FAULT_BUDGET { return drvhost_quarantine(id); }
     return DRV_OK;
 }
 
 fn drvhost_quarantine(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    sd(&drv_state + id * 4, DRV_ST_QUARANTINE);
+    sw(&drv_state + id * 4, DRV_ST_QUARANTINE);
     return DRV_OK;
 }
 
@@ -520,12 +577,12 @@ fn drvhost_quarantine(id) {
 # a window a compromised instance set up).
 fn drvhost_restart(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    let st = ld(&drv_state + id * 4);
+    let st = lw(&drv_state + id * 4);
     if st != DRV_ST_QUARANTINE {
         if st != DRV_ST_DEAD { return DRV_ERR_STATE; }
     }
-    sd(&drv_faults + id * 4, 0);
-    sd(&drv_restarts + id * 4, ld(&drv_restarts + id * 4) + 1);
-    sd(&drv_state + id * 4, DRV_ST_RUNNING);
+    sw(&drv_faults + id * 4, 0);
+    sw(&drv_restarts + id * 4, lw(&drv_restarts + id * 4) + 1);
+    sw(&drv_state + id * 4, DRV_ST_RUNNING);
     return DRV_OK;
 }

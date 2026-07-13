@@ -252,6 +252,7 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\mon_hal_vmx_backend.ghl'; out = 'build\ghl\mon_hal_vmx_backend.asm' },
     @{ src = 'src\kernel\grithlk\syscall_validate.ghl'; out = 'build\ghl\syscall_validate.asm' },
     @{ src = 'src\kernel\grithlk\syscall_secure.ghl'; out = 'build\ghl\syscall_secure.asm' },
+    @{ src = 'src\kernel\grithlk\driver_host.ghl'; out = 'build\ghl\driver_host.asm' },
     @{ src = 'src\kernel\grithlk\wm_helpers.ghl'; out = 'build\ghl\wm_helpers.asm' },
     @{ src = 'src\kernel\grithlk\usb_hid_helpers.ghl'; out = 'build\ghl\usb_hid_helpers.asm' },
     @{ src = 'src\kernel\grithlk\usermode_callbacks.ghl'; out = 'build\ghl\usermode_callbacks.asm' },

@@ -585,6 +585,10 @@ fn kmain() {
         spi_hid_init();
     }
     boot_mark(83, 72);                # "SH": spi_hid_init
+    # Prefer the paravirtual NIC when QEMU exposes it. RTL8139 remains compiled
+    # and initialized as a compatibility fallback; the NIC dispatcher chooses
+    # VirtIO by priority when both are present.
+    virtio_net_init();
     rtl8139_init();
     boot_mark(82, 57);                # "R9": rtl8139_init
 
