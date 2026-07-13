@@ -1,0 +1,77 @@
+# ============================================================================
+# Example app: System Monitor, ported to GritHL GUI v2.
+#
+# Shows the v2 shape: build the tree ONCE, keep handles, re-stamp only the
+# live values each frame, call g2_frame. The CPU/RAM bars change every frame
+# so only those nodes repaint; the labels, panel and layout are diffed clean
+# and cost nothing after the first frame.
+#
+# Compare with the v1 monitor in ui_kits: there, the whole client area is
+# redrawn from scratch every frame through per-primitive syscalls.
+# ============================================================================
+
+use core
+use theme
+use gui2
+
+# Retained handles, built once.
+let g_root    = 0;
+let g_cpu_bar = 0;
+let g_cpu_val = 0;
+let g_ram_bar = 0;
+let g_ram_val = 0;
+
+# Scratch strings (length-prefixed); fmt_pct writes into these.
+const STR_CPU = 0x00A70000;
+const STR_RAM = 0x00A70100;
+
+extern fmt_pct;          # core helper: write "NN%" into a string buffer
+
+fn build_ui(win) {
+    g_root = g2_window(win);
+
+    let col = g2_panel(g_root, g2_col(TC_BG_BASE));
+
+    # CPU row: caption + value + bar track + bar fill.
+    let cpu_head = g2_hstack(col);
+    g2_label(cpu_head, str("CPU"), g2_col(TC_TEXT_MUTED), g2_col(TC_BG_BASE));
+    g_cpu_val = g2_label(cpu_head, str("0%"), g2_col(TC_TEXT), g2_col(TC_BG_BASE));
+    let cpu_track = g2_panel(col, g2_col(TC_SURFACE_2));
+    sq(cpu_track + N_H, 8);
+    g_cpu_bar = g2_panel(cpu_track, g2_col(TC_ACCENT));
+
+    # RAM row, same shape.
+    let ram_head = g2_hstack(col);
+    g2_label(ram_head, str("Memory"), g2_col(TC_TEXT_MUTED), g2_col(TC_BG_BASE));
+    g_ram_val = g2_label(ram_head, str("0%"), g2_col(TC_TEXT), g2_col(TC_BG_BASE));
+    let ram_track = g2_panel(col, g2_col(TC_SURFACE_2));
+    sq(ram_track + N_H, 8);
+    g_ram_bar = g2_panel(ram_track, g2_col(TC_ACCENT));
+
+    g2_mount(g_root, win);
+}
+
+# Called by the WM ~once per frame. Only the live values are re-stamped; the
+# diff repaints the two bars and two value labels, nothing else.
+fn draw(win) {
+    let cpu = sys_core_util(0);
+    let ram = (sys_ram_max_kb() - sys_ram_free_kb()) * 100 / sys_ram_max_kb();
+
+    g2_set_label(g_cpu_val, fmt_pct(STR_CPU, cpu));
+    g2_set_label(g_ram_val, fmt_pct(STR_RAM, ram));
+
+    # Bar width tracks the value; a changed width re-emits just that rect.
+    sq(g_cpu_bar + N_INTRIN_W, cpu);
+    sq(g_ram_bar + N_INTRIN_W, ram);
+    layout_bump();
+
+    g2_frame(g_root);
+}
+
+fn main() {
+    g2_init();
+    let win = syscall(SYS_WM_CREATE, str("System Monitor"), 360, 240);
+    build_ui(win);
+    syscall(SYS_WM_HANDLERS, win, draw, 0, 0);
+    return 0;
+}

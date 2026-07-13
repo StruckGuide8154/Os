@@ -1,0 +1,12 @@
+flowchart LR
+    subgraph SANDBOX["Ring-3 driver sandboxes (one per driver)"]
+        D1["battery"]
+        D2["rtl8156 NIC"]
+        D3["HID / input"]
+        D4["display"]
+        D5["HDA audio class driver"]
+    end
+    BROKER["driver_host.ghl broker — frozen driver_inventory.txt + DMA grant table (IOMMU G2) + PnP match"]
+    KERN["Ring-0 kernel services"]
+    D1 & D2 & D3 & D4 & D5 -->|"capability-scoped IPC (no direct MMIO/DMA)"| BROKER
+    BROKER -->|"granted windows only"| KERN

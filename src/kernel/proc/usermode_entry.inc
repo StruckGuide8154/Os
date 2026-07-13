@@ -18,6 +18,15 @@ FN_BEGIN app_blob_init, 0, 0, FN_RET_SCALAR
     mov [rel app_blob_size_v], rcx
     add rax, rcx
     mov [rel app_blob_end_v], rax
+    ; W^X split offset (Codex review finding 2): app_blob_code_end - app_blob_start
+    ; is the page-aligned code/data boundary. The in-image labels keep their
+    ; relative positions after the post-build strip, and the loaded APPS.BIN has
+    ; the identical internal layout, so this single constant drives every slot's
+    ; v1 W^X manifest regardless of where the live blob actually sits.
+    lea rax, [rel app_blob_code_end]
+    lea rcx, [rel app_blob_start]
+    sub rax, rcx
+    mov [rel app_blob_code_size_v], rax
     mov rax, [abs VBE_INFO_ADDR + VBE_APP_ARENA_BASE_OFF]
     test rax, rax
     jnz .have_arena_base
@@ -115,7 +124,7 @@ FN_BEGIN l3_user_stack_top, 0, 0, FN_RET_SCALAR
     jb .l3_ust_slot_ok
     xor ecx, ecx
 .l3_ust_slot_ok:
-    mov rax, [rel l3_slot_ustack_off + rcx*8]
+    mov rax, [abs l3_slot_ustack_off + rcx*8]
     test rax, rax
     jnz .l3_ust_have_off
     mov rax, L3_SLOT_USTACK_TOP_HIGH
@@ -179,7 +188,7 @@ FN_BEGIN l3_randomize_user_stack_top, 0, 0, FN_RET_VOID
 %endif
 .lrust_store:
     mov ecx, r8d
-    mov [rel l3_slot_ustack_off + rcx*8], rdx
+    mov [abs l3_slot_ustack_off + rcx*8], rdx
 .lrust_done:
     pop r8
     pop rdi

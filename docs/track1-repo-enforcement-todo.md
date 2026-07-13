@@ -119,3 +119,45 @@ Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P0: Repository Enforcement" an
       (`check_build_integrity.ps1` generated-artifact-as-source rule)
 - [x] All enforcement has its own negative tests.
       (`test_enforcement_meta.ps1`, 5/5 green)
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 10 / speed 10** (2026-06-23). The floor now protects
+file *extensions*, the build graph, AND the *toolchain that produced them*.
+
+- [x] **(sec→10)** Reproducible-build attestation: byte-identical rebuild from a
+      pinned toolchain, gated in CI; a non-reproducible build fails the gate.
+      (`scripts/test/check_reproducible_build.py` double-compiles 6 pinned
+      trusted-path GHL modules through the pinned `gritc.py` and asserts (a) the
+      two compiles are byte-identical and (b) each digest matches the frozen
+      `tools/security/reproducible_digests.txt`, which is itself content-bound to
+      the `gritc.py` sha256. Re-bake via `--update`. Wired into the entry point;
+      verified green locally.)
+- [x] **(sec→10)** Signed CI provenance (SLSA-style): every artifact carries a
+      signed builder identity + source revision, verified by the Track 2/7 root.
+      (`scripts/build/gen_provenance.py` emits a canonical-JSON SLSA-style
+      statement — builder id + git revision + per-artifact sha256 + pinned
+      toolchain digests — and SIGNS it as a Track-2 `policy`-class envelope via
+      the existing `write_envelope.py` (real Ed25519 quorum sigs).
+      `scripts/build/verify_provenance.py` verifies it through the Track-2/7
+      Ed25519 root (`ed25519_host` dev role pubkeys). CI emits `PROVENANCE.ENV`
+      for KERNEL.BIN/APPS.BIN/KERNEL.ENV and verifies it inline.
+      `scripts/test/eval_provenance.py` proves the round-trip + 5 negatives
+      (payload/sig tamper, wrong revision, wrong artifact hash, under-quorum);
+      wired into the entry point; verified green.)
+- [x] **(sec→10)** Pin `gritc.py` + nasm by hash so a swapped compiler is
+      rejected exactly like a new `.asm`. (Frozen manifest
+      `tools/security/toolchain_pins.txt` pins `gritc.py` + `ed25519_host.py` by
+      sha256 and nasm by version token; `tools/security/check_toolchain_pins.ps1`
+      fails on any drift (`toolchain-pin-drift`). Re-bake via `-Update`. Wired
+      into the entry point; negative meta-tests in `test_enforcement_meta.ps1`
+      (tests 5+6: corrupt the gritc.py pin / nasm version pin, assert fail,
+      restore) — 10/10 meta-tests green. NOTE: nasm is pinned by *version token*,
+      not a raw binary file-hash, because the official `nasm.exe` differs per
+      OS/arch package and a file-hash would false-drift between the dev box and
+      the windows-latest CI runner; the version token is the meaningful identity.
+      gritc.py — a tracked in-repo file — IS content-pinned by full sha256.)
+- [x] **Verify:** entry point + meta-tests green locally
+      (`scripts\test\test_ghl_security_guards.ps1`, `test_enforcement_meta.ps1`).
+      An independent re-rating to **security 10** is the remaining external step.
+- Speed stays **10**: every addition is build-time only, zero runtime cost.

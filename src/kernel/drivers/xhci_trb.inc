@@ -110,13 +110,7 @@ xhci_queue_int_trb:
     xor edi, edi
 
     ; Debug: 'w' (Int Wrap)
-    push rax
-    push rdx
-    mov dx, 0x3F8
-    mov al, 'w'
-    out dx, al
-    pop rdx
-    pop rax
+    SER 'w'
 
 .int_no_wrap:
     mov rsi, XHCI_INT_RING_ADDR
@@ -276,7 +270,7 @@ xhci_configure_endpoint:
     imul eax, ecx                 ; Offset = DCI * ctx_stride
     lea rsi, [rdi + rax]          ; Base of slot
     add rsi, rcx                  ; Add Input Control Context offset (ctx_stride)
-    
+
     ; Wait, Input Context layout:
     ; [Input Control Context] [Slot Context] [EP0 Context] [EP1 IN Context] ...
     ; Offset = (DCI + 1) * ctx_stride (because entry 0 = Input Control)
@@ -376,10 +370,20 @@ xhci_flush_events:
     push rbx
     push rcx
     push rdx
+    ; BOUNDED drain. The legitimate number of pending events is at most the
+    ; event-ring size (256). If xhci_poll_event keeps returning "event" past
+    ; that - e.g. on real HW where a misprogrammed ERDP / cycle-bit mismatch
+    ; makes every stale TRB look fresh - an uncapped loop would hang this AP
+    ; forever (tick-independent). Cap at 4096 (16x the ring) so a runaway
+    ; controller fails-soft instead of wedging the device-enum core.
+    mov ecx, 4096
 .flush_loop:
     call xhci_poll_event
     test eax, eax
-    jnz .flush_loop  ; Keep checking until no more events
+    jz .flush_done   ; no more events
+    dec ecx
+    jnz .flush_loop  ; keep checking until no more events or budget exhausted
+.flush_done:
     pop rdx
     pop rcx
     pop rbx
@@ -391,6 +395,9 @@ xhci_flush_events:
 ; Clobbers: nothing (saves/restores all used regs)
 ; ============================================================================
 serial_hex32:
+%ifndef ENABLE_DEBUG_SERIAL
+    ret                   ; release: no COM1 egress, inert leaf (all callers gated)
+%else
     push rax
     push rbx
     push rcx
@@ -421,4 +428,5 @@ serial_hex32:
     pop rbx
     pop rax
     ret
+%endif
 

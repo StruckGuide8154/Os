@@ -280,9 +280,9 @@ idt_init:
     ; gate. Without this a kernel stack overflow re-faults on the exhausted
     ; stack and triple-faults silently; with it the fault lands on a clean stack
     ; so isr_8/14/13 can log it. IST1=#DF(8), IST2=#PF(14), IST3=#GP(13).
-    mov byte [IDT_ADDR + 8  * 16 + 4], 1   ; #DF -> IST1
-    mov byte [IDT_ADDR + 14 * 16 + 4], 2   ; #PF -> IST2
-    mov byte [IDT_ADDR + 13 * 16 + 4], 3   ; #GP -> IST3
+    mov byte [abs IDT_ADDR + 8  * 16 + 4], 1   ; #DF -> IST1
+    mov byte [abs IDT_ADDR + 14 * 16 + 4], 2   ; #PF -> IST2
+    mov byte [abs IDT_ADDR + 13 * 16 + 4], 3   ; #GP -> IST3
 
     ; Load IDT
     lea rax, [idt_ptr]

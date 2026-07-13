@@ -1,0 +1,20 @@
+<svg width="160" height="160" viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gritGold" x1="32" y1="24" x2="128" y2="136" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E0BC86"></stop>
+      <stop offset="0.55" stop-color="#C9A26A"></stop>
+      <stop offset="1" stop-color="#A8854F"></stop>
+    </linearGradient>
+    <linearGradient id="gritSheen" x1="40" y1="28" x2="80" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.34"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+  </defs>
+  
+  <rect x="20" y="20" width="120" height="120" rx="34" fill="url(#gritGold)"></rect>
+  <rect x="20" y="20" width="120" height="120" rx="34" fill="url(#gritSheen)"></rect>
+  <rect x="21.25" y="21.25" width="117.5" height="117.5" rx="32.75" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="1.5"></rect>
+  
+  <path d="M104 64 A30 30 0 1 0 104 96 L104 84 L83 84" fill="none" stroke="#17150F" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"></path>
+  <circle cx="103" cy="63.5" r="5.5" fill="#17150F"></circle>
+</svg>

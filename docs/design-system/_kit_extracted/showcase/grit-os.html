@@ -1,0 +1,374 @@
+<!-- @dsCard group="Desktop" viewport="1280x800" name="Grit OS — GHL v2" subtitle="The flagship: a Grit desktop rendered by the gui2 retained engine — gold, smooth, live perf HUD" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="gold">
+<head>
+<meta charset="utf-8" />
+<title>Grit OS — GHL v2</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--font-ui);
+    color: var(--text-body);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  #screen { position: fixed; inset: 0; overflow: hidden; }
+
+  /* ---- entrance: the whole desktop deblurs into focus (Apple-style) ---- */
+  @keyframes deblur {
+    0%   { opacity: 0; filter: blur(26px) saturate(0.6); transform: scale(1.012); }
+    100% { opacity: 1; filter: blur(0)    saturate(1);   transform: scale(1); }
+  }
+  #screen.boot { animation: deblur 1100ms cubic-bezier(.22,.61,.21,1) both; }
+
+  /* ---- top menu bar (glass) ---- */
+  .bar {
+    position: absolute; top: 0; left: 0; right: 0; height: 38px; z-index: 600;
+    display: flex; align-items: center; gap: 20px; padding: 0 16px;
+    background: var(--glass-tint); backdrop-filter: var(--blur-glass);
+    -webkit-backdrop-filter: var(--blur-glass);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--edge-light);
+  }
+  .bar .brand { display: flex; align-items: center; gap: 9px; }
+  .bar .brand img { height: 19px; width: auto; }
+  .bar .brand b { font: var(--fw-semibold) var(--fs-sm)/1 var(--font-ui); color: var(--text-heading); letter-spacing: -.01em; }
+  .bar .mi { font: var(--fw-medium) var(--fs-sm)/1 var(--font-ui); color: var(--text-muted); cursor: default; transition: color .15s; }
+  .bar .mi:hover { color: var(--text-body); }
+  .bar .right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+  .bar .ico { width: 15px; height: 15px; display: inline-flex; color: var(--text-body); }
+  .bar .clock { font: var(--fw-medium) var(--fs-sm)/1 var(--font-mono); color: var(--text-heading); letter-spacing: .02em; }
+
+  /* accent picker in the bar */
+  .swatches { display: flex; gap: 7px; align-items: center; }
+  .swatch { width: 15px; height: 15px; border-radius: var(--r-pill); cursor: pointer; border: 1.5px solid rgba(255,255,255,.18);
+            transition: transform .18s var(--ease-out), box-shadow .18s; }
+  .swatch:hover { transform: scale(1.18); }
+  .swatch.on { box-shadow: 0 0 0 2px var(--surface-desktop), 0 0 0 3.5px currentColor; }
+
+  /* ---- windows ---- */
+  .win {
+    position: absolute; display: flex; flex-direction: column;
+    background: var(--surface-window);
+    border: 1px solid var(--border-control);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-window);
+    overflow: hidden;
+    opacity: 1; transform: none;
+    transition: box-shadow .3s var(--ease-out);
+  }
+  #w-set, #w-term { }
+  .win.focused { box-shadow: var(--shadow-window), 0 0 0 1px var(--focus-ring); z-index: 50 !important; }
+
+  .titlebar {
+    height: 40px; flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 0 13px; cursor: grab;
+    background: var(--glass-tint-2); backdrop-filter: var(--blur-thin);
+    -webkit-backdrop-filter: var(--blur-thin);
+    border-bottom: 1px solid var(--border);
+  }
+  .titlebar:active { cursor: grabbing; }
+  .lights { display: flex; gap: 8px; }
+  .light { width: 12px; height: 12px; border-radius: var(--r-pill); background: var(--surface-active);
+           border: 1px solid rgba(0,0,0,.25); transition: background .15s; }
+  .win:hover .light.c { background: #CF6F66; }
+  .win:hover .light.m { background: #D6A444; }
+  .win:hover .light.x { background: #6FB894; }
+  .titlebar .t { font: var(--fw-semibold) var(--fs-sm)/1 var(--font-ui); color: var(--text-heading); white-space: nowrap; }
+  .titlebar .tsub { font: var(--fw-regular) var(--fs-xs)/1 var(--font-mono); color: var(--text-faint); margin-left: 2px; }
+  .titlebar .tr { margin-left: auto; display: flex; gap: 6px; }
+  .tbtn { width: 26px; height: 26px; border-radius: var(--r-sm); display: inline-flex; align-items: center; justify-content: center;
+          color: var(--text-muted); cursor: pointer; transition: background .15s, color .15s; }
+  .tbtn:hover { background: var(--surface-raised); color: var(--text-body); }
+  .tbtn .ico { width: 14px; height: 14px; display: inline-flex; }
+  .body { flex: 1; min-height: 0; overflow: hidden; }
+
+  .label { font: var(--fw-semibold) var(--fs-micro)/1 var(--font-ui); letter-spacing: var(--ls-label);
+           text-transform: uppercase; color: var(--text-muted); }
+  .ico { display: inline-flex; align-items: center; justify-content: center; }
+  .ico svg { width: 100%; height: 100%; display: block; stroke-width: 1.75; }
+
+  /* ---- monitor app ---- */
+  .mon { padding: 18px; display: flex; flex-direction: column; gap: 15px; height: 100%; }
+  .stat .toprow { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+  .stat .ico { width: 15px; height: 15px; display: inline-flex; color: var(--text-accent); }
+  .stat .v { margin-left: auto; font: var(--fw-semibold) var(--fs-lg)/1 var(--font-ui); color: var(--text-heading); font-variant-numeric: tabular-nums; }
+  .track { height: 8px; border-radius: var(--r-pill); background: var(--surface-input); overflow: hidden; box-shadow: inset 0 1px 2px rgba(0,0,0,.35); }
+  .fill { height: 100%; border-radius: var(--r-pill); background: var(--accent-grad);
+          transition: width .45s cubic-bezier(.4,0,.1,1); }
+  .fill.g { background: linear-gradient(90deg, var(--grit-success), #8fcfab); }
+  .fill.w { background: linear-gradient(90deg, var(--grit-warning), #e6bd6a); }
+  .sub { font: var(--fw-regular) var(--fs-xs)/1 var(--font-mono); color: var(--text-faint); margin-top: 7px; }
+
+  /* ---- settings app ---- */
+  .set { padding: 16px 18px; overflow: auto; height: 100%; }
+  .row { display: flex; align-items: center; gap: 16px; padding: 13px 2px; border-bottom: 1px solid var(--border); }
+  .row .meta { flex: 1; }
+  .row .rt { font: var(--fw-medium) var(--fs-base)/1.3 var(--font-ui); color: var(--text-heading); }
+  .row .rh { font: var(--fw-regular) var(--fs-sm)/1.4 var(--font-ui); color: var(--text-muted); margin-top: 2px; }
+  .sw2 { width: 42px; height: 25px; border-radius: var(--r-pill); background: var(--surface-input); border: 1px solid var(--border-strong);
+         position: relative; cursor: pointer; transition: background .22s, border-color .22s; flex: 0 0 auto; }
+  .sw2.on { background: var(--accent-grad); border-color: transparent; }
+  .knob { position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: var(--r-pill);
+          background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: left .22s cubic-bezier(.4,0,.1,1); }
+  .sw2.on .knob { left: 19px; }
+
+  /* ---- terminal app ---- */
+  .term { height: 100%; background: var(--grit-void); padding: 15px 17px; overflow: auto;
+          font: var(--fw-regular) var(--fs-sm)/1.75 var(--font-mono); }
+  .term .p { color: var(--accent); }
+  .term .c { color: var(--text-heading); }
+  .term .o { color: var(--text-body); }
+  .term .ok { color: var(--grit-success); }
+  .caret { display: inline-block; width: 8px; height: 15px; background: var(--accent); vertical-align: -2px;
+           animation: blink 1.1s step-end infinite; border-radius: 1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ---- dock ---- */
+  .dock {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 600;
+    display: flex; align-items: flex-end; gap: 10px; padding: 9px 12px;
+    background: var(--glass-tint); backdrop-filter: var(--blur-glass); -webkit-backdrop-filter: var(--blur-glass);
+    border: 1px solid var(--border); border-radius: var(--r-2xl); box-shadow: var(--shadow-lg);
+  }
+  .dapp { width: 46px; height: 46px; border-radius: var(--r-lg); display: flex; align-items: center; justify-content: center;
+          background: var(--surface-panel); border: 1px solid var(--border-control); color: var(--text-body);
+          cursor: pointer; position: relative; transition: transform .2s var(--ease-out), background .15s, color .15s; }
+  .dapp .ico { width: 22px; height: 22px; display: inline-flex; }
+  .dapp:hover { transform: translateY(-7px) scale(1.06); color: var(--text-accent); background: var(--surface-raised); }
+  .dapp.active::after { content: ''; position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
+                        width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+
+  /* ---- GHL v2 perf HUD ---- */
+  .hud {
+    position: absolute; top: 54px; right: 16px; z-index: 400; width: 252px;
+    background: var(--glass-tint-2); backdrop-filter: var(--blur-glass); -webkit-backdrop-filter: var(--blur-glass);
+    border: 1px solid var(--border-control); border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+    padding: 14px 15px;
+  }
+  .hud { opacity: 1; }
+  .hud .hh { display: flex; align-items: center; gap: 8px; margin-bottom: 13px; }
+  .hud .ht { white-space: nowrap; }
+  .hud .dotlive { width: 7px; height: 7px; border-radius: 50%; background: var(--grit-success);
+                  box-shadow: 0 0 0 0 var(--grit-success-soft); animation: pulse 1.8s ease-out infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(111,184,148,.5);} 100%{box-shadow:0 0 0 7px rgba(111,184,148,0);} }
+  .hud .ht { font: var(--fw-semibold) var(--fs-xs)/1 var(--font-ui); color: var(--text-heading); letter-spacing: .02em; }
+  .hud .htag { margin-left: auto; font: var(--fw-semibold) 9px/1 var(--font-mono); letter-spacing: .12em;
+               color: var(--text-invert); background: var(--accent); padding: 3px 6px; border-radius: var(--r-xs); }
+  .met { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; }
+  .met .mk { font: var(--fw-regular) var(--fs-xs)/1.3 var(--font-ui); color: var(--text-muted); flex: 1; }
+  .met .mv { font: var(--fw-semibold) var(--fs-sm)/1 var(--font-mono); color: var(--text-heading); font-variant-numeric: tabular-nums; }
+  .met .mv.acc { color: var(--text-accent); }
+  .spark { height: 30px; display: flex; align-items: flex-end; gap: 2px; margin-top: 8px; }
+  .spark i { flex: 1; background: var(--accent-fill); border-radius: 1.5px; transition: height .2s linear; }
+  .spark i.hot { background: var(--accent); }
+  .hud .cmp { margin-top: 11px; padding-top: 11px; border-top: 1px solid var(--border); font: var(--fw-regular) var(--fs-xs)/1.5 var(--font-ui); color: var(--text-faint); }
+  .hud .cmp b { color: var(--text-body); font-weight: var(--fw-semibold); }
+</style>
+</head>
+<body class="grit-wall grit-wall-depth">
+<div id="screen" class="boot">
+
+  <div class="bar">
+    <div class="brand"><img src="../assets/logo-grit-lockup.svg" alt="Grit" /></div>
+    <span class="mi">File</span><span class="mi">Edit</span><span class="mi">View</span><span class="mi">Window</span>
+    <div class="right">
+      <div class="swatches" id="swatches"></div>
+      <span class="ico"><i data-lucide="wifi"></i></span>
+      <span class="ico"><i data-lucide="volume-2"></i></span>
+      <span class="ico" style="color:var(--grit-success)"><i data-lucide="battery-full"></i></span>
+      <span class="clock" id="clock">9:41</span>
+    </div>
+  </div>
+
+  <!-- System Monitor -->
+  <div class="win" id="w-mon" style="width:340px; left:64px; top:96px; height:300px; z-index:30;">
+    <div class="titlebar" data-win="w-mon">
+      <div class="lights"><span class="light c"></span><span class="light m"></span><span class="light x"></span></div>
+      <span class="t">System Monitor</span><span class="tsub">gui2</span>
+    </div>
+    <div class="body"><div class="mon" id="mon"></div></div>
+  </div>
+
+  <!-- Settings -->
+  <div class="win" id="w-set" style="width:392px; left:430px; top:150px; height:330px; z-index:20;">
+    <div class="titlebar" data-win="w-set">
+      <div class="lights"><span class="light c"></span><span class="light m"></span><span class="light x"></span></div>
+      <span class="t">Settings</span><span class="tsub">Appearance</span>
+    </div>
+    <div class="body"><div class="set" id="set"></div></div>
+  </div>
+
+  <!-- Terminal -->
+  <div class="win" id="w-term" style="width:430px; left:300px; top:438px; height:240px; z-index:10;">
+    <div class="titlebar" data-win="w-term">
+      <div class="lights"><span class="light c"></span><span class="light m"></span><span class="light x"></span></div>
+      <span class="t">Terminal</span><span class="tsub">~ gritctl</span>
+    </div>
+    <div class="body"><div class="term" id="term"></div></div>
+  </div>
+
+  <!-- GHL v2 engine HUD -->
+  <div class="hud" id="hud">
+    <div class="hh">
+      <span class="dotlive"></span>
+      <span class="ht">GHL v2 engine</span>
+      <span class="htag">RETAINED</span>
+    </div>
+    <div class="met"><span class="mk">Syscalls / frame</span><span class="mv acc" id="m-sys">1</span></div>
+    <div class="met"><span class="mk">Primitives batched</span><span class="mv" id="m-prim">312</span></div>
+    <div class="met"><span class="mk">Nodes repainted</span><span class="mv" id="m-rep">4 / 268</span></div>
+    <div class="met"><span class="mk">Glyph atlas hit</span><span class="mv" id="m-atlas">99.2%</span></div>
+    <div class="met"><span class="mk">Frame time</span><span class="mv" id="m-ft">0.9 ms</span></div>
+    <div class="spark" id="spark"></div>
+    <div class="cmp" id="cmp"><b>1 ring crossing</b> this frame vs <b>312</b> on the v1 immediate path.</div>
+  </div>
+
+  <div class="dock" id="dock"></div>
+
+</div>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>
+(function(){
+  const $ = (s,r=document)=>r.querySelector(s);
+  const ico = n => `<span class="ico"><i data-lucide="${n}"></i></span>`;
+
+  /* ---- accent theme packs ---- */
+  const ACCENTS = [
+    { id:'gold',   col:'#C9A26A' },
+    { id:'copper', col:'#C17A57' },
+    { id:'sage',   col:'#79A98C' },
+    { id:'slate',  col:'#7C879B' },
+  ];
+  const sw = $('#swatches');
+  sw.innerHTML = ACCENTS.map(a=>`<span class="swatch${a.id==='gold'?' on':''}" data-acc="${a.id}" style="background:${a.col};color:${a.col}"></span>`).join('');
+  sw.addEventListener('click', e=>{
+    const el = e.target.closest('.swatch'); if(!el) return;
+    document.documentElement.setAttribute('data-accent', el.dataset.acc);
+    sw.querySelectorAll('.swatch').forEach(s=>s.classList.toggle('on', s===el));
+    flashRepaint(); // theme change = full repaint in the HUD
+  });
+
+  /* ---- monitor ---- */
+  const stats = [
+    { ic:'cpu', label:'CPU', cls:'', sub:'8 cores · 2.1 GHz', base:32 },
+    { ic:'memory-stick', label:'Memory', cls:'', sub:'4.9 / 8.0 GB', base:61 },
+    { ic:'hard-drive', label:'Disk', cls:'g', sub:'120 / 250 GB', base:48 },
+    { ic:'thermometer', label:'Temp', cls:'w', sub:'52 °C · nominal', base:52 },
+  ];
+  $('#mon').innerHTML = stats.map((s,i)=>`
+    <div class="stat">
+      <div class="toprow">${ico(s.ic)}<span class="label">${s.label}</span><span class="v" id="v${i}">${s.base}%</span></div>
+      <div class="track"><div class="fill ${s.cls}" id="f${i}" style="width:${s.base}%"></div></div>
+      <div class="sub">${s.sub}</div>
+    </div>`).join('');
+
+  /* ---- settings ---- */
+  const rows = [
+    { t:'Dark appearance', h:'Use the dark surface ramp system-wide.', on:true },
+    { t:'Interface animations', h:'Window, dock and menu motion.', on:true },
+    { t:'Reduce transparency', h:'Disable glass blur on chrome.', on:false },
+    { t:'Wi-Fi', h:'grit-secure · connected', on:true },
+  ];
+  $('#set').innerHTML = rows.map((r,i)=>`
+    <div class="row">
+      <div class="meta"><div class="rt">${r.t}</div><div class="rh">${r.h}</div></div>
+      <div class="sw2 ${r.on?'on':''}" data-row="${i}"><div class="knob"></div></div>
+    </div>`).join('') + `
+    <div class="row" style="border-bottom:none;">
+      <div class="meta"><div class="rt">Accent color</div><div class="rh">The system accent — also in the menu bar.</div></div>
+      <div class="swatches" id="set-sw"></div>
+    </div>`;
+  $('#set-sw').innerHTML = ACCENTS.map(a=>`<span class="swatch" data-acc="${a.id}" style="background:${a.col};color:${a.col};width:22px;height:22px"></span>`).join('');
+  $('#set').addEventListener('click', e=>{
+    const tg = e.target.closest('.sw2'); if(tg){ tg.classList.toggle('on'); flashRepaint(); return; }
+    const acc = e.target.closest('[data-acc]'); if(acc){ sw.querySelector(`[data-acc="${acc.dataset.acc}"]`).click(); }
+  });
+  function syncSetSw(){ const cur=document.documentElement.getAttribute('data-accent');
+    $('#set-sw').querySelectorAll('.swatch').forEach(s=>s.classList.toggle('on', s.dataset.acc===cur)); }
+
+  /* ---- terminal ---- */
+  $('#term').innerHTML = `
+    <div><span class="p">$ </span><span class="c">gritctl status</span></div>
+    <div><span class="o">Grit 0.5.0 · kernel </span><span class="ok">GritHL</span><span class="o"> · secure-boot OK</span></div>
+    <div><span class="o">desktop-shell  running   pid 142   render </span><span class="ok">gui2</span></div>
+    <div><span class="p">$ </span><span class="c">render --engine</span></div>
+    <div><span class="o">gui2 retained · batched draw lists · glyph atlas · dirty-rect present</span></div>
+    <div><span class="p">$ </span><span class="caret"></span></div>`;
+
+  /* ---- dock ---- */
+  const dock = [
+    {ic:'folder', on:false},{ic:'terminal', on:true},{ic:'settings', on:true},
+    {ic:'activity', on:true},{ic:'globe', on:false},{ic:'image', on:false},
+  ];
+  $('#dock').innerHTML = dock.map(d=>`<div class="dapp ${d.on?'active':''}">${ico(d.ic)}</div>`).join('');
+
+  /* ---- window focus + lightweight drag ---- */
+  let ztop = 60;
+  document.querySelectorAll('.win').forEach(w=>{
+    w.addEventListener('mousedown', ()=>{
+      document.querySelectorAll('.win').forEach(x=>x.classList.remove('focused'));
+      w.classList.add('focused'); w.style.zIndex = ++ztop;
+    });
+  });
+  document.querySelectorAll('.titlebar').forEach(tb=>{
+    tb.addEventListener('mousedown', e=>{
+      const w = $('#'+tb.dataset.win); const r = w.getBoundingClientRect();
+      const ox = e.clientX - r.left, oy = e.clientY - r.top;
+      const mv = ev=>{ w.style.left = Math.max(0, ev.clientX-ox)+'px'; w.style.top = Math.max(40, ev.clientY-oy)+'px'; };
+      const up = ()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
+      document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
+    });
+  });
+
+  /* ---- clock ---- */
+  function tick(){ const d=new Date(); let h=d.getHours()%12||12;
+    $('#clock').textContent = h+':'+String(d.getMinutes()).padStart(2,'0'); }
+  tick(); setInterval(tick, 10000);
+
+  /* ---- GHL v2 perf HUD (animated, plausible retained-mode numbers) ---- */
+  const spark = $('#spark');
+  spark.innerHTML = Array.from({length:32},()=>'<i style="height:20%"></i>').join('');
+  const bars = [...spark.children];
+  let repaintBoost = 0;
+  function flashRepaint(){ repaintBoost = 1; } // theme change spikes repaint briefly
+  function frame(){
+    // monitor values drift
+    stats.forEach((s,i)=>{ const v = Math.max(3, Math.min(99, s.base + Math.round((Math.random()-.5)*8)));
+      s.base = s.base*0.85 + v*0.15;
+      const val = Math.round(s.base); $('#v'+i).textContent = val+'%'; $('#f'+i).style.width = val+'%'; });
+
+    // HUD metrics — retained engine: few nodes change per frame
+    let repainted = repaintBoost ? 268 : (2 + (Math.random()*6|0));
+    const prim = repaintBoost ? 312 : (4 + repainted*2 + (Math.random()*3|0));
+    repaintBoost = 0;
+    const ft = (0.6 + Math.random()*0.7 + (repainted>50?2.2:0));
+    $('#m-sys').textContent = '1';
+    $('#m-prim').textContent = prim;
+    $('#m-rep').textContent = repainted + ' / 268';
+    $('#m-atlas').textContent = (98.4 + Math.random()*1.4).toFixed(1)+'%';
+    $('#m-ft').textContent = ft.toFixed(1)+' ms';
+    $('#cmp').innerHTML = `<b>1 ring crossing</b> this frame vs <b>${prim}</b> on the v1 immediate path.`;
+
+    // sparkline of frame time
+    bars.shift(); const h = Math.min(100, ft/3.2*100); bars.push(0);
+    const nb = spark.children;
+    for(let i=0;i<nb.length-1;i++){ nb[i].style.height = nb[i+1].style.height; nb[i].className = nb[i+1].className; }
+    const last = nb[nb.length-1]; last.style.height = Math.max(8,h)+'%'; last.className = h>60?'hot':'';
+  }
+  setInterval(frame, 700);
+
+  /* ---- entrance choreography ---- */
+  function paintIcons(){ if(window.lucide) lucide.createIcons(); }
+  window.addEventListener('load', ()=>{ paintIcons(); syncSetSw(); });
+  paintIcons();
+  syncSetSw();
+  setTimeout(()=>$('#screen').classList.remove('boot'), 1200);
+})();
+</script>
+</body>
+</html>

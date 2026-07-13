@@ -142,4 +142,23 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
 - [ ] Every driver→hardware access is brokered, bounds-checked, default-deny (G3).
 - [ ] A compromised/crashed driver is contained + restartable, proven by the
       per-stage negative + quarantine tests (G4).
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 7 / speed 6**. The keystone: G1/G2 gates + the HDA
+class driver landed and a new in-kernel driver is impossible, but most drivers still
+run in-kernel until the migration ladder finishes.
+
+- [ ] **(sec→10)** Wire `SC_DRVHOST_*` into the dispatcher (default-deny in the slot
+      allow bitmap) — the shared blocker for every migration.
+- [ ] **(sec→10)** Finish the ladder: battery/acpi_ec → rtl8156 → i2c_hid/xhci/
+      usb_hid/display to ring-3; delete each `.asm` + its inventory line.
+- [ ] **(sec→10)** Rung 4: fault-budget quarantine-and-restart + the per-stage
+      negative test (forged out-of-grant request refused, kernel authority unreachable).
+- [ ] **(sec→10)** Re-prove `INV-DRIVER-NO-DMA-MINT` (Track 3) against the broker.
+- [ ] **Verify:** an independent agent re-rates this track **security 10**.
+- **(speed→max under sec 10)** Validate-once batched descriptor rings (TX = one
+      submit/frame, RX = walk in ring-3, no per-frame syscall) keep the hot path fast;
+      gate TX/RX throughput within budget of the in-kernel baseline. Target speed **8**
+      (the ring-3 broker crossing has irreducible but amortizable cost).
 </content>

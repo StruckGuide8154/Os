@@ -1,0 +1,149 @@
+# ============================================================================
+# GritHL GUI v2 - batch.ghl
+# Batched draw lists: one syscall flushes many primitives.
+#
+# v1 (lib/gui.ghl) is immediate-mode: every ui_rect / ui_text is its own
+# SYS_GUI_RECT / SYS_GUI_TEXT syscall. A modest window redraws hundreds of
+# primitives per frame, so a frame is hundreds of ring transitions
+# (user->kernel->user), each with its register save/restore and cache
+# disturbance. That is the single biggest cost in the old UI path.
+#
+# v2 records primitives into a flat command buffer in user memory, then
+# crosses the ring ONCE per frame with SYS_GUI_BATCH(buf, count). The kernel
+# walks the buffer with the framebuffer already mapped and emits every
+# primitive without returning to userspace between them.
+#
+# Record format: fixed 64-byte (8-quad) records so the writer never branches
+# on size and the kernel reader can stride without parsing. A fixed stride
+# also lets the diff layer (retained.ghl) overwrite a single record in place
+# when only a color or string pointer changed.
+# ============================================================================
+
+use core
+
+# --- Proposed v2 syscalls (immediate SYS_GUI_RECT/TEXT remain for v1). -----
+# SYS_GUI_BATCH(buf_ptr, record_count): walk a command buffer once.
+# SYS_GUI_CLIPSET is encoded inline as OP_CLIP records, not a syscall.
+const SYS_GUI_BATCH = 30
+
+# --- Command opcodes (record quad 0). --------------------------------------
+const OP_NOP    = 0      # skipped by the kernel; lets the diff layer retire a
+                         # record without compacting the whole buffer.
+const OP_RECT   = 1      # q1=x q2=y q3=w q4=h q5=color
+const OP_TEXT   = 2      # q1=x q2=y q3=str_ptr q4=fg q5=bg q6=len
+const OP_GLYPH  = 3      # q1=x q2=y q3=atlas_cell q4=fg q5=bg  (see atlas.ghl)
+const OP_CLIP   = 4      # q1=x q2=y q3=w q4=h  - push scissor; OP_CLIP w<0 pops
+const OP_BLIT   = 5      # q1=x q2=y q3=w q4=h q5=src_cell  - cached surface copy
+
+# --- Record geometry. ------------------------------------------------------
+const REC_QUADS  = 8         # 8 * 8 bytes = 64 bytes / record
+const REC_BYTES  = 64
+const REC_OP     = 0
+const REC_A      = 8
+const REC_B      = 16
+const REC_C      = 24
+const REC_D      = 32
+const REC_E      = 40
+const REC_F      = 48
+# quad 7 (offset 56) is reserved for a per-record damage tag (damage.ghl).
+const REC_TAG    = 56
+
+# --- Command buffer arena. -------------------------------------------------
+# A single contiguous arena. CMD_CAP records is plenty for a full desktop
+# frame; overflow flushes early (flush_if_full) rather than dropping draws.
+const CMDBUF   = 0x00C00000       # arena base (reserved user scratch page)
+const CMD_CAP  = 4096             # max records per flush
+const CMD_HEAD = 0x00BFFF00       # write cursor (record index), its own quad
+
+fn batch_reset() {
+    sq(CMD_HEAD, 0);
+}
+
+fn batch_count() {
+    return lq(CMD_HEAD);
+}
+
+# Address of record `i`.
+fn rec_addr(i) {
+    return CMDBUF + i * REC_BYTES;
+}
+
+# Reserve one record and return its base address, or -1 if the buffer is full.
+# Callers that can defer (the compositor walk) should flush_if_full first.
+fn batch_alloc() {
+    let n = lq(CMD_HEAD);
+    if n >= CMD_CAP { return -1; }
+    sq(CMD_HEAD, n + 1);
+    return CMDBUF + n * REC_BYTES;
+}
+
+# --- Primitive recorders. Each writes one fixed record; no syscall. --------
+fn cmd_rect(x, y, w, h, color) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_RECT);
+    sq(r + REC_A, x);  sq(r + REC_B, y);
+    sq(r + REC_C, w);  sq(r + REC_D, h);
+    sq(r + REC_E, color);
+}
+
+fn cmd_text(x, y, str_ptr, len, fg, bg) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_TEXT);
+    sq(r + REC_A, x);  sq(r + REC_B, y);
+    sq(r + REC_C, str_ptr);
+    sq(r + REC_D, fg); sq(r + REC_E, bg);
+    sq(r + REC_F, len);
+}
+
+# Blit a pre-rasterized glyph cell from the atlas (atlas.ghl owns `cell`).
+fn cmd_glyph(x, y, cell, fg, bg) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_GLYPH);
+    sq(r + REC_A, x); sq(r + REC_B, y);
+    sq(r + REC_C, cell);
+    sq(r + REC_D, fg); sq(r + REC_E, bg);
+}
+
+# Scissor push / pop. The kernel clips every following primitive to the
+# intersection of the clip stack until a matching pop (w < 0).
+fn cmd_clip_push(x, y, w, h) {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_CLIP);
+    sq(r + REC_A, x); sq(r + REC_B, y);
+    sq(r + REC_C, w); sq(r + REC_D, h);
+}
+
+fn cmd_clip_pop() {
+    let r = batch_alloc();
+    if r < 0 { return; }
+    sq(r + REC_OP, OP_CLIP);
+    sq(r + REC_C, -1);
+}
+
+# Retire a record in place (turn it into a NOP) without compacting. Used by
+# the retained diff when a node leaves the tree but the frame is otherwise
+# unchanged - avoids rebuilding the whole command buffer.
+fn cmd_retire(rec_ptr) {
+    sq(rec_ptr + REC_OP, OP_NOP);
+}
+
+# --- Flush. One ring transition for the whole frame. -----------------------
+fn batch_flush() {
+    let n = lq(CMD_HEAD);
+    if n == 0 { return 0; }
+    let drawn = syscall(SYS_GUI_BATCH, CMDBUF, n);
+    sq(CMD_HEAD, 0);
+    return drawn;
+}
+
+# Flush early when the arena is nearly full so a huge frame still renders
+# correctly (in draw order) instead of dropping its tail.
+fn batch_flush_if_full() {
+    if lq(CMD_HEAD) >= CMD_CAP - 4 {
+        batch_flush();
+    }
+}

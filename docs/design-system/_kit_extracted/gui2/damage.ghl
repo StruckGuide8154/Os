@@ -1,0 +1,131 @@
+# ============================================================================
+# GritHL GUI v2 - damage.ghl
+# Dirty-rect tracking + damage-tracked present that cooperates with the
+# kernel's async page-flip.
+#
+# v1 redraws the entire client area every frame. v2 keeps a small list of
+# damage rectangles - the union of every region a retained node touched
+# since the last present - and only repaints inside that union, then hands
+# the same union to the compositor so it copies the minimum back-buffer area
+# to the scanout buffer on the next vblank.
+#
+# The compositor owns two buffers and flips on vblank (SYS_GUI_PRESENT is
+# async: it queues the damage and returns; the flip happens at the next
+# vsync without blocking the app). We therefore double-buffer the damage
+# list so the app can keep accumulating frame N+1 while the kernel is still
+# consuming frame N.
+# ============================================================================
+
+use core
+
+const SYS_GUI_PRESENT = 31   # present(damage_ptr, rect_count) -> queued, async
+
+# --- Damage rect ring. -----------------------------------------------------
+# Each rect is 4 quads (x,y,w,h). Two banks so present() can swap and the
+# app writes the next frame into the idle bank.
+const DMG_BANK_A = 0x00BFE000
+const DMG_BANK_B = 0x00BFE800
+const DMG_CAP    = 64                 # rects per bank before we coalesce-all
+const DMG_RECT_Q = 4
+const DMG_STATE  = 0x00BFDF00         # quad0=active bank, quad1=count
+
+const DMG_FULL_W = 0x7FFFFFFF         # sentinel: whole-screen damage
+
+fn dmg_bank() {
+    if lq(DMG_STATE) == 0 { return DMG_BANK_A; }
+    return DMG_BANK_B;
+}
+
+fn dmg_reset() {
+    sq(DMG_STATE + 8, 0);
+}
+
+fn dmg_count() {
+    return lq(DMG_STATE + 8);
+}
+
+# Two axis-aligned rects overlap (or touch)? Used to coalesce.
+fn dmg_touch(ax, ay, aw, ah, bx, by, bw, bh) {
+    if ax + aw < bx { return 0; }
+    if bx + bw < ax { return 0; }
+    if ay + ah < by { return 0; }
+    if by + bh < ay { return 0; }
+    return 1;
+}
+
+# Add a damage rect. If it overlaps an existing rect we grow that rect to the
+# bounding union instead of adding a new one - this keeps the list short and
+# the repaint area tight. If the list is full we collapse to one full-screen
+# rect (correct, just less optimal) rather than dropping damage.
+fn dmg_add(x, y, w, h) {
+    if w <= 0 { return; }
+    if h <= 0 { return; }
+    let base = dmg_bank();
+    let n = lq(DMG_STATE + 8);
+    let i = 0;
+    while i < n {
+        let r = base + i * DMG_RECT_Q * 8;
+        let rx = lq(r); let ry = lq(r + 8);
+        let rw = lq(r + 16); let rh = lq(r + 24);
+        if dmg_touch(rx, ry, rw, rh, x, y, w, h) != 0 {
+            let nx = rx; let ny = ry;
+            if x < nx { nx = x; }
+            if y < ny { ny = y; }
+            let ex = rx + rw; let ox = x + w;
+            if ox > ex { ex = ox; }
+            let ey = ry + rh; let oy = y + h;
+            if oy > ey { ey = oy; }
+            sq(r, nx); sq(r + 8, ny);
+            sq(r + 16, ex - nx); sq(r + 24, ey - ny);
+            return;
+        }
+        i = i + 1;
+    }
+    if n >= DMG_CAP {
+        # Overflow: one rect covers everything.
+        sq(base, 0); sq(base + 8, 0);
+        sq(base + 16, DMG_FULL_W); sq(base + 24, DMG_FULL_W);
+        sq(DMG_STATE + 8, 1);
+        return;
+    }
+    let r = base + n * DMG_RECT_Q * 8;
+    sq(r, x); sq(r + 8, y); sq(r + 16, w); sq(r + 24, h);
+    sq(DMG_STATE + 8, n + 1);
+}
+
+# Mark a whole widget rect dirty - the common call from retained.ghl when a
+# node's content hash changes.
+fn dmg_node(x, y, w, h) {
+    dmg_add(x, y, w, h);
+}
+
+# Is point/rect inside the current damage union? The compositor walk uses
+# this to skip emitting primitives for clean regions.
+fn dmg_intersects(x, y, w, h) {
+    let base = dmg_bank();
+    let n = lq(DMG_STATE + 8);
+    let i = 0;
+    while i < n {
+        let r = base + i * DMG_RECT_Q * 8;
+        if dmg_touch(lq(r), lq(r + 8), lq(r + 16), lq(r + 24), x, y, w, h) != 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Present: queue the current damage list for the compositor, then swap banks
+# so the next frame accumulates independently. Async - returns immediately;
+# the flip lands on the next vblank.
+fn dmg_present() {
+    let base = dmg_bank();
+    let n = lq(DMG_STATE + 8);
+    if n == 0 { return 0; }
+    syscall(SYS_GUI_PRESENT, base, n);
+    # swap active bank, clear the new one
+    if lq(DMG_STATE) == 0 { sq(DMG_STATE, 1); }
+    else { sq(DMG_STATE, 0); }
+    sq(DMG_STATE + 8, 0);
+    return n;
+}

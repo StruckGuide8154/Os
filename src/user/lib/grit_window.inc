@@ -35,6 +35,7 @@ APP_SECURITY_PROBE equ 8
 APP_TASKMGR     equ 9
 APP_PING        equ 10
 APP_MEDIA       equ 11
+APP_SHELL       equ 12              ; privileged ring-3 desktop shell slot
 
 APP_SLOT_PARAM_OFF         equ 0x17C000
 APP_SLOT_PARAM_SZ          equ 256
@@ -43,6 +44,6 @@ APP_SLOT_BMP_FILE_SZ      equ 262144
 APP_SLOT_PAINT_CANVAS_OFF equ 0x1BD000
 APP_SLOT_PAINT_CANVAS_SZ  equ 120000
 APP_SLOT_SAVE_BMP_OFF     equ 0x1DB000
-APP_SLOT_SAVE_BMP_SZ      equ 131072
+APP_SLOT_SAVE_BMP_SZ      equ 0x1F000
 
 %endif

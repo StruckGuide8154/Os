@@ -60,11 +60,11 @@ FN_BEGIN l3_randomize_code_slide, 0, 0, FN_RET_VOID
 .lrcs_have_page:
     shl rdx, 12                          ; rdx = slide in bytes, page-aligned
     mov ecx, r8d
-    mov [rel l3_slot_code_slide + rcx*8], rdx
+    mov [abs l3_slot_code_slide + rcx*8], rdx
     jmp .lrcs_done
 .lrcs_zero:
     mov ecx, r8d
-    mov qword [rel l3_slot_code_slide + rcx*8], 0
+    mov qword [abs l3_slot_code_slide + rcx*8], 0
 .lrcs_done:
     pop r8
     pop rdi
@@ -169,7 +169,7 @@ l3_derive_slot_key:
     mov rdx, [rel l3_boot_nonce]
     call .dsk_fold8
 
-    mov [rel l3_slot_key + rcx*8], rax
+    mov [abs l3_slot_key + rcx*8], rax
 .dsk_ret:
     pop rdi
     pop rdx

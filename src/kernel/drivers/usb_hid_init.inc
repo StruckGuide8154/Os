@@ -108,10 +108,10 @@ usb_hid_init_body:
     mov edx, [rsi + rax + XHCI_PORTSC]
     test edx, XHCI_PORTSC_PRC
     jnz .tport_reset_done
-    
+
     dec r9d
     jz .tport_reset_done
-    
+
     mov rax, [tick_count]
     cmp rax, rbx
     jge .tport_reset_done               ; timeout - proceed anyway
@@ -236,9 +236,7 @@ usb_hid_init_body:
     call debug_print
 
     ; Serial: 'H' (HID Init)
-    mov dx, 0x3F8
-    mov al, 'H'
-    out dx, al
+    SER 'H'
 
     ; 4. Get Device Descriptor (to verify it's a mouse? or just to debug)
     ; Request: 80 06 00 01 00 00 12 00 (Get Descriptor Device, len 18)
@@ -262,10 +260,8 @@ usb_hid_init_body:
     call usb_log_kv16
 
     ; Serial: 'D' (Descriptor)
-    mov dx, 0x3F8
-    mov al, 'D'
-    out dx, al
-    
+    SER 'D'
+
     mov rsi, szUsbConfig
     call usb_log_str
     call usb_log_crlf
@@ -280,10 +276,10 @@ usb_hid_init_body:
     call usb_control_transfer_in
     test eax, eax
     jz .release_slot_try_next_port
-    
+
     ; Read TotalLength from offset 2
     movzx ecx, word [abs XHCI_CTRL_BUF_ADDR + 2]
-    
+
     ; 6. Get Full Configuration Descriptor
     mov rdi, XHCI_CTRL_BUF_ADDR
     ; rcx is already len
@@ -336,9 +332,7 @@ usb_hid_init_body:
     call usb_log_kv8
 
     ; Serial: 'E' (Endpoint Found)
-    mov dx, 0x3F8
-    mov al, 'E'
-    out dx, al
+    SER 'E'
 
     ; 6. Set Configuration (Value = 1)
     ; Request: 00 09 01 00 00 00 00 00
@@ -353,9 +347,7 @@ usb_hid_init_body:
     call usb_log_crlf
 
     ; Serial: 'C' (Config Set)
-    mov dx, 0x3F8
-    mov al, 'C'
-    out dx, al
+    SER 'C'
 
     ; Set boot protocol for keyboard (1) and mouse (2); skip for report protocol (0)
     cmp byte [usb_hid_protocol], 0
@@ -366,7 +358,7 @@ usb_hid_init_body:
     mov r8d, 0x00000B21
     movzx r9d, byte [usb_interface_num]
     call usb_control_transfer_nodata
-    
+
     ; 8. Set Idle (Value = 0 for infinite duration)
     ; Request: 21 0A 00 00 00 00 00 00 (SET_IDLE)
     mov r8d, 0x00000A21
@@ -407,19 +399,17 @@ usb_hid_init_body:
     and edi, 0x7F            ; Clear direction bit (0x81 -> 1)
     movzx esi, word [usb_ep_mps]
     movzx edx, byte [usb_ep_interval]
-    
+
     ; Debug: log EP, MPS, Interval
     ; ...
-    
+
     call xhci_configure_endpoint
     test eax, eax
     jz .fail
     STAGE 9
 
     ; Serial: 'O' (OK)
-    mov dx, 0x3F8
-    mov al, 'O'
-    out dx, al
+    SER 'O'
 
     ; 10. Flush any pending events (like Port Status Changes from init)
     ; Do this BEFORE queuing mouse transfers so we don't flush their completion events!
@@ -487,9 +477,7 @@ usb_hid_init_body:
     lea rsi, [rel szUsbLogFail]
     call usb_log_str
     call usb_log_crlf
-    mov dx, 0x3F8
-    mov al, 'X'
-    out dx, al
+    SER 'X'
 
     pop rbp
     pop rdi

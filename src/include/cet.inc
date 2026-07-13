@@ -1,8 +1,8 @@
 %ifndef CET_INC
 %define CET_INC
 ; ============================================================================
-; Intel CET (Control-flow Enforcement Technology): shadow stack (SHSTK) and
-; indirect branch tracking (IBT) detection + enable plumbing.
+; x86 CET (Control-flow Enforcement Technology): shadow stack (SHSTK) and
+; indirect branch tracking (IBT) detection + future enable plumbing.
 ;
 ; security_todo.md §3 - "CET shadow stack + IBT on supported CPUs."
 ;
@@ -27,13 +27,11 @@
 ;     the inventory the rest of the kernel (and a future attestation syscall)
 ;     reads to know whether the part can do hardware CET at all.
 ;
-;   * ENABLE SCAFFOLD (gated on -dENABLE_CET, OFF by default): cet_enable sets
-;     CR4.CET (bit 23) and programs IA32_S_CET (MSR 0x6A2) for the supervisor
-;     side - but ONLY after cet_detect has confirmed SHSTK support, so it is a
-;     hard no-op on any CPU/VM without CET and under QEMU TCG (qemu64 reports
-;     neither bit). Fail-closed ordering: if detection says "no", cet_enable
-;     returns without touching CR4 or any MSR, so the default flat-model boot
-;     is byte-for-byte unchanged.
+;   * ENABLE SCAFFOLD (gated on -dENABLE_CET): cet_enable records that the
+;     always-on software kernel shadow stack remains the active protection.
+;     It deliberately does not touch CR4.CET, IA32_S_CET, or IA32_PL0_SSP yet,
+;     even when CPUID reports hardware support. This keeps real hardware with
+;     CET-capable AMD/Intel CPUs on the same safe path as QEMU.
 ;
 ; DELIBERATELY SCOPED OUT (documented follow-up work)
 ;   * Activating the supervisor shadow stack itself. Turning on CR4.CET +
@@ -45,10 +43,9 @@
 ;     syscall-stack PT setup in usermode.asm/l3_install_syscall_stack_pt. That
 ;     is the invasive part and is left for a follow-up; the +0x1000 shadow page
 ;     reserved by the software design is the natural home for it. Until then
-;     cet_enable programs S_CET with the shadow-stack-enable bit CLEAR (it only
-;     sets the IBT-related WRSS/endbr legacy-treatment bits when IBT is present
-;     and -dENABLE_CET_IBT is also given), so enabling CET cannot trap a kernel
-;     RET against an unseeded SSP and brick the boot.
+;     cet_enable leaves hardware supervisor CET completely inert, so it cannot
+;     trap a kernel RET against an unseeded/incompletely wired SSP and brick the
+;     boot.
 ;
 ;   * Full IBT (an endbr64 at every indirect-branch target). Grit has many
 ;     indirect jumps/calls (the syscall dispatcher's jmp [r12+HANDLER], the
@@ -67,11 +64,12 @@
 ;   MSR address is defined below for the follow-up.
 ;
 ; BUILD GATE  (mirrors smap.inc's -dENABLE_SMAP / -NoSmap convention)
-;   -dENABLE_CET      : compile cet_enable's CR4/S_CET programming. Without it
-;                       only cet_detect (detection-into-data) is compiled.
-;   -dENABLE_CET_IBT  : additionally arm the IBT-side S_CET bits when IBT is
-;                       present. Requires -dENABLE_CET. Off by default because
-;                       the endbr64 markers are not yet emitted.
+;   -dENABLE_CET      : compile cet_enable's software-fallback status path.
+;                       Hardware CR4/S_CET/SSP programming is intentionally
+;                       scoped out until the full SSP wiring lands.
+;   -dENABLE_CET_IBT  : reserved for the later IBT arm path. Requires
+;                       -dENABLE_CET, but is inert today because endbr64 markers
+;                       and CR4.CET arming are not yet emitted.
 ; ============================================================================
 
 ; CET-related MSRs.
@@ -162,73 +160,21 @@ cet_log_detect:
     ret
 
 %ifdef ENABLE_CET
-extern nk_pt_window_begin
-extern nk_pt_window_end
-
 ; ---------------------------------------------------------------------------
-; cet_enable - turn on the hardware CET enable bits the part supports.
+; cet_enable - publish the current CET protection mode.
 ;   PRECONDITION: cet_detect has run (kmain calls it first). If hardware SHSTK
 ;   is unavailable, the existing software kernel shadow stack remains the active
 ;   fallback and the serial state reports that explicitly.
 ;
-;   Scoped (see header): sets CR4.CET and programs IA32_S_CET, but leaves the
-;   supervisor shadow-stack ENABLE bit (SH_STK_EN) CLEAR - activating it needs
-;   a seeded PL0_SSP + shadow-stack PTEs, which is the documented follow-up. So
-;   today this establishes the CET machine state (CR4.CET on, S_CET present)
-;   without arming a RET-check against an unseeded SSP. The IBT enable bit is
-;   only set when -dENABLE_CET_IBT is given AND IBT is present (still gated off
-;   by default because endbr64 markers aren't emitted yet).
+;   Scoped (see header): hardware supervisor CET is NOT armed yet. Real CPUs can
+;   expose SHSTK before this kernel has the required per-core SSPs, interrupt/IST
+;   SSP handling, syscall-entry SSPs, and properly sized shadow stacks. Until
+;   that invasive work lands, do not write IA32_PL0_SSP, IA32_S_CET, or CR4.CET.
 ;
-;   Clobbers rax/rcx/rdx (wrmsr/CR4). Caller-saved at the kmain init site.
+;   Clobbers nothing. Caller-saved at the kmain init site.
 ; ---------------------------------------------------------------------------
 global cet_enable
 cet_enable:
-    cmp byte [rel cet_have_shstk], 0
-    je .software_fallback            ; no hardware shadow stack -> software guard
-
-    ; Seed the RET that leaves cet_enable before arming SH_STK_EN.
-    mov r8, [rsp]
-    mov qword [abs CET_PL0_SHSTK_TOP - 8], r8
-    mov qword [rel cet_pl0_ssp], CET_PL0_SHSTK_TOP - 8
-
-    ; Convert the dedicated page to a CET shadow-stack PTE:
-    ; present, read-only, dirty, NX, supervisor.
-    call nk_pt_window_begin
-    mov rax, CET_PL0_SHSTK_ADDR
-    or  rax, CET_P_PRESENT | CET_P_DIRTY
-    bts rax, 63
-    mov [abs CET_PL0_SHSTK_PTE], rax
-    call nk_pt_window_end
-
-    mov ecx, IA32_PL0_SSP
-    mov rax, CET_PL0_SHSTK_TOP - 8
-    mov rdx, rax
-    shr rdx, 32
-    wrmsr
-
-    ; Build the S_CET value. Hardware supervisor shadow stack is active.
-    mov eax, S_CET_SH_STK_EN
-    xor edx, edx
-%ifdef ENABLE_CET_IBT
-    cmp byte [rel cet_have_ibt], 0
-    je .no_ibt
-    or  eax, S_CET_ENDBR_EN | S_CET_NO_TRACK_EN
-    mov byte [rel cet_ibt_armed], 1
-.no_ibt:
-%endif
-    mov [rel cet_s_cet_low], eax
-    mov ecx, IA32_S_CET
-    wrmsr
-    ; Enable CR4.CET. Safe because SHSTK is present; note CR4.CET requires
-    ; CR0.WP=1, which the kernel already runs with (paging W^X depends on it).
-    mov rax, cr4
-    bts rax, CR4_CET_BIT
-    mov cr4, rax
-    mov byte [rel cet_shstk_armed], 1
-    mov byte [rel cet_enable_state], 2
-    ; No CALLs after CR4.CET until this seeded RET completes.
-    ret
-.software_fallback:
     mov byte [rel cet_sw_shstk_armed], 1
     mov byte [rel cet_enable_state], 3
     ret

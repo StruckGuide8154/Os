@@ -8,11 +8,11 @@ $Markers = @(
     '(!0-ENTRY)',
     'CPU:',
     'CACHE:',
-    'MEMCAP:'
+    'MEMCAP:',
+    '[L4]',
+    'X3='
 )
-$RegexMarkers = @(
-    'M12K*F!'
-)
+$RegexMarkers = @()
 $SerialHost = '127.0.0.1'
 $SerialPort = 5555
 

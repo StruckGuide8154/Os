@@ -1,17 +1,20 @@
 # INV-PLANTED-CAP-HMAC-REJECTED vectors. predicate:
-#   inv_planted_cap_hmac_rejected(dump_canary, live_canary, slot, mask, planted_tag, accepted)
-# tag = low8(canary ^ slot ^ (mask_hi ^ mask_lo) ^ 0x5C).
+#   inv_planted_cap_hmac_rejected(dump_canary, live_canary, slot, mask,
+#                                 planted_lane0, planted_lane1, accepted)
+# Both 64-bit lanes use the exact cap_mask_store/cap_mask_verify arithmetic.
 invariant=INV-PLANTED-CAP-HMAC-REJECTED
 predicate=inv_planted_cap_hmac_rejected
 
-# Planted but NOT accepted (dispatcher rejected the stale tag) -> vacuously sound.
-# boot B canary 0x22 != boot A 0x11, planted tag 0x4E != live tag 0x7D, mask refused.
-case=accept | 0x11, 0x22, 3, 0xFFFF, 0x4E, 0
-# Same-canary collision (no fresh boot): the planted tag DOES re-derive -> sound.
-case=accept | 0x11, 0x11, 3, 0xFFFF, 0x4E, 1
-# Legit live-derived tag accepted (slot=5,mask=0x0801,canary=0x33 -> 0x63).
-case=accept | 0x33, 0x33, 5, 0x0801, 0x63, 1
-# THE violation: widened mask (CAP_ALL) + boot-A tag 0x4E accepted on boot B.
-case=reject | 0x11, 0x22, 3, 0xFFFF, 0x4E, 1
-# Forge with a guessed tag that does not match the live derivation.
-case=reject | 0x40, 0x91, 7, 0x00FF, 0x00, 1
+# Planted but NOT accepted (dispatcher rejected the stale MAC) -> vacuously sound.
+# boot B canary 0x22 != boot A 0x11; the stale 128-bit pair is refused.
+case=accept | 0x11, 0x22, 3, 0xFFFF, 0x161491D87F30C3B4, 0x4A4190F2017DA41B, 0
+# Same-canary collision (no fresh boot): both planted lanes re-derive -> sound.
+case=accept | 0x11, 0x11, 3, 0xFFFF, 0x161491D87F30C3B4, 0x4A4190F2017DA41B, 1
+# Legit live-derived 128-bit MAC accepted.
+case=accept | 0x33, 0x33, 5, 0x0801, 0xCD5D6BAB5575A183, 0x1CC4A28B5EB8CFAE, 1
+# THE violation: widened mask + complete boot-A MAC accepted on boot B.
+case=reject | 0x11, 0x22, 3, 0xFFFF, 0x161491D87F30C3B4, 0x4A4190F2017DA41B, 1
+# Independent lane corruption must fail: matching lane 0 cannot mask bad lane 1.
+case=reject | 0x91, 0x91, 7, 0x00FF, 0xD5C71ACE4F4B491B, 0x0C99B2ABF392EEA4, 1
+# Independent lane corruption must fail: matching lane 1 cannot mask bad lane 0.
+case=reject | 0x91, 0x91, 7, 0x00FF, 0xD5C71ACE4F4B491A, 0x0C99B2ABF392EEA5, 1

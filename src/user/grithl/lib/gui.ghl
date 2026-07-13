@@ -63,34 +63,9 @@ const UI_ROW_H          = 22
 const UI_CHECK_SIZE     = 16
 const UI_CHECK_LABEL_GAP = 8
 
-# Light-mode reference palette. These are *the same numbers* the LIGHT
-# theme pack ships in `assets/themes/light/theme.xml` and that
-# `theme.ghl::theme_seed_light()` writes into the runtime palette. They
-# remain here so apps that want a fixed look (i.e. ignore the active
-# theme) can still name-reference standard colors. Widgets in this file
-# resolve through `theme_col(TC_*)` instead, so they follow whichever
-# pack is active - apps that go through `ui_*` helpers are themed by
-# default.
-#
-# DRIFT WARNING: editing these constants without editing both
-# `theme_seed_light()` and `assets/themes/light/theme.xml` causes silent
-# divergence. The source-guards test cross-checks the three places.
-const UI_REF_BG_BASE     = 0x00F5F6FA
-const UI_REF_SURFACE_2   = 0x00ECEFF4
-const UI_REF_BORDER_2    = 0x00C4CBD3
-const UI_REF_ACCENT      = 0x002A6FFF
-const UI_REF_ERROR       = 0x00E5474D
-const UI_REF_WARNING     = 0x00F7B52C
-const UI_REF_SUCCESS     = 0x002EB56E
-const UI_REF_TEXT        = 0x000F141E
-const UI_REF_TEXT_MUTED  = 0x004B5563
-const UI_REF_TEXT_INVERT = 0x00FFFFFF
-const UI_REF_SURFACE     = 0x00FFFFFF
-const UI_REF_MENU        = 0x00ECEFF4
-const UI_REF_DROPDOWN    = 0x00FFFFFF
-const UI_REF_BORDER      = 0x00D8DDE3
-const UI_REF_FOCUS       = 0x002A6FFF
-
+# Negative values are explicit semantic handles. Positive RGB values are
+# always literal. The old value-matching fallback made app artwork change when
+# a theme happened to contain the same RGB value.
 const UI_COL_BG_BASE     = -1000
 const UI_COL_SURFACE     = -1001
 const UI_COL_SURFACE_2   = -1002
@@ -113,31 +88,20 @@ fn ui_col(idx) { return theme_col(idx); }
 
 fn ui_resolve_color(color) {
     if color == UI_COL_BG_BASE     { return theme_col(TC_BG_BASE); }
-    if color == UI_REF_BG_BASE     { return theme_col(TC_BG_BASE); }
     if color == UI_COL_SURFACE_2   { return theme_col(TC_SURFACE_2); }
-    if color == UI_REF_SURFACE_2   { return theme_col(TC_SURFACE_2); }
     if color == UI_COL_BORDER_2    { return theme_col(TC_BORDER_2); }
-    if color == UI_REF_BORDER_2    { return theme_col(TC_BORDER_2); }
     if color == UI_COL_ACCENT      { return theme_col(TC_ACCENT); }
-    if color == UI_REF_ACCENT      { return theme_col(TC_ACCENT); }
     if color == UI_COL_ERROR       { return theme_col(TC_ERROR); }
-    if color == UI_REF_ERROR       { return theme_col(TC_ERROR); }
     if color == UI_COL_WARNING     { return theme_col(TC_WARNING); }
-    if color == UI_REF_WARNING     { return theme_col(TC_WARNING); }
     if color == UI_COL_SUCCESS     { return theme_col(TC_SUCCESS); }
-    if color == UI_REF_SUCCESS     { return theme_col(TC_SUCCESS); }
     if color == UI_COL_TEXT        { return theme_col(TC_TEXT); }
-    if color == UI_REF_TEXT        { return theme_col(TC_TEXT); }
     if color == UI_COL_TEXT_MUTED  { return theme_col(TC_TEXT_MUTED); }
-    if color == UI_REF_TEXT_MUTED  { return theme_col(TC_TEXT_MUTED); }
     if color == UI_COL_TEXT_INVERT { return theme_col(TC_TEXT_INVERT); }
     if color == UI_COL_SURFACE     { return theme_col(TC_SURFACE); }
     if color == UI_COL_MENU        { return theme_col(TC_MENU); }
     if color == UI_COL_DROPDOWN    { return theme_col(TC_DROPDOWN); }
     if color == UI_COL_BORDER      { return theme_col(TC_BORDER); }
-    if color == UI_REF_BORDER      { return theme_col(TC_BORDER); }
     if color == UI_COL_FOCUS       { return theme_col(TC_FOCUS); }
-    if color == UI_REF_FOCUS       { return theme_col(TC_FOCUS); }
     return color;
 }
 

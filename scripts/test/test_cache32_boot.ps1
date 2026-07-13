@@ -1,13 +1,43 @@
+param(
+    [switch]$SkipBuild,
+    [switch]$SkipBenchmark,
+    [ValidateRange(1000, 120000)]
+    [int]$BootDelayMs = 30000
+)
+
 $ErrorActionPreference = 'Stop'
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $BuildDir = Join-Path $Root 'build'
 $LogPath = Join-Path $BuildDir 'cache32_serial.log'
+$ImagePath = Join-Path $BuildDir 'Grit.img'
 $SerialHost = '127.0.0.1'
 $SerialPort = 5555
 
-function Stop-QemuIfRunning {
-    Get-Process qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+function Get-Cache32QemuProcess {
+    # Do not kill unrelated interactive/UEFI QEMU sessions. This test owns only
+    # the process whose command line has its BIOS disk image attached.
+    @(Get-CimInstance Win32_Process -Filter "Name='qemu-system-x86_64.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains("file=$ImagePath") })
+}
+
+function Stop-Cache32QemuIfRunning {
+    $owned = @(Get-Cache32QemuProcess)
+    foreach ($process in $owned) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($owned.Count -gt 0) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $remaining = @(Get-Cache32QemuProcess)
+            if ($remaining.Count -eq 0) { return }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        $pids = ($remaining | ForEach-Object ProcessId) -join ', '
+        throw "Cache32 QEMU did not stop within 5 seconds (PID(s): $pids); refusing to rebuild a mapped image."
+    }
 }
 
 function Read-Serial {
@@ -37,7 +67,10 @@ function Read-Serial {
     try {
         $stream = $client.GetStream()
         if ($CommandBytes.Count -gt 0) {
-            Start-Sleep -Milliseconds 6000
+            # BIOS stage 2 reads the reserved kernel area sector-by-sector.
+            # Leave enough time for the current 4 MiB reservation plus early
+            # storage initialization before asking the serial console for data.
+            Start-Sleep -Milliseconds $BootDelayMs
             $stream.Write($CommandBytes, 0, $CommandBytes.Count)
         }
 
@@ -61,11 +94,19 @@ function Read-Serial {
 }
 
 try {
-    Stop-QemuIfRunning
+    Stop-Cache32QemuIfRunning
     New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
 
-    Write-Host '[cache32] Building BIOS Cache32Max image...' -ForegroundColor Yellow
-    powershell -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\build\build_bios.ps1') -PerfProfile Cache32Max
+    if (-not $SkipBuild) {
+        Write-Host '[cache32] Building BIOS Cache32Max image...' -ForegroundColor Yellow
+        powershell -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\build\build_bios.ps1') -PerfProfile Cache32Max
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cache32Max BIOS build failed with exit code $LASTEXITCODE."
+        }
+    }
+    elseif (-not (Test-Path $ImagePath)) {
+        throw "-SkipBuild requested but $ImagePath does not exist."
+    }
 
     Write-Host '[cache32] Booting strict 32MB / 8-core BIOS QEMU profile...' -ForegroundColor Yellow
     $bootJob = Start-Job -ScriptBlock {
@@ -74,10 +115,15 @@ try {
     } -ArgumentList $Root
 
     try {
-        $serial = Read-Serial -CommandBytes ([byte[]]@(0x01,0x70,0x01,0x6D,0x01,0x73,0x01,0x62))
+        $commands = if ($SkipBenchmark) {
+            [byte[]]@(0x01,0x70,0x01,0x6D,0x01,0x73)
+        } else {
+            [byte[]]@(0x01,0x70,0x01,0x6D,0x01,0x73,0x01,0x62)
+        }
+        $serial = Read-Serial -CommandBytes $commands
     }
     finally {
-        Stop-QemuIfRunning
+        Stop-Cache32QemuIfRunning
         Wait-Job $bootJob | Out-Null
         Receive-Job $bootJob | Out-Host
         Remove-Job $bootJob
@@ -86,6 +132,9 @@ try {
     Set-Content -Path $LogPath -Value $serial
 
     $markers = @('CPU:', 'CACHE:', 'FREQ:', 'MEMCAP:', 'SMP:', 'BENCH:')
+    if ($SkipBenchmark) {
+        $markers = @($markers | Where-Object { $_ -ne 'BENCH:' })
+    }
     $missing = @()
     foreach ($marker in $markers) {
         if ($serial -notlike "*$marker*") { $missing += $marker }
@@ -102,5 +151,5 @@ try {
     Write-Host "Serial log saved to $LogPath" -ForegroundColor Gray
 }
 finally {
-    Stop-QemuIfRunning
+    Stop-Cache32QemuIfRunning
 }

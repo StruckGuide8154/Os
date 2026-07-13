@@ -5,9 +5,10 @@
 # (gritc.py --target kernel, %include'd from kernel_build.asm right after
 # cpu_acct.asm, before crypto.ghl). serial_dispatch_control decodes the
 # byte that follows the 0x01 "arm" prefix on the COM1 automation channel and
-# routes it: '2'..'9' launch an app by id; o/q/p/m/s/v/t/g/b/n/N/i/x/X drive
-# desktop, perfdiag, trace dump, SVG render probe, benchmark, ICMP pings, and
-# window-close. Called once per armed byte from serial_poll_command.
+# routes it: '2'..'9' launch app ids 2..9, '0' launches app id 10, '1' launches
+# app id 11; o/q/p/m/s/v/t/g/b/n/N/i/x/X drive desktop, perfdiag, trace dump,
+# SVG render probe, benchmark, ICMP pings, and window-close. Called once per
+# armed byte from serial_poll_command.
 #
 # History: this was one giant register-exact `asm {}` shim. It is now structured
 # GritHLK with ZERO inline asm. Two faithful, telemetry-only substitutions:
@@ -22,7 +23,7 @@
 # Single NASM translation unit (-f bin): the caller (serial_poll_command) and
 # every callee/string this binds to (app_launch, ser_print_hex64, perfdiag_*,
 # svg_dump_serial/svg_dump_puts/svg_dump_putc, wm_*, rtl8139_*/net_ping_*,
-# desktop_handle_click, the net_ping_* strings) stay defined elsewhere and bind
+# the net_ping_* strings) stay defined elsewhere and bind
 # with no extern wiring. ABI: al = command byte in; clobbers caller-saved regs.
 # ============================================================================
 
@@ -33,6 +34,8 @@ unsafe raw_mem;          # sb/lq against kernel-resident UI state
 global serial_dispatch_control;
 
 # Command bytes (ASCII) decoded from the automation channel.
+const CMD_DIGIT_ZERO = 48; # '0'  (app id 10)
+const CMD_DIGIT_ONE  = 49; # '1'  (app id 11)
 const CMD_DIGIT_LO = 50;   # '2'  (apps 2..9 -> ids 2..9)
 const CMD_DIGIT_HI = 57;   # '9'
 const CMD_O = 111;  # 'o'  open first desktop icon
@@ -81,6 +84,27 @@ extern nx_volatile_wipe_halt;
 
 # al = the post-arm command byte. Decodes + dispatches; see header.
 fn serial_dispatch_control(al cmd) {
+    # '0'/'1' -> launch app ids 10/11. Kept separate from the direct digit math
+    # below so the historical '2'..'9' mapping remains unchanged.
+    if cmd == CMD_DIGIT_ZERO {
+        call svg_dump_putc(al: ECHO_L);
+        call ser_print_hex64(rdi: 10);
+        let r = app_launch(10);
+        call svg_dump_putc(al: ECHO_R);
+        call ser_print_hex64(rdi: r);
+        sb(&scene_dirty, 1);
+        return;
+    }
+    if cmd == CMD_DIGIT_ONE {
+        call svg_dump_putc(al: ECHO_L);
+        call ser_print_hex64(rdi: 11);
+        let r = app_launch(11);
+        call svg_dump_putc(al: ECHO_R);
+        call ser_print_hex64(rdi: r);
+        sb(&scene_dirty, 1);
+        return;
+    }
+
     # '2'..'9' -> launch app by id.
     if cmd >= CMD_DIGIT_LO {
         if cmd <= CMD_DIGIT_HI {
@@ -95,9 +119,11 @@ fn serial_dispatch_control(al cmd) {
         }
     }
 
-    # 'o' -> open the first desktop icon.
+    # 'o' -> launch File Explorer (APP_EXPLORER). The old kernel desktop is
+    # retired (desktop_handle_click is gone); the ring-3 shell owns desktop icons,
+    # so this debug shortcut launches an app directly instead.
     if cmd == CMD_O {
-        let r = desktop_handle_click(48, 48);
+        let r = app_launch(2);
         call svg_dump_putc(al: ECHO_O);
         call ser_print_hex64(rdi: r);
         sb(&scene_dirty, 1);

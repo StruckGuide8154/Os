@@ -1,0 +1,28 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Spacing scale" subtitle="4px base grid — sp-2 through sp-12" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 20px 22px; }
+  .row { display: flex; align-items: flex-end; gap: 14px; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .bar { background: var(--nx-grad-accent); border-radius: var(--r-xs); width: 100%; }
+  .lab { font: var(--fw-medium) 10px/1 var(--font-mono); color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="item" style="width:30px;"><div class="bar" style="height:4px;"></div><span class="lab">4</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:8px;"></div><span class="lab">8</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:12px;"></div><span class="lab">12</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:16px;"></div><span class="lab">16</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:24px;"></div><span class="lab">24</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:32px;"></div><span class="lab">32</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:48px;"></div><span class="lab">48</span></div>
+  <div class="item" style="width:30px;"><div class="bar" style="height:64px;"></div><span class="lab">64</span></div>
+</div>
+</body>
+</html>

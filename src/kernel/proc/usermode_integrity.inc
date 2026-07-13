@@ -1,12 +1,23 @@
-L3_CODE_HASH_FNV_OFFSET equ 0xCBF29CE484222325
-L3_CODE_HASH_FNV_PRIME  equ 0x00000100000001B3
-
-; l3_code_hash_compute - EDI = slot. Returns RAX = FNV-1a hash of the slot's
-; executable code-range bytes (skipping the handle-table carve-out), or 0 if
-; the slot has no valid v1 manifest / an empty range. Preserves rbx,rcx,rdx,
-; rsi,rdi,r8..r12 (clobbers only rax + the saved/restored temporaries).
+; l3_code_hash_compute - EDI = slot. Returns RAX = low 64 bits of the SHA-256 of
+; the slot's executable code-range bytes (skipping the handle-table carve-out),
+; or 0 if the slot has no valid v1 manifest / an empty range. Truncated SHA-256
+; replaces the former FNV-1a fold: FNV is unkeyed and algebraically invertible,
+; so an attacker who can write a code page (the exact threat this tripwire
+; guards - see usermode_paging.inc) could forge a second preimage (~2^32 work,
+; constants are in KERNEL.BIN) and pass the check. SHA-256 has no such shortcut
+; (~2^64 even truncated, non-invertible). The SHA state is a reentrant context
+; on THIS stack frame (ci_sha256_* take a ctx pointer), so install (syscall) and
+; verify_all (PIT IRQ) never share state and need no lock.
+;
+; Preserves rbx,rcx,rdx,rsi,rdi,rbp,r8..r15 (clobbers only rax). The byte stream
+; fed to SHA-256 is identical for install and verify (same walk), so baselines
+; compare correctly; the value differs from the old FNV but is never persisted
+; across boots (l3_code_hash is .bss, re-baselined every boot).
+extern ci_sha256_init
+extern ci_sha256_update
+extern ci_sha256_final_lo
+CI_SHA_CTX_SIZE equ 408                   ; 400-byte ctx + 8 to keep rsp 16-aligned
 FN_DECL l3_code_hash_compute, 0, 0, FN_RET_SCALAR
-    push rbx
     push rcx
     push rdx
     push rsi
@@ -15,83 +26,103 @@ FN_DECL l3_code_hash_compute, 0, 0, FN_RET_SCALAR
     push r9
     push r10
     push r11
+    push rbx
+    push rbp
     push r12
+    push r13
+    push r14
+    push r15                              ; 14 pushes (rsp stays 8 mod 16)
+    sub rsp, CI_SHA_CTX_SIZE              ; ctx at [rsp..rsp+400); rsp now 16-aligned
 
-    mov r8d, edi                         ; r8d = slot
-    cmp r8d, MAX_WINDOWS
+    mov r12d, edi                         ; r12d = slot
+    cmp r12d, MAX_WINDOWS
     jae .ch_zero
 
     ; Require a committed v1 manifest with sane bounds (same gate as the policy
     ; walk). Anything else means "no code range to hash".
-    mov eax, r8d
+    mov eax, r12d
     cmp qword [l3_wx_manifest_ver + rax*8], 1
     jne .ch_zero
-    mov rsi, [l3_wx_code_start + rax*8]   ; rsi = code_start offset
-    mov rdx, [l3_wx_code_end + rax*8]     ; rdx = code_end offset (exclusive)
-    cmp rsi, rdx
+    mov rbp, [l3_wx_code_start + rax*8]   ; rbp = cursor = code_start offset
+    mov r14, [l3_wx_code_end + rax*8]     ; r14 = code_end offset (exclusive)
+    cmp rbp, r14
     jae .ch_zero
 
-    ; r9 = slot base virtual address.
-    mov edi, r8d
+    ; r13 = slot base virtual address.
+    mov edi, r12d
     call l3_slot_base
-    mov r9, rax
+    mov r13, rax
 
-    ; r10 = handle-table carve-out start offset, r11 = carve-out end offset
-    ; (page-rounded, matching l3_apply_wx_policy's skip window).
-    mov r10, L3_HANDLE_TABLE_OFF
-    mov r11, (L3_HANDLE_TABLE_SZ + 0xFFF) & ~0xFFF
-    add r11, r10
+    ; r15 = handle-table carve-out start offset, rbx = carve-out end offset
+    ; (page-rounded, matching l3_apply_wx_policy's skip window). The carve-out is
+    ; page-aligned, so it can be skipped whole pages at a time.
+    mov r15, L3_HANDLE_TABLE_OFF
+    mov rbx, (L3_HANDLE_TABLE_SZ + 0xFFF) & ~0xFFF
+    add rbx, r15
 
-    mov r12, L3_CODE_HASH_FNV_OFFSET      ; r12 = running hash accumulator
-    mov rcx, rsi                          ; rcx = current offset cursor
+    mov rdi, rsp                          ; ctx
+    call ci_sha256_init
 
-    ; SMAP: the slot is user (PTE.U=1) memory; bracket the byte reads.
+    ; SMAP: the slot is user (PTE.U=1) memory; bracket the byte reads. ci_sha256_
+    ; update reads user bytes into the (kernel-stack) ctx; both are fine with AC=1.
     USER_ACCESS_BEGIN
-.ch_loop:
-    cmp rcx, rdx
+.ch_page_loop:
+    cmp rbp, r14
     jae .ch_loop_done
-    ; Skip the handle-table carve-out [r10, r11): mutable kernel data, not code.
-    cmp rcx, r10
+    ; r8 = next page boundary above the cursor (exclusive).
+    mov r8, rbp
+    or r8, 0xFFF
+    inc r8
+    ; r9 = run end for this page = min(next-page-boundary, code_end).
+    mov r9, r8
+    cmp r9, r14
+    jbe .ch_have_runend
+    mov r9, r14
+.ch_have_runend:
+    ; Skip the handle-table carve-out page [r15, rbx): mutable kernel data.
+    cmp rbp, r15
     jb .ch_present_check
-    cmp rcx, r11
-    jb .ch_skip
+    cmp rbp, rbx
+    jb .ch_skip_page
 .ch_present_check:
-    ; Only fold bytes from PRESENT pages. A non-present page in the range
-    ; (e.g. a guard or never-populated page) would #PF in ring 0 here ??? and it
-    ; holds no executable bytes anyway ??? so skip the whole page. PT entry for
-    ; this offset = APP_ARENA_PT_BASE + slot*ARENA_SLOT_PAGES*8 + (off>>12)*8.
-    mov rbx, rcx
-    shr rbx, 12                           ; page index within slot
-    mov eax, r8d
+    ; Only hash bytes from PRESENT pages. A non-present page (guard / never
+    ; populated) would #PF in ring 0 and holds no executable bytes -> skip it.
+    ; PT entry = APP_ARENA_PT_BASE + slot*ARENA_SLOT_PAGES*8 + (off>>12)*8.
+    mov r10, rbp
+    shr r10, 12                           ; page index within slot
+    mov eax, r12d
     imul rax, ARENA_SLOT_PAGES * 8
-    lea rbx, [rax + rbx*8 + APP_ARENA_PT_BASE]
-    mov rax, [rbx]
+    lea r10, [rax + r10*8 + APP_ARENA_PT_BASE]
+    mov rax, [r10]
     test al, 1                            ; PAGE_PRESENT?
     jz .ch_skip_page
-    ; rax held the PTE (scratch); the running hash lives in r12 across the loop.
-    movzx ebx, byte [r9 + rcx]            ; slot byte
-    xor r12, rbx                          ; FNV-1a: hash ^= byte
-    mov rbx, L3_CODE_HASH_FNV_PRIME
-    imul r12, rbx                         ; hash *= prime
-    inc rcx
-    jmp .ch_loop
+    ; Feed run [rbp, r9): src = base + rbp, len = r9 - rbp.
+    mov rdi, rsp                          ; ctx
+    lea rsi, [r13 + rbp]                  ; src
+    mov rdx, r9
+    sub rdx, rbp                          ; len
+    call ci_sha256_update
+    mov rbp, r9                           ; advance cursor past the hashed run
+    jmp .ch_page_loop
 .ch_skip_page:
-    ; Advance rcx to the next page boundary (skip the whole absent page).
-    or rcx, 0xFFF
-    inc rcx
-    jmp .ch_loop
-.ch_skip:
-    inc rcx
-    jmp .ch_loop
+    mov rbp, r8                           ; advance to the next page boundary
+    jmp .ch_page_loop
 .ch_loop_done:
     USER_ACCESS_END
-    mov rax, r12                          ; final running hash
+    mov rdi, rsp                          ; ctx
+    call ci_sha256_final_lo               ; rax = low 64 bits of SHA-256
     jmp .ch_ret
 
 .ch_zero:
-    xor eax, eax                          ; no valid range -> hash 0
+    xor eax, eax                          ; no valid range -> tag 0
 .ch_ret:
+    add rsp, CI_SHA_CTX_SIZE
+    pop r15
+    pop r14
+    pop r13
     pop r12
+    pop rbp
+    pop rbx
     pop r11
     pop r10
     pop r9
@@ -100,7 +131,6 @@ FN_DECL l3_code_hash_compute, 0, 0, FN_RET_SCALAR
     pop rsi
     pop rdx
     pop rcx
-    pop rbx
     ret
 
 ; l3_code_hash_install - EDI = slot. Capture the slot's code-range hash as the

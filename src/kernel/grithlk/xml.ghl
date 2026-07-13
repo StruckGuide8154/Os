@@ -658,14 +658,25 @@ fn xml_parse_pi(sb, p, endp) {
 
 # ---- '!' bang: comment / CDATA / DOCTYPE -----------------------------------
 fn xml_parse_bang(sb, p, endp) {
+    # Every branch below does fixed-offset lookahead from p (='<', p+1='!').
+    # Prove the disambiguation byte at p+2 is in bounds first, or a short input
+    # such as a trailing "<!" drives a privileged out-of-bounds read (CWE-125).
+    if (p + 3) > endp {
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
     let c2 = lb(p + 2);
-    if c2 == 91 {                   # '[' -> CDATA
+    if c2 == 91 {                   # '[' -> CDATA (xml_match_cdata_open bounds-checks)
         return xml_parse_cdata(sb, p, endp);
     }
-    if c2 == 68 {                   # 'D' -> DOCTYPE
+    if c2 == 68 {                   # 'D' -> DOCTYPE (bounds-checks its keyword)
         return xml_parse_doctype(sb, p, endp);
     }
     if c2 != 45 {                   # '-'
+        xml_set_error(sb, 2, p);
+        return 0;
+    }
+    if (p + 4) > endp {             # comment needs a second '-' at p+3
         xml_set_error(sb, 2, p);
         return 0;
     }
@@ -707,7 +718,10 @@ fn xml_parse_cdata(sb, p, endp) {
 
 # DOCTYPE: verify keyword, parse-and-skip (with internal subset).
 fn xml_parse_doctype(sb, p, endp) {
-    # "<!DOCTYPE"
+    # "<!DOCTYPE" is 9 bytes (p..p+8). Prove the whole keyword is in bounds
+    # before any fixed-offset read, so a truncated "<!D" cannot drive an
+    # out-of-bounds read past endp (CWE-125).
+    if (p + 9) > endp { xml_set_error(sb, 2, p); return 0; }
     if lb(p + 3) != 79 { xml_set_error(sb, 2, p); return 0; }   # 'O'
     if lb(p + 4) != 67 { xml_set_error(sb, 2, p); return 0; }   # 'C'
     if lb(p + 5) != 84 { xml_set_error(sb, 2, p); return 0; }   # 'T'

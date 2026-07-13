@@ -10,10 +10,23 @@ xhci_enable_slot:
     cmp eax, 1                    ; 1 = Success
     jne .slot_fail
 
-    ; Slot ID in bits 31:24 of completion DWord3
+    ; Slot ID in bits 31:24 of completion DWord3.
+    ; SECURITY: this slot id is supplied by the controller's Enable-Slot
+    ; completion event (device-controlled). It is used directly as an index into
+    ; the DCBAA ([XHCI_DCBAA_ADDR + id*8], xhci_address_device/disable_slot) and
+    ; the doorbell array ([xhci_db_base + id*4], xhci_ring_doorbell). MaxSlotsEn is
+    ; programmed to at most XHCI_MAX_SLOT_ID, so a conforming controller only ever
+    ; returns id in 1..XHCI_MAX_SLOT_ID; anything outside that is a malformed or
+    ; hostile response. Reject fail-closed rather than trust it as an array index.
+    ; The validated value is the exact byte stored in xhci_slot_id and reused at
+    ; every downstream site (held in the global, never re-derived) => TOCTOU-free.
     mov eax, ebx
     shr eax, 24
     and eax, 0xFF
+    test eax, eax
+    jz .slot_fail                 ; id 0 is reserved for the host-controller doorbell
+    cmp eax, XHCI_MAX_SLOT_ID
+    ja .slot_fail                 ; out of programmed slot range -> drop
     mov [xhci_slot_id], al
     ret
 
@@ -33,6 +46,11 @@ xhci_disable_slot:
     movzx ecx, al
     test ecx, ecx
     jz .ds_fail
+    ; SECURITY (defence in depth): AL is the caller-supplied slot id used to clear
+    ; the DCBAA entry below ([XHCI_DCBAA_ADDR + id*8]). Bound it to the same valid
+    ; range as enable so a stray/oversized id cannot write outside the array.
+    cmp ecx, XHCI_MAX_SLOT_ID
+    ja .ds_fail
     mov r12d, ecx
     xor r8d, r8d
     xor r9d, r9d

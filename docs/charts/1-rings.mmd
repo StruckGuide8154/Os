@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph R3["Ring 3 — user mode (sandboxed)"]
+        APPS["Apps (.ghl) — per-app syscall capability bitmap"]
+        subgraph DRV["Userspace drivers (Track 8)"]
+            BAT["battery"]
+            NIC["rtl8156 NIC"]
+            IN["input / HID"]
+            DISP["display"]
+            AUD["HDA audio class driver"]
+        end
+    end
+    subgraph R0["Ring 0 — kernel"]
+        SYS["syscall dispatcher (default-deny CAP_CORE)"]
+        BROKER["driver_host broker (DMA grant table, PnP)"]
+        WM["window mgr / desktop / taskbar"]
+        NET["net stack (arp/ip/udp/dns/dhcp, zero-asm)"]
+        FS["FAT16 (fat16_core.ghl)"]
+        SCHED["priority scheduler + SMP workqueue"]
+        NK["nested-kernel monitor (MMU+WP PTE guard)"]
+    end
+    subgraph SUB0["Below ring 0 — monitor tiers"]
+        T5["Track 5: mon_hal (VMX/SVM/EL2/RV-H + IOMMU)"]
+        T6["Track 6: software '-1' monitor (PT/KEY/HASH/CAP/DMA/LOAD)"]
+    end
+    subgraph HW["Hardware root"]
+        T10["Track 10: USB-FPGA enclave (root-of-trust, TRNG)"]
+        FME["FME: Intel TME / AMD SME full-DRAM encrypt"]
+    end
+    APPS -->|syscall| SYS
+    DRV -->|broker IPC only| BROKER
+    BROKER --> SYS
+    SYS --> SCHED
+    SCHED --> NET & FS & WM
+    R0 --> NK
+    NK --> T5 & T6
+    T5 & T6 --> T10 & FME

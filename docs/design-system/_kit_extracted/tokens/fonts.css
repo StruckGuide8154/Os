@@ -1,0 +1,11 @@
+/* ============================================================
+   Grit — Webfonts
+   UI: Hanken Grotesk (warm, precise grotesk — clean at OS sizes)
+   Mono: Geist Mono (terminal / telemetry / code)
+   NOTE: the grit / GritHL kernel renders with a built-in bitmap
+   font; no font binaries ship in the repo, so these are the closest
+   modern substitutes, loaded from Google Fonts. Flagged for the
+   user to swap for the real kernel face when it exists.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300;400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap');

@@ -38,10 +38,15 @@ Offset  Size  Field
 
 | File                    | Count | Channels | Size  | Purpose          |
 |-------------------------|-------|----------|-------|------------------|
-| `palette_light.npl`     | 16    | 3 (RGB)  | 56 B  | Default light    |
-| `palette_dark.npl`      | 16    | 3 (RGB)  | 56 B  | Dark mode        |
+| `palette_light.npl`     | generated | 3 (RGB) | generated | Active light pack |
+| `palette_dark.npl`      | generated | 3 (RGB) | generated | Dark pack |
 
-### Semantic indices (both palettes use the same slot layout)
+### Semantic indices
+
+The authoritative ordered token list is `assets/themes/theme-spec.json` and is
+documented in `docs/theme-pack.md`. Do not maintain a second index table here;
+`tools/theme_tool.py` emits both NPL files from that list and the build verifies
+their exact bytes. The table below is historical NPL1 background only.
 
 | Idx | Name          | Light         | Dark          | Usage                          |
 |-----|---------------|---------------|---------------|--------------------------------|
@@ -274,11 +279,12 @@ ICON_BUF      = 16 KB per slot (largest 48x48 BGRA + slack)
 
 ---
 
-## 5. Embedding as `.inc`
+## 5. Embedding
 
 The smaller resources ship as NASM include files inside `KERNEL.BIN`:
 
-- `palette_light.inc`, `palette_dark.inc` - semantic constants + binary data
+- `palette_light.npl`, `palette_dark.npl` - generated directly from the unified
+  theme specification and embedded with `incbin`
 - `font_8x16.inc`, `font_16x32.inc`, `font_24x48.inc` - byte-identical to the `.nft` files
 
 Icons at 32bpp are larger (10 icons × 3 sizes ≈ 140 KB), so they're loaded from FAT16 at runtime rather than embedded.

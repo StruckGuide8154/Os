@@ -73,6 +73,8 @@ main_loop_stage_done db 0    ; last stage that completed
 main_loop_iters      dd 0    ; full iterations of the .infinite loop
 global scene_dirty
 scene_dirty db 1
+global kernel_event_flags
+kernel_event_flags dd 0       ; IRQ/service wake bits consumed atomically by kmain
 rf_last_mouse_x dd 0xFFFFFFFF
 rf_last_mouse_y dd 0xFFFFFFFF
 rf_last_fps     dd 0xFFFFFFFF

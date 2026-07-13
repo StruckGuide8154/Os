@@ -34,17 +34,21 @@ _start:
     mov ecx, 24 / 4
     rep stosd
 .gop_done:
+    BOOTBLK                 ; loader blk 0: GOP framebuffer ready
 
     ; === S1.25: Allocate dynamic boot-owned buffers ===
     call alloc_boot_regions
+    BOOTBLK                 ; loader blk 1: boot regions allocated
 
     ; === S1.5: Locate EFI_SIMPLE_POINTER_PROTOCOL and save for kernel ===
     call locate_spp
+    BOOTBLK                 ; loader blk 2: pointer protocol located
 
     ; === S2: Load kernel from filesystem ===
     call load_kernel
     test rax, rax
     jnz .fail_kernel
+    BOOTBLK                 ; loader blk 3: KERNEL.BIN loaded
 
     ; === S2b: Load APPS.BIN ===
     ; KASLR mode keeps using the embedded app blob. The diff-relocation fixup
@@ -70,6 +74,7 @@ _start:
     ; if DATA.IMG is missing the kernel falls back to ATA PIO and simply
     ; finds no usable volume (same as today).
     call load_data_img
+    BOOTBLK                 ; loader blk 4: DATA.IMG ramdisk loaded
 
     ; === S2b2b: Load OPTIONAL BOOTCFG.TXT (runtime feature-toggle config) ===
     ; Read \EFI\BOOT\BOOTCFG.TXT into firmware RAM and publish (base,size) in
@@ -87,6 +92,7 @@ _start:
     ; the kernel fail-closed; KUPDATE.ENV optional staged update). Publishes
     ; (base,size) pairs in VBE_INFO for envelope_gate.ghl. ===
     call load_envelopes
+    BOOTBLK                 ; loader blk 5: signed envelopes loaded
 
 %ifdef RELEASE_BUILD
     ; Fail before ExitBootServices and before any attacker-controlled artifact
@@ -101,12 +107,14 @@ _start:
     ; Captured in VBE_INFO + STORAGE_EXTENTS_ADDR for ramdisk_flush in the
     ; kernel (Phase 5). Non-fatal: failure leaves contract zeroed.
     call resolve_data_img_extents
+    BOOTBLK                 ; loader blk 6: DATA.IMG extents resolved
 
     ; Capture KASLR entropy while UEFI protocols are still callable. The
     ; post-ExitBootServices relocation path consumes only this saved state.
     call collect_kaslr_entropy
     test rax, rax
     jnz .fail_entropy
+    BOOTBLK                 ; loader blk 7: KASLR entropy captured
 
     ; === S2c: If previous kernel left a klog flush request in RAM, write it
     ; out to \KLOG.TXT and clear the magic. Non-fatal on failure. ===
@@ -116,8 +124,10 @@ _start:
 
     ; === S3: Build identity-mapped page tables ===
     call setup_paging
+    BOOTBLK                 ; loader blk 8: page tables built
 
     ; === S4: Exit boot services ===
+    BOOTBLK                 ; loader blk 9: about to ExitBootServices (last FB draw pre-handoff)
     call exit_boot_services
     test rax, rax
     jnz .fail_exit

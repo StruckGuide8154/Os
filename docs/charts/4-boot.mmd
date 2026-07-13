@@ -1,0 +1,2 @@
+flowchart LR
+    UEFI["UEFI GOP framebuffer"] --> LOADER["loader: KERNEL.ENV verify"] --> MB["measured_boot_init"] --> ASYNC["async device bring-up (SMP worker)"] --> SMP["SMP AP bringup (SMEP/SMAP/CR0.WP per core)"] --> JOIN["join device_enum_job"] --> LOCK["lockdown (W^X, nk monitor armed)"] --> GUI["desktop / taskbar live"]

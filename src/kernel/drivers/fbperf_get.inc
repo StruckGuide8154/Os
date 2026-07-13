@@ -393,7 +393,17 @@ fbperf_wc_activate:
     ; Intel SDM Vol 3A 11.11.8 "MP Initialization for MTRRs" describes the
     ; canonical disable-MTRR/wbinvd/wrmsr/enable-MTRR ritual; here we only
     ; touch PAT (not MTRRs), so the reduced sequence wbinvd -> wrmsr -> CR3
-    ; reload is sufficient -- the CR3 reload at .flush handles TLB shootdown.
+    ; reload suffices ON THIS CPU.
+    ;
+    ; IMPORTANT: the wbinvd, the IA32_PAT wrmsr, and the CR3 reload below are all
+    ; per-logical-CPU and affect ONLY the core that runs this routine (the BSP).
+    ; They do NOT shoot down other cores' TLBs and do NOT reprogram their PAT.
+    ; This is therefore SAFE TO CALL ONLY BEFORE the APs are started: kmain
+    ; activates WC here ahead of smp_ap_startup(), so every AP comes out of the
+    ; trampoline walking the already-patched FB PTE and programs its own PAT to
+    ; the same canonical layout (apic.asm ap_long_mode_init). Calling this after
+    ; the APs are live would leave them with a stale TLB / divergent memory type
+    ; for the FB page -> aliased memory types (SDM 11.12.4, undefined: tearing).
     wbinvd
     mov  ecx, 0x277
     mov  eax, [fbperf_wc_plan_pat]

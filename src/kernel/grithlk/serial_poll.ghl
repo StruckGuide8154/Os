@@ -3,12 +3,10 @@
 # Consumes bounded serial bursts, arms control commands, and forwards normal
 # bytes. Structured GritHLK (was a register-exact asm shim).
 #
-# FALL-THROUGH NOTE: the original asm shim had NO `ret` - after `.done` it fell
-# through into the next %include'd module (input_dispatch's `process_mouse`),
-# so every serial poll also ran process_mouse once. That behavior is reproduced
-# faithfully here by an explicit `process_mouse()` tail call before the
-# structured `ret`, so the main loop's per-iteration work is byte-for-byte the
-# same set of calls as before.
+# The old asm shim accidentally fell through into input_dispatch's
+# `process_mouse` after every serial poll. The main loop now owns input routing
+# explicitly, so this poller only drains COM1 and leaves mouse processing to the
+# scheduled input service.
 # ============================================================================
 
 module "serial_poll";
@@ -53,6 +51,4 @@ fn serial_poll_command() preserves(rax, rcx, rdx, rdi) {
             n = n - 1;
         }
     }
-    # Reproduce the original shim's implicit fall-through into process_mouse.
-    process_mouse();
 }

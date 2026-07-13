@@ -30,7 +30,7 @@ layout, syscall numbers, callback entry, or process ownership.
 
 ## Syscall Range
 
-Current public syscall numbers are `0..27`. New numbers require validation
+Current public syscall numbers are `0..80`. New numbers require validation
 docs, source guards, and a serial or source-level acceptance test.
 
 ## Callback Boundary

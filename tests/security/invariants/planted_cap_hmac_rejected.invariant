@@ -1,13 +1,13 @@
-# Track 4 Part D planted-leak NEGATIVE test over the REAL cap-mask authenticator
-# arithmetic: tag = low8(kernel_canary ^ slot ^ (mask_hi ^ mask_lo) ^ 0x5C). A
-# (mask, tag) pair recovered from a RAM dump of boot A is replayed on a fresh boot
-# B; the dispatcher must reject it because boot B drew a new canary, so the tag no
-# longer re-derives. Acceptance is permitted ONLY on canary collision; otherwise
-# trusting the planted (widened) mask is a privilege forge.
+# Track 4 Part D planted-leak NEGATIVE test over the REAL 128-bit cap-mask MAC:
+# two independently-finalized 64-bit lanes bind the live canary, slot, full
+# 16-bit mask, and KDOM_CAP_MASK. A (mask, lane0, lane1) tuple recovered from a
+# RAM dump of boot A is replayed on fresh boot B; the dispatcher must reject it
+# because both lanes are recomputed with boot B's canary. Acceptance is permitted
+# ONLY when the complete planted 128-bit value re-derives under the live canary.
 invariant=INV-PLANTED-CAP-HMAC-REJECTED
-title=A dumped cap-mask + HMAC tag cannot widen a slot on a fresh boot
-statement=The dispatcher trusts a slot cap-mask only when its authenticator tag re-derives under the live per-boot canary. A tag forged under a dumped (boot-A) canary is accepted only on canary collision; accepting a non-matching planted tag is a forge and is forbidden. Rejecting always fails closed (-> CANARY panic).
-compromised=A one-shot RAM-dump attacker replaying a recovered cap-mask + slot_cap_hmac tag to install a widened capability mask on a fresh boot
-denied_authority=Trusting a planted cap mask whose tag does not re-derive under the live canary
+title=A dumped cap-mask + 128-bit MAC cannot widen a slot on a fresh boot
+statement=The dispatcher trusts a slot cap-mask only when both 64-bit lanes of its 128-bit authenticator re-derive under the live per-boot canary. A MAC recovered under a dumped boot-A canary is accepted only on a full 128-bit collision; accepting either mismatched lane is a forge and is forbidden. Rejecting always fails closed (-> CANARY panic).
+compromised=A one-shot RAM-dump attacker replaying a recovered cap-mask + 128-bit slot_cap_hmac to install a widened capability mask on a fresh boot
+denied_authority=Trusting a planted cap mask whose complete 128-bit MAC does not re-derive under the live canary
 predicate=inv_planted_cap_hmac_rejected
 status=proven

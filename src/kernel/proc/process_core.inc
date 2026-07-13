@@ -5,13 +5,13 @@ FN_BEGIN scheduler_init, 0, 0, FN_RET_SCALAR
     push rcx
     push rax
     push rbx
-    
+
     ; Clear process pool
     mov rdi, PROCESS_POOL
     xor eax, eax
     mov ecx, (MAX_PROCESSES * 512) / 4
     rep stosd
-    
+
     ; Initialize Kernel Process (PID 0)
     mov rbx, PROCESS_POOL
     mov dword [rbx + process_t.id], 0
@@ -33,7 +33,7 @@ FN_BEGIN scheduler_init, 0, 0, FN_RET_SCALAR
 
     mov dword [current_process_id], 0
     mov dword [next_pid], 1
-    
+
     pop rbx
     pop rax
     pop rcx
@@ -54,7 +54,7 @@ FN_BEGIN process_create, 0, 0, FN_RET_SCALAR
     push r12
     push r13
     push r14
-    
+
     mov r12, rdi        ; entry
     mov r13, rsi        ; slot
     mov r14, rdx        ; win_id
@@ -63,7 +63,7 @@ FN_BEGIN process_create, 0, 0, FN_RET_SCALAR
     jae .invalid_args
     cmp r14, MAX_WINDOWS
     jae .invalid_args
-    
+
     ; Find free slot in process pool
     mov rbx, PROCESS_POOL
     xor ecx, ecx
@@ -76,7 +76,7 @@ FN_BEGIN process_create, 0, 0, FN_RET_SCALAR
     jl .find_loop
     mov rax, -1
     jmp .done
-    
+
 .found:
     ; Initialize PCB
     mov eax, [next_pid]
@@ -86,22 +86,25 @@ FN_BEGIN process_create, 0, 0, FN_RET_SCALAR
     mov [rbx + process_t.rip], r12
     mov [rbx + process_t.slot], r13d
     mov [rbx + process_t.win_id], r14d
-    
+
     ; Setup Stacks
     mov edi, r13d
     call l3_user_stack_top
     sub rax, 8
-    extern call_app_l3_app_done
-    lea rdx, [rel call_app_l3_app_done]
+    push rax
+    mov edi, r13d
+    call l3_install_app_done_trampoline
+    mov rdx, rax
+    pop rax
     USER_ACCESS_BEGIN
-    mov qword [rax], rdx          ; IRET trampoline onto the slot's user stack (PTE.U=1)
+    mov qword [rax], rdx          ; slot-local IRET trampoline on the user stack
     USER_ACCESS_END
     mov [rbx + process_t.rsp], rax
-    
+
     mov edi, r13d
     call l3_syscall_stack_top
     mov [rbx + process_t.kernel_rsp], rax
-    
+
     ; Setup Selectors and RFLAGS
     mov qword [rbx + process_t.cs], GDT64_USER_CODE
     mov qword [rbx + process_t.ss], GDT64_USER_DATA
@@ -162,13 +165,13 @@ FN_BEGIN process_save_context, 0, 0, FN_RET_SCALAR
     push rax
     push rbx
     push rcx
-    
+
     call current_process_ptr
     test rax, rax
     jz .done
-    
+
     mov rbx, rax    ; rbx = PCB
-    
+
     ; Save GP registers from stack frame
     mov rcx, [rdi + ALL_RAX]
     mov [rbx + process_t.rax], rcx
@@ -200,7 +203,7 @@ FN_BEGIN process_save_context, 0, 0, FN_RET_SCALAR
     mov [rbx + process_t.r14], rcx
     mov rcx, [rdi + ALL_R15]
     mov [rbx + process_t.r15], rcx
-    
+
     ; Save RIP, CS, RFLAGS, RSP, SS from interrupt frame
     mov rcx, [rdi + 136] ; RIP
     mov [rbx + process_t.rip], rcx
@@ -212,7 +215,7 @@ FN_BEGIN process_save_context, 0, 0, FN_RET_SCALAR
     mov [rbx + process_t.rsp], rcx
     mov rcx, [rdi + 168] ; SS
     mov [rbx + process_t.ss], rcx
-    
+
 .done:
     pop rcx
     pop rbx
@@ -225,13 +228,13 @@ FN_BEGIN process_restore_context, 0, 0, FN_RET_SCALAR
     push rax
     push rbx
     push rcx
-    
+
     call current_process_ptr
     test rax, rax
     jz .done
-    
+
     mov rbx, rax ; PCB
-    
+
     ; Restore GP registers to stack frame
     mov rcx, [rbx + process_t.rax]
     mov [rdi + ALL_RAX], rcx
@@ -263,7 +266,7 @@ FN_BEGIN process_restore_context, 0, 0, FN_RET_SCALAR
     mov [rdi + ALL_R14], rcx
     mov rcx, [rbx + process_t.r15]
     mov [rdi + ALL_R15], rcx
-    
+
     ; Restore interrupt frame
     mov rcx, [rbx + process_t.rip]
     mov [rdi + 136], rcx
@@ -285,7 +288,7 @@ FN_BEGIN process_restore_context, 0, 0, FN_RET_SCALAR
     jz .skip_cr3
     mov cr3, rdx
 .skip_cr3:
-    
+
 .done:
     pop rcx
     pop rbx

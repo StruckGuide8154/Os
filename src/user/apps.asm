@@ -43,12 +43,29 @@ __SECT__
 ; Per-app integrity manifest format contract (segment labels + table macros).
 %include "app_manifest.inc"
 
+; Page-align the blob's start in the image. l3_copy_app_blob_to_slot lands
+; app_blob_start at the page-aligned slot offset `slide`, so making the start
+; page-aligned here keeps the code/data split offset
+; (app_blob_code_end - app_blob_start) a whole number of 4 KiB pages -- every
+; slot page then falls entirely inside the code window XOR the data tail, which
+; is what makes the per-slot W^X policy airtight (Codex review finding 2).
+align 4096
 global app_blob_start
 app_blob_start:
 ; 16-byte sentinel so a post-build extraction can locate this blob inside
 ; kernel.bin without needing NASM symbol maps.
 db 0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "GRAPPBLO"
 db 0x42, 0x53, 0x54, 0x52, 0x54, 0xDE, 0xAD, 0xBE    ; "BSTRT" + 0xDEADBE
+
+; --- W^X data-tail section declaration (Codex review finding 2) -----------
+; All writable app data (gritc `data`/`buffer` emitted by the GritHL apps, plus
+; asm-glue state in state.inc) is routed into `.appdata`. Declare that section
+; once, page-aligned and following `.text`, but do NOT put app_blob_code_end
+; here: NASM resolves section labels at the point they are emitted, and later
+; app includes can still append executable `.text`. The real W^X boundary is
+; page-aligned and labeled after every app code include below.
+[section .appdata follows=.text align=4096]
+__SECT__
 ; --- Segment 0: common glue (boot trampoline + common/state/launch) -------
 app_seg_common_start:
 global app_l3_done_trampoline
@@ -89,11 +106,25 @@ app_seg_security_probe_end:
 app_seg_media_viewer_start:
 %include "src/user/apps/media_viewer.inc"
 app_seg_media_viewer_end:
+; Actual W^X code/data boundary. No app `.text` may be emitted after this point.
+; `.appdata` was declared as follows=.text align=4096 above, so this page-aligned
+; end-of-text label is also the first byte of the writable data tail in the flat
+; blob. Slots mark [app_blob_start, app_blob_code_end) X+!W and
+; [app_blob_code_end, app_blob_end) W+NX.
+align 4096
+global app_blob_code_end
+app_blob_code_end:
+; End sentinel + app_blob_end live in `.appdata` so they sit AFTER every byte of
+; app writable data. The sentinel extractor (tools/build/extract_apps.ps1) and
+; the blob signer copy [start sentinel, end sentinel], so this keeps the whole
+; [code | data] blob -- not just the code -- inside APPS.BIN and the signature.
+section .appdata
 ; End sentinel (16 bytes, distinct from start marker).
 db 0x47, 0x52, 0x41, 0x50, 0x50, 0x42, 0x4C, 0x4F    ; "GRAPPBLO"
 db 0x42, 0x45, 0x4E, 0x44, 0x21, 0xCA, 0xFE, 0xBE    ; "BEND!" + 0xCAFEBE
 global app_blob_end
 app_blob_end:
+section .text
 
 ; End of the syscall-immediate fixup table (see app_syscall_fixups_start).
 [section .scfix align=1]

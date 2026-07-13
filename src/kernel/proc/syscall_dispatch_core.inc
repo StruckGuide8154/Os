@@ -42,7 +42,7 @@
     SC_SLOT_FROM_RIP rbx                 ; rbx = slot id from user RIP (rcx)
     mov r15d, ebx                        ; r15 = slot id (live through dispatch)
     imul rbx, L3_RT_SIZE
-    lea rbx, [rel l3_runtime + rbx]      ; rbx = &l3_runtime[slot]
+    lea rbx, [abs l3_runtime + rbx]      ; rbx = &l3_runtime[slot]
     mov [rbx + L3_RT_USER_RSP], rsp
     mov [rbx + L3_RT_SLOT], r15d
     mov [rbx + L3_RT_USER_RIP], rcx

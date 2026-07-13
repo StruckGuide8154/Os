@@ -38,10 +38,61 @@ EVT_FOCUS_CHANGE      equ 0x464F4353      ; FOCS
 EVT_INPUT_ROUTE       equ 0x494E5054      ; INPT
 EVT_SYSCALL_ENTER     equ 0x53594345      ; SYCE
 EVT_SYSCALL_EXIT      equ 0x53594358      ; SYCX
+; No-progress / spin watchdog: a slot repeated the same syscall with identical
+; args SC_PROGRESS_LIMIT times in a row without making progress. a0=syscall num,
+; a1=arg0, a2=arg1, a3=faulting user RIP, a4=repeat count.
+EVT_NOPROGRESS        equ 0x4E4F5052      ; NOPR
+
+; Notepad-open instrumentation (debug builds only). The "opens blank / white
+; window only sometimes" symptom is a launch-ordering race: a window is
+; drawable the instant wm_create_window_ex returns, but its capability manifest
+; (WF_MANIFEST_OK) and L3 slot seed land one step later. These events stamp each
+; milestone with a TSC so the dump (DEVT) shows the interleaving that produced a
+; blank frame. See .launch_notepad / app_seed_notepad_slot / sc_record_strike /
+; window_draw .dispatch_user_draw.
+EVT_NP_LAUNCH         equ 0x4E504C41      ; NPLA  launch entry
+EVT_NP_WINCREATE      equ 0x4E505743      ; NPWC  wm_create_window_ex returned
+EVT_NP_MANIFEST       equ 0x4E504D46      ; NPMF  manifest applied (sandbox on)
+EVT_NP_SEED           equ 0x4E505344      ; NPSD  L3 slot seeded
+EVT_NP_HANDLERS       equ 0x4E504844      ; NPHD  click/key handlers installed
+EVT_NP_DRAW           equ 0x4E504452      ; NPDR  draw callback dispatched
+EVT_NP_STRIKE_GAP     equ 0x4E505347      ; NPSG  draw denied before sandbox
 
 %ifndef RELEASE_BUILD
 %define ENABLE_DBG_EVT_FULL
 %endif
+
+; DBG_EVT6 id, ctx, a0, a1, a2, a3
+;
+; Debug-build-only thin wrapper over dbg_event_emit6 (core/debug_events.asm),
+; which preserves every register. Use this from kernel-context asm sites that
+; already have live values in rdi/rsi/rdx/rcx/r8/r9 - the macro spills and
+; reloads the six arg registers around the call, and loads rdi last so an
+; operand may safely reference one of the other arg registers. Pass operands as
+; immediates or non-arg registers (rax/rbx/r10-r15) to avoid ordering surprises.
+%macro DBG_EVT6 6
+%ifndef RELEASE_BUILD
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r8
+    push r9
+    mov r9, %6
+    mov r8, %5
+    mov rcx, %4
+    mov rdx, %3
+    mov rsi, %2
+    mov rdi, %1
+    call dbg_event_emit6
+    pop r9
+    pop r8
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+%endif
+%endmacro
 
 %macro DBG_EVT_STORE 8
     push r11
@@ -72,7 +123,7 @@ EVT_SYSCALL_EXIT      equ 0x53594358      ; SYCX
     mov r10, rax
     and r10, DBG_EVT_MASK
     imul r10, DBG_EVT_RECORD_SIZE
-    lea r10, [rel dbg_evt_ring + r10]
+    lea r10, [abs dbg_evt_ring + r10]
     mov [r10 + DBG_EVT_SEQ], rbx
     rdtsc
     shl rdx, 32

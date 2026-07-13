@@ -1,0 +1,7 @@
+flowchart TB
+    A["NO-FREEZE invariant: loop or fail, sandbox + terminate"]
+    A --> B["Tier-1 BSP kernel-liveness watchdog (PIT → r3guard pad)"]
+    A --> C["Ring-3 callback deadman (per-slot guard, demote-then-kill)"]
+    A --> D["GHL blocking-effect type system"]
+    A --> E["kfault ring-0 recovery (longjmp wraps render_frame)"]
+    A -.->|TODO| F["Tier-2 NMI/cli watchdog + bounded locks"]

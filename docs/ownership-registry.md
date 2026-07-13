@@ -14,7 +14,7 @@ This page is normative for maintainer routing. Use it before editing a subsystem
 | Paging user/kernel split | `src/boot/paging.asm` | `scripts/test/test_source_guards.ps1` |
 | Window structure offsets | `src/include/window_layout.inc` | `tools/check_invariants.ps1` |
 | Window manager | `src/kernel/gui/window.asm` | `tools/check_complexity_thresholds.ps1` |
-| FAT16 operations | `src/kernel/fs/fat16.asm` | `tools/check_complexity_thresholds.ps1` |
+| FAT16 operations | `src/kernel/grithlk/fat16_core.ghl` | `tools/check_complexity_thresholds.ps1` |
 | Cache32Max boot profile | `scripts/test/test_cache32_boot.ps1` | `scripts/test/test_verify_all.ps1` |
 | SMP serial markers | `scripts/test/test_smp_boot.ps1` | `scripts/test/test_verify_all.ps1` |
 

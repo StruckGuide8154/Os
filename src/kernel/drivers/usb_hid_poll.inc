@@ -65,22 +65,27 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 
     ; It's a transfer event. Check completion code
     ; We already have EAX = Completion Code from xhci_poll_event
-    
+
     cmp eax, 1     ; Success
     je .process_data
     cmp eax, 13    ; Short Packet (Success with less data)
     je .process_data
-    
+
     ; If not Success or Short Packet, it's an error
     ; This likely means the endpoint is halted or there's a transaction error.
     ; We must recover aggressively.
-    
-    ; Debug: Print error code
+
+    ; Debug: Print error code (logless in release: gated like SER, but al holds
+    ; the runtime completion code so it can't use the immediate-only SER macro)
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
+    push rdx
     mov dx, 0x3F8
     add al, '0' ; Convert low nibble to char (rough)
     out dx, al
+    pop rdx
     pop rax
+%endif
     inc dword [usb_dbg_err]   ; DEBUG: count error completion codes
     mov [usb_dbg_errcode], al
 
@@ -137,6 +142,12 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     inc rsi
 .parsed_no_skip:
     movzx ecx, word [usb_ep_mps]
+    ; Fail-closed clamp on the parser extent: never walk more than a buffer's
+    ; worth regardless of the device-claimed mps (defence in depth vs the GHL mask).
+    cmp ecx, XHCI_HID_REPORT_MAX
+    jbe .parsed_len_ok
+    mov ecx, XHCI_HID_REPORT_MAX
+.parsed_len_ok:
     call hid_process_touchpad_report
     mov byte [mouse_moved], 1
     call usb_queue_mouse_read
@@ -174,7 +185,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     jz .done_movement
     div ecx
     mov [mouse_x], eax
-    
+
     movzx eax, word [rsi + 3]
     mov ecx, [scr_height]
     mul ecx
@@ -598,15 +609,21 @@ usb_queue_mouse_read:
     ; DWord 0, 1: Buffer Address
     mov r8d, XHCI_MOUSE_BUF_ADDR
     xor r9d, r9d
-    
+
     ; DWord 2: Length (Transfer Length)
     movzx r10d, word [usb_ep_mps]
+    ; Fail-closed clamp on the controller DMA length: cap at the buffer slack so
+    ; an over-large mps can never DMA past XHCI_MOUSE_BUF_ADDR's region.
+    cmp r10d, XHCI_HID_REPORT_MAX
+    jbe .q1_len_ok
+    mov r10d, XHCI_HID_REPORT_MAX
+.q1_len_ok:
     ; TD Size = 0, Interrupter = 0
-    
+
     ; DWord 3: Flags
     ; IOC (Interrupt On Completion) | ISP (Interrupt on Short Packet) | Setup? No, Normal TRB (1)
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2) ; ISP
-    
+
     call xhci_queue_int_trb
 
     ; Ring Doorbell for endpoint
@@ -622,6 +639,10 @@ usb_queue_mouse_read2:
     mov r8d, XHCI_MOUSE_BUF2_ADDR
     xor r9d, r9d
     movzx r10d, word [usb_ep2_mps]
+    cmp r10d, XHCI_HID_REPORT_MAX
+    jbe .q2_len_ok
+    mov r10d, XHCI_HID_REPORT_MAX
+.q2_len_ok:
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2)
     call xhci_queue_int_trb2
     movzx edi, byte [usb_slot2_id]

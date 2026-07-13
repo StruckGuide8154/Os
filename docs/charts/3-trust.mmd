@@ -1,0 +1,12 @@
+flowchart TB
+    ROOT["Ed25519 public root of trust (Track 7)"]
+    QUORUM["Threshold quorum (KQUORUM.ENV dual-approval ratchet)"]
+    FLOOR["Anti-rollback floors (floor_store @ LBA 2, RTC now-binding)"]
+    MANIFEST["Keyless SHA manifest (measured boot)"]
+    KENV["KERNEL.ENV (loader envelope, measured handoff)"]
+    APPENV["App envelopes (.ghl) 25-case reject matrix"]
+    ROOT --> QUORUM --> FLOOR --> MANIFEST
+    MANIFEST --> KENV
+    MANIFEST --> APPENV
+    KENV -->|"fail-closed KSG*"| BOOT["Boot / load"]
+    APPENV -->|"envelope_verify_signed"| LOAD["App launch"]

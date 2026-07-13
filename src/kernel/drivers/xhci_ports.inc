@@ -1,3 +1,15 @@
+; SECURITY (futureproof): the port loops below access op_base + 0x400 + port*0x10,
+; where op_base = xhci_mmio_base + CAPLENGTH (a byte register, <= 0xFF) and the
+; port index runs 0..xhci_max_ports-1 with xhci_max_ports a byte (<= 255). The
+; whole port-register span must stay inside the registered MMIO_XHCI_WINDOW so the
+; XHCI_MMIO_ASSERT base-probe (which proves only that the base lies in-window) is a
+; sufficient bound for every port index. Pin that invariant: if the window is ever
+; shrunk below the worst-case span, the build breaks instead of allowing an
+; out-of-window MMIO poke from a controller that over-reports MaxPorts.
+%if (0xFF + 0x400 + (255 * 0x10) + 0x10) > MMIO_XHCI_WINDOW
+  %error "xHCI port-register span can exceed MMIO_XHCI_WINDOW (max_ports unbounded)"
+%endif
+
 xhci_find_port:
     push rsi
     push rcx
@@ -11,7 +23,8 @@ xhci_find_port:
     movzx ecx, byte [xhci_max_ports]
     xor edx, edx                  ; Port index 0-based
 
-    ; Serial: 'P' + max_ports hex byte
+    ; Serial: 'P' + max_ports hex byte (debug-only: leaks controller topology)
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
     push rdx
     mov al, 'P'
@@ -21,6 +34,7 @@ xhci_find_port:
     call serial_hex32
     pop rdx
     pop rax
+%endif
 
     ; --- Power on EVERY root port first. After HCRST the ports come up
     ;     unpowered (PP=0); while PP=0 the CCS bit reads 0, so a scan would
@@ -70,7 +84,9 @@ xhci_find_port:
     shl eax, 4                    ; * 16 bytes per port
     mov ebx, [rsi + rax + XHCI_PORTSC]
 
-    ; Serial: print PORTSC for each port
+    ; Serial: print PORTSC for each port (debug-only: leaks per-port connect/
+    ; speed status = attached-device topology; never emit in release)
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
     push rdx
     mov eax, ebx
@@ -78,6 +94,7 @@ xhci_find_port:
     call serial_hex32
     pop rdx
     pop rax
+%endif
 
     ; Check CCS (Current Connect Status)
     test ebx, XHCI_PORTSC_CCS
@@ -121,7 +138,8 @@ xhci_find_port:
     lea eax, [edx + 1]
     mov [xhci_port_num], al
 
-    ; Serial: 'F' + port number
+    ; Serial: 'F' + port number (debug-only: leaks which port a device is on)
+%ifdef ENABLE_DEBUG_SERIAL
     push rax
     push rdx
     mov al, 'F'
@@ -131,6 +149,7 @@ xhci_find_port:
     call serial_hex32
     pop rdx
     pop rax
+%endif
 
     ; Re-read speed to check if it's USB 3.0+
     mov ecx, ebx
@@ -186,12 +205,12 @@ xhci_find_port:
     ; Normal Reset
     or eax, XHCI_PORTSC_PR             ; Set Port Reset
     jmp .apply_reset
-    
+
 .do_warm_reset:
     ; SuperSpeed Warm Reset
     ; WPR is bit 31
     or eax, (1 << 31)                  ; XHCI_PORTSC_WPR
-    
+
 .apply_reset:
     mov [xhci_dbg_portsc_written], eax  ; DEBUG: exact value we are writing
     mov [rsi + rdx + XHCI_PORTSC], eax

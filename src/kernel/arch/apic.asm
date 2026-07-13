@@ -23,6 +23,8 @@ global smp_target_cores
 global smp_core_states
 extern madt_enabled_cpu_count
 extern madt_lapic_ids
+extern tick_count               ; core/pit.asm - PIT tick (100Hz, 10ms/tick); used
+                                ; for real-time bounded delays in AP bring-up
 extern smp_worker_loop          ; proc/workqueue.asm - AP job-processing loop
 extern ap_long_mode_init        ; kernel/arch/apic.asm - Stage 2b ring-3 prep
 
@@ -246,19 +248,165 @@ FN_BEGIN smp_ap_startup, 0, 0, FN_RET_SCALAR
     mov [smp_target_cores], eax
     cmp eax, 2
     jb .done
+    ; ---- Batched parallel bring-up (was: serial per-AP INIT-SIPI-SIPI+wait) --
+    ; The old path called smp_start_one in a loop: each AP paid its own 3 inter-
+    ; IPI delays AND a full alive-wait before the next AP was even touched, so
+    ; the ~10 ms INIT delay + wait was multiplied by the core count (the bulk of
+    ; the ~600 ms L0 stage under TCG). We now drive the canonical INIT-SIPI-SIPI
+    ; as three batched phases: assert/deassert/SIPI are issued to every target AP
+    ; back-to-back, and the mandatory inter-phase delays (10 ms after INIT, ~200 us
+    ; after SIPI #1) are paid ONCE for the whole fan-out. All APs then come up in
+    ; parallel and we wait on the aggregate started-count once. Targeted physical
+    ; destination (not an all-excluding-self broadcast) so RELEASE_BUILD's "start
+    ; exactly one AP" intent is preserved. Trampoline self-identifies by APIC id,
+    ; so the BSP no longer pre-stages per-AP stack/state pointers.
+    mov rdi, [lapic_base]
+    ; Phase 1: INIT assert to every target AP.
     mov ecx, 1
-.loop:
+.p1:
     cmp ecx, [smp_target_cores]
-    jae .done
-    call smp_start_one
+    jae .p1_done
+    call smp_apicid_for          ; ecx -> eax = target apic id
+    mov r8d, eax
+    mov r9d, LAPIC_ICR_INIT_ASSERT
+    call smp_send_ipi
     inc ecx
-    jmp .loop
+    jmp .p1
+.p1_done:
+    mov edx, 2                   ; >=10 ms: wait two PIT edges (10 ms/tick)
+    call smp_wait_pit_edges
+    ; Phase 2: INIT de-assert + STARTUP (SIPI #1) to every target AP.
+    mov ecx, 1
+.p2:
+    cmp ecx, [smp_target_cores]
+    jae .p2_done
+    call smp_apicid_for
+    mov r8d, eax
+    mov r9d, LAPIC_ICR_INIT_DEASSERT
+    call smp_send_ipi
+    mov r9d, LAPIC_ICR_STARTUP
+    call smp_send_ipi
+    inc ecx
+    jmp .p2
+.p2_done:
+    call smp_short_delay         ; ~200 us inter-SIPI gap (paid once)
+    ; Phase 3: STARTUP (SIPI #2) to every target AP. Per the Intel algorithm a
+    ; second SIPI is sent in case an AP missed the first; modern parts/QEMU
+    ; usually start on #1, so most APs are already live and ignore this.
+    mov ecx, 1
+.p3:
+    cmp ecx, [smp_target_cores]
+    jae .p3_done
+    call smp_apicid_for
+    mov r8d, eax
+    mov r9d, LAPIC_ICR_STARTUP
+    call smp_send_ipi
+    inc ecx
+    jmp .p3
+.p3_done:
+    call smp_wait_all_alive      ; single bounded wait for the whole fan-out
+    ; Reflect the check-in count in smp_started_cores (was incremented per-AP by
+    ; the removed smp_wait_alive). +1 for the BSP. alive/parked are recomputed
+    ; authoritatively by smp_count_states below from the per-core state records.
+    mov eax, [smp_ap_started_count]
+    inc eax
+    mov [smp_started_cores], eax
 .done:
     call smp_count_states
     pop rdi
     pop rsi
     pop rcx
     pop rbx
+    ret
+
+; smp_apicid_for(ecx=dense core index) -> eax = target APIC id. Mirrors the old
+; smp_start_one mapping: madt_lapic_ids[idx] when a MADT is present, else the
+; index itself (contiguous-id fallback for MADT-less boots).
+smp_apicid_for:
+    cmp dword [abs madt_enabled_cpu_count], 2
+    jb .aif_fallback
+    movzx eax, byte [madt_lapic_ids + rcx]
+    ret
+.aif_fallback:
+    mov eax, ecx
+    ret
+
+; smp_send_ipi(rdi=lapic_base, r8d=apic id, r9d=ICR-low command). Waits (bounded)
+; for any in-flight IPI to drain, programs ICR-high with the physical destination,
+; then writes ICR-low to fire. Clobbers eax only.
+smp_send_ipi:
+    push rcx
+    mov ecx, 0x100000            ; bounded delivery-status drain
+.si_wait:
+    mov eax, [rdi + 0x300]
+    test eax, 0x1000             ; delivery status pending?
+    jz .si_go
+    pause
+    dec ecx
+    jnz .si_wait
+.si_go:
+    mov eax, r8d
+    shl eax, 24
+    mov [rdi + 0x310], eax       ; ICR high = dest apic id << 24
+    mov [rdi + 0x300], r9d       ; ICR low = command (fires the IPI)
+    pop rcx
+    ret
+
+; smp_wait_pit_edges(edx = number of PIT tick edges to wait, ~10 ms each).
+; Real-time delay off the already-running PIT (sti ran at K8, before this).
+; A pause-loop safety cap guarantees forward progress even if the PIT were
+; wedged, so a stuck timer can never hang boot here.
+smp_wait_pit_edges:
+    push rax
+    push r8
+    push r9
+    mov r8, [tick_count]
+    mov r9d, edx                 ; zero-extends edx into r9
+    add r8, r9                   ; target tick
+    mov r9, 0x4000000            ; safety cap
+.wpe:
+    mov rax, [tick_count]
+    cmp rax, r8
+    jae .wpe_done
+    pause
+    dec r9
+    jnz .wpe
+.wpe_done:
+    pop r9
+    pop r8
+    pop rax
+    ret
+
+; smp_wait_all_alive - wait until every target AP has checked in
+; (smp_ap_started_count >= target-1) OR a generous PIT-edge timeout elapses, then
+; return. Bounded + fail-soft: a no-show AP is simply not counted by the
+; subsequent smp_count_states, exactly as the old per-AP timeout behaved, but the
+; whole fan-out is awaited ONCE in parallel instead of serially.
+smp_wait_all_alive:
+    push rax
+    push rcx
+    push r8
+    push r9
+    mov ecx, [smp_target_cores]
+    dec ecx                      ; expected AP count = target - 1
+    mov r8, [tick_count]
+    add r8, 30                   ; ~300 ms aggregate timeout
+    mov r9, 0x8000000            ; pause-loop safety cap (wedged-PIT guard)
+.waa:
+    mov eax, [smp_ap_started_count]
+    cmp eax, ecx
+    jae .waa_done
+    mov rax, [tick_count]
+    cmp rax, r8
+    jae .waa_done
+    pause
+    dec r9
+    jnz .waa
+.waa_done:
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
     ret
 
 smp_init_states:
@@ -276,6 +424,7 @@ smp_init_states:
     mov dword [abs smp_started_cores], 1
     mov dword [abs smp_alive_cores], 1
     mov dword [abs smp_parked_cores], 1
+    mov dword [abs smp_ap_started_count], 0  ; APs lock-inc this as they check in
     ret
 
 smp_copy_trampoline:
@@ -286,61 +435,10 @@ smp_copy_trampoline:
     wbinvd
     ret
 
-smp_start_one:
-    push rcx
-    mov eax, ecx
-    imul eax, SMP_CORE_STATE_SIZE
-    lea rbx, [smp_core_states + rax]
-    mov dword [rbx + 0], 1
-    mov [rbx + 4], ecx
-    cmp dword [madt_enabled_cpu_count], 2
-    jb .fallback_id
-    movzx eax, byte [madt_lapic_ids + rcx]
-    jmp .got_id
-.fallback_id:
-    mov eax, ecx
-.got_id:
-    mov [rbx + 8], eax
-    mov qword [rbx + 16], 0
-    mov rax, SMP_CORE_STACK_BASE
-    mov edx, ecx
-    inc edx
-    imul edx, SMP_CORE_STACK_SIZE
-    add rax, rdx
-    mov [abs SMP_TRAMPOLINE_ADDR + ap_boot_stack_ptr - ap_tramp_start], rax
-    mov [abs SMP_TRAMPOLINE_ADDR + ap_boot_state_ptr - ap_tramp_start], rbx
-    wbinvd
-    mov rdi, [abs lapic_base]
-    mov eax, [rbx + 8]
-    shl eax, 24
-    mov [rdi + 0x310], eax
-    mov dword [rdi + 0x300], LAPIC_ICR_INIT_ASSERT
-    call smp_short_delay
-    mov dword [rdi + 0x300], LAPIC_ICR_INIT_DEASSERT
-    call smp_short_delay
-    mov dword [rdi + 0x300], LAPIC_ICR_STARTUP
-    call smp_short_delay
-    mov dword [rdi + 0x300], LAPIC_ICR_STARTUP
-    call smp_wait_alive
-    pop rcx
-    ret
-
-smp_wait_alive:
-%ifdef RELEASE_BUILD
-    mov edx, 50000
-%else
-    mov edx, 2000000
-%endif
-.wait:
-    cmp qword [rbx + 16], 0
-    jne .alive
-    dec edx
-    jnz .wait
-    mov dword [rbx + 0], 4
-    ret
-.alive:
-    inc dword [smp_started_cores]
-    ret
+; (smp_start_one / smp_wait_alive removed: the serial per-AP INIT-SIPI-SIPI+wait
+; was replaced by the batched parallel phases in smp_ap_startup above, and the AP
+; trampoline now self-identifies by APIC id rather than reading a BSP-staged
+; per-AP stack/state pointer.)
 
 smp_count_states:
     xor eax, eax
@@ -408,8 +506,66 @@ ap_lm64:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov rsp, [abs SMP_TRAMPOLINE_ADDR + ap_boot_stack_ptr - ap_tramp_start]
-    mov rdi, [abs SMP_TRAMPOLINE_ADDR + ap_boot_state_ptr - ap_tramp_start]
+    ; --- Self-identify: APIC id -> dense core index --------------------------
+    ; The BSP no longer stages this AP's stack/state pointer (that only worked
+    ; when APs were started one at a time). With the batched parallel bring-up,
+    ; several APs execute this trampoline concurrently, so each one must derive
+    ; its OWN identity. Read this core's APIC id and map it to its dense index
+    ; via madt_lapic_ids - the exact mapping the BSP used and that wd_core_index
+    ; relies on - then compute its private stack and per-core state record. An
+    ; AP that is not in the target set (or that wrongly resolves to index 0, the
+    ; BSP slot) parks rather than scribbling on another core's state: a spurious
+    ; or injected SIPI cannot hijack a live slot.
+    ; KASLR-safe addressing: this is the trampoline COPY running at the low fixed
+    ; SMP_TRAMPOLINE_ADDR, so RIP-relative is wrong; relocated kernel symbols
+    ; (madt_*, lapic_base, smp_*) are loaded as imm64 addresses into a register
+    ; first (the KASLR relocator fixes up those imm64s) then dereffed - the same
+    ; pattern the original trampoline used for smp_ap_started_count. smp_core_states
+    ; and the SMP_* sizes are fixed low equ constants and are used directly.
+    ; Read this core's APIC id via CPUID.1:EBX[31:24], NOT the LAPIC MMIO ID
+    ; register: the boot page tables (CR3 here) do not map the LAPIC MMIO page
+    ; (0xFEE00xxx) until mmio_register_lapic runs later, and the AP has no IDT
+    ; yet, so an MMIO read here #PFs straight into a triple fault. The CPUID
+    ; initial APIC id equals the LAPIC ID register value and madt_lapic_ids[]
+    ; for xAPIC, so the mapping below is identical to wd_core_index's.
+    mov eax, 1
+    cpuid
+    shr ebx, 24
+    mov esi, ebx                   ; esi = this core's APIC id
+    mov r8, smp_target_cores       ; &smp_target_cores (relocated)
+    mov r9, madt_enabled_cpu_count ; &madt_enabled_cpu_count (relocated)
+    mov r10, madt_lapic_ids        ; &madt_lapic_ids[0] (relocated)
+    xor ecx, ecx                   ; index scan cursor
+.ap_id_scan:
+    cmp ecx, [r8]                  ; smp_target_cores
+    jae .ap_park                   ; not a targeted core -> park
+    cmp dword [r9], 2
+    jb .ap_id_fallback             ; MADT-less: id == index (contiguous fallback)
+    movzx eax, byte [r10 + rcx]
+    jmp .ap_id_cmp
+.ap_id_fallback:
+    mov eax, ecx
+.ap_id_cmp:
+    cmp eax, esi
+    je .ap_id_found
+    inc ecx
+    jmp .ap_id_scan
+.ap_id_found:
+    test ecx, ecx
+    jz .ap_park                    ; index 0 is the BSP - an AP must never claim it
+    ; private stack = SMP_CORE_STACK_BASE + (index+1)*SMP_CORE_STACK_SIZE
+    mov eax, ecx
+    inc eax
+    imul eax, eax, SMP_CORE_STACK_SIZE
+    mov rsp, SMP_CORE_STACK_BASE
+    add rsp, rax
+    ; per-core state record = smp_core_states + index*SMP_CORE_STATE_SIZE
+    mov eax, ecx
+    imul eax, eax, SMP_CORE_STATE_SIZE
+    mov rdi, smp_core_states
+    add rdi, rax
+    mov [rdi + 4], ecx             ; record dense core index (read back below)
+    mov [rdi + 8], esi             ; record APIC id
     ; Enable SSE on this AP so offloaded compute jobs (e.g. SVG rasterisation,
     ; which is often vectorised) do not #UD: CR0.EM=0, CR0.MP=1, CR4.OSFXSR=1.
     mov rax, cr0
@@ -419,9 +575,9 @@ ap_lm64:
     mov rax, cr4
     or eax, 0x200               ; set OSFXSR (bit 9)
     mov cr4, rax
-    inc qword [rdi + 16]        ; first liveness beat - smp_wait_alive waits on this
+    inc qword [rdi + 16]        ; first liveness beat
     mov rax, smp_ap_started_count
-    lock inc dword [rax]
+    lock inc dword [rax]        ; aggregate check-in; smp_wait_all_alive waits on this
     mov dword [rdi + 0], 3      ; state = PARKED/available (counted by smp_count_states)
     ; --- Stage 2b: prepare this AP to handle ring 3 -------------------------
     ; ap_long_mode_init lives in the kernel image at its real address (not in
@@ -440,6 +596,13 @@ ap_lm64:
     ; core now pulls compute jobs from the queue instead of sitting in HLT.
     mov rax, smp_worker_loop
     jmp rax
+.ap_park:
+    ; Untargeted / unidentifiable AP (spurious or injected SIPI, or a core
+    ; outside the started set): halt safely without touching any core's state.
+    cli
+.ap_park_hlt:
+    hlt
+    jmp .ap_park_hlt
 align 8
 ap_gdt:
     dq 0
@@ -449,10 +612,6 @@ ap_gdt:
 ap_gdt_ptr:
     dw ap_gdt_ptr - ap_gdt - 1
     dq SMP_TRAMPOLINE_ADDR + ap_gdt - ap_tramp_start
-ap_boot_stack_ptr:
-    dq 0
-ap_boot_state_ptr:
-    dq 0
 ap_tramp_end:
 
 ; ----------------------------------------------------------------------------
@@ -494,24 +653,69 @@ ap_long_mode_init:
     push rcx
     push rdi
     mov ecx, edi                      ; save core index across the GDT load
-    ; --- 0. Sanitize CR4 to match what the UEFI loader did for the BSP. ---
+    ; --- 0. Sanitize CR4 to a known-clean base, then re-derive SMEP/SMAP. ---
     ; UEFI may leave SMEP / SMAP / PCIDE / LA57 / PKE set when it hands off,
-    ; and the trampoline only forced PAE on. With SMAP enabled in particular,
-    ; the first time call_app_l3 writes the slot's shadow-window page from
-    ; kernel mode the AP page-faults (kernel touching a USER-bit page) and
-    ; without a recoverable #PF handler the AP triple-faults silently. This
-    ; mirrors the sanitisation in src/boot/uefi_loader.asm.
+    ; and the trampoline only forced PAE on. We start from a clean CR4 (clear
+    ; the inherited bits) and then, under ENABLE_SMAP, re-enable SMEP/SMAP per
+    ; CPUID exactly as the BSP's smap_smep_init does. This MUST be symmetric
+    ; with the BSP: every worker AP runs ring-3 callbacks (smp_worker_loop ->
+    ; cb_run_guarded -> call_app_l3), so leaving SMEP/SMAP off here would let a
+    ; callback execute on a core with the kernel/user boundary hardening
+    ; disabled - a confused-deputy / ret2usr hole the BSP does not have.
+    ; The historical reason this code disabled SMAP (call_app_l3's shadow-window
+    ; write #PF'ing a USER page from kernel mode) is gone: l3_prepare_callback
+    ; now brackets every user write with smap_open/smap_close (stac/clac), so
+    ; SMAP no longer faults the AP. mirrors src/boot/uefi_loader.asm + smap.inc.
     mov rax, cr4
     btr rax, 7                        ; PGE   off
     btr rax, 12                       ; LA57  off
     btr rax, 17                       ; PCIDE off
-    btr rax, 20                       ; SMEP  off
-    btr rax, 21                       ; SMAP  off
+    btr rax, 20                       ; SMEP  off (re-derived from CPUID below)
+    btr rax, 21                       ; SMAP  off (re-derived from CPUID below)
     btr rax, 22                       ; PKE   off
     bts rax, 5                        ; PAE   on
     bts rax, 9                        ; OSFXSR on
     bts rax, 10                       ; OSXMMEXCPT on
+%ifdef ENABLE_SMAP
+    ; CPUID.(7,0).EBX: SMEP = bit 7 -> CR4 bit 20, SMAP = bit 20 -> CR4 bit 21.
+    ; Only set the bits this part actually advertises so non-SMAP silicon still
+    ; boots. rax carries the CR4 image being built; preserve it across cpuid.
+    push rax
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    mov ecx, ebx                      ; stash feature bits (clobbered registers)
+    pop rax
+    bt  ecx, 7
+    jnc .ap_no_smep
+    bts rax, 20                       ; CR4.SMEP
+.ap_no_smep:
+    bt  ecx, 20
+    jnc .ap_no_smap
+    bts rax, 21                       ; CR4.SMAP
+.ap_no_smap:
+%endif
     mov cr4, rax
+%ifdef ENABLE_SMAP
+    ; Arm SMAP with AC clear so any later stray kernel user-deref on this core
+    ; faults until a stac bracket opens the window (matches smap_smep_init's
+    ; closing clac on the BSP).
+    clac
+%endif
+    ; CR0.WP: enforce supervisor write-protect on this core (security fix #2).
+    ; CR0.WP makes ring-0 honor read-only PTEs - it is the mechanism behind
+    ; kernel_lockdown_ro (.text RO) and nk_protect_page_tables (page tables RO).
+    ; WP is PER-CORE: the BSP sets it at lockdown via nk_engage_wp, but APs come
+    ; out of the trampoline with WP=0 (the UEFI loader cleared it to write the
+    ; firmware-RO 0x100000). Without this, a kernel write primitive running on a
+    ; worker AP (which the AP DOES run: render/callback jobs) bypasses both the
+    ; RO .text lockdown and the nested-kernel page-table protection. Arm it now,
+    ; before the BSP's later lockdown marks those pages RO. APs never legitimately
+    ; write .text or page tables (the nk WP-toggle window is BSP-only), so WP=1
+    ; here is purely protective and cannot fault the AP's own job path.
+    mov rax, cr0
+    bts rax, 16                       ; CR0.WP
+    mov cr0, rax
     ; EFER: enable NXE so kernel page tables with the NX bit are accepted.
     push rdx
     mov ecx, IA32_EFER_MSR
@@ -528,6 +732,17 @@ ap_long_mode_init:
     mov eax, IA32_PAT_CANONICAL_LO
     mov edx, IA32_PAT_CANONICAL_HI
     wrmsr
+    ; Read PAT back and record it in this AP's per-core state slot (offset 24,
+    ; AP_STATE_OFF_PAT) so the BSP can emit it after startup and a test can
+    ; assert every core agrees on the WC layout. ecx still = IA32_PAT_MSR.
+    rdmsr                             ; edx:eax = this CPU's live PAT
+    push rbx
+    mov ebx, edi                      ; edi = this AP's core index (preserved)
+    imul ebx, ebx, SMP_CORE_STATE_SIZE
+    lea rcx, [smp_core_states + rbx]   ; smp_core_states is an absolute equ
+    mov [rcx + AP_STATE_OFF_PAT],     eax
+    mov [rcx + AP_STATE_OFF_PAT + 4], edx
+    pop rbx
     pop rdx
     mov ecx, edi                      ; restore core index in ecx
     ; --- 1. Load the kernel GDT ---

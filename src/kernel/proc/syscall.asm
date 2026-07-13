@@ -43,7 +43,7 @@ FAT16_MAX_ENTRIES   equ FAT16_ROOT_CACHE_SZ / DIR_ENTRY_SIZE
 FS_ENTRY_INFO_SIZE  equ 20
 SYSCALL_MAX_STR_LEN equ 256
 APP_MIN_ID          equ 2
-APP_MAX_ID          equ 11
+APP_MAX_ID          equ 11              ; 11 = APP_MEDIA; ring-3 shell is parked
 APP_OPEN_CMD_MAX    equ 256
 SYSCALL_ENTRY_SIZE  equ 24
 SYSCALL_HANDLER_OFF equ 0
@@ -60,13 +60,11 @@ SYSCALL_CAP_OFF     equ 13
 ; land; un-flagged rows keep the legacy probe.
 SYSCALL_FLAGS_OFF   equ 15
 SC_FLAG_STRICT      equ 0x01
-; Optional per-arg descriptor qword. 4 bits per arg (6 args = 24 bits used);
-; nibble N != 0 means "byte length of this PTR arg lives in scalar arg
-; (nibble - 1)". The validator pulls that sibling and uses it as the real
-; range length, instead of the 1-byte probe. The "one missed handler is a
-; bug" pattern goes away - the dispatcher always range-validates, even when
-; the handler forgets. Reserved bits stay zero for future alignment/NUL-cap
-; descriptors. Encode with SC_DESC_LEN / SC_DESC macros below.
+; Optional per-arg descriptor qword. Bits 0..47 hold six 8-bit length/size
+; fields; bits 48..53 are the per-argument WRITE-direction bitmap. The
+; dispatcher uses the direction bit to select the slot-only output validator
+; instead of the read validator (which may also accept the shared user blob).
+; Encode with the SC_DESC_* macros in syscall_support.inc.
 SYSCALL_ARG_DESC_OFF equ 16
 
 ; Slot-internal layout - duplicate of usermode.asm's locals; see

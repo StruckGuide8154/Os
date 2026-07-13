@@ -1,0 +1,159 @@
+/* ============================================================
+   Grit — Color System  (dark-first)
+   Grounded in assets/themes/{dark,light}/theme.xml from the
+   grit / GritHL repo, refined into a soft, layered desktop palette.
+
+   Direction: calm cool-neutral near-blacks (never pure OLED black,
+   so 3D-depth wallpapers read), under a single MUTED GOLD accent.
+   No electric neon, no glow spam — color is earned, not sprayed.
+
+   Raw ramps carry the prefix --grit-*; the semantic aliases below
+   are what components actually consume. Accent is swappable: the
+   default is gold; [data-accent="..."] re-points the accent aliases
+   so Settings / theme packs can switch the whole system at runtime.
+   ============================================================ */
+
+:root {
+  /* ---- Neutral ramp (soft cool near-black -> light) ---------- */
+  --grit-void:       #0E1013;  /* desktop backdrop (NOT pure black) */
+  --grit-bg:         #131519;  /* app canvas                        */
+  --grit-surface-1:  #181A1F;  /* window body                       */
+  --grit-surface-2:  #1E2127;  /* panels, sidebars                  */
+  --grit-surface-3:  #262A31;  /* inputs, raised, hover             */
+  --grit-surface-4:  #30343D;  /* active / pressed raised           */
+  --grit-border-1:   #24272E;  /* hairline divider                  */
+  --grit-border-2:   #31353E;  /* control border                    */
+  --grit-border-3:   #424753;  /* strong / focus-adjacent border    */
+
+  /* ---- Text (soft warm-white, not clinical #FFF) ------------- */
+  --grit-text-1:     #ECEDEF;  /* primary / headings                */
+  --grit-text-2:     #A8ACB4;  /* body / secondary                  */
+  --grit-text-3:     #71757E;  /* muted / captions                  */
+  --grit-text-4:     #4D515B;  /* faint / disabled                  */
+  --grit-text-invert:#17150F;  /* warm near-black on gold           */
+
+  /* ---- Accent palettes (theme packs) ------------------------- */
+  /* GOLD — the default Grit accent. Muted, premium, never garish. */
+  --gold-base:    #C9A26A;
+  --gold-bright:  #DCBA84;  /* hover lift                          */
+  --gold-deep:    #A8854F;  /* pressed / light-theme accent        */
+  --gold-soft:    rgba(201, 162, 106, 0.14);  /* tinted fill       */
+  --gold-faint:   rgba(201, 162, 106, 0.07);
+  --gold-ring:    rgba(201, 162, 106, 0.42);
+  --gold-grad:    linear-gradient(135deg, #D8B47E 0%, #B98C50 100%); /* @kind color */
+
+  /* COPPER — warm alternate */
+  --copper-base:  #C17A57;  --copper-bright: #D6967A; --copper-deep: #9E5E3F;
+  --copper-soft:  rgba(193, 122, 87, 0.14); --copper-faint: rgba(193,122,87,0.07);
+  --copper-ring:  rgba(193, 122, 87, 0.42);
+  --copper-grad:  linear-gradient(135deg, #D08C68 0%, #A86344 100%); /* @kind color */
+
+  /* SAGE — calm green alternate */
+  --sage-base:    #79A98C;  --sage-bright: #95C2A6; --sage-deep: #5E8B72;
+  --sage-soft:    rgba(121, 169, 140, 0.14); --sage-faint: rgba(121,169,140,0.07);
+  --sage-ring:    rgba(121, 169, 140, 0.42);
+  --sage-grad:    linear-gradient(135deg, #8DBC9E 0%, #648F77 100%); /* @kind color */
+
+  /* SLATE — cool neutral-blue alternate (the calm, no-color option) */
+  --slate-base:   #7C879B;  --slate-bright: #98A2B4; --slate-deep: #626D80;
+  --slate-soft:   rgba(124, 135, 155, 0.14); --slate-faint: rgba(124,135,155,0.07);
+  --slate-ring:   rgba(124, 135, 155, 0.42);
+  --slate-grad:   linear-gradient(135deg, #909AAD 0%, #6A7488 100%); /* @kind color */
+
+  /* ---- Semantic status (muted, harmonized with gold) --------- */
+  --grit-success:    #6FB894;
+  --grit-success-soft: rgba(111, 184, 148, 0.14);
+  --grit-warning:    #D6A444;
+  --grit-warning-soft: rgba(214, 164, 68, 0.14);
+  --grit-error:      #CF6F66;
+  --grit-error-soft: rgba(207, 111, 102, 0.14);
+  --grit-info:       #7C879B;
+
+  /* ============================================================
+     Semantic aliases — consume THESE in components
+     ============================================================ */
+  --surface-desktop:  var(--grit-void);
+  --surface-app:      var(--grit-bg);
+  --surface-window:   var(--grit-surface-1);
+  --surface-panel:    var(--grit-surface-2);
+  --surface-input:    var(--grit-surface-3);
+  --surface-raised:   var(--grit-surface-3);
+  --surface-hover:    var(--grit-surface-3);
+  --surface-active:   var(--grit-surface-4);
+
+  --border:           var(--grit-border-1);
+  --border-control:   var(--grit-border-2);
+  --border-strong:    var(--grit-border-3);
+
+  --text-heading:     var(--grit-text-1);
+  --text-body:        var(--grit-text-2);
+  --text-muted:       var(--grit-text-3);
+  --text-faint:       var(--grit-text-4);
+  --text-invert:      var(--grit-text-invert);
+  --text-accent:      var(--accent-hover);
+
+  /* ---- Active accent (default = gold). Override via [data-accent]. */
+  --accent:        var(--gold-base);
+  --accent-hover:  var(--gold-bright);
+  --accent-press:  var(--gold-deep);
+  --accent-fill:   var(--gold-soft);
+  --accent-faint:  var(--gold-faint);
+  --accent-grad:   var(--gold-grad);
+  --focus-ring:    var(--gold-ring);
+  --on-accent:     var(--grit-text-invert);
+}
+
+/* ---- Accent theme packs (gold is the :root default) ---------- */
+[data-accent="copper"] {
+  --accent: var(--copper-base); --accent-hover: var(--copper-bright);
+  --accent-press: var(--copper-deep); --accent-fill: var(--copper-soft);
+  --accent-faint: var(--copper-faint); --accent-grad: var(--copper-grad);
+  --focus-ring: var(--copper-ring);
+}
+[data-accent="sage"] {
+  --accent: var(--sage-base); --accent-hover: var(--sage-bright);
+  --accent-press: var(--sage-deep); --accent-fill: var(--sage-soft);
+  --accent-faint: var(--sage-faint); --accent-grad: var(--sage-grad);
+  --focus-ring: var(--sage-ring);
+}
+[data-accent="slate"] {
+  --accent: var(--slate-base); --accent-hover: var(--slate-bright);
+  --accent-press: var(--slate-deep); --accent-fill: var(--slate-soft);
+  --accent-faint: var(--slate-faint); --accent-grad: var(--slate-grad);
+  --focus-ring: var(--slate-ring);
+}
+
+/* ============================================================
+   Light theme — opt-in via [data-theme="light"]
+   Warm paper neutrals, gold reads as a deeper ochre for contrast.
+   (from assets/themes/light/theme.xml, refined)
+   ============================================================ */
+[data-theme="light"] {
+  --grit-void:       #E7E4DD;
+  --grit-bg:         #F4F2EC;
+  --grit-surface-1:  #FBFAF6;
+  --grit-surface-2:  #F0EEE7;
+  --grit-surface-3:  #E7E4DB;
+  --grit-surface-4:  #DBD7CC;
+  --grit-border-1:   #E0DCD1;
+  --grit-border-2:   #CDC8BA;
+  --grit-border-3:   #B0A99A;
+
+  --grit-text-1:     #1B1A16;
+  --grit-text-2:     #45433C;
+  --grit-text-3:     #6F6C61;
+  --grit-text-4:     #9C988B;
+  --grit-text-invert:#FBFAF6;
+
+  --gold-base:    #9A7637;  --gold-bright: #B08C4C; --gold-deep: #7E5F28;
+  --gold-soft:    rgba(154, 118, 55, 0.13); --gold-faint: rgba(154,118,55,0.06);
+  --gold-ring:    rgba(154, 118, 55, 0.38);
+  --gold-grad:    linear-gradient(135deg, #B0884A 0%, #8C6A30 100%); /* @kind color */
+
+  --grit-success:  #3F9B72;
+  --grit-warning:  #B8822A;
+  --grit-error:    #BC4F46;
+  --grit-info:     #5E6B82;
+
+  --on-accent:     #FBFAF6;
+}

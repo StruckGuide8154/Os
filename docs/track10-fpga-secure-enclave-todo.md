@@ -498,3 +498,26 @@ peripheral structurally can't be.
   of the enclave protocol (Phase A + latch + Phase B) so the host boot/driver/monitor path
   is CI-testable without the board; full crypto/tamper validation needs the HW rig.
 - This is **design-only**. No host code, gateware, or board procurement yet.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 6 / speed 5 (target)**. Software/models are complete
+(phase/session/boot, 61 RTL checks, generation); the gap is physical — no board, no
+real crypto cores, no lab validation, plus the irreducible first-instruction gap.
+
+- [ ] **(sec→10, board-gated)** Order the IGLOO2 M2GL010TS + finish the gateware
+      crypto (field25519/X25519/Ed25519/AEAD/fabric-USB), constant-time build-gated.
+- [ ] **(sec→10)** Real PUF-derived master (never stored readable) + HW monotonic
+      counters + voted tamper-zeroize, validated on the rig.
+- [ ] **(sec→10)** Tier-B earliest-self-measurement into board PCRs over a nonce —
+      shrinks (does not close) the first-instruction window; write the residual-trust
+      statement so the claim stays honest.
+- [ ] **Verify:** an independent agent re-rates this track **security 10 (board
+      present, bounded by the documented first-instruction + lab-physical residuals)**.
+- **Honest cap:** security 10 here is explicitly *bounded* — it never claims to fix a
+      compromised host at runtime, close the pre-enumeration firmware gap, or defeat
+      lab-grade physical attacks. Those are documented non-goals, not silent holes.
+- **(speed→max under sec 10)** Privileged ops fire once per boot (off the hot path);
+      Phase-B is async tick-FSM so USB latency never freezes the GUI. Speed ceiling is
+      **~7** — USB round-trip latency is physical and cannot reach 10. Stated honestly
+      rather than faked.

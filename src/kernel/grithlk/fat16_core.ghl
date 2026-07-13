@@ -53,7 +53,7 @@ extern kernel_canary;      # final kernel canary qword (cache-guard seed)
 extern kernel_panic_canary;  # noreturn cache-guard panic (rdi/rsi/edx ABI)
 
 # -------------------- geometry --------------------
-const FAT16_PART_LBA   = 4160;        # KERNEL_START_SECTOR(64) + KERNEL_SECTORS(4096)
+const FAT16_PART_LBA   = 8256;        # KERNEL_START_SECTOR(64) + KERNEL_SECTORS(8192); guarded by build_ghl.ps1
 const SECT_BYTES       = 512;
 const DIR_ENTRY_SIZE   = 32;
 const ROOT_CACHE_SECTORS = 32;
@@ -223,8 +223,12 @@ fn fat16_init() {
 fn f16_probe_marker() {
     if ata_read_sectors(FAT16_PART_LBA, &fat16_sector_buf, 1) != 0 { return 0; }
     if f16_rd_u16(&fat16_sector_buf + 510) != 0xAA55 { return 0; }
-    if f16_rd_u32(&fat16_sector_buf + 3) != 0x5558454E { return 0; }   # "NEXU"
-    if f16_rd_u32(&fat16_sector_buf + 7) != 0x20534F53 { return 0; }   # "SOS "
+    # OEM-name marker stamped by build_uefi.ps1: "GRIT    " (8 bytes). Pre-rebrand
+    # images used "NEXUSOS "; the Grit rebrand changed the image stamp but this
+    # probe was missed, so it fail-closed on every boot and the file manager
+    # always listed 0 files.
+    if f16_rd_u32(&fat16_sector_buf + 3) != 0x54495247 { return 0; }   # "GRIT"
+    if f16_rd_u32(&fat16_sector_buf + 7) != 0x20202020 { return 0; }   # "    "
     return 1;
 }
 

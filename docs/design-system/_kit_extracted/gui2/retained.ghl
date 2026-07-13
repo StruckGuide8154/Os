@@ -1,0 +1,146 @@
+# ============================================================================
+# GritHL GUI v2 - retained.ghl
+# Retained-mode node tree + content-hash diff: only repaint what changed.
+#
+# v1 is pure immediate-mode - the app redraws every widget from scratch each
+# frame. v2 keeps the widget tree alive between frames. Each node carries a
+# content hash (its kind, geometry, color and text folded together). On a
+# new frame the app re-stamps node content; nodes whose hash is unchanged
+# emit nothing and contribute no damage. A changed node marks its arranged
+# rect dirty (damage.ghl) and re-emits its draw records (batch.ghl). The
+# compositor then repaints only the damage union.
+#
+# This is the piece that ties the other four files together: layout.ghl
+# sizes the tree, this diffs it, batch.ghl records the survivors, damage.ghl
+# bounds the repaint, atlas.ghl supplies cached glyphs.
+# ============================================================================
+
+use core
+
+# Node arena. Fixed-size nodes (layout.ghl::N_SIZE = 128 bytes) bump-allocated
+# from a pool; the desktop's whole tree is a few hundred nodes.
+const NODE_POOL  = 0x00B00000
+const NODE_CAP   = 2048
+const NODE_HEAD  = 0x00AFFFF0       # bump cursor (node index)
+
+# Extra node fields layered on top of the layout offsets.
+const N_HASH     = 120              # content hash from the last stamp
+
+# Paint/visual fields (kept past N_SIZE-relevant layout fields).
+const NV_COLOR   = 56 + 8           # NOTE: reuse-safe scratch; see stamp_*
+# To stay clear of layout's offsets we store visual data in a parallel band:
+const NVZ_COLOR  = 0
+const NVZ_FG     = 8
+const NVZ_BG     = 16
+const NVZ_STR    = 24
+const NVZ_BAND   = 0x00A80000       # parallel visual band, indexed by node id
+
+extern dmg_node;
+extern cmd_rect;
+extern atlas_draw_text;
+
+fn node_reset() {
+    sq(NODE_HEAD, 0);
+}
+
+# Allocate a node, zeroed. Returns its base address.
+fn node_new(kind) {
+    let n = lq(NODE_HEAD);
+    if n >= NODE_CAP { return 0; }
+    sq(NODE_HEAD, n + 1);
+    let p = NODE_POOL + n * 128;
+    let q = 0;
+    while q < 16 { sq(p + q * 8, 0); q = q + 1; }
+    sq(p + N_KIND, kind);
+    return p;
+}
+
+fn node_id(node) {
+    return (node - NODE_POOL) / 128;
+}
+
+fn vz(node) {
+    return NVZ_BAND + node_id(node) * 32;
+}
+
+# Link `child` as the last child of `parent`.
+fn node_add(parent, child) {
+    let c = lq(parent + N_CHILD);
+    if c == 0 { sq(parent + N_CHILD, child); return; }
+    while lq(c + N_NEXT) != 0 { c = lq(c + N_NEXT); }
+    sq(c + N_NEXT, child);
+}
+
+# --- Content hashing. A cheap FNV-style fold of the fields that affect
+# pixels. Geometry is included so a moved node repaints both old and new. ---
+fn hash_mix(h, v) {
+    h = h ^ v;
+    h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF;
+    return h;
+}
+
+fn node_content_hash(node) {
+    let h = 1469598103934665603;
+    h = hash_mix(h, lq(node + N_KIND));
+    h = hash_mix(h, lq(node + N_X));
+    h = hash_mix(h, lq(node + N_Y));
+    h = hash_mix(h, lq(node + N_W));
+    h = hash_mix(h, lq(node + N_H));
+    let v = vz(node);
+    h = hash_mix(h, lq(v + NVZ_COLOR));
+    h = hash_mix(h, lq(v + NVZ_FG));
+    h = hash_mix(h, lq(v + NVZ_STR));
+    return h;
+}
+
+# --- Stamps: set a node's visual content for this frame. -------------------
+fn stamp_fill(node, color) {
+    let v = vz(node);
+    sq(v + NVZ_COLOR, color);
+}
+
+fn stamp_text(node, str_ptr, fg, bg) {
+    let v = vz(node);
+    sq(v + NVZ_STR, str_ptr);
+    sq(v + NVZ_FG, fg);
+    sq(v + NVZ_BG, bg);
+}
+
+# --- Emit one node's primitives into the batch (called only when dirty). ---
+fn node_emit(node) {
+    let v = vz(node);
+    let color = lq(v + NVZ_COLOR);
+    if color != 0 {
+        cmd_rect(lq(node + N_X), lq(node + N_Y), lq(node + N_W), lq(node + N_H), color);
+    }
+    let str_ptr = lq(v + NVZ_STR);
+    if str_ptr != 0 {
+        atlas_draw_text(lq(node + N_X) + 4, lq(node + N_Y) + 3,
+                        str_ptr, lq(v + NVZ_FG), lq(v + NVZ_BG));
+    }
+}
+
+# --- The frame diff. Walk the tree; for each node compare the freshly
+# stamped content hash to last frame's. If it changed, damage its rect (and
+# its previous rect if it moved) and re-emit. Clean nodes cost one hash and
+# one compare - no syscall, no draw, no damage. -----------------------------
+fn diff_node(node) {
+    if node == 0 { return; }
+    let h = node_content_hash(node);
+    if h != lq(node + N_HASH) {
+        sq(node + N_HASH, h);
+        dmg_node(lq(node + N_X), lq(node + N_Y), lq(node + N_W), lq(node + N_H));
+        node_emit(node);
+    }
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        diff_node(c);
+        c = lq(c + N_NEXT);
+    }
+}
+
+# Force a node (and its subtree on the next diff) to repaint - used when a
+# node is being removed or the theme changed.
+fn node_dirty(node) {
+    sq(node + N_HASH, 0);
+}

@@ -17,6 +17,8 @@ extern i2c_hid_poll
 extern spi_hid_poll
 extern apic_eoi
 extern lapic_base               ; isr_ap_tick EOI (Tier-2 AP self-wake timer)
+extern kernel_event_flags
+extern xhci_irq_ack
 extern render_frame
 extern process_mouse
 extern keyboard_repeat_tick
@@ -428,7 +430,7 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
 .exc_r3_inflight_scan:
     cmp ecx, MAX_WINDOWS
     jae .exc_r3_orphan                  ; none in flight -> no callback frame to unwind
-    cmp qword [rel l3_slot_in_flight + rcx*8], 0
+    cmp qword [abs l3_slot_in_flight + rcx*8], 0
     je .exc_r3_inflight_next
     mov eax, ecx                        ; recover via the in-flight callback slot
     jmp .exc_ring3_slot_ready
@@ -533,6 +535,8 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     je .irq_wq_wake
     cmp rax, 50
     je .irq_apic_touchpad
+    cmp rax, 51
+    je .irq_xhci
 
     ; Unhandled IRQ - just send EOI
     jmp .send_eoi
@@ -632,12 +636,14 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
 
 .irq_keyboard:
     call keyboard_handler
+    lock or dword [rel kernel_event_flags], 1
     call apic_eoi
     call pic_eoi_master
     jmp .done
 
 .irq_mouse:
     call mouse_handler
+    lock or dword [rel kernel_event_flags], 1
     call apic_eoi
     call pic_eoi_slave
     call pic_eoi_master
@@ -661,6 +667,13 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
 .irq_apic_touchpad:
     call i2c_hid_poll
     call spi_hid_poll
+    lock or dword [rel kernel_event_flags], 1
+    call apic_eoi
+    jmp .done
+
+.irq_xhci:
+    call xhci_irq_ack
+    lock or dword [rel kernel_event_flags], 3
     call apic_eoi
     jmp .done
 

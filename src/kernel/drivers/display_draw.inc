@@ -424,7 +424,7 @@ draw_hline_raster:
     jle .done
     cmp r10, 0
     jl .done
-    mov eax, [raster_target_height]
+    mov eax, [raster_target_tbl + RTGT_HEIGHT]
     cmp r10, rax
     jge .done
     cmp r9, 0
@@ -433,7 +433,7 @@ draw_hline_raster:
     jle .done
     xor r9d, r9d
 .clip_right:
-    mov eax, [raster_target_width]
+    mov eax, [raster_target_tbl + RTGT_WIDTH]
     cmp r9, rax
     jge .done
     mov rdi, rax
@@ -443,9 +443,9 @@ draw_hline_raster:
     mov rbx, rdi
 .addr:
     mov rax, r10
-    imul rax, [raster_target_pitch_q]
+    imul rax, [raster_target_tbl + RTGT_PITCH]
     lea rax, [rax + r9 * 4]
-    mov rdi, [raster_target_addr]
+    mov rdi, [raster_target_tbl + RTGT_ADDR]
     add rdi, rax
     mov eax, ecx
     mov rcx, rbx

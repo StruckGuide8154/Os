@@ -1,0 +1,176 @@
+<!-- @dsCard group="Brand" viewport="1280x800" name="Boot reveal" subtitle="3D gold Grit wordmark, blurred → sharp, deblurring into the desktop (Apple-style)" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="gold">
+<head>
+<meta charset="utf-8" />
+<title>Grit — Boot</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  *,*::before,*::after { box-sizing: border-box; }
+  html,body { margin:0; height:100%; background:#070809; overflow:hidden; }
+  #stage { position:fixed; inset:0; font-family:var(--font-ui); }
+
+  /* ---------- layer 1: the boot logo ---------- */
+  .logo {
+    position:absolute; inset:0; z-index:30; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:30px; will-change:opacity, filter, transform;
+    background:
+      radial-gradient(120% 90% at 50% 30%, rgba(232,222,205,.05), transparent 55%),
+      radial-gradient(100% 80% at 50% 120%, rgba(201,162,106,.07), transparent 60%),
+      #08090B;
+  }
+  .mark { width:128px; height:128px; filter: drop-shadow(0 18px 40px rgba(0,0,0,.6)); will-change:opacity, filter, transform; }
+
+  /* 3D gold wordmark: gradient fill + stacked extrusion shadow + specular sweep. */
+  .word {
+    position:relative; font-weight:800; font-size:96px; letter-spacing:-.04em; line-height:1;
+    background: linear-gradient(176deg, #F0DCB6 0%, #D8B47E 34%, #C9A26A 56%, #A8854F 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:
+      0 1px 0 #b8965e, 0 2px 0 #a8854f, 0 3px 0 #936f3f,
+      0 4px 1px rgba(0,0,0,.35), 0 8px 18px rgba(0,0,0,.55);
+    will-change:opacity, filter, transform;
+  }
+  .word .sweep {
+    content:''; position:absolute; inset:-8% -12%;
+    background: linear-gradient(105deg, transparent 40%, rgba(255,250,238,.6) 50%, transparent 60%);
+    mix-blend-mode:screen; transform: translateX(-130%); pointer-events:none;
+  }
+  .tag { font: var(--fw-semibold) 12px/1 var(--font-mono); letter-spacing:.42em; text-transform:uppercase; color:var(--gold-deep); }
+  .prog { position:absolute; bottom:120px; left:50%; transform:translateX(-50%);
+          width:210px; height:2px; border-radius:2px; background:rgba(201,162,106,.16); overflow:hidden; }
+  .prog i { position:absolute; inset:0; width:0; border-radius:2px; background:linear-gradient(90deg, var(--gold-deep), var(--gold-bright)); }
+
+  /* ---------- layer 0: the desktop ---------- */
+  .desk { position:absolute; inset:0; z-index:10; overflow:hidden; will-change:opacity, filter, transform; }
+  .menubar { position:absolute; top:0; left:0; right:0; height:38px; display:flex; align-items:center; gap:18px; padding:0 16px;
+             background:var(--glass-tint); backdrop-filter:var(--blur-glass); -webkit-backdrop-filter:var(--blur-glass); border-bottom:1px solid var(--border); }
+  .menubar img { height:18px; }
+  .menubar .mi { font:var(--fw-medium) var(--fs-sm)/1 var(--font-ui); color:var(--text-muted); }
+  .menubar .r { margin-left:auto; font:var(--fw-medium) var(--fs-sm)/1 var(--font-mono); color:var(--text-heading); }
+  .greet { position:absolute; top:46%; left:50%; transform:translate(-50%,-50%); text-align:center; }
+  .greet h1 { margin:0; font:var(--fw-semibold) 34px/1.1 var(--font-ui); color:var(--text-heading); letter-spacing:-.02em; }
+  .greet p { margin:8px 0 0; font:var(--fw-regular) 15px/1 var(--font-ui); color:var(--text-muted); }
+  .dock { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); display:flex; gap:11px; padding:9px 13px;
+          background:var(--glass-tint); backdrop-filter:var(--blur-glass); -webkit-backdrop-filter:var(--blur-glass);
+          border:1px solid var(--border); border-radius:var(--r-2xl); box-shadow:var(--shadow-lg); }
+  .dapp { width:46px; height:46px; border-radius:var(--r-lg); display:flex; align-items:center; justify-content:center;
+          background:var(--surface-panel); border:1px solid var(--border-control); color:var(--text-body); }
+  .dapp svg { width:22px; height:22px; }
+
+  .replay { position:absolute; bottom:18px; right:18px; z-index:50; display:flex; align-items:center; gap:7px;
+            padding:8px 13px; border-radius:var(--r-pill); cursor:pointer;
+            background:var(--glass-tint-2); backdrop-filter:var(--blur-thin); -webkit-backdrop-filter:var(--blur-thin);
+            border:1px solid var(--border-control); color:var(--text-body); font:var(--fw-medium) var(--fs-sm)/1 var(--font-ui); }
+  .replay:hover { color:var(--text-accent); border-color:var(--border-strong); }
+  .replay svg { width:14px; height:14px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="desk" id="desk">
+    <div class="menubar">
+      <img src="../assets/logo-grit-lockup.svg" alt="Grit" />
+      <span class="mi">File</span><span class="mi">View</span><span class="mi">Window</span>
+      <span class="r" id="clk">9:41</span>
+    </div>
+    <div class="greet">
+      <h1>Welcome to Grit</h1>
+      <p>GritHL · UEFI graphical desktop · rendered by gui2</p>
+    </div>
+    <div class="dock" id="dock"></div>
+  </div>
+
+  <div class="logo" id="logo">
+    <img class="mark" id="mark" src="../assets/logo-grit-mark.svg" alt="Grit" />
+    <div class="word" id="word">Grit<span class="sweep" id="sweep"></span></div>
+    <div class="tag" id="tag">GritHL · x86-64</div>
+    <div class="prog"><i id="bar"></i></div>
+  </div>
+
+  <div class="replay" id="replay"><i data-lucide="rotate-ccw"></i><span>Replay</span></div>
+</div>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>
+(function(){
+  const $=s=>document.querySelector(s);
+  $('#dock').innerHTML = ['folder','terminal','settings','activity','globe','image'].map(n=>`<div class="dapp"><i data-lucide="${n}"></i></div>`).join('');
+  if(window.lucide) lucide.createIcons();
+  const d=new Date(); $('#clk').textContent=(d.getHours()%12||12)+':'+String(d.getMinutes()).padStart(2,'0');
+
+  const mark=$('#mark'), word=$('#word'), tag=$('#tag'), bar=$('#bar'), sweep=$('#sweep'), logo=$('#logo'), desk=$('#desk');
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  // ease
+  const eo=t=>1-Math.pow(1-t,3), ei=t=>t*t*t, eio=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+  // phase helper: progress of t within [s,e]
+  const ph=(t,s,e,ease)=>{ if(t<=s)return 0; if(t>=e)return 1; return (ease||(x=>x))((t-s)/(e-s)); };
+
+  const DUR = 5200;
+  let start=0, raf=0;
+
+  function render(t){
+    // 1) mark deblur in  (260 -> 1500)
+    const m = ph(t,260,1500,eo);
+    mark.style.opacity = clamp(m*1.6,0,1);
+    mark.style.filter = `blur(${lerp(34,0,m)}px) drop-shadow(0 18px 40px rgba(0,0,0,.6))`;
+    mark.style.transform = `scale(${lerp(1.10,1,m)})`;
+
+    // 2) wordmark rack into focus (480 -> 1820)
+    const w = ph(t,480,1820,eo);
+    word.style.opacity = clamp(w*1.6,0,1);
+    word.style.filter = `blur(${lerp(26,0,w)}px)`;
+    word.style.transform = `translateY(${lerp(10,0,w)}px) scale(${lerp(1.06,1,w)})`;
+    word.style.letterSpacing = `${lerp(.06,-.04,w)}em`;
+
+    // specular sweep across letters (1150 -> 2350)
+    const sp = ph(t,1150,2350,eio);
+    sweep.style.transform = `translateX(${lerp(-130,130,sp)}%)`;
+
+    // 3) tag + progress (1500 -> 3300)
+    tag.style.opacity = ph(t,1500,2100,eo)*0.92;
+    tag.style.transform = `translateY(${lerp(8,0,ph(t,1500,2100,eo))}px)`;
+    bar.style.width = `${ph(t,1800,3300,eio)*100}%`;
+
+    // 4) handoff: logo blurs/scales up & fades; desktop deblurs in (3500 -> 4600)
+    const h = ph(t,3500,4500,eio);
+    logo.style.opacity = 1-h;
+    logo.style.filter = `blur(${lerp(0,22,h)}px)`;
+    logo.style.transform = `scale(${lerp(1,1.06,h)})`;
+    logo.style.visibility = h>=1 ? 'hidden' : 'visible';
+
+    const dk = ph(t,3520,4620,eo);
+    desk.style.opacity = dk;
+    desk.style.filter = `blur(${lerp(30,0,dk)}px) saturate(${lerp(.55,1,dk)})`;
+    desk.style.transform = `scale(${lerp(1.025,1,dk)})`;
+  }
+
+  function frame(now){
+    if(!start) start=now;
+    const t = now-start;
+    render(Math.min(t,DUR));
+    if(t<DUR) raf=requestAnimationFrame(frame);
+  }
+  // Drive with rAF when available; fall back to a setInterval clock for
+  // throttled/offscreen contexts where rAF is paused.
+  function play(){
+    render(0); start=0;
+    if(raf) cancelAnimationFrame(raf);
+    if(window.__iv) clearInterval(window.__iv);
+    let useRaf=true;
+    raf=requestAnimationFrame(frame);
+    // safety clock: if rAF hasn't ticked in 120ms, drive via timer instead
+    const t0=performance.now();
+    window.__iv=setInterval(()=>{
+      const t=performance.now()-t0;
+      render(Math.min(t,DUR));
+      if(t>=DUR) clearInterval(window.__iv);
+    }, 33);
+  }
+  $('#replay').addEventListener('click', play);
+  play();
+})();
+</script>
+</body>
+</html>
