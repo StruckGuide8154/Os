@@ -120,6 +120,14 @@ def main():
                    help='also write the raw canonical statement JSON here')
     args = p.parse_args()
 
+    # write_envelope runs with scripts/build as its cwd so its local imports and
+    # key paths are stable. Resolve caller-supplied outputs first; otherwise a
+    # relative `--out PROVENANCE.ENV` is silently written under scripts/build
+    # while the caller verifies/uploads it from the repository root.
+    out_path = os.path.abspath(args.out)
+    statement_out_path = (os.path.abspath(args.statement_out)
+                          if args.statement_out else None)
+
     if args.builder:
         builder_id = args.builder
     elif os.environ.get('GRIT_BUILDER_ID'):
@@ -151,12 +159,12 @@ def main():
     try:
         with open(payload_path, 'wb') as fh:
             fh.write(payload)
-        if args.statement_out:
-            with open(args.statement_out, 'wb') as fh:
+        if statement_out_path:
+            with open(statement_out_path, 'wb') as fh:
                 fh.write(payload)
         write_env = os.path.join(ROOT, 'scripts', 'build', 'write_envelope.py')
         cmd = [sys.executable, write_env,
-               '--payload', payload_path, '--out', args.out,
+               '--payload', payload_path, '--out', out_path,
                '--type', 'policy', '--device-id', '1']
         proc = subprocess.run(cmd, cwd=os.path.join(ROOT, 'scripts', 'build'))
         if proc.returncode != 0:
@@ -167,7 +175,7 @@ def main():
 
     print("[provenance] builder=%s rev=%s artifacts=%d -> %s"
           % (builder_id, stmt['source']['revision'][:12],
-             len(artifacts), args.out))
+             len(artifacts), out_path))
     return 0
 
 
