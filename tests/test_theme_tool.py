@@ -48,6 +48,15 @@ class ThemeToolTests(unittest.TestCase):
         self.assertEqual(len(blob), 8 + count * channels)
         self.assertEqual(blob[8:11], bytes.fromhex(self.spec["themes"]["light"]["colors"]["bg_base"][1:]))
 
+    def test_text_output_check_accepts_crlf(self):
+        self.assertTrue(
+            theme_tool._output_matches(theme_tool.CONSTANTS_PATH, b"one\r\ntwo\r\n", b"one\ntwo\n")
+        )
+
+    def test_binary_output_check_remains_byte_exact(self):
+        palette = ROOT / "assets" / "themes" / "light" / "palette.npl"
+        self.assertFalse(theme_tool._output_matches(palette, b"one\r\ntwo", b"one\ntwo"))
+
 
 if __name__ == "__main__":
     unittest.main()

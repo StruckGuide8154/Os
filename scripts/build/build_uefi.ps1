@@ -25,7 +25,8 @@ param(
     [switch]$BootAnim,       # Play the pre-GUI /BOOTANIM.NBA splash at boot. OFF by default (deterministic boot). Defines GRIT_BOOT_ANIM so the gated boot_anim_play() call site compiles in. The BOOTANIM.NBA asset is always built (Media Player demo content) regardless of this flag.
     [switch]$BootTrace,      # Debug-only pre-GUI freeze tracer. Paints a marching grid of colored framebuffer blocks - one per boot stage - from the UEFI loader (top band) through every kmain stage (lower band). On a real-hardware hang before the GUI, the last/rightmost block is the last stage that COMPLETED. Defines GRIT_BOOT_TRACE for both loader + kernel. Not allowed with -Release.
     [switch]$SyscallTrace,   # Emit a per-syscall serial trace ('s'<num>...). OFF by default: it floods COM1 on syscall-heavy apps (e.g. Task Manager polls per-core util/mhz every frame) and serial-out is slow enough to make the app crawl. Pass -SyscallTrace only when debugging the dispatcher.
-    [switch]$CopyToE         # Copy built ESP\EFI tree to E:\ for boot from removable media.
+    [switch]$CopyToE,        # Copy built ESP\EFI tree to E:\ for boot from removable media.
+    [switch]$KernelGenerationOnly # Compile user apps + every GritHLK module, then stop before image assembly.
     # GFX/DCN bring-up flags (-Gfx, -GfxWave3, -GfxWave3L, -GfxImuKick,
     # -DiagLegacy) were retired 2026-05-26 along with the AMD 780M iGPU
     # subsystem. Source preserved under deprecated/780M_IGPU/.
@@ -215,6 +216,19 @@ if ($AppO3) { $NxhBuildArgs += '-O3' }
 & powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
 
+# 0b1. Compile the installable virtio-net driver as a dedicated ring-3 blob.
+# --target driver forces both --forbid-asm and --deny-unsafe; --embed lets the
+# framing in src/drivers/driver_blob.asm place code/data in isolated sections.
+$DriverGritc = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
+$DriverOut = Join-Path $Root 'build\ghl\virtio_net.asm'
+$DriverSafety = Join-Path $Root 'build\ghl\driver-safety\virtio_net.safety.json'
+New-Item -Path (Split-Path $DriverSafety) -ItemType Directory -Force | Out-Null
+Write-Host '  compile (driver) src\drivers\net\virtio_net.ghl' -ForegroundColor Yellow
+& python $DriverGritc (Join-Path $Root 'src\drivers\net\virtio_net.ghl') `
+    -o $DriverOut -L (Join-Path $Root 'src\user\grithl\lib') `
+    --embed --target driver --safety-manifest $DriverSafety
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED ring-3 driver compile' -ForegroundColor Red; exit 1 }
+
 # 0b2. Compile GritHLK kernel modules -> build/ghl/*.asm (%include'd by
 # kernel_build.asm). These use gritc.py's kernel emit mode (--target kernel):
 # plain NASM, bare labels, direct in-unit calls, no app-blob framing. Currently
@@ -253,6 +267,7 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\syscall_validate.ghl'; out = 'build\ghl\syscall_validate.asm' },
     @{ src = 'src\kernel\grithlk\syscall_secure.ghl'; out = 'build\ghl\syscall_secure.asm' },
     @{ src = 'src\kernel\grithlk\driver_host.ghl'; out = 'build\ghl\driver_host.asm' },
+    @{ src = 'src\kernel\grithlk\driver_loader.ghl'; out = 'build\ghl\driver_loader.asm' },
     @{ src = 'src\kernel\grithlk\wm_helpers.ghl'; out = 'build\ghl\wm_helpers.asm' },
     @{ src = 'src\kernel\grithlk\usb_hid_helpers.ghl'; out = 'build\ghl\usb_hid_helpers.asm' },
     @{ src = 'src\kernel\grithlk\usermode_callbacks.ghl'; out = 'build\ghl\usermode_callbacks.asm' },
@@ -262,6 +277,7 @@ $KernelModules = @(
     @{ src = 'src\kernel\grithlk\rtl8156_dhcp_sm.ghl'; out = 'build\ghl\rtl8156_dhcp_sm.asm' },
     @{ src = 'src\kernel\grithlk\dns.ghl'; out = 'build\ghl\dns.asm' },
     @{ src = 'src\kernel\grithlk\net_dhcp_dispatch.ghl'; out = 'build\ghl\net_dhcp_dispatch.asm' },
+    @{ src = 'src\kernel\grithlk\net_dhcp_l2.ghl'; out = 'build\ghl\net_dhcp_l2.asm' },
     @{ src = 'src\kernel\grithlk\boot_features.ghl'; out = 'build\ghl\boot_features.asm' },
     @{ src = 'src\kernel\grithlk\cursor.ghl'; out = 'build\ghl\cursor.asm' },
     @{ src = 'src\kernel\grithlk\eth.ghl'; out = 'build\ghl\eth.asm' },
@@ -461,6 +477,11 @@ $CoverageTool = Join-Path $Root 'tools\check_coverage.py'
 if (Test-Path $CoverageTool) {
     & python $CoverageTool
     if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED signature coverage' -ForegroundColor Red; exit 1 }
+}
+
+if ($KernelGenerationOnly) {
+    Write-Host '  GritHL/GritHLK generation complete; image assembly skipped.' -ForegroundColor Green
+    exit 0
 }
 
 # 0c. Generate boot animation -> build/BOOTANIM.NBA (raw BGRA frames + header).

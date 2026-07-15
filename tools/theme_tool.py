@@ -252,12 +252,20 @@ def expected_outputs(spec: dict, canonical: bytes) -> dict[Path, bytes]:
     return outputs
 
 
+def _output_matches(path: Path, actual: bytes | None, expected: bytes) -> bool:
+    if actual is None:
+        return False
+    if path in {CONSTANTS_PATH, THEME_GHL_PATH, ACTIVE_PATH}:
+        return actual.replace(b"\r\n", b"\n") == expected.replace(b"\r\n", b"\n")
+    return actual == expected
+
+
 def cmd_generate(check: bool) -> int:
     spec, canonical = load_spec()
     stale = []
     for path, expected in expected_outputs(spec, canonical).items():
         actual = path.read_bytes() if path.exists() else None
-        if actual != expected:
+        if not _output_matches(path, actual, expected):
             stale.append(path)
             if not check:
                 _atomic_write(path, expected)

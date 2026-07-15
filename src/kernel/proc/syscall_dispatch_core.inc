@@ -330,7 +330,7 @@
     imul ecx, ecx, syscall_table_count  ; slot's inverse-table base
     add rcx, rax                        ; + app-visible number = flat index
     lea rdx, [rel sc_slot_perm_inv]
-    movzx eax, byte [rdx + rcx]         ; eax = real syscall_table row
+    movzx eax, word [rdx + rcx*2]       ; eax = real syscall_table row
 .sc_perm_done:
     pop rdx
     pop rcx

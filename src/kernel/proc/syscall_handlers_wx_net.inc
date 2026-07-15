@@ -362,6 +362,8 @@
     je .ni_last_ttl
     cmp rdi, 9
     je .ni_dns
+    cmp rdi, 10
+    je .ni_driver
     jmp .ni_store
 .ni_active:
 .ni_bound:
@@ -372,6 +374,7 @@
 .ni_nexthop:
 .ni_last_ttl:
 .ni_dns:
+.ni_driver:
     call net_info
 .ni_store:
     mov [rsp + ALL_RAX], rax
@@ -661,5 +664,168 @@
 .sc_drvhost_ring_denied:
     add rsp, 16
     mov qword [rsp + ALL_RAX], -1
+    jmp .done
+
+; ----------------------------------------------------------------------------
+; Width-parametric brokered MMIO/PIO (VirtIO modern common_cfg + legacy I/O BAR)
+; and the DMA-pointer program op.  Same slot-derived identity and fail-closed
+; denial as the 32-bit family above; never accept a driver_id from ring 3.
+; ----------------------------------------------------------------------------
+%macro DRVHOST_RD1 2
+%1:
+    push rdi
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    pop rsi
+    test eax, eax
+    jz .sc_drvhost_denied
+    mov rdi, rax
+    call %2
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+%endmacro
+
+%macro DRVHOST_WR2 2
+%1:
+    push rdi
+    push rsi
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .sc_drvhost_denied
+    mov rdi, rax
+    call %2
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+%endmacro
+
+DRVHOST_RD1 .sc_drvhost_mmio_rd8,  drvhost_mmio_rd8
+DRVHOST_RD1 .sc_drvhost_mmio_rd16, drvhost_mmio_rd16
+DRVHOST_RD1 .sc_drvhost_mmio_rd64, drvhost_mmio_rd64
+DRVHOST_WR2 .sc_drvhost_mmio_wr8,  drvhost_mmio_wr8
+DRVHOST_WR2 .sc_drvhost_mmio_wr16, drvhost_mmio_wr16
+DRVHOST_WR2 .sc_drvhost_mmio_wr64, drvhost_mmio_wr64
+DRVHOST_RD1 .sc_drvhost_pio_rd16,  drvhost_pio_rd16
+DRVHOST_RD1 .sc_drvhost_pio_rd32,  drvhost_pio_rd32
+DRVHOST_WR2 .sc_drvhost_pio_wr16,  drvhost_pio_wr16
+DRVHOST_WR2 .sc_drvhost_pio_wr32,  drvhost_pio_wr32
+
+; write_dma_ptr(addr, dma_addr, width): 3 scalars.  The broker proves addr is in
+; an MMIO grant AND dma_addr is in a DMA grant before writing the pointer.
+.sc_drvhost_mmio_wr_dmaptr:
+    push rdi
+    push rsi
+    push rdx
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    test eax, eax
+    jz .sc_drvhost_dmaptr_denied
+    mov rdi, rax
+    mov rsi, [rsp + 16]
+    mov rdx, [rsp + 8]
+    mov rcx, [rsp + 0]
+    call drvhost_mmio_write_dma_ptr
+    add rsp, 24
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+.sc_drvhost_dmaptr_denied:
+    add rsp, 24
+    mov qword [rsp + ALL_RAX], -1
+    jmp .done
+
+; ----------------------------------------------------------------------------
+; DMA self-service (234 GRANT_DMA / 242 DMA_MAP) and IRQ wait (243). All derive
+; the driver identity from the authoritative slot in r15 - never a driver-
+; supplied id. DMA calls return 0 (not -1) on denial because 0 is the drivers'
+; failure sentinel for a phys/VA result (a valid phys/VA is always non-zero).
+; ----------------------------------------------------------------------------
+.sc_drvhost_dma_zero:
+    mov qword [rsp + ALL_RAX], 0
+    jmp .done
+
+; GRANT_DMA(size) -> device-physical base of a fresh policy-bounded coherent
+; buffer, or 0. drvhost_dma_alloc allocates the frames and mints the grant.
+.sc_drvhost_dma_alloc:
+    push rdi                          ; size
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    pop rsi                           ; rsi = size
+    test eax, eax
+    jz .sc_drvhost_dma_zero
+    mov rdi, rax
+    call drvhost_dma_alloc
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+
+; DMA_MAP(phys) -> ring-3 VA of the caller's own granted DMA window, or 0.
+.sc_drvhost_dma_map:
+    push rdi                          ; phys
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    pop rsi                           ; rsi = phys
+    test eax, eax
+    jz .sc_drvhost_dma_zero
+    mov rdi, rax
+    call drvhost_dma_map
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+
+; IRQ_WAIT() -> forwarded-IRQ event count. Bounded yield: drains the per-driver
+; pending word; if none, sti/hlt yields the (AP-homed) core until the next
+; interrupt and re-checks, returning 0 once the short tick deadline passes so the
+; driver degrades to polling and never wedges (no-freeze invariant). r12/r13 are
+; restored from the syscall frame on .done, so clobbering them here is safe.
+DRVHOST_IRQ_WAIT_TICKS equ 2
+.sc_drvhost_irq_wait:
+    push r12                          ; r12/r13 are callee-saved across a syscall;
+    push r13                          ; pop them before writing the frame's RAX.
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    test eax, eax
+    jz .sc_irqw_zero
+    mov r12, rax                      ; r12 = driver_id
+    mov r13, [tick_count]
+    add r13, DRVHOST_IRQ_WAIT_TICKS   ; r13 = deadline
+.sc_irqw_loop:
+    mov rdi, r12
+    call drvhost_irq_take
+    test rax, rax
+    jnz .sc_irqw_out                  ; woke on a forwarded IRQ -> return the count
+    mov rcx, [tick_count]
+    cmp rcx, r13
+    jae .sc_irqw_zero                 ; deadline passed -> return 0 (poll again)
+    sti
+    hlt                               ; yield the AP-homed core until next interrupt
+    cli
+    jmp .sc_irqw_loop
+.sc_irqw_zero:
+    xor eax, eax
+.sc_irqw_out:
+    pop r13
+    pop r12
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+
+; NET_RX(grant_offset, frame_len) -> 1 consumed / 0 rejected. Identity is
+; derived from r15; drvhost_net_rx re-proves the entire grant-relative slice.
+.sc_drvhost_net_rx:
+    push rdi
+    push rsi
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    test eax, eax
+    jz .sc_net_rx_zero
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    mov rdx, [rsp]
+    call drvhost_net_rx
+    jmp .sc_net_rx_out
+.sc_net_rx_zero:
+    xor eax, eax
+.sc_net_rx_out:
+    add rsp, 16
+    mov [rsp + ALL_RAX], rax
     jmp .done
 

@@ -27,9 +27,15 @@ global l3_wx_manifest_ver
 global l3_wx_code_start
 global l3_wx_code_end
 global l3_slot_live
+global l3_slot_blob_kind
+global l3_slot_blob_size
 global l3_slot_ustack_off
 global l3_slot_code_slide
 l3_slot_live:        resq MAX_WINDOWS
+; 0 = shared GUI app blob, 1 = dedicated installable-driver blob. Size is the
+; exact live blob span used by slot-local callback target validation.
+l3_slot_blob_kind:   resq MAX_WINDOWS
+l3_slot_blob_size:   resq MAX_WINDOWS
 l3_wx_manifest_ver: resq MAX_WINDOWS
 l3_wx_code_start:   resq MAX_WINDOWS
 l3_wx_code_end:     resq MAX_WINDOWS

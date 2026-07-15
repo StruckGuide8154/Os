@@ -123,6 +123,7 @@ data ml_pointer_dirty: 1 x 1 = 0;
 
 const KEV_INPUT = 1;                # keyboard/PS2/touchpad input IRQ
 const KEV_USB   = 2;                # xHCI event IRQ
+const KEV_DRIVER = 4;               # brokered external-driver IRQ
 const ML_INPUT_FALLBACK_PERIOD = 1;  # legacy serial/USB fallback (~10 ms)
 const ML_I2C_IDLE_PERIOD = 50;      # rare fallback only if touchpad IRQ is absent
 const ML_ACTIVITY_TICKS = 25;       # active input burst window (~250 ms)
@@ -300,6 +301,7 @@ fn ml_input_service(now, events) {
 fn ml_net_service(now, events) {
     let period = ML_NET_IDLE_PERIOD;
     if (events & KEV_USB) != 0 { period = 0; }
+    if (events & KEV_DRIVER) != 0 { period = 0; }
     let usbnic_on = feat_on(FEAT_USBNIC_INIT);
     if usbnic_on != 0 && lb(&rtl8156_active) == 1 {
         if lb(&rtl8156_dhcp_state) == 1 { period = 1; }
@@ -311,7 +313,11 @@ fn ml_net_service(now, events) {
 
     if usbnic_on != 0 && lb(&rtl8156_active) == 1 { rtl8156_dhcp_pump(); }
     rtl8139_dhcp_pump();
+    net_dhcp_l2_pump();
     net_nic_poll_rx();
+    # External NICs are normally drained by the IRQ workqueue job. This is the
+    # bounded no-IRQ/lost-IRQ fallback: at most once per idle service period.
+    driver_manager_service(events & KEV_DRIVER);
 }
 
 fn ml_render_due(now) {
@@ -723,6 +729,11 @@ fn kmain() {
     # leak (one job) is the deliberate price; see workqueue_wait_timeout.
     workqueue_wait_timeout(dev_job, DEVENUM_JOIN_BUDGET);
     boot_mark(68, 87);                # "DW": device-enum job joined (or bounded-timeout)
+
+    # Installable-device match/probe/bind runs on the BSP after the legacy
+    # device worker join and before lockdown. call_app_l3_driver owns BSP-local
+    # callback scratch, so it must never run inside device_enum_job on an AP.
+    driver_manager_init();
 
     # Join the K5 Ed25519 verification job: FAIL CLOSED on any bad verdict, then
     # persist the ratcheted anti-rollback floors. This MUST complete before the

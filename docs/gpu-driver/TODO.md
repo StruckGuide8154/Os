@@ -171,11 +171,19 @@ The M0/M3/M4 GHL compartments compile and are self-consistent. Status as of 2026
       ever be called with a real `engine_driver_id`. Not attempted this session; no
       spawn primitive of any kind exists in the codebase today (verified by search).
 
-## 2c. NEW FINDING (2026-07-01): the SC_DRVHOST_* syscall family is not routed by the
-real kernel dispatcher — this blocks ALL userspace drivers, not just GPU
+## 2c. SC_DRVHOST runtime integration status
+
+The original 2026-07-01 finding was valid: the family was not routed. The
+dispatcher foundation landed 2026-07-13: sparse rows `232..249`, `CAP_DRIVER`,
+caller-slot-derived identity, kernel-owned policy rows, and the linked broker.
+Dangerous grant/mapping/event rows deliberately remain denied until a device
+manager provisions concrete instance resources. GPU drivers still do not run
+end to end, but an unrouted syscall number is no longer the blocker.
+
+### Original finding and remaining work
 
 While wiring the above, found that `syscall(SC_DRVHOST_REGISTER, ...)` etc. (numbers
-232–236, 240–248/249) are **not present as rows in the kernel's actual syscall
+232–236, 240–248/249) were **not present as rows in the kernel's actual syscall
 dispatch table** (`src/kernel/proc/syscall_support.inc`'s `syscall_table:`, a dense,
 POSITIONAL array where row index == syscall number — currently ~84 entries, nowhere
 near 232). There is no sparse/gap-filled dispatch, no jump table, and no reference to
@@ -195,20 +203,16 @@ previously called out explicitly.
 
 Closing it needs (separate, larger effort, cross-cutting across every Track-8
 driver, not scoped to this session):
-- [ ] Extend `syscall_table` (`syscall_support.inc`) with real rows for 232–236 and
-      240–249, each wrapping a `driver_host.ghl` function via a `syscall_entry.*`
-      handler (following the existing `SYSCALL_ENTRY` macro convention).
-- [ ] Add a `CAP_PCICFG`-equivalent (or reuse a driver-class capability) to the OUTER
-      `syscall_caps.inc` CAP_* / manifest system so a driver-process app_id can be
-      declared and gated the same way GUI apps are.
+- [x] Extend `syscall_table` with fixed sparse rows `232..249`; safe data-plane
+      wrappers are live and control-plane rows fail closed.
+- [x] Add outer `CAP_DRIVER` gating. No ordinary app manifest carries it.
 - [ ] Decide how ring-3 driver PROCESSES get an app_id / slot / manifest at all —
       today `app_manifest_table` only has GUI app rows (Explorer..Shell); there is no
       "driver" app class.
 
-Until this lands, M0–M4 across every Track-8 driver (not just the GPU compartments)
-are GHL-correct and broker-gated but **do not execute against real hardware or even
-real QEMU I/O** — `syscall(SC_DRVHOST_*, ...)` calls a number the dispatcher does not
-route.
+Until the remaining driver-slot and device-manager work lands, M0–M4 across every
+Track-8 driver remain unable to execute real hardware or QEMU I/O. The safe failure
+is now missing admission/provisioning rather than an unrouted syscall number.
 
 ## 3. Compartmentalization design (the security spine)
 

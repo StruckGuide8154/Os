@@ -33,6 +33,18 @@ unsafe kernel_io;        # inb/outb/ind/outd for brokered PORT I/O at the bounda
 unsafe implicit_extern;  # &drv_* module-local table addresses
 unsafe kernel_priv;      # atomic_xchg for bounded per-driver ring serialization
 
+# --- kernel primitives the broker leans on (all outside the driver's reach) ----
+# page_alloc_contig(n_pages) -> device-physical base of a physically-contiguous
+#   run (constrained <4 GiB, so it is also a valid identity-mapped kernel VA), or
+#   0 on failure. This is the ONLY minter of DMA-reachable memory; a driver can
+#   never name a physical address, only ask the broker to allocate a bounded one.
+# l3_map_driver_dma(slot, phys, len) -> the ring-3 VA the broker mapped `len`
+#   bytes of `phys` into inside `slot`'s own arena (PRESENT|USER|W+NX), or 0.
+# l3_unmap_driver_dma(slot) -> tears that mapping down (containment on revoke).
+extern page_alloc_contig;
+extern l3_map_driver_dma;
+extern l3_unmap_driver_dma;
+
 # --- registration / lifecycle ----------------------------------------------
 global drvhost_register;
 global drvhost_policy_install;
@@ -47,12 +59,38 @@ global drvhost_grant_pio;
 global drvhost_grant_dma;
 global drvhost_grant_irq;
 global drvhost_dma_contained;
+# --- DMA self-service (policy-bounded; the ONLY driver-callable DMA path) -----
+global drvhost_dma_alloc;
+global drvhost_dma_map;
+global drvhost_dma_adopt;
+global drvhost_dma_unmap;
+global drvhost_net_rx;
+# --- IRQ delivery bookkeeping (vector stub -> per-driver pending word) --------
+global drvhost_irq_note;
+global drvhost_irq_take;
+# --- per-frame tick model (option 1, docs/virtio-net-ring3-migration.md §4b) ---
+global drvhost_register_tick;
+global drvhost_tick_entry;
+global drvhost_tick_begin;
+global drvhost_tick_end;
 # --- brokered access (the ONLY way a driver touches hardware) ---------------
 global drvhost_mmio_read32;
 global drvhost_mmio_write32;
 global drvhost_pio_read8;
 global drvhost_pio_write8;
 global drvhost_pci_cfg_read32;
+# --- width-parametric brokered access (VirtIO modern common_cfg + legacy) ----
+global drvhost_mmio_rd8;
+global drvhost_mmio_rd16;
+global drvhost_mmio_rd64;
+global drvhost_mmio_wr8;
+global drvhost_mmio_wr16;
+global drvhost_mmio_wr64;
+global drvhost_mmio_write_dma_ptr;
+global drvhost_pio_rd16;
+global drvhost_pio_rd32;
+global drvhost_pio_wr16;
+global drvhost_pio_wr32;
 # --- descriptor rings (fast path) ------------------------------------------
 global drvhost_ring_establish;
 global drvhost_ring_submit;
@@ -114,6 +152,35 @@ data drv_restarts: 16 x 4;      # restart generation
 # BSS-zero means "not a driver" and registration fails closed.
 data drv_slot_policy_caps: 16 x 4;
 data drv_slot_code_hash: 16 x 8;
+# Signed per-driver DMA byte ceiling (the loader installs it alongside caps).
+# drvhost_dma_alloc refuses once a driver's running total would exceed this, so
+# a compromised driver can never exhaust physical memory by looping GRANT_DMA.
+# BSS-zero => no DMA budget => every self-service alloc fails closed.
+data drv_slot_policy_dma_cap: 16 x 8;
+
+# --- driver-facing DMA accounting (keyed by driver_id) ----------------------
+# One mapped DMA region per driver: base phys, mapped VA (0 = unmapped), and
+# byte length, so quarantine/restart can tear the VA mapping down deterministically.
+# drv_dma_used is the running allocated total checked against the policy cap.
+data drv_dma_used:     16 x 8;
+data drv_dma_map_phys: 16 x 8;
+data drv_dma_map_va:   16 x 8;
+data drv_dma_map_len:  16 x 8;
+
+# --- forwarded-IRQ pending counts (vector stub bumps; IRQ_WAIT drains) --------
+data drv_irq_pending:  16 x 4;
+
+# --- per-frame tick model (option 1) ----------------------------------------
+# A ring-3 driver in the tick model exposes a bounded per-frame `virtio_tick`
+# entry. The signed loader records its in-slot ring-3 VA here AFTER spawn; the
+# kernel's per-frame tick job reads it and invokes it via the ring-3 callback
+# path. drv_tick_busy is the re-entrancy guard (mirrors l3_slot_in_flight for
+# GUI callbacks): at most one tick per driver is ever in flight, so the kernel
+# can never stack tick->syscall->...->tick for the same driver. Both are keyed
+# by driver_id and cleared on quarantine/restart so a contained driver is no
+# longer ticked and a restart must re-register its entry through the loader.
+data drv_tick_entry: 16 x 8;     # ring-3 tick entry VA (0 = none registered)
+data drv_tick_busy:  16 x 4;     # 1 while this driver's tick is in flight
 
 # A ring batch is copied once from ring-3 memory into the caller's private,
 # kernel-owned 4 KiB snapshot.  The busy word prevents two threads in the same
@@ -121,6 +188,7 @@ data drv_slot_code_hash: 16 x 8;
 # operation, or write data from the mutable user batch.
 data drv_ring_busy: 16 x 4;
 data drv_ring_scratch: 65536 x 1;       # 16 slots * 4096 bytes
+data drv_net_rx_scratch: 1536 x 1;      # bounded kernel-owned Ethernet copy
 data drv_pci_cfg_busy: 1 x 4;           # CF8/CFC is one global transaction port
 
 # --- MMIO grant table -------------------------------------------------------
@@ -259,19 +327,41 @@ fn drvhost_revoke_resources(id) {
         if lw(&irq_owner + v * 4) == id { sw(&irq_owner + v * 4, 0); }
         v = v + 1;
     }
+
+    # Tear down the driver's DMA VA mapping (if any) and reset its DMA accounting
+    # so a quarantined/restarted driver keeps NO device-reachable memory. The dg
+    # windows themselves were already compacted out above; here we drop the ring-3
+    # VA alias and zero the running total + pending IRQ count.
+    if lq(&drv_dma_map_va + id * 8) != 0 {
+        l3_unmap_driver_dma(id - 1);
+        sq(&drv_dma_map_va + id * 8, 0);
+        sq(&drv_dma_map_phys + id * 8, 0);
+        sq(&drv_dma_map_len + id * 8, 0);
+    }
+    sq(&drv_dma_used + id * 8, 0);
+    sw(&drv_irq_pending + id * 4, 0);
+
+    # Drop the tick entry + clear its in-flight guard: a quarantined/restarted
+    # driver is no longer ticked, and a restart must re-register through the
+    # signed loader (so a contained instance cannot silently keep being called).
+    sq(&drv_tick_entry + id * 8, 0);
+    sw(&drv_tick_busy + id * 4, 0);
     return DRV_OK;
 }
 
-# Kernel-only control-plane hook. `caps` and `code_hash` must already have
-# passed signed ART_DRIVER admission and concrete device permission review.
-# Installing policy grants no MMIO/PIO/DMA window by itself.
-fn drvhost_policy_install(slot, caps, code_hash) {
+# Kernel-only control-plane hook. `caps`, `code_hash`, and `dma_cap` must already
+# have passed signed ART_DRIVER admission and concrete device permission review.
+# Installing policy grants no MMIO/PIO/DMA window by itself; `dma_cap` is merely
+# the ceiling the driver's later self-service DMA allocations are bounded to (0
+# means the driver may allocate no DMA even if it carries DRV_CAP_DMA).
+fn drvhost_policy_install(slot, caps, code_hash, dma_cap) {
     if drv_valid_slot(slot) == 0 { return DRV_ERR_NODRV; }
     if caps == 0 { return DRV_ERR_CAP; }
     let id = slot + 1;
     if lw(&drv_state + id * 4) != DRV_ST_NONE { return DRV_ERR_STATE; }
     sw(&drv_slot_policy_caps + slot * 4, caps);
     sq(&drv_slot_code_hash + slot * 8, code_hash);
+    sq(&drv_slot_policy_dma_cap + slot * 8, dma_cap);
     return DRV_OK;
 }
 
@@ -443,6 +533,83 @@ fn drvhost_mmio_write32(id, addr, val) {
 }
 
 # ---------------------------------------------------------------------------
+# Width-parametric brokered MMIO (8/16/32/64).  VirtIO-1.x common_cfg mixes
+# byte (STATUS/CFGGEN), word (QSELECT/QSIZE/QENABLE/QNOFF), dword (DFEATURE/
+# GFEATURE) and qword (QDESC/QDRIVER/QDEVICE) registers with side effects, so a
+# read-modify-write of a wider unit is NOT safe - each access must be its exact
+# width.  Every variant proves the FULL width lies inside one of the driver's
+# granted MMIO windows (drv_mmio_contained with the real byte count), same
+# default-deny discipline as the 32-bit path.  Denied reads return the all-ones
+# the bus would (safe direction); denied writes return DRV_ERR_*.
+# ---------------------------------------------------------------------------
+fn drvhost_raw_mmio_rd8(addr)  { return lb(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_rd16(addr) { return lh(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_rd64(addr) { return lq(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_wr8(addr, val)  { sb(addr, val); }     # the named HW boundary
+fn drvhost_raw_mmio_wr16(addr, val) { sh(addr, val); }     # the named HW boundary
+fn drvhost_raw_mmio_wr64(addr, val) { sq(addr, val); }     # the named HW boundary
+
+fn drvhost_mmio_rd8(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFF; }
+    if drv_mmio_contained(id, addr, 1) == 0 { return 0xFF; }
+    return drvhost_raw_mmio_rd8(addr);
+}
+fn drvhost_mmio_rd16(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFFFF; }
+    if drv_mmio_contained(id, addr, 2) == 0 { return 0xFFFF; }
+    return drvhost_raw_mmio_rd16(addr);
+}
+fn drvhost_mmio_rd64(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0 - 1; }
+    if drv_mmio_contained(id, addr, 8) == 0 { return 0 - 1; }
+    return drvhost_raw_mmio_rd64(addr);
+}
+fn drvhost_mmio_wr8(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 1) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr8(addr, val & 255);
+    return DRV_OK;
+}
+fn drvhost_mmio_wr16(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 2) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr16(addr, val & 0xFFFF);
+    return DRV_OK;
+}
+fn drvhost_mmio_wr64(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 8) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr64(addr, val);
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_mmio_write_dma_ptr - program a device-physical POINTER register.  This
+# is the one write where the VALUE is itself a device-reachable address (a
+# VirtIO virtqueue base written into QDESC/QDRIVER/QDEVICE, or an HD-Audio BDL
+# base).  A compromised driver must not be able to point the device at memory it
+# was not granted, so the broker proves BOTH: (1) the MMIO register at `addr`
+# lies in one of the driver's MMIO windows, AND (2) `dma_addr` lies fully inside
+# one of the driver's granted DMA windows (drvhost_dma_contained).  Only then is
+# the pointer written, at the requested width (8 for a 64-bit vq address on the
+# 32-bit-register path is rejected; VirtIO modern uses width 8).  Fail-closed on
+# either check.  (INV-DRIVER-NO-DMA-MINT, re-proven for pointer programming.)
+# ---------------------------------------------------------------------------
+fn drvhost_mmio_write_dma_ptr(id, addr, dma_addr, width) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return DRV_ERR_CAP; }
+    if width != 4 {
+        if width != 8 { return DRV_ERR_GRANT; }
+    }
+    if drv_mmio_contained(id, addr, width) == 0 { return DRV_ERR_GRANT; }
+    # The pointer VALUE must be a device address inside this driver's DMA grant.
+    if drvhost_dma_contained(id, dma_addr, 1) == 0 { return DRV_ERR_GRANT; }
+    if width == 8 { drvhost_raw_mmio_wr64(addr, dma_addr); }
+    else { drvhost_raw_mmio_write32(addr, dma_addr); }
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
 # drvhost_grant_dma - authorize a {base,len} coherent DMA window for a driver.
 # Only valid if the driver holds DRV_CAP_DMA (from signed policy). The broker is
 # the only party that mints DMA-reachable memory: a driver can never widen this
@@ -487,6 +654,224 @@ fn drvhost_dma_contained(id, addr, len) {
     return 0;
 }
 
+# ===========================================================================
+# Driver-facing DMA self-service (the ONLY DMA path reachable from ring 3).
+#
+# A driver asks the broker to allocate a coherent DMA buffer of `len` bytes; it
+# never names a physical address.  The broker:
+#   (1) requires the driver hold DRV_CAP_DMA (from signed policy),
+#   (2) bounds the request against the driver's signed dma_cap (running total),
+#   (3) allocates physically-contiguous <4 GiB memory itself (page_alloc_contig),
+#   (4) records a {base,len} DMA grant via the SAME drvhost_grant_dma discipline
+#       the control plane uses, and
+#   (5) returns the device-physical base.
+# INV-DRIVER-NO-DMA-MINT holds: the driver bounds neither the address (the broker
+# chooses it) nor the size beyond its own signed ceiling.  Fail-closed returns 0
+# (no partial allocation is ever recorded).
+#
+# This is deliberately NOT named drvhost_grant_* : the ring-3 syscall wrapper is
+# allowed to call THIS (a bounded self-service allocator) but is forbidden from
+# ever calling a raw grant/policy primitive (test_driver_framework.ps1).
+# ===========================================================================
+fn drvhost_dma_alloc(id, len) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    if len == 0 { return 0; }
+    # Round the request up to whole pages before every bound check so the cap
+    # accounts for exactly what is reserved.
+    let need = (len + 4095) & 0xFFFFF000;
+    if need < len { return 0; }                       # size overflow
+    let cap = lq(&drv_slot_policy_dma_cap + (id - 1) * 8);
+    let used = lq(&drv_dma_used + id * 8);
+    let total = used + need;
+    if total < used { return 0; }                     # accounting overflow
+    if total > cap { return 0; }                      # over the signed ceiling
+    let pages = need >> 12;
+    let phys = page_alloc_contig(pages);
+    if phys == 0 { return 0; }                         # out of contiguous memory
+    # Record the window with the broker's own fail-closed grant discipline; on
+    # the (table-full) rejection the physical run leaks a bounded amount but no
+    # authority is minted -- still fail-closed toward the driver.
+    if drvhost_grant_dma(id, phys, need) != DRV_OK { return 0; }
+    sq(&drv_dma_used + id * 8, total);
+    return phys;
+}
+
+# Prove `phys` is the base of one of `id`'s granted DMA windows and return that
+# window's byte length (0 if `phys` is not a grant base for this driver). Used by
+# drvhost_dma_map so a driver can only map memory the broker already granted it.
+fn drv_dma_grant_len(id, phys) {
+    let n = lw(&dg_count);
+    let i = 0;
+    while i < n {
+        if lw(&dg_drv + i * 4) == id {
+            if lq(&dg_base + i * 8) == phys {
+                return lq(&dg_end + i * 8) - phys;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_dma_map - map a previously-allocated DMA window into the driver's OWN
+# ring-3 arena and return the mapped VA.  `phys` must be the base of one of the
+# caller's DMA grants (proven above).  Exactly one DMA region is mapped per
+# driver at the fixed per-slot DMA VA window; a second map of the same base is
+# idempotent, a map of a different base while one is live fails closed.  The
+# actual PTE writes happen in the paging TCB helper l3_map_driver_dma, which
+# marks the window PRESENT|USER|W+NX inside the caller's slot only.
+# ---------------------------------------------------------------------------
+fn drvhost_dma_map(id, phys) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    let len = drv_dma_grant_len(id, phys);
+    if len == 0 { return 0; }
+    let cur = lq(&drv_dma_map_va + id * 8);
+    if cur != 0 {
+        # Already mapped: only the same base is honoured (idempotent), else deny.
+        if lq(&drv_dma_map_phys + id * 8) == phys { return cur; }
+        return 0;
+    }
+    let va = l3_map_driver_dma(id - 1, phys, len);
+    if va == 0 { return 0; }
+    sq(&drv_dma_map_phys + id * 8, phys);
+    sq(&drv_dma_map_va + id * 8, va);
+    sq(&drv_dma_map_len + id * 8, len);
+    return va;
+}
+
+# Adopt an early-boot physical reservation into a running driver's signed DMA
+# budget. Kernel control-plane only: unlike ring-3 allocation, the caller names
+# `phys`, but the same cap, alignment, accounting, and grant-table checks apply.
+fn drvhost_dma_adopt(id, phys, len) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return DRV_ERR_CAP; }
+    if phys == 0 { return DRV_ERR_GRANT; }
+    if (phys & 4095) != 0 { return DRV_ERR_GRANT; }
+    if len == 0 { return DRV_ERR_GRANT; }
+    let need = (len + 4095) & 0xFFFFF000;
+    if need < len { return DRV_ERR_GRANT; }
+    let cap = lq(&drv_slot_policy_dma_cap + (id - 1) * 8);
+    let used = lq(&drv_dma_used + id * 8);
+    let total = used + need;
+    if total < used { return DRV_ERR_GRANT; }
+    if total > cap { return DRV_ERR_CAP; }
+    if drvhost_grant_dma(id, phys, need) != DRV_OK { return DRV_ERR_GRANT; }
+    sq(&drv_dma_used + id * 8, total);
+    return DRV_OK;
+}
+
+# Explicit unmap (cooperative teardown; quarantine/restart also unmap via
+# drvhost_revoke_resources). Idempotent and fail-closed on a bad id.
+fn drvhost_dma_unmap(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    if lq(&drv_dma_map_va + id * 8) == 0 { return DRV_OK; }
+    l3_unmap_driver_dma(id - 1);
+    sq(&drv_dma_map_va + id * 8, 0);
+    sq(&drv_dma_map_phys + id * 8, 0);
+    sq(&drv_dma_map_len + id * 8, 0);
+    return DRV_OK;
+}
+
+# net.l2 RX hand-up. The driver passes a grant-relative offset, never a pointer.
+# Re-prove the complete frame lies inside its live DMA mapping, then copy only
+# that bounded slice into kernel-owned memory. The DMA alias is USER-marked, so
+# parsing it directly under SMAP would fault (and would also permit TOCTOU).
+fn drvhost_net_rx(id, off, len) {
+    if drv_is_running(id) == 0 { return 0; }
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    if len < 14 { return 0; }
+    if len > 1522 { return 0; }
+    let total = lq(&drv_dma_map_len + id * 8);
+    if off > total { return 0; }
+    if len > total - off { return 0; }
+    let phys = lq(&drv_dma_map_phys + id * 8);
+    if phys == 0 { return 0; }
+    let src = phys + off;
+    let i = 0;
+    smap_open();
+    while i < len {
+        sb(&drv_net_rx_scratch + i, lb(src + i));
+        i = i + 1;
+    }
+    smap_close();
+    call net_rx_frame(rdi: &drv_net_rx_scratch, ecx: len);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Forwarded-IRQ bookkeeping. The kernel vector stub ACKs the line, then calls
+# drvhost_irq_note(vector); if that vector is routed to a running driver, its
+# per-driver pending count is bumped. SC_DRVHOST_IRQ_WAIT drains the count via
+# drvhost_irq_take. Counts saturate at a bound so a storm cannot wrap the word.
+# ---------------------------------------------------------------------------
+const IRQ_PENDING_MAX = 0x40000000;
+
+fn drvhost_irq_note(vector) {
+    let id = drvhost_irq_deliver(vector);              # validates routed + running
+    if id == 0 { return 0; }
+    let p = lw(&drv_irq_pending + id * 4);
+    if p < IRQ_PENDING_MAX { sw(&drv_irq_pending + id * 4, p + 1); }
+    return id;
+}
+
+# Consume and return the pending IRQ count for a running driver (0 if none / not
+# running). SC_DRVHOST_IRQ_WAIT calls this each poll; a non-zero return wakes it.
+fn drvhost_irq_take(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    let p = lw(&drv_irq_pending + id * 4);
+    if p != 0 { sw(&drv_irq_pending + id * 4, 0); }
+    return p;
+}
+
+# ---------------------------------------------------------------------------
+# Per-frame tick model (option 1, docs/virtio-net-ring3-migration.md §4b).
+# Grit runs ring-3 code as cooperative callbacks, not preemptive threads, so a
+# ring-3 driver cannot run a long `while(1)` event loop. Instead the signed
+# loader registers the driver's bounded ring-3 `virtio_tick` entry here after
+# spawn, and the kernel's per-frame tick job invokes it once per frame via the
+# ring-3 callback path. This is no-freeze by construction: the tick body is
+# bounded and always returns; if it faults, the caller charges drvhost_fault and
+# the existing quarantine path contains it.
+#
+# CONTROL PLANE ONLY: like grant/policy_install, drvhost_register_tick is called
+# by the kernel loader, never from a ring-3 syscall wrapper (a driver cannot
+# name a slot VA, and must not be able to point its own tick at arbitrary code).
+# ---------------------------------------------------------------------------
+fn drvhost_register_tick(id, entry) {
+    if drv_is_running(id) == 0 { return DRV_ERR_STATE; }
+    if entry == 0 { return DRV_ERR_GRANT; }
+    sq(&drv_tick_entry + id * 8, entry);
+    return DRV_OK;
+}
+
+# Read a driver's registered tick entry VA (0 if none / not running). Non-mutating
+# accessor for diagnostics / the dispatcher's pre-check.
+fn drvhost_tick_entry(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    return lq(&drv_tick_entry + id * 8);
+}
+
+# Per-frame tick admission. Returns the ring-3 tick entry VA to invoke (nonzero)
+# iff a tick MAY start for this driver right now: running, a tick entry is
+# registered, and no tick is already in flight. On success it marks the driver
+# tick-busy (paired with drvhost_tick_end when the tick returns), so a second
+# tick for the same driver can never be stacked. Returns 0 to skip this frame.
+fn drvhost_tick_begin(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    let entry = lq(&drv_tick_entry + id * 8);
+    if entry == 0 { return 0; }
+    if atomic_xchg(&drv_tick_busy + id * 4, 1) != 0 { return 0; }   # already in flight
+    return entry;
+}
+
+# Release the tick in-flight guard once the driver's tick has returned to the
+# kernel (or been abandoned on fault). Idempotent; fail-closed on a bad id.
+fn drvhost_tick_end(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    atomic_xchg(&drv_tick_busy + id * 4, 0);
+    return DRV_OK;
+}
+
 # ---------------------------------------------------------------------------
 # Brokered port I/O. A granted [lo,hi] port range; default-deny outside it.
 # ---------------------------------------------------------------------------
@@ -526,6 +911,37 @@ fn drvhost_pio_write8(id, port, val) {
     if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
     if drv_pio_allowed(id, port) == 0 { return DRV_ERR_GRANT; }
     outb(port, val & 255);                              # the named HW boundary
+    return DRV_OK;
+}
+
+# Width-parametric brokered port I/O (16/32) for the VirtIO legacy transitional
+# I/O BAR.  A 16-bit access at `port` needs both `port` and `port+1` inside the
+# granted range; 32-bit needs port..port+3.  Same default-deny as the 8-bit path.
+fn drv_pio_range_allowed(id, port, hi) {
+    if drv_pio_allowed(id, port) == 0 { return 0; }
+    if drv_pio_allowed(id, hi) == 0 { return 0; }
+    return 1;
+}
+fn drvhost_pio_rd16(id, port) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return 0xFFFF; }
+    if drv_pio_range_allowed(id, port, port + 1) == 0 { return 0xFFFF; }
+    return inw(port);                                   # the named HW boundary
+}
+fn drvhost_pio_rd32(id, port) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return 0xFFFFFFFF; }
+    if drv_pio_range_allowed(id, port, port + 3) == 0 { return 0xFFFFFFFF; }
+    return ind(port);                                   # the named HW boundary
+}
+fn drvhost_pio_wr16(id, port, val) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
+    if drv_pio_range_allowed(id, port, port + 1) == 0 { return DRV_ERR_GRANT; }
+    outw(port, val & 0xFFFF);                           # the named HW boundary
+    return DRV_OK;
+}
+fn drvhost_pio_wr32(id, port, val) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
+    if drv_pio_range_allowed(id, port, port + 3) == 0 { return DRV_ERR_GRANT; }
+    outd(port, val);                                    # the named HW boundary
     return DRV_OK;
 }
 

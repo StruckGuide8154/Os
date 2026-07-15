@@ -132,7 +132,8 @@
       "Bash(\"/c/Program Files/qemu/qemu-system-x86_64.exe\" -bios build/OVMF.fd -drive format=raw,file=fat:rw:build/esp -drive file=build/data.img,format=raw,media=disk -m 512M -vga std -display gtk,grab-on-hover=on,show-cursor=on,window-close=on -device qemu-xhci,id=xhci0 -device usb-mouse,bus=xhci0.0,port=1 -device usb-kbd,bus=xhci0.0,port=2 -serial file:build/serial.log -no-reboot -name Grit_UEFI)",
       "Bash(ps -W)",
       "Bash(\"/c/Program Files/qemu/qemu-system-x86_64.exe\" -bios build/OVMF.fd -drive format=raw,file=fat:rw:build/esp -drive file=build/data.img,format=raw,media=disk -m 512M -vga std -display gtk -serial file:build/serial.log -no-reboot)",
-      "Bash(openssl req *)"
+      "Bash(openssl req *)",
+      "Bash(grep -iE \"build.*\\\\.\\(ps1|py|sh\\)$|^build_|Makefile\")"
     ]
   }
 }

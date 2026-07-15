@@ -2263,8 +2263,8 @@ def _enforce_no_asm(decls, why):
 
 # Function-level safety inference. This is deliberately conservative: unknown
 # extern calls are surfaced as contract debt instead of being assumed safe.
-_MEM_READ_BUILTINS={"lb","lw","lq"}
-_MEM_WRITE_BUILTINS={"sb","sw","sq"}
+_MEM_READ_BUILTINS={"lb","lh","lw","lq"}
+_MEM_WRITE_BUILTINS={"sb","sh","sw","sq"}
 _USER_MEM_BUILTINS={"smap_open","smap_close","rep_movsq","rep_movsd"}
 _SERIAL_NAMES={"serial_putc","serial_puts","serial_crlf","svg_dump_putc","ser_print_hex64","debug_print"}
 _FRAMEBUFFER_NAMES={
@@ -2276,6 +2276,11 @@ _FRAMEBUFFER_NAMES={
 # Externs with a narrow, GHL-facing contract. These are still emitted in
 # extern_calls for visibility, but they are not ABI debt in the safety budget.
 _CONTRACTED_EXTERN_NAMES={
+    # Core network helpers with stable GHL-facing scalar/pointer ABIs.
+    "net_arp_resolve_ipv4_try",
+    "net_arp_resolved_mac_ptr",
+    "net_checksum",
+    "net_info",
     "render_flush",
     "render_mark_dirty",
     "render_mark_full",
@@ -3019,7 +3024,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
                 continue   # FN_BEGIN already emitted `global g` for this fn
             out.append(f"global {g}")
     if not embed:
-        out.append("section .text")
+        out.append("section .driverblob" if target=="driver" else "section .text")
     # Phase 0 (--O4): drop wrapper fns that were inlined everywhere and are now
     # called nowhere, before the line-level passes run on the survivors.
     text=cg.text
@@ -3051,6 +3056,13 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if cg.o4 and optimize:
         body=_o4_dead_result_elim(body, target)
     out.extend(body)
+    # A driver package is one contiguous flat section so NASM can prove every
+    # copy/entry bound with scalar label differences. Runtime W^X still needs a
+    # whole-page code/data split, so emit that boundary before all generated
+    # rodata/state bytes.
+    if target=="driver":
+        out.append("align 4096")
+        out.append("driver_blob_code_end:")
     # Strings: emit as inert bytes in standalone .rodata. In the embedded app
     # blob they are still data objects: some apps intentionally mutate string
     # storage as scratch buffers, and even read-only literals must not force a
@@ -3058,9 +3070,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # into `.appdata` so the slot W^X split can keep [code) X+!W and [data) W+NX.
     if cg.rodata:
         if embed and not kernel:
-            out.append("section .appdata")
-            out.extend(cg.rodata)
-            out.append("section .text")
+            if target=="driver":
+                out.extend(cg.rodata)
+            else:
+                out.append("section .appdata")
+                out.extend(cg.rodata)
+                out.append("section .text")
         else:
             out.append("section .rodata")
             out.extend(cg.rodata)
@@ -3078,9 +3093,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             # (global app_blob_code_end), so slot install can mark [code) X+!W and
             # the data tail W+NX with one clean boundary. Restore `.text` so the next %include'd
             # app (and the app_seg_<name>_end label) lands back in the code stream.
-            out.append("section .appdata")
-            out.extend(cg.data)
-            out.append("section .text")
+            if target=="driver":
+                out.extend(cg.data)
+            else:
+                out.append("section .appdata")
+                out.extend(cg.data)
+                out.append("section .text")
         else:
             out.append("section .data")
             out.extend(cg.data)
@@ -3096,7 +3114,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
         # code stream; leaving `.bss` active would drop the following app's code
         # (and its app_seg_<name>_end label) into NOBITS. Restore `.text`.
         if embed and not kernel:
-            out.append("section .text")
+            out.append("section .driverblob" if target=="driver" else "section .text")
     LAST_SIGS=cg.sigs
     LAST_MEMMAP={"buffers":cg.buffers,"used":cg.buffer_used,"cap":BUFFER_REGION_CAP}
     broad_caps={"raw_mem","implicit_extern","kernel_priv"}
@@ -4755,7 +4773,13 @@ def gen_expr(st,e):
         # (not permuted - there is no immediate to rewrite).
         numc=const_fold_int(cg, e["num"])
         if numc is not None:
-            cg.emit(f"    APP_SYSNO {numc}")
+            # Driver-host processes use the raw, stable broker ABI. Some broker
+            # syscall numbers exceed 255, while the GUI APPS.BIN permutation
+            # record is a packed u8 and is meaningful only for that shared blob.
+            if getattr(cg,"target","user")=="driver":
+                cg.emit(f"    mov eax, {numc}")
+            else:
+                cg.emit(f"    APP_SYSNO {numc}")
         else:
             gen_expr(st,e["num"])
         cg.emit("    syscall")
@@ -4763,7 +4787,7 @@ def gen_expr(st,e):
         args=e["args"]
         name=e["name"]
         # Builtins: memory load/store - compile inline, no actual call.
-        if name in ("lb","lw","lq","sb","sw","sq"):
+        if name in ("lb","lh","lw","lq","sb","sh","sw","sq"):
             # Ring-3 targets (user apps AND Track-8 driver-host processes) may use
             # the load/store builtins without a capability: the MMU confines every
             # such access to the process's own mapped pages, so they can never
@@ -4772,18 +4796,22 @@ def gen_expr(st,e):
             # physical addresses, so there they stay gated behind `unsafe raw_mem`.
             if getattr(cg,"target","user") not in ("user","driver"):
                 _require_cap(cg,"raw_mem",f"{cg.target} raw memory builtin {name}()")
-            if name in ("lb","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
-            if name in ("sb","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
+            if name in ("lb","lh","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
+            if name in ("sb","sh","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
             if name=="lb":
                 gen_expr(st,args[0]); cg.emit("    movzx rax, byte [rax]")
+            elif name=="lh":
+                # 16-bit unsigned load (VirtIO split-ring idx/flags/desc fields).
+                gen_expr(st,args[0]); cg.emit("    movzx rax, word [rax]")
             elif name=="lw":
                 gen_expr(st,args[0]); cg.emit("    movsxd rax, dword [rax]")
             elif name=="lq":
                 gen_expr(st,args[0]); cg.emit("    mov rax, [rax]")
-            elif name in ("sb","sw","sq"):
+            elif name in ("sb","sh","sw","sq"):
                 gen_expr(st,args[0]); cg.emit("    push rax")
                 gen_expr(st,args[1]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
                 if name=="sb": cg.emit("    mov [rax], cl")
+                elif name=="sh": cg.emit("    mov [rax], cx")
                 elif name=="sw": cg.emit("    mov [rax], ecx")
                 else: cg.emit("    mov [rax], rcx")
                 cg.emit("    xor rax, rax")

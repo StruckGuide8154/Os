@@ -1,0 +1,469 @@
+# ============================================================================
+# driver_loader.ghl - the DEVICE MANAGER / external-driver control plane
+# (Track 8, docs/virtio-net-ring3-migration.md Stage 4b).
+#
+# This is the missing keystone: it brings a ring-3 driver to life. Nothing else
+# in the tree spawns a driver, installs its signed policy, or grants it hardware.
+# The model is match -> probe -> bind, event-driven (NOT a 24/7 poll):
+#
+#   1. ENUMERATE the PCI bus and MATCH a device against the driver table
+#      (virtio-net modern 1af4:1041).
+#   2. Enable the device (config-write COMMAND: memory space + bus master) and
+#      RESOLVE its VirtIO capability windows (common_cfg / notify / device_cfg).
+#      A config WRITE is control-plane only - the broker deliberately has no
+#      config-write primitive, so BAR/command programming lives here.
+#   3. Reserve a headless driver SLOT (a window-pool entry with WF_ACTIVE but no
+#      WF_VISIBLE - invisible to the WM, exactly like the slot-0 wallpaper), copy
+#      the driver blob into it, and set its capability mask.
+#   4. Fork B ordering: drvhost_policy_install + drvhost_register the slot (-> the
+#      broker marks it RUNNING) and grant its MMIO windows BEFORE the driver runs,
+#      because the driver reads MMIO in its probe and the broker cannot grant to a
+#      not-yet-running driver. The resolved bases are written into the driver's
+#      state{} handoff, so the driver needs no self-registration.
+#   5. PROBE: run the driver's one-shot main() via the windowless spawn path
+#      (call_app_l3_driver). It negotiates the device and sets its state `ready`.
+#   6. BIND only if ready == 1: register the driver's virtio_tick as its
+#      RX-drain callback (drvhost_register_tick) so the kernel invokes it on the
+#      device event. If the probe fails, the device is left unclaimed.
+#
+# The device manager is trusted control-plane code (part of the TCB): it holds
+# ambient PCI/port authority the DRIVER never gets. The driver stays fully
+# sandboxed - every hardware touch it makes is still brokered and bounds-checked.
+# ============================================================================
+
+module "driver_loader";
+
+unsafe kernel_io;        # inb/outb/ind/outd for PCI config space (CF8/CFC)
+unsafe kernel_priv;      # smap_open/close to write the driver's slot handoff
+unsafe raw_mem;          # sq/sd over the reserved window-pool entry + slot state
+unsafe implicit_extern;  # &app_hl_virtio_net_* / &driver_blob_start labels
+
+global driver_manager_init;
+global driver_manager_tick;
+global driver_manager_service;
+global driver_manager_tx_frame;
+global driver_manager_poll_rx;
+global driver_manager_bound;
+global driver_manager_mac;
+global driver_manager_info;
+global driver_manager_stage;
+
+# --- kernel/broker/slot primitives the control plane leans on ----------------
+extern l3_slot_base;              # (slot) -> arena VA base of the slot
+extern l3_copy_driver_blob_to_slot; # (slot) -> installs dedicated driver blob
+extern l3_slot_code_slide;        # per-slot code slide array (qword each)
+extern l3_wx_code_end;            # per-slot executable end offset
+extern cap_mask_store;            # (slot, mask) -> set the slot's syscall cap mask
+extern call_app_l3_driver;        # (slot, blob_entry_va) -> run ring-3 fn, return
+extern driver_blob_start;         # driver layout anchor
+
+extern drvhost_policy_install;    # (slot, caps, code_hash, dma_cap)
+extern drvhost_register;          # (id, requested, policy_grant, code_hash)
+extern drvhost_grant_mmio;        # (id, base, len)
+extern drvhost_grant_dma;         # (id, base, len)  [unused here; DMA is self-service]
+extern drvhost_dma_adopt;         # (id, phys, len) -> account early reservation
+extern drvhost_dma_map;           # (id, phys) -> fixed ring-3 alias
+extern drvhost_register_tick;     # (id, entry_va)
+extern drvhost_grant_irq;          # (id, vector)
+extern drvhost_tick_begin;        # (id) -> entry VA to run this event, or 0
+extern drvhost_tick_end;          # (id)
+extern ioapic_set_irq;             # (gsi, vector, dest apic id, flags)
+extern workqueue_submit;           # fixed job-id submission (BSP only)
+extern workqueue_done;
+extern workqueue_reap;
+extern serial_puts;
+extern serial_crlf;
+extern ser_print_hex64;
+
+# --- the ring-3 virtio-net driver's blob entry points + state{} handoff -------
+extern app_hl_virtio_net_main;        # one-shot probe entry
+extern app_hl_virtio_net_virtio_tick; # per-event RX-drain callback
+extern app_hl_virtio_net_virtio_tx;   # on-demand net.l2 TX callback
+extern app_hl_virtio_net_transport;   # state handoff fields (loader writes these)
+extern app_hl_virtio_net_common_cfg;
+extern app_hl_virtio_net_notify_base;
+extern app_hl_virtio_net_notify_mult;
+extern app_hl_virtio_net_device_cfg;
+extern app_hl_virtio_net_isr_cfg;
+extern app_hl_virtio_net_io_base;
+extern app_hl_virtio_net_ready;       # driver sets 1 on a successful probe
+extern app_hl_virtio_net_dma_va;
+extern app_hl_virtio_net_hdr_size;
+extern app_hl_virtio_net_tx_request_len;
+extern app_hl_virtio_net_tx_result;
+extern app_hl_virtio_net_mac0;
+extern app_hl_virtio_net_mac1;
+
+# --- constants ---------------------------------------------------------------
+# Driver slot: the top arena slot, reserved as a headless (WF_ACTIVE, no
+# WF_VISIBLE) window-pool entry so the WM's free-slot scan skips it. MAX_WINDOWS
+# is 12 (a NASM equ GHL cannot import), so the top slot is 11.
+const DRIVER_SLOT   = 11;
+
+const WINDOW_POOL_ADDR   = 0x2410000;
+const WINDOW_STRUCT_SIZE = 256;
+const WIN_OFF_ID         = 0;
+const WIN_OFF_FLAGS      = 40;
+const WIN_OFF_APPDATA    = 136;
+const WF_ACTIVE          = 0x10;
+
+const CAP_CORE   = 0x0001;
+const CAP_DRIVER = 0x2000;
+
+# Driver-host capability class bits (driver_host.ghl DRV_CAP_*).
+const DRV_CAP_MMIO = 1;
+const DRV_CAP_PIO  = 2;
+const DRV_CAP_DMA  = 4;
+const DRV_CAP_IRQ  = 8;
+
+# VirtIO-net modern PCI identity + transport + DMA budget (mirror virtio_net.ghl).
+const PCI_VENDOR_VIRTIO   = 0x1AF4;
+const PCI_DEVICE_VNET_MOD = 0x1041;
+const PCI_DEVICE_VNET_LEG = 0x1000;
+const TRANSPORT_LEGACY    = 1;
+const TRANSPORT_MODERN    = 2;
+const DMA_TOTAL           = 0x34000;
+
+# VirtIO PCI capability walk.
+const PCI_CMD_REG      = 0x04;
+const PCI_CMD_MEM      = 0x02;   # memory space enable
+const PCI_CMD_IO       = 0x01;   # I/O space enable (legacy transitional BAR)
+const PCI_CMD_BUSMSTR  = 0x04;   # bus master enable
+const PCI_STATUS_CAPS  = 0x10;   # status bit 4 -> capability list present
+const PCI_CAP_PTR_REG  = 0x34;
+const PCI_CAP_VNDR_VIRTIO = 0x09;
+const VIRTIO_CAP_COMMON = 1;
+const VIRTIO_CAP_NOTIFY = 2;
+const VIRTIO_CAP_ISR    = 3;
+const VIRTIO_CAP_DEVICE = 4;
+const DRIVER_IRQ_VECTOR = 52;
+const WQ_JOB_DRIVER     = 7;
+const WQ_PRIO_HIGH      = 2;
+const WQ_INVALID        = -1;
+const IOAPIC_LEVEL_LOW  = 0xA000;
+
+# --- resolved device state (single supported NIC for now) --------------------
+data dl_common_cfg:  1 x 8;
+data dl_notify_base: 1 x 8;
+data dl_notify_mult: 1 x 4;
+data dl_device_cfg:  1 x 8;
+data dl_isr_cfg:     1 x 8;
+data dl_irq_gsi:     1 x 4;
+data dl_io_base:     1 x 4;
+data dl_transport:   1 x 4;
+data driver_manager_bound: 1 x 4;   # 1 once a driver is probed + bound
+data driver_manager_job: 1 x 4 = 0xFFFFFFFF;
+data driver_manager_call_busy: 1 x 4;
+data driver_manager_mac: 6 x 1;
+data driver_manager_info: 28 x 1;
+data driver_manager_stage: 1 x 4;
+data dl_msg_bind: 13 x 1 = [91,86,78,69,84,32,66,73,78,68,93,10,0];
+data dl_msg_fail: 13 x 1 = [91,86,78,69,84,32,70,65,73,76,93,32,0];
+
+fn dl_fail(stage) {
+    sw(&driver_manager_stage, stage);
+    serial_puts(&dl_msg_fail);
+    call ser_print_hex64(rdi: stage);
+    serial_crlf();
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# PCI config-space access (control-plane ambient authority; NOT brokered - this
+# module is trusted TCB). reg is dword-aligned by the CF8 mechanism.
+# ---------------------------------------------------------------------------
+fn pci_addr(bus, dev, func, reg) {
+    return 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | (reg & 0xFC);
+}
+fn pci_rd(bus, dev, func, reg) {
+    outd(0xCF8, pci_addr(bus, dev, func, reg));
+    return ind(0xCFC);
+}
+fn pci_wr(bus, dev, func, reg, val) {
+    outd(0xCF8, pci_addr(bus, dev, func, reg));
+    outd(0xCFC, val);
+    return 0;
+}
+# Byte / word extracts from a dword-aligned config read.
+fn pci_rd8(bus, dev, func, reg) {
+    return (pci_rd(bus, dev, func, reg) >> ((reg & 3) * 8)) & 0xFF;
+}
+fn pci_rd16(bus, dev, func, reg) {
+    return (pci_rd(bus, dev, func, reg) >> ((reg & 2) * 8)) & 0xFFFF;
+}
+
+# Resolve a 64-bit-capable BAR's base address (low 4 bits masked; +high dword if
+# the BAR is 64-bit, type bits == 0x4).
+fn pci_bar_base(bus, dev, func, bar) {
+    let lo = pci_rd(bus, dev, func, 0x10 + bar * 4);
+    let base = lo & 0xFFFFFFF0;
+    if (lo & 0x6) == 0x4 {
+        let hi = pci_rd(bus, dev, func, 0x10 + bar * 4 + 4);
+        base = base | (hi << 32);
+    }
+    return base;
+}
+fn pci_io_bar_base(bus, dev, func, bar) {
+    return pci_rd(bus, dev, func, 0x10 + bar * 4) & 0xFFFFFFFC;
+}
+
+# ---------------------------------------------------------------------------
+# Walk the VirtIO vendor capabilities and record the common/notify/device MMIO
+# window bases. Returns 1 if a common_cfg was found (modern transport usable).
+# ---------------------------------------------------------------------------
+fn resolve_virtio_caps(bus, dev, func) {
+    sq(&dl_common_cfg, 0);
+    sq(&dl_notify_base, 0);
+    sq(&dl_device_cfg, 0);
+    sq(&dl_isr_cfg, 0);
+    sw(&dl_notify_mult, 0);
+    if (pci_rd16(bus, dev, func, 0x06) & PCI_STATUS_CAPS) == 0 { return 0; }
+    let cap = pci_rd8(bus, dev, func, PCI_CAP_PTR_REG) & 0xFC;
+    let guard = 0;
+    while cap != 0 {
+        if guard > 48 { cap = 0; }                       # bounded walk (fail-safe)
+        else {
+            let vndr = pci_rd8(bus, dev, func, cap);
+            let nxt  = pci_rd8(bus, dev, func, cap + 1) & 0xFC;
+            if vndr == PCI_CAP_VNDR_VIRTIO {
+                let ctype = pci_rd8(bus, dev, func, cap + 3);
+                let bar   = pci_rd8(bus, dev, func, cap + 4) & 0xFF;
+                let off   = pci_rd(bus, dev, func, cap + 8);
+                let abs   = pci_bar_base(bus, dev, func, bar) + off;
+                if ctype == VIRTIO_CAP_COMMON { sq(&dl_common_cfg, abs); }
+                if ctype == VIRTIO_CAP_NOTIFY {
+                    sq(&dl_notify_base, abs);
+                    sw(&dl_notify_mult, pci_rd(bus, dev, func, cap + 16));
+                }
+                if ctype == VIRTIO_CAP_ISR { sq(&dl_isr_cfg, abs); }
+                if ctype == VIRTIO_CAP_DEVICE { sq(&dl_device_cfg, abs); }
+            }
+            cap = nxt;
+            guard = guard + 1;
+        }
+    }
+    if lq(&dl_common_cfg) == 0 { return 0; }
+    if lq(&dl_isr_cfg) == 0 { return 0; }
+    return 1;
+}
+
+# Scan bus 0 for modern or transitional virtio-net.
+fn find_virtio_net() {
+    let dev = 0;
+    while dev < 32 {
+        let id = pci_rd(0, dev, 0, 0);
+        if (id & 0xFFFF) == PCI_VENDOR_VIRTIO {
+            let did = (id >> 16) & 0xFFFF;
+            if did == PCI_DEVICE_VNET_MOD { return dev; }
+            if did == PCI_DEVICE_VNET_LEG { return dev; }
+        }
+        dev = dev + 1;
+    }
+    return 0 - 1;
+}
+
+# ---------------------------------------------------------------------------
+# Handoff: absolute slot VA of a driver state{} field. The blob was copied to
+# slot_base + slide, so a field at blob offset (field - driver_blob_start) lands at
+# slot_base + slide + that offset. (Used only after l3_copy_app_blob_to_slot.)
+# ---------------------------------------------------------------------------
+fn slot_field(slot, field) {
+    return l3_slot_base(slot) + lq(&l3_slot_code_slide + slot * 8)
+           + (field - &driver_blob_start);
+}
+
+# ---------------------------------------------------------------------------
+# Reserve the headless driver slot in the window pool: WF_ACTIVE (so the WM's
+# free-slot scan skips it) but no WF_VISIBLE (invisible to draw / hit-test /
+# focus), APPDATA = the slot's arena base. Mirrors the slot-0 wallpaper entry.
+# ---------------------------------------------------------------------------
+fn reserve_driver_window(slot) {
+    let w = WINDOW_POOL_ADDR + slot * WINDOW_STRUCT_SIZE;
+    sq(w + WIN_OFF_ID, slot);
+    sq(w + WIN_OFF_FLAGS, WF_ACTIVE);
+    sq(w + WIN_OFF_APPDATA, l3_slot_base(slot));
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# driver_manager_init - enumerate, match, probe, and bind the virtio-net driver.
+# Called once during device bring-up (before kernel lockdown). Returns 1 if a
+# driver was bound, 0 otherwise. Fail-closed at every step: a missing device, a
+# failed cap resolve, or a probe that never sets `ready` simply leaves the device
+# unclaimed and the system otherwise unaffected.
+# ---------------------------------------------------------------------------
+fn driver_manager_init() {
+    sw(&driver_manager_stage, 1);
+    let dev = find_virtio_net();
+    if dev < 0 { return dl_fail(1); }
+
+    let did = (pci_rd(0, dev, 0, 0) >> 16) & 0xFFFF;
+    # Enable memory/I/O space + bus mastering (control-plane only).
+    let cmd = pci_rd16(0, dev, 0, PCI_CMD_REG);
+    pci_wr(0, dev, 0, PCI_CMD_REG, cmd | PCI_CMD_IO | PCI_CMD_MEM | PCI_CMD_BUSMSTR);
+
+    let transport = TRANSPORT_MODERN;
+    if resolve_virtio_caps(0, dev, 0) == 0 {
+        if did != PCI_DEVICE_VNET_LEG { return dl_fail(2); }
+        let iob = pci_io_bar_base(0, dev, 0, 0);
+        if iob == 0 { return dl_fail(2); }
+        sw(&dl_io_base, iob);
+        transport = TRANSPORT_LEGACY;
+    }
+    sw(&dl_transport, transport);
+    let gsi = pci_rd8(0, dev, 0, 0x3C);
+    if gsi == 0xFF { return dl_fail(3); }
+    sw(&dl_irq_gsi, gsi);
+
+    let slot = DRIVER_SLOT;
+    let id = slot + 1;
+    let caps = DRV_CAP_MMIO | DRV_CAP_PIO | DRV_CAP_DMA | DRV_CAP_IRQ;
+
+    # Reserve the slot + install the driver blob + set its sandbox cap mask.
+    reserve_driver_window(slot);
+    if l3_copy_driver_blob_to_slot(slot) == 0 { return dl_fail(4); }
+    cap_mask_store(slot, CAP_CORE | CAP_DRIVER);
+
+    # Fork B: install signed policy, register (-> RUNNING), and grant the MMIO
+    # windows BEFORE the driver runs. dma_cap bounds the driver's self-service DMA.
+    drvhost_policy_install(slot, caps, 0, DMA_TOTAL);
+    drvhost_register(id, caps, caps, 0);
+    if transport == TRANSPORT_MODERN {
+        drvhost_grant_mmio(id, lq(&dl_common_cfg), 0x1000);
+        drvhost_grant_mmio(id, lq(&dl_notify_base), 0x4000);
+        drvhost_grant_mmio(id, lq(&dl_isr_cfg), 0x1000);
+        if lq(&dl_device_cfg) != 0 { drvhost_grant_mmio(id, lq(&dl_device_cfg), 0x1000); }
+    } else {
+        drvhost_grant_pio(id, lw(&dl_io_base), lw(&dl_io_base) + 0x1F);
+    }
+
+    # Establish the coherent window before entering ring 3. This avoids
+    # mutating the active slot's PTEs from inside its first syscall return path;
+    # allocation, grant accounting, and mapping remain broker-enforced.
+    # The top slot's fixed DMA subrange is pre-reserved with the app arena and
+    # identity-mapped below 4 GiB, so it is already coherent device memory and
+    # cannot fail from late physical fragmentation.
+    let dma_phys = l3_slot_base(slot) + 0x100000;
+    if drvhost_dma_adopt(id, dma_phys, DMA_TOTAL) != 0 { return dl_fail(0x44); }
+    if lq(&l3_wx_code_end + slot * 8) > 0x100000 { return dl_fail(0x43); }
+    let dma_va = drvhost_dma_map(id, dma_phys);
+    if dma_va == 0 { return dl_fail(0x42); }
+
+    # Write the resolved transport + MMIO bases into the driver's state{} handoff.
+    smap_open();
+    sw(slot_field(slot, &app_hl_virtio_net_transport), transport);
+    sq(slot_field(slot, &app_hl_virtio_net_common_cfg), lq(&dl_common_cfg));
+    sq(slot_field(slot, &app_hl_virtio_net_notify_base), lq(&dl_notify_base));
+    sw(slot_field(slot, &app_hl_virtio_net_notify_mult), lw(&dl_notify_mult));
+    sq(slot_field(slot, &app_hl_virtio_net_device_cfg), lq(&dl_device_cfg));
+    sq(slot_field(slot, &app_hl_virtio_net_isr_cfg), lq(&dl_isr_cfg));
+    sw(slot_field(slot, &app_hl_virtio_net_io_base), lw(&dl_io_base));
+    sq(slot_field(slot, &app_hl_virtio_net_dma_phys), dma_phys);
+    sq(slot_field(slot, &app_hl_virtio_net_dma_va), dma_va);
+    sw(slot_field(slot, &app_hl_virtio_net_ready), 0);
+    smap_close();
+
+    # PROBE: run the one-shot driver main() in its own windowless slot.
+    call_app_l3_driver(slot, &app_hl_virtio_net_main);
+
+    # BIND only on a fully successful probe (driver set ready == 1).
+    smap_open();
+    let ready = lw(slot_field(slot, &app_hl_virtio_net_ready));
+    smap_close();
+    if ready != 1 { return dl_fail(5); }
+
+    # Register the RX-drain callback; the tick dispatcher invokes it per event.
+    drvhost_register_tick(id, &app_hl_virtio_net_virtio_tick);
+    drvhost_grant_irq(id, DRIVER_IRQ_VECTOR);
+    # Conventional PCI INTx is level-triggered, active-low. Route it to CPU0 so
+    # the ISR->main-loop handoff preserves the workqueue's BSP-producer rule.
+    ioapic_set_irq(lw(&dl_irq_gsi), DRIVER_IRQ_VECTOR, 0, IOAPIC_LEVEL_LOW);
+    # Publish the link identity only after probe+bind. net_nic_select observes
+    # driver_manager_bound last, so it cannot select a half-initialised backend.
+    smap_open();
+    let m0 = lw(slot_field(slot, &app_hl_virtio_net_mac0));
+    let m1 = lw(slot_field(slot, &app_hl_virtio_net_mac1));
+    smap_close();
+    sw(&driver_manager_mac, m0);
+    sw(&driver_manager_mac + 4, m1);
+    sw(&driver_manager_bound, 1);
+    sw(&driver_manager_stage, 6);
+    serial_puts(&dl_msg_bind);
+    net_dhcp_l2_start();
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# driver_manager_tick - dispatch the bound driver's RX-drain callback once.
+# This is the event hook: the kernel calls it when the driver's device signals
+# (IRQ path) or, as the documented no-IRQ fallback, at a LOW frequency - never a
+# 24/7 per-frame poll. drvhost_tick_begin gates re-entrancy (returns 0 if the
+# driver is not bound/running or a tick is already in flight).
+# ---------------------------------------------------------------------------
+fn driver_manager_tick() {
+    if lw(&driver_manager_bound) == 0 { return 0; }
+    if atomic_xchg(&driver_manager_call_busy, 1) != 0 { return 0; }
+    let id = DRIVER_SLOT + 1;
+    let entry = drvhost_tick_begin(id);
+    if entry == 0 { atomic_xchg(&driver_manager_call_busy, 0); return 0; }
+    call_app_l3_driver(DRIVER_SLOT, entry);
+    drvhost_tick_end(id);
+    atomic_xchg(&driver_manager_call_busy, 0);
+    return 1;
+}
+
+# BSP-side IRQ/workqueue bridge. Reaps the prior fire-and-forget job before
+# submitting another, so an interrupt storm cannot consume all 32 queue slots.
+# `irq_event=0` is the documented low-frequency no-IRQ fallback and runs one
+# bounded drain inline only when no AP job is outstanding.
+fn driver_manager_service(irq_event) {
+    if lw(&driver_manager_bound) == 0 { return 0; }
+    let h = lw(&driver_manager_job);
+    if h != WQ_INVALID {
+        if workqueue_done(h) == 0 { return 0; }
+        workqueue_reap(h);
+        sw(&driver_manager_job, WQ_INVALID);
+    }
+    if irq_event == 0 { return driver_manager_tick(); }
+    h = workqueue_submit(WQ_JOB_DRIVER, 0, WQ_PRIO_HIGH);
+    if h == WQ_INVALID { return driver_manager_tick(); }
+    sw(&driver_manager_job, h);
+    return 1;
+}
+
+# Kernel-facing net.l2 TX provider (legacy NIC ops ABI: rdi=frame, ecx=len).
+# The only shared bytes are the bounded Ethernet frame staged into this driver's
+# own DMA mapping plus two scalar handoff cells; hardware access remains inside
+# the ring-3 driver through broker syscalls.
+fn driver_manager_tx_frame(rdi frame, ecx len)
+        preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if lw(&driver_manager_bound) == 0 { return 0; }
+    if len < 14 { return 0; }
+    if len > 1514 { return 0; }
+    if atomic_xchg(&driver_manager_call_busy, 1) != 0 { return 0; }
+    let slot = DRIVER_SLOT;
+    smap_open();
+    let dva = lq(slot_field(slot, &app_hl_virtio_net_dma_va));
+    let hdr = lw(slot_field(slot, &app_hl_virtio_net_hdr_size));
+    if dva != 0 {
+        let i = 0;
+        while i < len {
+            sb(dva + 0x30000 + hdr + i, lb(frame + i));
+            i = i + 1;
+        }
+        sw(slot_field(slot, &app_hl_virtio_net_tx_request_len), len);
+        sw(slot_field(slot, &app_hl_virtio_net_tx_result), 0);
+    }
+    smap_close();
+    if dva == 0 { atomic_xchg(&driver_manager_call_busy, 0); return 0; }
+    call_app_l3_driver(slot, &app_hl_virtio_net_virtio_tx);
+    smap_open();
+    let rc = lw(slot_field(slot, &app_hl_virtio_net_tx_result));
+    smap_close();
+    atomic_xchg(&driver_manager_call_busy, 0);
+    return rc;
+}
+
+fn driver_manager_poll_rx() {
+    return driver_manager_service(0);
+}

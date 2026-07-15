@@ -501,20 +501,28 @@ syscall_table:
     %endrep
     ; 232 REGISTER(requested_caps): policy and identity are kernel-owned.
     SYSCALL_ENTRY syscall_entry.sc_drvhost_register,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
-    ; 233..236 MMIO/DMA/IRQ/PIO grant requests are control-plane only.
-    %rep 4
-        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
-    %endrep
+    ; 233 MMIO, 235 IRQ, 236 PIO grants stay control-plane only (those windows
+    ; come from PCI enumeration the driver cannot see). 234 GRANT_DMA is the ONE
+    ; driver-callable DMA path: the handler calls drvhost_dma_alloc, which mints a
+    ; policy-bounded coherent buffer INTERNALLY (never a drvhost_grant_* call from
+    ; ring 3 - test_driver_framework.ps1) and returns its device-physical base.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_dma_alloc,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
     ; 237..239 reserved.
     %rep 3
         SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
     %endrep
     SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_read32,  1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
     SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_write32, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
-    ; 242 DMA map and 243 IRQ wait await the manager mapping/event path.
-    %rep 2
-        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
-    %endrep
+    ; 242 DMA_MAP(phys) -> ring-3 VA of the driver's OWN granted DMA window
+    ; (broker proves phys is a grant base, then l3_map_driver_dma aliases it
+    ; PRESENT|USER|W+NX into the caller slot). 243 IRQ_WAIT() -> forwarded-IRQ
+    ; event count; a bounded yield that returns 0 on the tick-deadline timeout so
+    ; a driver degrades cleanly to polling and never wedges its core (no-freeze).
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_dma_map,      1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_irq_wait,     0, 0, CAP_DRIVER
     SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_read8,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
     SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_write8,   2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
     SYSCALL_ENTRY syscall_entry.sc_drvhost_ring_establish, 1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
@@ -522,6 +530,24 @@ syscall_table:
     SYSCALL_ENTRY syscall_entry.sc_drvhost_pci_cfg_read32, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
     ; 249 cross-driver MMIO grant is control-plane only.
     SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    ; 250..262 width-parametric brokered MMIO/PIO + DMA-pointer program op
+    ; (VirtIO modern common_cfg is byte/word/qword; legacy is word/dword I/O).
+    ; Every access is bounds-checked to a granted window inside the broker.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd8,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd16,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_read32,  1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd64,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr8,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr16,    2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_write32, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr64,    2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr_dmaptr, 3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_rd16,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_wr16,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_rd32,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_wr32,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 263 net.l2 RX: grant-relative offset + bounded Ethernet frame length.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_net_rx,       2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
 syscall_table_end:
 syscall_table_count equ (syscall_table_end - syscall_table) / SYSCALL_ENTRY_SIZE
 

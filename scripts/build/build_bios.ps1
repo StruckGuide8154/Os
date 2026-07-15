@@ -44,27 +44,13 @@ Write-Host ("Mode:   " + ($(if ($Release) { 'release' } else { 'debug' })))
 Write-Host "Perf:   $PerfProfile"
 Write-Host ("Trace:  " + ($(if ($Trace) { 'on' } else { 'off' })))
 
-$NxhBuildArgs = @()
-if ($Release) { $NxhBuildArgs += '-Release' }
-& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
-if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
-
-# The BIOS build consumes generated GritHLK assembly too. Regenerate the FAT16
-# module explicitly so disk-layout changes cannot compile against stale output
-# (the UEFI builder already regenerates the full kernel-module set).
-$GritcPy = Join-Path $Root 'src\user\grithl\compiler\gritc.py'
-$GritLib = Join-Path $Root 'src\user\grithl\lib'
-$Fat16Ghl = Join-Path $Root 'src\kernel\grithlk\fat16_core.ghl'
-$Fat16Asm = Join-Path $BUILD_DIR 'ghl\fat16_core.asm'
-$Fat16Safety = Join-Path $BUILD_DIR 'ghl\safety\fat16_core.safety.json'
-New-Item -ItemType Directory -Path (Split-Path $Fat16Safety) -Force | Out-Null
-& python $GritcPy $Fat16Ghl -o $Fat16Asm -L $GritLib --embed --target kernel --forbid-asm --safety-manifest $Fat16Safety
-if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED FAT16 GritHLK compile' -ForegroundColor Red; exit 1 }
-$CoverageTool = Join-Path $Root 'tools\check_coverage.py'
-if (Test-Path $CoverageTool) {
-    & python $CoverageTool
-    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED signature coverage' -ForegroundColor Red; exit 1 }
-}
+# BIOS and UEFI consume the same generated app/kernel assembly. Use the UEFI
+# generator-only mode as the single module registry so a clean BIOS build can
+# never reuse stale output for any of the 55 GritHLK modules.
+$GenerationArgs = @('-KernelGenerationOnly')
+if ($Release) { $GenerationArgs += '-Release' }
+& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_uefi.ps1') @GenerationArgs
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL/GritHLK generation' -ForegroundColor Red; exit 1 }
 Write-Host "Source: $SRC_DIR"
 Write-Host "Build:  $BUILD_DIR"
 

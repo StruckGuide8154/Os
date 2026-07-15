@@ -102,6 +102,10 @@ fn net_dhcp_configure(rax result)
 # ---------------------------------------------------------------------------
 fn net_dhcp_start(rax result)
         preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
+    if net_nic_active() == 3 {
+        result = net_dhcp_l2_start();
+        return;
+    }
     if feat_on(FEAT_USBNIC_INIT) != 0 {
         if lb(&rtl8156_active) == 1 {
             # Force a fresh DISCOVER: drop any existing lease + reset the FSM so the

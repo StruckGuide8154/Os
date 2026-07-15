@@ -18,6 +18,7 @@ bits 64
 %include "src/kernel/proc/usermode_decls.inc"
 %include "src/kernel/proc/usermode_entry.inc"
 %include "src/kernel/proc/usermode_paging.inc"
+%include "src/kernel/proc/usermode_driver_dma.inc"
 %include "src/kernel/proc/usermode_integrity.inc"
 %include "src/kernel/proc/usermode_slot_state.inc"
 %include "src/kernel/proc/usermode_slot_install.inc"

@@ -109,7 +109,10 @@ $legacyBuildScripts = @(
 # build step; everything else must treat build/ghl as output, never source.
 $legacyAggregators = @(
     'src/kernel/kernel_build.asm',
-    'src/user/apps.asm'
+    'src/user/apps.asm',
+    # Dedicated signed driver-package linker wrapper. Like kernel_build.asm it
+    # only aggregates gritc output into the flat image; the .ghl remains source.
+    'src/drivers/driver_blob.asm'
 )
 
 # The full legacy quarantine: build scripts + aggregators. Files here are exempt

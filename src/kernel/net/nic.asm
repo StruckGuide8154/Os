@@ -54,6 +54,11 @@ extern rtl_dhcp_dns
 extern rtl_guest_ip
 extern rtl_next_hop_ip
 extern cpu_tsc_per_tick
+extern driver_manager_bound
+extern driver_manager_mac
+extern driver_manager_info
+extern driver_manager_tx_frame
+extern driver_manager_poll_rx
 
 section .text
 
@@ -62,6 +67,7 @@ section .text
 section .data
 net_driver_rtl8156_name db "rtl8156", 0
 net_driver_rtl8139_name db "rtl8139", 0
+net_driver_virtio_name db "virtio-net/ring3", 0
 
 align 8
 net_driver_rtl8156_ops:
@@ -92,7 +98,22 @@ net_driver_rtl8139_ops:
     dq 0
     dq rtl8139_net_info
 
+net_driver_virtio_ops:
+    dq net_driver_virtio_name
+    dd NET_NIC_VIRTIO
+    dd 300
+    dq 0
+    dq driver_manager_bound
+    dq driver_manager_mac
+    dq driver_manager_tx_frame
+    dq driver_manager_poll_rx
+    dq 0
+    dq 0
+    dq net_dhcp_start
+    dq driver_manager_info
+
 net_driver_table:
+    dq net_driver_virtio_ops
     dq net_driver_rtl8156_ops
     dq net_driver_rtl8139_ops
 net_driver_table_end:
@@ -153,6 +174,15 @@ net_nic_tx_frame:
     push rbx
     push rcx
     push rdi
+    ; SECURITY (GSEC net): validate the caller-supplied length ONCE, before any
+    ; NIC is selected or driven. Drivers copy this many bytes into a fixed DMA
+    ; buffer, so an out-of-range length here would overrun kernel memory. Reject
+    ; runts (< header) and oversized frames (> max standard frame) fail-closed;
+    ; concrete drivers re-check as defence in depth.
+    cmp ecx, NET_ETH_FRAME_MAX
+    ja .fail
+    cmp ecx, NET_ETH_FRAME_MIN
+    jb .fail
     call net_nic_select
     test rax, rax
     jz .fail
@@ -220,10 +250,17 @@ net_info:
     push rbx
     call net_nic_active
     mov ebx, eax
+    cmp rdi, 10                    ; NI_DRIVER: expose the selected backend id
+    jne .select_backend
+    mov eax, ebx
+    jmp .done
+.select_backend:
     cmp ebx, NET_NIC_RTL8156
     je .rtl8156
     cmp ebx, NET_NIC_RTL8139
     je .rtl8139
+    cmp ebx, NET_NIC_VIRTIO
+    je .virtio
     xor eax, eax
     cmp rdi, 7
     jne .done
@@ -315,6 +352,56 @@ net_info:
     je .r8139_dns
     xor eax, eax
     jmp .done
+.virtio:
+    cmp rdi, 0
+    je .active
+    cmp rdi, 1
+    je .virtio_bound
+    cmp rdi, 2
+    je .virtio_ip
+    cmp rdi, 3
+    je .virtio_router
+    cmp rdi, 4
+    je .virtio_server
+    cmp rdi, 5
+    je .virtio_guest
+    cmp rdi, 6
+    je .virtio_next_hop
+    cmp rdi, 7
+    je .virtio_state
+    cmp rdi, 8
+    je .virtio_ttl
+    cmp rdi, 9
+    je .virtio_dns
+    xor eax, eax
+    jmp .done
+.virtio_bound:
+    movzx eax, byte [driver_manager_info + NET_NIC_INFO_DHCP_BOUND]
+    jmp .done
+.virtio_state:
+    movzx eax, byte [driver_manager_info + NET_NIC_INFO_DHCP_STATE]
+    jmp .done
+.virtio_ttl:
+    movzx eax, byte [driver_manager_info + NET_NIC_INFO_LAST_TTL]
+    jmp .done
+.virtio_ip:
+    mov eax, [driver_manager_info + NET_NIC_INFO_DHCP_IP]
+    jmp .done
+.virtio_router:
+    mov eax, [driver_manager_info + NET_NIC_INFO_DHCP_ROUTER]
+    jmp .done
+.virtio_server:
+    mov eax, [driver_manager_info + NET_NIC_INFO_DHCP_SERVER]
+    jmp .done
+.virtio_guest:
+    mov eax, [driver_manager_info + NET_NIC_INFO_GUEST_IP]
+    jmp .done
+.virtio_next_hop:
+    mov eax, [driver_manager_info + NET_NIC_INFO_NEXT_HOP_IP]
+    jmp .done
+.virtio_dns:
+    mov eax, [driver_manager_info + NET_NIC_INFO_DNS_SERVER]
+    jmp .done
 .r8139_bound:
     movzx eax, byte [rtl_dhcp_bound]
     jmp .done
@@ -372,6 +459,25 @@ net_ping_ipv4:
     je .try_rtl8156
     cmp byte [rtl_active], 1
     je .try_rtl8139
+    call net_nic_active
+    cmp eax, NET_NIC_VIRTIO
+    je .try_virtio
+    jmp .fail
+.try_virtio:
+    ; The serial-console ping is synchronous by design. Drive the same
+    ; non-blocking FSM used by the GUI while explicitly draining VirtIO RX.
+    mov edi, [rsp]
+    call net_ping_l2_tick
+    test rax, rax
+    jg .virtio_done
+    js .fail
+    call net_nic_poll_rx
+    pause
+    jmp .try_virtio
+.virtio_done:
+    pop rdi
+    pop rbx
+    ret
 .try_rtl8156:
     call rtl8156_icmp_ping_ipv4
     test eax, eax
@@ -408,11 +514,17 @@ net_ping_ipv4:
 ; async; rtl8139 stays synchronous and returns -1 here so userspace can
 ; fall back to the legacy SYS_NET_PING4 if needed.
 extern rtl8156_ping4_tick
+extern net_ping_l2_tick
 global net_ping4_tick
 net_ping4_tick:
     cmp byte [rtl8156_active], 1
-    jne .nope
+    jne .try_generic
     jmp rtl8156_ping4_tick
+.try_generic:
+    call net_nic_active
+    cmp eax, NET_NIC_VIRTIO
+    jne .nope
+    jmp net_ping_l2_tick
 .nope:
     mov rax, -1
     ret

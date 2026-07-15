@@ -53,6 +53,7 @@ unsafe implicit_extern;   # &symbol resolved as same-unit kernel labels (-f bin)
 
 global call_app_l3;
 global call_app_l3_packed;
+global call_app_l3_driver;
 global call_app_l3_return;
 global call_app_l3_app_done;
 global test_usermode_proc;
@@ -109,6 +110,7 @@ const SYS_PRINT    = 0;
 # Kernel-resident L3 runtime / slot state + the per-slot arena base (defined in
 # usermode_storage.inc / usermode_entry.inc). Read/written through &symbol.
 extern l3_slot_live;          # qword[MAX_WINDOWS] - L3_SLOT_MAGIC when populated
+extern l3_slot_blob_kind;     # qword[MAX_WINDOWS] - 1 for dedicated driver blob
 extern l3_app_arena_base_v;   # qword - arena base VA
 extern l3_slot_in_flight;     # qword[MAX_WINDOWS] - 1 while slot's ring-3 cb runs
 extern l3_wx_code_start;      # qword[MAX_WINDOWS] - executable window start off
@@ -132,6 +134,12 @@ const IRET_RFLAGS_MASK = 0xFFFFFFFFFFFFFCFF;
 data cb_rt: 1 x 8;
 # Scratch slot id for call_app_l3_return (naked; no `let`).
 data cb_slot: 1 x 8;
+# Forced-slot sentinel for windowless driver spawn (Fork A). Holds slot+1 when a
+# call_app_l3_driver invocation must run in an explicit slot with no window; 0 =
+# normal window-derived slot pick. Set immediately before call_app_l3 and
+# consumed straight-line in l3_prepare_callback (same BSP-only discipline as
+# cb_rt), so no window callback ever observes a non-zero value.
+data cb_driver_slot: 1 x 8;
 
 # ===========================================================================
 # Debug / trace serial helpers (zero-cost unless the matching cfg is set).
@@ -162,6 +170,19 @@ fn l3_prepare_callback(rdi target, rsi arg0, rdx arg1, rcx arg2) {
             if idx < MAX_WINDOWS {
                 slot = idx;
             }
+        }
+    }
+
+    # Windowless driver spawn (Fork A): the control plane forces an explicit slot
+    # via call_app_l3_driver (arg0 == 0, no window). cb_driver_slot holds slot+1;
+    # consume it straight-line. 0 (every window-derived call) leaves `slot`
+    # exactly as computed above, so the GUI callback path is byte-for-byte
+    # unchanged. Clamp out-of-range fail-closed to slot 0.
+    if lq(&cb_driver_slot) != 0 {
+        let ds = lq(&cb_driver_slot) - 1;
+        sq(&cb_driver_slot, 0);
+        if ds < MAX_WINDOWS {
+            slot = ds;
         }
     }
 
@@ -405,6 +426,24 @@ fn call_app_l3_packed(blk) {
 }
 
 # ===========================================================================
+# call_app_l3_driver - windowless ring-3 driver entry (Fork A, external-driver
+# loader).  Runs `target` (a blob code VA, e.g. &virtio_net_main for the one-shot
+# probe or &virtio_net_tick for the IRQ-triggered RX drain) in driver `slot` with
+# NO window: no shadow-window sync, and the slot is chosen explicitly rather than
+# derived from a window struct.  Same synchronous round-trip as call_app_l3 - it
+# returns to the caller when the driver fn issues SYS_APP_DONE, and its result is
+# whatever the driver fn left (the loader also reads the driver's state{} handoff).
+# The control plane must have installed the driver blob + policy + grants into
+# `slot` first; because arg0 is 0 (no window) the fail-closed W^X entry check in
+# l3_prepare_callback still requires `target` to resolve inside the slot's
+# declared code window, so a bad entry no-ops via the app-done trampoline.
+# ===========================================================================
+fn call_app_l3_driver(slot, target) {
+    sq(&cb_driver_slot, slot + 1);      # forced-slot sentinel; consumed in prepare
+    call call_app_l3(rdi: target, rsi: 0, rdx: 0, rcx: 0);
+}
+
+# ===========================================================================
 # call_app_l3_return - kernel-resume side of the ring-3 callback round-trip.
 # Reached by `jmp call_app_l3_return` from the syscall app-done epilogue, with
 # the per-slot id sitting at [rsp] (left there by POP_ALL). Restores the exact
@@ -529,6 +568,10 @@ fn call_app_l3_app_done() naked {
 fn l3_install_app_done_trampoline(slot) {
     let base = l3_slot_base(slot);
     let slide = lq(&l3_slot_code_slide + slot * 8);
+    if lq(&l3_slot_blob_kind + slot * 8) == 1 {
+        let driver_tramp_off = (&driver_blob_done_trampoline) - (&driver_blob_start);
+        return base + slide + driver_tramp_off;
+    }
     let tramp_off = (&app_l3_done_trampoline) - (&app_blob_start);
     return base + slide + tramp_off;
 }

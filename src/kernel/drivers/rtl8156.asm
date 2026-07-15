@@ -11,6 +11,15 @@ bits 64
 %include "constants.inc"
 %include "net_driver.inc"
 
+; The tx path stores an 8-byte Realtek TX descriptor at RTL8156_TX_BUF_ADDR then
+; the Ethernet frame (up to NET_ETH_FRAME_MAX) at +8, all inside the reserved DMA
+; window that ends where the scratch region begins. Pin the invariant so a future
+; memory-map change that shrinks this window fails the build instead of silently
+; reintroducing the DMA overrun the tx bounds check closes.
+%if ((RTL8156_SCRATCH_ADDR - RTL8156_TX_BUF_ADDR) < (NET_ETH_FRAME_MAX + 8))
+  %error "RTL8156 TX DMA window smaller than NET_ETH_FRAME_MAX + descriptor"
+%endif
+
 extern xhci_init
 extern xhci_active
 extern xhci_find_port

@@ -16,7 +16,7 @@ extern isr_15, isr_16, isr_17, isr_18, isr_19, isr_20, isr_21
 extern isr_22, isr_23, isr_24, isr_25, isr_26, isr_27, isr_28
 extern isr_29, isr_30, isr_31
 extern irq_0, irq_1, irq_2, irq_3, irq_4, irq_5, irq_6, irq_7
-extern irq_8, irq_9, irq_10, irq_11, irq_12, irq_13, irq_14, irq_15, irq_17, irq_18
+extern irq_8, irq_9, irq_10, irq_11, irq_12, irq_13, irq_14, irq_15, irq_17, irq_18, irq_20
 extern isr_nmi          ; Tier-2 liveness NMI stub (vector 2)
 extern isr_ap_tick      ; Tier-2 per-AP self-wake timer stub (vector 48)
 
@@ -273,6 +273,10 @@ idt_init:
 
     mov rdi, 50
     lea rsi, [irq_18]
+    call idt_set_entry
+
+    mov rdi, 52
+    lea rsi, [irq_20]
     call idt_set_entry
 
     ; Route the abort-class fault gates onto dedicated IST stacks (filled by
