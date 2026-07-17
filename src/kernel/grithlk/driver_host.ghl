@@ -111,11 +111,21 @@ const DRV_CAP_PIO   = 2;        # brokered port I/O within a granted port range
 const DRV_CAP_DMA   = 4;        # a DMA window the broker maps for the device
 const DRV_CAP_IRQ   = 8;        # receive forwarded IRQ signals
 const DRV_CAP_RING  = 16;       # establish shared-memory descriptor rings
-const DRV_CAP_RESET = 32;       # device reset / firmware load (threshold-gated)
+const DRV_CAP_RESET = 32;       # transient device reset (threshold-gated).
+                                 # ABI row 264 SC_DRVHOST_DEVICE_RESET is reserved
+                                 # for it (compiler-gated by `capability reset;`,
+                                 # control-plane denied until dispatched).
 const DRV_CAP_PCICFG = 64;      # brokered PCI config-space READ (enumeration only;
                                  # gated so only a signed PnP/enumeration controller
                                  # is ever registered with this bit, see docs/gpu-driver/
                                  # TODO.md §2b item 1). Grants no MMIO/DMA/PIO authority.
+const DRV_CAP_FWLOAD = 128;     # firmware load into the device (threshold-gated).
+                                 # Split from DRV_CAP_RESET on purpose: loaded
+                                 # firmware PERSISTS past a reboot, so reset
+                                 # authority must never subsume it. ABI row 265
+                                 # SC_DRVHOST_FW_LOAD is reserved (compiler-gated
+                                 # by `capability fwload;`, control-plane denied
+                                 # until dispatched).
 
 # Driver lifecycle states.
 const DRV_ST_NONE       = 0;    # slot unused

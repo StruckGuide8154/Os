@@ -2695,7 +2695,11 @@ _KERNEL_PRIV_SUBSUMES={
 # a static least-authority gate over the stable driver-host syscall ABI; they do
 # not mint runtime authority.  The in-kernel broker independently intersects
 # requested capabilities with signed policy and checks every concrete window.
-_VALID_DRIVER_CAPS={"mmio","dma","pio","irq","ring","reset"}
+# `reset` (transient device reset) and `fwload` (persistent firmware load) are
+# deliberately SEPARATE classes: firmware load outlives a reboot, so neither
+# declaration may subsume the other (mirrors DRV_CAP_RESET / DRV_CAP_FWLOAD in
+# driver_host.ghl).
+_VALID_DRIVER_CAPS={"mmio","dma","pio","irq","ring","reset","fwload"}
 
 # Broker operations whose mere presence in a driver binary requires explicit
 # authority.  258 programs a device-visible DMA pointer through an MMIO window,
@@ -2716,6 +2720,8 @@ _DRIVER_SYSCALL_CAPS={
     256: frozenset(("mmio",)),       # MMIO_WR32
     257: frozenset(("mmio",)),       # MMIO_WR64
     258: frozenset(("mmio","dma")), # MMIO_WR_DMAPTR
+    264: frozenset(("reset",)),      # DEVICE_RESET (reserved; not yet dispatched)
+    265: frozenset(("fwload",)),     # FW_LOAD (reserved; not yet dispatched)
 }
 
 def _require_driver_syscall_caps(cg, num):
@@ -5599,9 +5605,10 @@ def main():
                          "and emit no inline asm. Combined with the ring-3 privilege gate (privileged "
                          "intrinsics inb/outb/write_cr*/lgdt/... already require --target kernel), a "
                          "driver binary provably holds ZERO ambient hardware authority: it reaches "
-                         "hardware only by syscalling the in-kernel driver_host broker. Brokered MMIO "
-                         "and DMA calls additionally require explicit `capability mmio;` / "
-                         "`capability dma;` declarations; dynamic syscall numbers are rejected.")
+                         "hardware only by syscalling the in-kernel driver_host broker. Brokered MMIO, "
+                         "DMA, device-reset, and firmware-load calls additionally require explicit "
+                         "`capability mmio;` / `capability dma;` / `capability reset;` / "
+                         "`capability fwload;` declarations; dynamic syscall numbers are rejected.")
     ap.add_argument("--forbid-asm",action="store_true",
                     help="reject any inline asm block. Use for new code and migration gates.")
     ap.add_argument("--deny-unsafe",action="store_true",

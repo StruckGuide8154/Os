@@ -1,0 +1,10 @@
+# Negative Track-8 compiler gate: a driver cannot name the device-reset broker
+# syscall unless it declares the reset authority class.
+
+app "driver_target_reset_cap_forbidden" { stack = 4096; }
+capability fwload;  # the adjacent authority must not satisfy the reset gate
+const SC_DRVHOST_DEVICE_RESET = 264;
+
+fn main() {
+    return syscall(SC_DRVHOST_DEVICE_RESET, 0);
+}

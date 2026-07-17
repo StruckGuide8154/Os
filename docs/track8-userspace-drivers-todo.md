@@ -53,13 +53,21 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       bounded/SMAP-bracketed ring submission, and fail-closed control-plane
       rows. Remaining: verified driver-slot creation, concrete device grants,
       DMA mapping, IRQ events, and device-manager provisioning.
-- [~] MMIO/DMA capability gates in `gritc`: **MMIO + DMA LANDED 2026-07-17.**
-      `--target driver` requires explicit `capability mmio;` / `capability dma;`
-      for the corresponding broker syscall families, requires both for DMA
-      pointer programming through MMIO, and rejects dynamic syscall numbers so
-      the check cannot be hidden. Compiler declarations do not mint authority:
-      signed policy + broker window grants still decide at runtime. Remaining
-      open P0 item: capability gate for device reset and firmware load.
+- [x] MMIO/DMA/reset/fwload capability gates in `gritc`: **MMIO + DMA LANDED
+      2026-07-17; RESET + FWLOAD LANDED 2026-07-17 (same day).** `--target
+      driver` requires explicit `capability mmio;` / `capability dma;` for the
+      corresponding broker syscall families, requires both for DMA pointer
+      programming through MMIO, and rejects dynamic syscall numbers so the
+      check cannot be hidden. Device reset (row 264) requires `capability
+      reset;` and firmware load (row 265) requires `capability fwload;` -
+      deliberately split classes (`DRV_CAP_RESET`/`DRV_CAP_FWLOAD`), since
+      loaded firmware persists past a reboot, so neither subsumes the other;
+      both rows are reserved-only (control-plane denied) until the dispatcher
+      wires them. Compiler declarations do not mint authority: signed policy +
+      broker window grants still decide at runtime. Fixtures:
+      `driver_target_{mmio,dma,reset,fwload}_cap_forbidden.ghl` +
+      `driver_target_reset_fwload_ok.ghl` + the dynamic-syscall reject, all in
+      `test_gritc_security.ps1`.
 - [ ] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
       broker (a driver_id can only reach windows in its granted table).
 
@@ -81,7 +89,11 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
   Canonical `SC_DRVHOST_*` ABI (one numbering across all driver-host processes):
   232 REGISTER, 233 GRANT_MMIO, 234 GRANT_DMA, 235 GRANT_IRQ, 236 GRANT_PIO,
   240 MMIO_READ32, 241 MMIO_WRITE32, 242 DMA_MAP, 243 IRQ_WAIT, 244 PIO_READ8,
-  245 PIO_WRITE8, 246 RING_ESTABLISH, 247 RING_SUBMIT.
+  245 PIO_WRITE8, 246 RING_ESTABLISH, 247 RING_SUBMIT, 248 PCI_CFG_READ32,
+  249 GRANT_MMIO_FOR, 250-253 MMIO_RD8/16/32/64, 254-257 MMIO_WR8/16/32/64,
+  258 MMIO_WR_DMAPTR, 259-262 PIO_RD/WR16/32, 263 NET_RX,
+  264 DEVICE_RESET (reserved, `capability reset;`),
+  265 FW_LOAD (reserved, `capability fwload;`).
 
 ## Rung 2.5 - HDA audio CLASS driver  **[DESIGN + DRIVER LANDED 2026-06-14]**
 

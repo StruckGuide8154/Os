@@ -120,7 +120,13 @@ data-at-rest). They are not yet split into their own track docs.
       allocation/mapping requires `capability dma;`, and the MMIO DMA-pointer
       programming operation requires both `mmio` and `dma`. Signed policy and
       broker window checks remain the independent runtime authority.
-- [ ] Add capability gates for device reset and firmware load.
+- [x] Add capability gates for device reset and firmware load. DONE
+      (2026-07-17) - under `--target driver`, the reserved broker rows 264
+      (device reset) / 265 (firmware load) require explicit `capability reset;`
+      / `capability fwload;`. The classes are split on purpose (firmware
+      persists past a reboot; `DRV_CAP_RESET` never subsumes `DRV_CAP_FWLOAD`).
+      Proven by `driver_target_{reset,fwload}_cap_forbidden.ghl` (the adjacent
+      class must not satisfy the gate) + `driver_target_reset_fwload_ok.ghl`.
 - [ ] Add capability gates for clock, timer, and monotonic-counter reads.
 - [ ] Add target-specific intrinsic allowlists for boot, kernel, hypervisor,
       driver, app, tool, and recovery targets.
