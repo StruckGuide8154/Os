@@ -53,6 +53,22 @@ reduce maintenance risk.
 - [ ] Add a negative test for app code trying to dereference live kernel window pointers.
 - [ ] Add per-syscall tests for invalid pointers: below app arena, above arena, kernel address, null, unaligned edge.
 
+## P1: Installable Driver Framework
+
+- [x] Define the installable package, permission review, device binding, class ABI,
+      recovery, update, and Wi-Fi integration architecture in
+      `docs/installable-driver-architecture.md`.
+- [ ] Complete Stage 0: wire the existing `SC_DRVHOST_*` broker into the real syscall
+      dispatcher with kernel-derived caller identity and driver-slot capabilities.
+- [ ] Define the shared versioned handle/message/ring ABI and implement `net.l2` as
+      the first dynamic device-class broker.
+- [ ] Generalize GPU PnP into a bus-neutral PCI/USB/ACPI device manager with
+      deterministic matching and exclusive transactional binding.
+- [ ] Implement signed external `.gdrv` packages, permission-diff review, revocation,
+      and anti-rollback updates through the existing `ART_DRIVER` envelope gate.
+- [ ] Add `wlan.radio`, a separate Wi-Fi service/supplicant, and a credential broker
+      before implementing the first hardware Wi-Fi chipset package.
+
 ## P1: Syscall Surface
 
 - [ ] Generate syscall docs from source or validate docs against source automatically.
@@ -158,8 +174,8 @@ reduce maintenance risk.
 
 ## P2: Documentation
 
-- [ ] Update `docs/verification.md` with the current full stage list, including Explorer marker validation.
-- [ ] Add a "known flaky/generated outputs" section explaining which tests rewrite `build`.
+- [x] Update `docs/verification.md` with the current full stage list, including Explorer marker validation.
+- [x] Add a "known flaky/generated outputs" section explaining which tests rewrite `build`.
 - [ ] Update `docs/audit-checklist.md` with the current SMP failure status.
 - [ ] Promote recurring audit findings into permanent check scripts where practical.
 - [ ] Document L3 slot memory layout with an ASCII map.

@@ -183,6 +183,10 @@ section .text
 ; identity from the active slot; signed policy installation remains kernel-only.
 %include "build/ghl/driver_host.asm"
 section .text
+; Signed device-manager control plane: PCI match/probe/bind for the dedicated
+; ring-3 driver package. Kept adjacent to the broker it provisions.
+%include "build/ghl/driver_loader.asm"
+section .text
 %include "src/kernel/proc/syscall.asm"
 ; GritHLK syscall data section (Stage 1 of docs/ghlk-syscall-rearchitecture.md):
 ; the unconditional, const-sized syscall data symbols migrated out of
@@ -297,6 +301,8 @@ section .text
 ; net_dhcp_configure / net_dhcp_start ported out of nic.asm to zero-asm GHLK.
 %include "build/ghl/net_dhcp_dispatch.asm"
 section .text
+%include "build/ghl/net_dhcp_l2.asm"
+section .text
 %include "src/kernel/drivers/driver_debug.asm"
 section .text
 %include "src/kernel/drivers/spi.asm"
@@ -384,6 +390,10 @@ strlen equ fn_strlen
 ; kernel text range [_start, _kernel_text_end) exactly as before.
 section .text
 %include "src/user/apps.asm"
+
+; Dedicated installable-driver package. Its .drivertext/.driverdata sections
+; remain disjoint from the GUI app blob and leave the fixed DMA VA window free.
+%include "src/drivers/driver_blob.asm"
 
 ; End-of-text marker. NASM `-f bin` concatenates section CONTENT by name in the
 ; order [.text | .data | .rodata | .bss] regardless of include order, so every

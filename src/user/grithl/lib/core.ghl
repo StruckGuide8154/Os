@@ -88,6 +88,13 @@ const NI_DHCP_STATE  = 7
 # Last successful ICMP echo reply's TTL byte (0 if no reply ever seen).
 const NI_PING_LAST_TTL = 8
 const NI_DNS_SERVER  = 9
+# Active network backend id (0=none, 1=RTL8156, 2=RTL8139, 3=VirtIO).
+const NI_DRIVER      = 10
+
+const NET_NIC_NONE    = 0
+const NET_NIC_RTL8156 = 1
+const NET_NIC_RTL8139 = 2
+const NET_NIC_VIRTIO  = 3
 
 # rtl8156 DHCP state machine values returned by NI_DHCP_STATE.
 const DHCP_IDLE      = 0

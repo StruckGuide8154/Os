@@ -149,6 +149,9 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     mov rax, L3_SLOT_MAGIC
     mov ecx, r9d
     mov [l3_slot_live + rcx*8], rax
+    mov qword [l3_slot_blob_kind + rcx*8], 0
+    mov rax, [rel app_blob_size_v]
+    mov [l3_slot_blob_size + rcx*8], rax
     ; Install this slot's W^X manifest (Codex review finding 2). Every GritHL app
     ; gets a default v1 manifest naming its code window; l3_apply_wx_policy marks
     ; that window X+!W and every other slot page (writable data tail, stack,
@@ -216,6 +219,110 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     pop rcx
     ret
 
+; l3_copy_driver_blob_to_slot - install the dedicated raw-syscall driver blob.
+; EDI = slot, RAX = unmodified slot base on success or 0 on invalid bounds.
+; The copy is constrained below L3_SLOT_DMA_OFF, leaving the fixed DMA window
+; writable+NX. Unlike GUI apps, this slot intentionally keeps syscall
+; permutation uncommitted so the broker's stable u32 syscall ABI is identity.
+FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
+    push rcx
+    push rdi
+    push rsi
+    push r8
+    push r9
+    mov r9d, edi
+    cmp r9d, MAX_WINDOWS
+    jae .driver_copy_fail
+    mov rcx, driver_blob_end - driver_blob_start
+    test rcx, rcx
+    jz .driver_copy_fail
+    cmp rcx, L3_SLOT_DMA_OFF
+    jae .driver_copy_fail
+    mov rax, driver_blob_code_end - driver_blob_start
+    test rax, rax
+    jz .driver_copy_fail
+    cmp rax, rcx
+    ja .driver_copy_fail
+%ifdef ENABLE_SYSCALL_PERM
+    lea rax, [rel sc_slot_perm_committed]
+    mov byte [rax + r9], 0
+%endif
+    mov byte [l3_code_hash_valid + r9], 0
+    mov edi, r9d
+    call l3_randomize_driver_slide
+    mov edi, r9d
+    call l3_slot_base
+    mov r8, rax
+
+    ; Recycle-safe whole-slot scrub, split around the non-present stack guard.
+    push rax
+    xor eax, eax
+    cld
+    call nk_pt_window_begin
+    mov rdi, r8
+    mov rcx, L3_SLOT_USER_STACK_GUARD_OFF / 8
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+    lea rdi, [r8 + L3_SLOT_USER_STACK_GUARD_OFF + 0x1000]
+    mov rcx, (APP_SLOT_SIZE - L3_SLOT_USER_STACK_GUARD_OFF - 0x1000) / 8
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+    call nk_pt_window_end
+    pop rax
+
+    mov rdi, r8
+    add rdi, [abs l3_slot_code_slide + r9*8]
+    lea rsi, [rel driver_blob_start]
+    mov rcx, driver_blob_end - driver_blob_start
+    ; Defense in depth against arithmetic/layout drift after the random draw.
+    mov rdx, L3_SLOT_DMA_OFF
+    sub rdx, [abs l3_slot_code_slide + r9*8]
+    cmp rcx, rdx
+    ja .driver_copy_fail_after_wipe
+    cld
+    USER_ACCESS_BEGIN
+    rep movsb
+    USER_ACCESS_END
+
+    mov ecx, r9d
+    mov rax, L3_SLOT_MAGIC
+    mov [l3_slot_live + rcx*8], rax
+    mov qword [l3_slot_blob_kind + rcx*8], 1
+    mov qword [l3_slot_blob_size + rcx*8], driver_blob_end - driver_blob_start
+    mov rdx, [abs l3_slot_code_slide + rcx*8]
+    mov rax, rdx
+    add rax, driver_blob_code_end - driver_blob_start
+    mov [l3_wx_code_start + rcx*8], rdx
+    mov [l3_wx_code_end + rcx*8], rax
+    mov qword [l3_wx_manifest_ver + rcx*8], 1
+    mov byte [l3_code_hash_valid + rcx], 0
+    mov edi, r9d
+    call l3_randomize_user_stack_top
+    mov edi, r9d
+    call l3_derive_slot_key
+    mov rdi, r8
+    call handle_table_clear
+    mov rax, r8
+    jmp .driver_copy_done
+
+.driver_copy_fail_after_wipe:
+    mov ecx, r9d
+    xor eax, eax
+    mov [l3_slot_live + rcx*8], rax
+    mov [l3_slot_blob_kind + rcx*8], rax
+    mov [l3_slot_blob_size + rcx*8], rax
+.driver_copy_fail:
+    xor eax, eax
+.driver_copy_done:
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rcx
+    ret
+
 ; l3_release_slot - retire per-launch state for a closed app slot.
 ; EDI = slot. This is the lifecycle counterpart to l3_copy_app_blob_to_slot:
 ; it clears kernel-owned per-slot metadata and scrubs the user arena. The
@@ -264,6 +371,8 @@ FN_BEGIN l3_release_slot, 1, 0, FN_RET_VOID
     mov ecx, r8d
     xor eax, eax
     mov [l3_slot_live + rcx*8], rax
+    mov [l3_slot_blob_kind + rcx*8], rax
+    mov [l3_slot_blob_size + rcx*8], rax
     mov [l3_wx_manifest_ver + rcx*8], rax
     mov [l3_wx_code_start + rcx*8], rax
     mov [l3_wx_code_end + rcx*8], rax

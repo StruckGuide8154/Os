@@ -216,6 +216,7 @@ src/kernel/proc/syscall_xscc_selftest.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode.asm | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_callbacks.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_decls.inc | kernel-proc | high | legacy | TBD
+src/kernel/proc/usermode_driver_dma.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_entry.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_integrity.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_paging.inc | kernel-proc | high | legacy | TBD
@@ -261,3 +262,4 @@ src/user/poc/wx_poc_pos.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_poc_write_x.asm | user-poc | low | legacy | TBD
 src/user/templates/hello_callback.asm | user-templates | low | legacy | TBD
 scripts/dev/poc_strike_immunity.inc | dev-poc | low | legacy | TBD
+src/drivers/driver_blob.asm | driver-package | high | legacy | dedicated GritHL driver-blob linker wrapper

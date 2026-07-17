@@ -92,6 +92,7 @@ extern render_flip_job;     # wq_job_table[3]: backbuffer->FB flip blit (grithlk
 extern device_enum_job;     # wq_job_table[4]: async device bring-up (kernel_lifecycle.ghl)
 extern wallpaper_render_job; # wq_job_table[5]: full-quality SVG wallpaper raster (gui/window_desktop.inc)
 extern k5_verify_job;        # wq_job_table[6]: K5 Ed25519 boot-chain verify (kernel_lifecycle.ghl)
+extern driver_manager_tick;  # wq_job_table[7]: bounded external-driver RX drain
 
 const PROCESS_POOL  = extern;
 const MAX_PROCESSES = extern;
@@ -108,6 +109,7 @@ table wq_job_table {
     device_enum_job,        # 4 - async device bring-up
     wallpaper_render_job,   # 5 - full-quality wallpaper SVG raster
     k5_verify_job,          # 6 - K5 Ed25519 boot-chain signed-verify
+    driver_manager_tick,    # 7 - brokered device IRQ callback
 };
 const WQ_JOB_TEST      = 0;
 const WQ_JOB_L3        = 1;
@@ -116,6 +118,7 @@ const WQ_JOB_FLIP      = 3;
 const WQ_JOB_DEVENUM   = 4;
 const WQ_JOB_WALLPAPER = 5;
 const WQ_JOB_K5VERIFY  = 6;
+const WQ_JOB_DRIVER    = 7;
 
 # --- slot layout (64 bytes / one cache line) ---------------------------------
 const WQ_OFF_STATUS = 0;    # dd - lifecycle state

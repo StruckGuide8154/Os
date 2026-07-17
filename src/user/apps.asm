@@ -106,6 +106,17 @@ app_seg_security_probe_end:
 app_seg_media_viewer_start:
 %include "src/user/apps/media_viewer.inc"
 app_seg_media_viewer_end:
+; NOTE (Track 8): the ring-3 virtio-net driver does NOT ride this shared GUI app
+; blob. Three hard incompatibilities were proven doing so (kept here so the next
+; iteration doesn't repeat them): the app-blob per-slot syscall-permutation fixup
+; record (app_sysno.inc) stores the syscall number in ONE byte, but the driver's
+; broker ABI uses numbers > 255 (256..263); the shared W^X code window spans the
+; whole blob, so a driver DMA VA window (W+NX) carved anywhere inside it is
+; force-flipped back to X+!W by l3_apply_wx_policy every activation; and the blob
+; is ~1.8 MiB, leaving no free slot VA for the DMA window. The correct design is a
+; SEPARATE small driver blob (own minimal framing: raw syscall numbers, a tiny
+; code window low in the slot, the rest free for the DMA window). See
+; docs/virtio-net-ring3-migration.md §4b-3.
 ; Actual W^X code/data boundary. No app `.text` may be emitted after this point.
 ; `.appdata` was declared as follows=.text align=4096 above, so this page-aligned
 ; end-of-text label is also the first byte of the writable data tail in the flat

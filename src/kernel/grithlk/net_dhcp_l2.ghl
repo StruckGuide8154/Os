@@ -1,0 +1,230 @@
+# ============================================================================
+# net_dhcp_l2.ghl - NIC-independent asynchronous DHCP client for installable
+# net.l2 providers. It builds complete Ethernet frames through net_nic_tx_frame,
+# consumes bounded frames from net_rx_frame, and publishes the ordinary
+# NET_NIC_INFO block owned by driver_loader. No hardware authority lives here.
+# ============================================================================
+
+module "net_dhcp_l2";
+
+unsafe raw_mem;
+unsafe kernel_priv;      # rdtsc transaction-id seed
+unsafe implicit_extern;
+
+global net_dhcp_l2_start;
+global net_dhcp_l2_pump;
+global net_dhcp_l2_rx_frame;
+
+const INFO_BOUND  = 0;
+const INFO_STATE  = 1;
+const INFO_IP     = 4;
+const INFO_ROUTER = 8;
+const INFO_SERVER = 12;
+const INFO_GUEST  = 16;
+const INFO_HOP    = 20;
+const INFO_DNS    = 24;
+
+const DHCP_IDLE = 0;
+const DHCP_DISCOVER = 1;
+const DHCP_REQUEST = 2;
+const DHCP_BOUND = 3;
+const DHCP_FAILED = 4;
+
+data l2_dhcp_frame: 342 x 1;
+data l2_dhcp_xid: 1 x 4;
+data l2_dhcp_ip_raw: 1 x 4;
+data l2_dhcp_server_raw: 1 x 4;
+data l2_dhcp_router_raw: 1 x 4;
+data l2_dhcp_dns_raw: 1 x 4;
+data l2_dhcp_offer: 1 x 1;
+data l2_dhcp_ack: 1 x 1;
+data l2_dhcp_deadline: 1 x 8;
+data l2_msg_disc: 16 x 1 = [91,68,72,67,80,32,76,50,32,68,73,83,67,93,10,0];
+data l2_msg_offer: 17 x 1 = [91,68,72,67,80,32,76,50,32,79,70,70,69,82,93,10,0];
+data l2_msg_bound: 17 x 1 = [91,68,72,67,80,32,76,50,32,66,79,85,78,68,93,10,0];
+
+fn dhcp_bswap32(v) {
+    return ((v >> 24) & 0xFF) | ((v >> 8) & 0xFF00)
+         | ((v << 8) & 0xFF0000) | ((v << 24) & 0xFF000000);
+}
+
+fn dhcp_base() {
+    let i = 0;
+    while i < 342 { sb(&l2_dhcp_frame + i, 0); i = i + 1; }
+    i = 0;
+    while i < 6 {
+        sb(&l2_dhcp_frame + i, 0xFF);
+        sb(&l2_dhcp_frame + 6 + i, lb(&driver_manager_mac + i));
+        sb(&l2_dhcp_frame + 42 + 28 + i, lb(&driver_manager_mac + i));
+        i = i + 1;
+    }
+    sb(&l2_dhcp_frame + 12, 0x08); sb(&l2_dhcp_frame + 13, 0x00);
+    let ip = &l2_dhcp_frame + 14;
+    sb(ip, 0x45); sb(ip + 4, 0x47); sb(ip + 5, 0x52);
+    sb(ip + 8, 64); sb(ip + 9, 17);
+    sw(ip + 16, 0xFFFFFFFF);
+    let udp = &l2_dhcp_frame + 34;
+    sb(udp, 0); sb(udp + 1, 68); sb(udp + 2, 0); sb(udp + 3, 67);
+    let bootp = &l2_dhcp_frame + 42;
+    sb(bootp, 1); sb(bootp + 1, 1); sb(bootp + 2, 6);
+    sw(bootp + 4, lw(&l2_dhcp_xid));
+    sb(bootp + 10, 0x80);
+    sw(bootp + 236, 0x63538263);
+}
+
+fn dhcp_finish(payload_len) {
+    let udp_len = payload_len + 8;
+    let ip_len = payload_len + 28;
+    let ip = &l2_dhcp_frame + 14;
+    let udp = &l2_dhcp_frame + 34;
+    sb(udp + 4, (udp_len >> 8) & 0xFF); sb(udp + 5, udp_len & 0xFF);
+    sb(ip + 2, (ip_len >> 8) & 0xFF); sb(ip + 3, ip_len & 0xFF);
+    let sum = 0;
+    let o = 0;
+    while o < 20 { sum = sum + ((lb(ip + o) << 8) | lb(ip + o + 1)); o = o + 2; }
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    let ck = (sum ^ 0xFFFF) & 0xFFFF;
+    sb(ip + 10, (ck >> 8) & 0xFF); sb(ip + 11, ck & 0xFF);
+    call net_nic_tx_frame(rdi: &l2_dhcp_frame, rcx: payload_len + 42);
+}
+
+fn dhcp_send(kind) {
+    dhcp_base();
+    let o = 282;
+    sb(&l2_dhcp_frame + o, 53); sb(&l2_dhcp_frame + o + 1, 1);
+    sb(&l2_dhcp_frame + o + 2, kind);
+    o = o + 3;
+    if kind == 3 {
+        sb(&l2_dhcp_frame + o, 50); sb(&l2_dhcp_frame + o + 1, 4);
+        sw(&l2_dhcp_frame + o + 2, lw(&l2_dhcp_ip_raw)); o = o + 6;
+        sb(&l2_dhcp_frame + o, 54); sb(&l2_dhcp_frame + o + 1, 4);
+        sw(&l2_dhcp_frame + o + 2, lw(&l2_dhcp_server_raw)); o = o + 6;
+    }
+    sb(&l2_dhcp_frame + o, 12); sb(&l2_dhcp_frame + o + 1, 4);
+    sb(&l2_dhcp_frame + o + 2, 71); sb(&l2_dhcp_frame + o + 3, 114);
+    sb(&l2_dhcp_frame + o + 4, 105); sb(&l2_dhcp_frame + o + 5, 116); o = o + 6;
+    sb(&l2_dhcp_frame + o, 55); sb(&l2_dhcp_frame + o + 1, 3);
+    sb(&l2_dhcp_frame + o + 2, 1); sb(&l2_dhcp_frame + o + 3, 3);
+    sb(&l2_dhcp_frame + o + 4, 6); o = o + 5;
+    sb(&l2_dhcp_frame + o, 255);
+    dhcp_finish(o - 42 + 1);
+}
+
+fn net_dhcp_l2_start() {
+    if lw(&driver_manager_bound) != 1 { return 0; }
+    let x = lw(&l2_dhcp_xid) + 1;
+    if x == 0 { x = rdtsc() & 0xFFFFFFFF; }
+    if x == 0 { x = 0x47524448; }
+    sw(&l2_dhcp_xid, x);
+    sb(&driver_manager_info + INFO_BOUND, 0);
+    sb(&driver_manager_info + INFO_STATE, DHCP_DISCOVER);
+    sb(&l2_dhcp_offer, 0); sb(&l2_dhcp_ack, 0);
+    sw(&l2_dhcp_ip_raw, 0); sw(&l2_dhcp_server_raw, 0);
+    sw(&l2_dhcp_router_raw, 0); sw(&l2_dhcp_dns_raw, 0);
+    dhcp_send(1);
+    serial_puts(&l2_msg_disc);
+    sq(&l2_dhcp_deadline, lq(&tick_count) + 300);
+    return 1;
+}
+
+fn dhcp_publish() {
+    let ip = dhcp_bswap32(lw(&l2_dhcp_ip_raw));
+    let server = dhcp_bswap32(lw(&l2_dhcp_server_raw));
+    let router = dhcp_bswap32(lw(&l2_dhcp_router_raw));
+    let dns = dhcp_bswap32(lw(&l2_dhcp_dns_raw));
+    if router == 0 { router = server; }
+    if dns == 0 { dns = server; }
+    sw(&driver_manager_info + INFO_IP, ip);
+    sw(&driver_manager_info + INFO_ROUTER, router);
+    sw(&driver_manager_info + INFO_SERVER, server);
+    sw(&driver_manager_info + INFO_GUEST, ip);
+    sw(&driver_manager_info + INFO_HOP, router);
+    sw(&driver_manager_info + INFO_DNS, dns);
+    sb(&driver_manager_info + INFO_BOUND, 1);
+    sb(&driver_manager_info + INFO_STATE, DHCP_BOUND);
+    serial_puts(&l2_msg_bound);
+}
+
+fn net_dhcp_l2_pump() {
+    let st = lb(&driver_manager_info + INFO_STATE);
+    if st == DHCP_DISCOVER {
+        if lb(&l2_dhcp_offer) == 1 {
+            dhcp_send(3);
+            sb(&driver_manager_info + INFO_STATE, DHCP_REQUEST);
+            sq(&l2_dhcp_deadline, lq(&tick_count) + 200);
+            return 1;
+        }
+    } else {
+        if st != DHCP_REQUEST { return 0; }
+        if lb(&l2_dhcp_ack) == 1 { dhcp_publish(); return 1; }
+    }
+    if lq(&tick_count) >= lq(&l2_dhcp_deadline) {
+        if st == DHCP_REQUEST {
+            if lb(&l2_dhcp_offer) == 1 { dhcp_publish(); return 1; }
+        }
+        sb(&driver_manager_info + INFO_STATE, DHCP_FAILED);
+    }
+    return 0;
+}
+
+# Complete Ethernet frame, bounded by drvhost_net_rx before reaching here.
+fn net_dhcp_l2_rx_frame(frame, len) {
+    if lw(&driver_manager_bound) != 1 { return 0; }
+    if len < 282 { return 0; }
+    if lb(frame + 12) != 0x08 { return 0; }
+    if lb(frame + 13) != 0x00 { return 0; }
+    let ip = frame + 14;
+    if (lb(ip) & 0xF0) != 0x40 { return 0; }
+    if lb(ip + 9) != 17 { return 0; }
+    let ihl = (lb(ip) & 0x0F) << 2;
+    if ihl < 20 { return 0; }
+    if 14 + ihl + 8 + 240 > len { return 0; }
+    let udp = ip + ihl;
+    if lb(udp) != 0 || lb(udp + 1) != 67 { return 0; }
+    if lb(udp + 2) != 0 || lb(udp + 3) != 68 { return 0; }
+    let bootp = udp + 8;
+    if (lw(bootp + 4) & 0xFFFFFFFF) != (lw(&l2_dhcp_xid) & 0xFFFFFFFF) { return 0; }
+    if (lw(bootp + 236) & 0xFFFFFFFF) != 0x63538263 { return 0; }
+    let ipraw = lw(bootp + 16);
+    if (ipraw & 0xFFFFFFFF) == 0 { return 0; }
+    let mtype = 0;
+    let server = 0; let router = 0; let dns = 0;
+    let p = bootp + 240;
+    let endp = frame + len;
+    while p < endp {
+        let op = lb(p);
+        if op == 255 { p = endp; }
+        else {
+            if op == 0 { p = p + 1; }
+            else {
+                if p + 1 >= endp { p = endp; }
+                else {
+                    let olen = lb(p + 1);
+                    let nxt = p + olen + 2;
+                    if nxt > endp { p = endp; }
+                    else {
+                        if op == 53 { if olen >= 1 { mtype = lb(p + 2); } }
+                        if op == 54 { if olen >= 4 { server = lw(p + 2); } }
+                        if op == 3 { if olen >= 4 { router = lw(p + 2); } }
+                        if op == 6 { if olen >= 4 { dns = lw(p + 2); } }
+                        p = nxt;
+                    }
+                }
+            }
+        }
+    }
+    if mtype == 2 {
+        sw(&l2_dhcp_ip_raw, ipraw); sw(&l2_dhcp_server_raw, server);
+        sw(&l2_dhcp_router_raw, router); sw(&l2_dhcp_dns_raw, dns);
+        sb(&l2_dhcp_offer, 1); serial_puts(&l2_msg_offer); return 1;
+    }
+    if mtype == 5 {
+        sw(&l2_dhcp_ip_raw, ipraw);
+        if server != 0 { sw(&l2_dhcp_server_raw, server); }
+        if router != 0 { sw(&l2_dhcp_router_raw, router); }
+        if dns != 0 { sw(&l2_dhcp_dns_raw, dns); }
+        sb(&l2_dhcp_ack, 1); return 1;
+    }
+    return 0;
+}

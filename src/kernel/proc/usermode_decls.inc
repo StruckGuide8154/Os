@@ -21,6 +21,10 @@ extern app_blob_code_end
 extern app_l3_done_trampoline
 extern app_syscall_fixups_start
 extern app_syscall_fixups_end
+extern driver_blob_start
+extern driver_blob_code_end
+extern driver_blob_end
+extern driver_blob_done_trampoline
 extern handle_table_clear
 extern kernel_canary
 ; Nested-kernel monitor (nk_monitor.asm): every page-table write below is
@@ -81,6 +85,7 @@ section .text
 ; auto-wrapped (FN_BEGIN emits global): global l3_install_app_done_trampoline
 ; auto-wrapped (FN_BEGIN emits global): global l3_translate_target
 ; auto-wrapped (FN_BEGIN emits global): global l3_copy_app_blob_to_slot
+; auto-wrapped (FN_BEGIN emits global): global l3_copy_driver_blob_to_slot
 ; auto-wrapped (FN_BEGIN emits global): global l3_release_slot
 ; auto-wrapped (FN_BEGIN emits global): global l3_slot_resolve_app_ptr
 ; auto-wrapped (FN_BEGIN emits global): global app_blob_init
@@ -90,3 +95,5 @@ global app_blob_size_v
 global app_blob_code_size_v
 global l3_app_arena_base_v
 global l3_app_arena_size_v
+global l3_slot_blob_kind
+global l3_slot_blob_size

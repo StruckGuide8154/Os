@@ -46,7 +46,7 @@
 
 # The GHL/GritHLK compiler - the trusted-path compiler of record. Every kernel
 # module, user app, and security policy module is emitted by this exact file.
-file-sha256 | gritc.py | sha256 | 2bdf9eef5e5e47fe8ce974c38f0c718f9b3721edc42a7c3a259e073b337f6856 | src/user/grithl/compiler/gritc.py
+file-sha256 | gritc.py | sha256 | 194d7b6e6eb8cc818191f5c264adce93a3df9293078bba85860e2abe41edfbca | src/user/grithl/compiler/gritc.py
 
 # The host-side Ed25519 reference + signer used by the envelope/provenance
 # machinery (write_envelope.py, the provenance signer). Pinning it makes the
@@ -56,4 +56,4 @@ file-sha256 | ed25519_host.py | sha256 | 4109e01330e1a30bb0a72a14c6bedcc39fcedad
 # The legacy assembler of record. Pinned by version token (see header note on
 # why a binary file-hash is intentionally avoided for nasm). build_uefi.ps1
 # invokes C:\Tools\nasm-2.16.03\nasm.exe.
-tool-version | nasm | version | NASM version 2.16.03 compiled on Apr 17 2024; NASM version 2.16.01 compiled on May  3 2024 | nasm -v (explicit full-banner allow-list)
+tool-version | nasm | version | NASM version 2.16.03 compiled on Apr 17 2024 | nasm -v (explicit full-banner allow-list)

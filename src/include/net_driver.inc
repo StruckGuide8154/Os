@@ -54,12 +54,31 @@ NET_NIC_INFO_SIZE           equ 28
 NET_NIC_NONE                equ 0
 NET_NIC_RTL8156             equ 1
 NET_NIC_RTL8139             equ 2
+NET_NIC_VIRTIO              equ 3
 
 NET_ETH_TYPE_IPV4           equ 0x0008
 NET_ETH_TYPE_ARP            equ 0x0608
 NET_IP_PROTO_ICMP           equ 1
 NET_IP_PROTO_TCP            equ 6
 NET_IP_PROTO_UDP            equ 17
+
+; --- Transmit frame-length contract (GSEC net) -------------------------------
+; Every driver tx_frame_fn copies the caller-supplied frame into a fixed kernel
+; DMA buffer with a `rep movsb` sized by the caller's length. That length MUST
+; be range-checked against these bounds - once here at the generic dispatcher
+; (net_nic_tx_frame) AND again in each concrete driver wrapper - before the copy,
+; or a corrupt/oversized length overruns the DMA buffer into adjacent kernel
+; memory (proven with a guard-page PoC on both rtl8139 and rtl8156).
+;   MIN = a complete Ethernet header (dst6 + src6 + ethertype2). Hardware pads
+;         short frames up to 60 bytes, so 14 is the smallest well-formed frame.
+;   MAX = 1522 = 1500 payload + 14 header + 4 (802.1Q VLAN tag) + 4 FCS. This is
+;         the largest standard (non-jumbo) frame; the TX DMA windows are sized
+;         well above it (see the per-driver static asserts). The zero-asm GHL
+;         drivers (rtl8156.ghl / virtio_net.ghl) enforce their own 1514 payload
+;         cap independently; this shared bound stays >= that so it never rejects
+;         a frame those paths would accept.
+NET_ETH_FRAME_MIN           equ 14
+NET_ETH_FRAME_MAX           equ 1522
 
 ; --- SplitMix64 PRNG finaliser constants (TCP ISN / ephemeral source port) ---
 ; Used by net_tcp_rng_* (src/kernel/net/tcp.asm). SplitMix64 is the reference

@@ -19,6 +19,7 @@ extern apic_eoi
 extern lapic_base               ; isr_ap_tick EOI (Tier-2 AP self-wake timer)
 extern kernel_event_flags
 extern xhci_irq_ack
+extern drvhost_irq_note
 extern render_frame
 extern process_mouse
 extern keyboard_repeat_tick
@@ -310,10 +311,19 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     SER 13
     SER 10
 
+%ifdef ENABLE_DEBUG_SERIAL
     ; DEBUG (blank-app #UD diagnosis): dump 16 bytes at the faulting RIP so we can
     ; identify the exact offending opcode. Only for ring-3 faults (CS[1:0]==3) so
     ; RIP is a mapped app-arena VA (kernel pages may be unmapped under KPTI). SMAP
     ; is off in this diag build, so a ring-0 read of the user page won't #AC.
+    ;
+    ; SECURITY (2026-07-14): the `mov rdi,[rsi]` below dereferences the *faulting
+    ; ring-3 RIP*. A malicious/buggy app that jumps to an unmapped or non-canonical
+    ; address faults with RIP==bad, and this read then nested-#PFs -> the entry
+    ; nested_exc_count hits 2 -> isr_nested_halt HALTS the whole OS. That is an
+    ; unprivileged DoS (violates the no-freeze invariant), so the deref is now
+    ; confined to debug builds; release never executes it. See
+    ; security/tools/isr_frame_proof.py (Claim 2).
     mov rax, [rsp + 160]     ; saved CS
     and rax, 3
     cmp rax, 3
@@ -331,6 +341,7 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     SER 13
     SER 10
 .skip_op_dump:
+%endif
 
     ; ------------------------------------------------------------------
     ; Counter dump: on any fault (notably a display-driver crash) print
@@ -510,6 +521,7 @@ IRQ_STUB 14, 46    ; Primary ATA
 IRQ_STUB 15, 47    ; Secondary ATA
 IRQ_STUB 17, 49    ; SMP workqueue wake IPI
 IRQ_STUB 18, 50    ; Advanced Touchpad (APIC)
+IRQ_STUB 20, 52    ; Brokered external device (VirtIO-net INTx)
 
 ; Common IRQ handler
 ; auto-wrapped (FN_BEGIN emits global): global irq_common_stub
@@ -537,6 +549,8 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     je .irq_apic_touchpad
     cmp rax, 51
     je .irq_xhci
+    cmp rax, 52
+    je .irq_driver
 
     ; Unhandled IRQ - just send EOI
     jmp .send_eoi
@@ -553,10 +567,13 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     ; (that would kill the kernel). EOI has already happened above, so the
     ; LAPIC stays healthy regardless of which exit path we take.
     ;
-    ; IRQ frame layout from rsp here (NO error code, unlike the exc stub):
+    ; IRQ frame layout from rsp here. IRQ_STUB (macros.inc) pushes a DUMMY
+    ; error code just like ISR_NOERRCODE, so this frame is byte-identical to
+    ; the exception frame and the common .done exit below (which the OS runs on
+    ; every timer/kbd/mouse IRQ, hence boot-proven):
     ;   PUSH_ALL = 15*8 = 120, then canary+pad = 16, then int# = 8,
-    ;   then RIP @ 144, CS @ 152, RFLAGS @ 160, user RSP @ 168.
-    mov rax, [rsp + 152]    ; saved CS on the IRQ frame
+    ;   then errcode @ 144, RIP @ 152, CS @ 160, RFLAGS @ 168, user RSP @ 176.
+    mov rax, [rsp + 160]    ; saved CS on the IRQ frame
     and rax, 3
     cmp rax, 3
     je .irq_timer_ring3     ; ring 3: callback deadman path below
@@ -614,7 +631,7 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
     mov rax, [rsp]                          ; canary check
     cmp rax, [rel kernel_canary]
     jne .irq_r3_canary_bad
-    add rsp, 24             ; Pop canary, pad, int# (NO errcode); RSP now at user RIP.
+    add rsp, 32             ; Pop canary, pad, errcode(dummy), int#; RSP now at user RIP.
     mov rax, [rsp]
     sub rax, [rel l3_app_arena_base_v]
     jc .irq_timer_slot_zero
@@ -674,6 +691,20 @@ FN_DECL irq_common_stub, 0, 0, FN_RET_SCALAR
 .irq_xhci:
     call xhci_irq_ack
     lock or dword [rel kernel_event_flags], 3
+    call apic_eoi
+    jmp .done
+
+.irq_driver:
+    ; The trusted loader routes the device INTx to BSP/vector 52. The ISR only
+    ; records/coalesces the event; the BSP main loop submits the allow-listed
+    ; workqueue job, preserving the queue's single-producer and no-ring3-in-ISR
+    ; invariants.
+    mov edi, 52
+    call drvhost_irq_note
+    test eax, eax
+    jz .irq_driver_ack
+    lock or dword [rel kernel_event_flags], 4
+.irq_driver_ack:
     call apic_eoi
     jmp .done
 

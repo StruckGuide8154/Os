@@ -223,13 +223,13 @@ sc_slot_perm_generate:
     mov eax, r10d
     imul eax, eax, syscall_table_count
     lea r9, [rel sc_slot_perm_fwd]
-    add r9, rax                          ; r9 -> fwd[] row for this slot
+    lea r9, [r9 + rax*2]                 ; r9 -> u16 fwd[] row for this slot
     ; fwd[] identity init (also the final value for slot 0 / the identity case).
     xor ecx, ecx
 .spg_id:
     cmp ecx, syscall_table_count
     jae .spg_id_done
-    mov byte [r9 + rcx], cl              ; fwd[i] = i   (count <= 256, fits a byte)
+    mov word [r9 + rcx*2], cx            ; fwd[i] = i
     inc ecx
     jmp .spg_id
 .spg_id_done:
@@ -270,10 +270,10 @@ sc_slot_perm_generate:
     xor edx, edx
     div r8                               ; rax/r8 -> rdx = remainder = j
     ; swap fwd[i] <-> fwd[j]
-    movzx eax, byte [r9 + rcx]           ; fwd[i]
-    movzx ebx, byte [r9 + rdx]           ; fwd[j]
-    mov [r9 + rcx], bl
-    mov [r9 + rdx], al
+    movzx eax, word [r9 + rcx*2]         ; fwd[i]
+    movzx ebx, word [r9 + rdx*2]         ; fwd[j]
+    mov word [r9 + rcx*2], bx
+    mov word [r9 + rdx*2], ax
     dec ecx
     jmp .spg_shuf
 .spg_shuf_done:
@@ -284,13 +284,13 @@ sc_slot_perm_generate:
     mov eax, r10d
     imul eax, eax, syscall_table_count
     lea r8, [rel sc_slot_perm_inv]
-    add r8, rax                          ; r8 -> inv[] row for this slot
+    lea r8, [r8 + rax*2]                 ; r8 -> u16 inv[] row for this slot
     xor ecx, ecx
 .spg_inv:
     cmp ecx, syscall_table_count
     jae .spg_inv_done
-    movzx eax, byte [r9 + rcx]           ; app_visible = fwd[real_row=ecx]
-    mov byte [r8 + rax], cl              ; inv[app_visible] = real_row
+    movzx eax, word [r9 + rcx*2]         ; app_visible = fwd[real_row=ecx]
+    mov word [r8 + rax*2], cx            ; inv[app_visible] = real_row
     inc ecx
     jmp .spg_inv
 .spg_inv_done:
@@ -388,7 +388,7 @@ sc_slot_perm_apply_blob:
     mov eax, r10d
     imul eax, eax, syscall_table_count
     lea r8, [rel sc_slot_perm_fwd]
-    add r8, rax
+    lea r8, [r8 + rax*2]
     ; rbx walks the fixup records; rsi is the table end.
     lea rbx, [rel app_syscall_fixups_start]
     lea rsi, [rel app_syscall_fixups_end]
@@ -400,7 +400,7 @@ sc_slot_perm_apply_blob:
     add rbx, 5
     cmp edx, syscall_table_count
     jae .spa_loop                       ; not a real row -> leave immediate as-is
-    movzx eax, byte [r8 + rdx]          ; app_visible = fwd[raw_sysno]
+    movzx eax, word [r8 + rdx*2]        ; app_visible = fwd[raw_sysno]
     ; store the 4-byte immediate at blob_base + offset
     lea rdi, [r9 + rcx]
     USER_ACCESS_BEGIN

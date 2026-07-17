@@ -44,6 +44,8 @@ global l3_translate_target;
 # blob at app_blob_base_v..app_blob_end_v.
 extern app_blob_start;
 extern app_blob_end;
+extern driver_blob_start;
+extern driver_blob_end;
 
 # Live per-slot runtime state (defined in usermode_storage.inc / _decls.inc).
 extern l3_app_arena_base_v;   # dq - base VA of the 2 MiB-slot app arena
@@ -52,6 +54,8 @@ extern app_blob_base_v;       # dq - live APPS.BIN base VA
 extern app_blob_end_v;        # dq - live APPS.BIN end VA
 extern app_blob_size_v;       # dq - live blob byte length
 extern l3_slot_code_slide;    # dq[MAX_WINDOWS] - per-slot code slide (KASLR-ish)
+extern l3_slot_blob_kind;     # dq[MAX_WINDOWS] - 0 app, 1 dedicated driver
+extern l3_slot_blob_size;     # dq[MAX_WINDOWS] - exact live copied blob span
 
 extern ser_print_hex64;       # (rdi value) -> serial hex, debug only
 
@@ -109,6 +113,26 @@ fn l3_xlate_blob_fail(target, app_base) {
 # l3_translate_target(rdi target, rsi app_base) -> rax
 # ---------------------------------------------------------------------------
 fn l3_translate_target(rdi target, rsi app_base) {
+    # --- Case 0: target is a canonical pointer inside the driver package. ---
+    # Only a slot explicitly installed as a driver may translate this source
+    # range. This prevents a GUI slot from treating driver bytes as callbacks.
+    if target >= &driver_blob_start {
+        if target < &driver_blob_end {
+            let arena = lq(&l3_app_arena_base_v);
+            if app_base < arena { return l3_xlate_blob_fail(target, app_base); }
+            let rel = app_base - arena;
+            if (rel & SLOT_MASK) != 0 { return l3_xlate_blob_fail(target, app_base); }
+            if rel >= lq(&l3_app_arena_size_v) { return l3_xlate_blob_fail(target, app_base); }
+            let slot = rel >> 21;
+            if slot >= MAX_WINDOWS { return l3_xlate_blob_fail(target, app_base); }
+            if lq(&l3_slot_blob_kind + slot * 8) != 1 {
+                return l3_xlate_blob_fail(target, app_base);
+            }
+            let off = target - &driver_blob_start;
+            return off + app_base + lq(&l3_slot_code_slide + slot * 8);
+        }
+    }
+
     # --- Case 1: target is a canonical pointer inside the built-in blob. ---
     let blob_base = lq(&app_blob_base_v);
     let blob_end = lq(&app_blob_end_v);
@@ -124,6 +148,9 @@ fn l3_translate_target(rdi target, rsi app_base) {
             if rel >= lq(&l3_app_arena_size_v) { return l3_xlate_blob_fail(target, app_base); }
             let slot = rel >> 21;
             if slot >= MAX_WINDOWS { return l3_xlate_blob_fail(target, app_base); }
+            if lq(&l3_slot_blob_kind + slot * 8) != 0 {
+                return l3_xlate_blob_fail(target, app_base);
+            }
             return off + app_base + lq(&l3_slot_code_slide + slot * 8);
         }
     }
@@ -147,6 +174,6 @@ fn l3_translate_target(rdi target, rsi app_base) {
     let slide = lq(&l3_slot_code_slide + slot * 8);
     if inoff < slide { return target; }
     let bo = inoff - slide;
-    if bo >= lq(&app_blob_size_v) { return target; }
+    if bo >= lq(&l3_slot_blob_size + slot * 8) { return target; }
     return inoff + app_base;                             # bo + slide + app_base
 }

@@ -1,0 +1,595 @@
+# ============================================================================
+# virtio_net.ghl - VirtIO-net (modern VirtIO-1.x PCI + legacy transitional),
+# Track-8 ring-3 driver-host process.  Compile: --target driver  (forces
+# --forbid-asm + --deny-unsafe; no unsafe cap, no privileged intrinsic; reaches
+# the device ONLY via SC_DRVHOST_* broker syscalls).
+#
+# This is the ring-3 migration of the deleted in-kernel virtio_net.asm
+# (git show 231890f6:src/kernel/drivers/virtio_net.asm).  The hardware logic is
+# preserved 1:1 - modern PCI-capability transport and legacy transitional I/O
+# BAR, VERSION_1+MAC-only feature negotiation, the CFGGEN MAC-atomicity retry,
+# split-virtqueue layout, RX seed / TX / RX-poll.  What changed is ONLY the
+# authority model:
+#
+#   * The driver holds NO ambient authority.  PCI enumeration, the command-
+#     register write (mem+busmaster), and BAR resolution are done by the kernel
+#     CONTROL PLANE, which then grants this process its {base,len} MMIO windows
+#     (common_cfg / notify / device_cfg), one DMA window (virtqueues + RX/TX
+#     buffers), and optionally an IRQ.  init() receives those resolved bases,
+#     exactly as rtl8156.ghl receives a pre-resolved xhci_base.
+#
+#   * The RX descriptor id lives in a driver-local `let` across the frame hand-
+#     up, so the in-kernel P1 (device descriptor id clobbered in r8 across
+#     net_rx_frame, recycling the wrong buffer) cannot occur here by
+#     construction.
+#
+#   * Programming a virtqueue device-physical pointer (QDESC/QDRIVER/QDEVICE)
+#     goes through drvhost_mmio_write_dma_ptr, which proves the VALUE lies inside
+#     this driver's own DMA grant before the broker writes it (INV-DRIVER-NO-DMA-MINT).
+#
+# See docs/virtio-net-ring3-migration.md.  Broker MMIO/PIO width family and the
+# DMA-pointer op are Stage-2 broker additions (driver_host.ghl); this driver is
+# written against that ABI.
+# ============================================================================
+
+app "virtio_net" { stack = 8192; }
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of rtl8156.ghl / driver_host.ghl).
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER      = 232
+const SC_DRVHOST_GRANT_DMA     = 234
+const SC_DRVHOST_DMA_MAP       = 242
+const SC_DRVHOST_IRQ_WAIT      = 243
+const SC_TICKS                 = 18
+
+# Stage-2 width-parametric brokered MMIO (all bounds-checked to a granted window).
+const SC_DRVHOST_MMIO_RD8      = 250
+const SC_DRVHOST_MMIO_RD16     = 251
+const SC_DRVHOST_MMIO_RD32     = 252
+const SC_DRVHOST_MMIO_RD64     = 253
+const SC_DRVHOST_MMIO_WR8      = 254
+const SC_DRVHOST_MMIO_WR16     = 255
+const SC_DRVHOST_MMIO_WR32     = 256
+const SC_DRVHOST_MMIO_WR64     = 257
+# Program a device-physical pointer register: broker checks mmio_addr in an MMIO
+# grant AND val in a DMA grant, then writes `val` (width bytes) to mmio_addr.
+const SC_DRVHOST_MMIO_WR_DMAPTR = 258
+# Stage-2 width-parametric brokered legacy port I/O.
+const SC_DRVHOST_PIO_RD8       = 244
+const SC_DRVHOST_PIO_WR8       = 245
+const SC_DRVHOST_PIO_RD16      = 259
+const SC_DRVHOST_PIO_WR16      = 260
+const SC_DRVHOST_PIO_RD32      = 261
+const SC_DRVHOST_PIO_WR32      = 262
+
+# Hand a complete Ethernet frame up to the IP stack (device-class net.l2).
+# The broker copies [dma_va+off, +len) up and dispatches Ethernet->ARP/IPv4.
+const SC_DRVHOST_NET_RX        = 263
+
+const DRV_OK = 0
+
+# Capability classes (driver_host.ghl DRV_CAP_*).
+const CAP_MMIO = 1
+const CAP_PIO  = 2
+const CAP_DMA  = 4
+const CAP_IRQ  = 8
+const CAP_RING = 16
+
+# ---------------------------------------------------------------------------
+# VirtIO PCI constants (verbatim from the deleted driver).
+# ---------------------------------------------------------------------------
+const VIRTIO_COMMON_DFSELECT = 0
+const VIRTIO_COMMON_DFEATURE = 4
+const VIRTIO_COMMON_GFSELECT = 8
+const VIRTIO_COMMON_GFEATURE = 12
+const VIRTIO_COMMON_STATUS   = 20
+const VIRTIO_COMMON_CFGGEN   = 21
+const VIRTIO_COMMON_QSELECT  = 22
+const VIRTIO_COMMON_QSIZE    = 24
+const VIRTIO_COMMON_QENABLE  = 28
+const VIRTIO_COMMON_QNOFF    = 30
+const VIRTIO_COMMON_QDESC    = 32
+const VIRTIO_COMMON_QDRIVER  = 40
+const VIRTIO_COMMON_QDEVICE  = 48
+
+# Legacy transitional I/O register offsets.
+const VIRTIO_PCI_HOST_FEATURES  = 0x00
+const VIRTIO_PCI_GUEST_FEATURES = 0x04
+const VIRTIO_PCI_QUEUE_PFN      = 0x08
+const VIRTIO_PCI_QUEUE_NUM      = 0x0C
+const VIRTIO_PCI_QUEUE_SEL      = 0x0E
+const VIRTIO_PCI_QUEUE_NOTIFY   = 0x10
+const VIRTIO_PCI_STATUS         = 0x12
+const VIRTIO_PCI_CONFIG         = 0x14
+const VIRTIO_PCI_ISR            = 0x13
+
+const VIRTIO_STATUS_ACKNOWLEDGE = 1
+const VIRTIO_STATUS_DRIVER      = 2
+const VIRTIO_STATUS_DRIVER_OK   = 4
+const VIRTIO_STATUS_FEATURES_OK = 8
+
+const VIRTIO_NET_F_MAC   = 5
+const VRING_DESC_F_WRITE = 2
+const VIRTIO_NET_RX_QUEUE = 0
+const VIRTIO_NET_TX_QUEUE = 1
+const VIRTIO_NET_MAX_QUEUE = 256
+
+const TRANSPORT_LEGACY = 1
+const TRANSPORT_MODERN = 2
+
+# ---------------------------------------------------------------------------
+# DMA window layout (single granted DMA region; offsets are grant-relative).
+#   RX virtqueue region   @ 0x00000  (desc + avail + used, one 64 KiB slot)
+#   TX virtqueue region   @ 0x10000
+#   RX buffers            @ 0x20000  (RX_SLOTS * 2048)
+#   TX buffer             @ 0x30000  (one in-flight frame)
+# ---------------------------------------------------------------------------
+const OFF_RX_VQ    = 0x00000
+const OFF_TX_VQ    = 0x10000
+const OFF_RX_BUFS  = 0x20000
+const OFF_TX_BUF   = 0x30000
+const VQ_REGION    = 0x10000
+const DMA_TOTAL    = 0x34000
+
+const RX_SLOTS     = 8
+const RX_BUF_SIZE  = 2048
+const RX_BUF_SHIFT = 11          # 2048 = 1 << 11
+const MAX_FRAME    = 1514
+const LEGACY_HDR   = 10
+const MODERN_HDR   = 12
+
+# ---------------------------------------------------------------------------
+# Driver-private state (ring-3 local; MMU-confined).
+# Bases are absolute device addresses of granted MMIO windows.
+# ---------------------------------------------------------------------------
+state {
+    self_id:        4;
+    ready:          4;      # control plane reads this after the one-shot probe:
+                            # 1 = virtio_init reached DRIVER_OK -> loader binds it.
+    transport:      4;      # written by the loader handoff (TRANSPORT_MODERN/LEGACY)
+    hdr_size:       4;
+
+    common_cfg:     8;      # modern common-cfg MMIO base (granted window)
+    notify_base:    8;      # modern notify MMIO base
+    notify_mult:    4;
+    device_cfg:     8;      # modern device-cfg MMIO base
+    isr_cfg:        8;      # modern ISR status byte (read-to-ack INTx)
+    io_base:        4;      # legacy transitional I/O BAR base
+
+    dma_phys:       8;      # DMA grant device-physical base
+    dma_va:         8;      # mapped VA of the DMA grant
+
+    rx_qsize:       4;
+    tx_qsize:       4;
+    rx_avail_off:   8;      # grant-relative offsets of the ring structures
+    rx_used_off:    8;
+    tx_avail_off:   8;
+    tx_used_off:    8;
+    rx_notify:      8;      # absolute MMIO addr of RX queue notify cell
+    tx_notify:      8;
+    rx_last_used:   4;
+    tx_last_used:   4;
+    tx_busy:        4;
+    tx_request_len: 4;      # kernel net.l2 bridge stages frame then invokes tx entry
+    tx_result:      4;
+
+    mac0:           4;
+    mac1:           4;      # six MAC bytes packed low->high across two words
+}
+
+# ---------------------------------------------------------------------------
+# Brokered MMIO width helpers (absolute device address inside a granted window).
+# ---------------------------------------------------------------------------
+fn m_rd8(a)       { return syscall(SC_DRVHOST_MMIO_RD8,  a); }
+fn m_rd16(a)      { return syscall(SC_DRVHOST_MMIO_RD16, a); }
+fn m_rd32(a)      { return syscall(SC_DRVHOST_MMIO_RD32, a); }
+fn m_wr8(a, v)    { return syscall(SC_DRVHOST_MMIO_WR8,  a, v); }
+fn m_wr16(a, v)   { return syscall(SC_DRVHOST_MMIO_WR16, a, v); }
+fn m_wr32(a, v)   { return syscall(SC_DRVHOST_MMIO_WR32, a, v); }
+# Program a vq device-physical pointer register (broker double-checks the value).
+fn m_wr_dmaptr(a, dma_addr, width) {
+    return syscall(SC_DRVHOST_MMIO_WR_DMAPTR, a, dma_addr, width);
+}
+
+# Common-cfg register accessors (modern transport).
+fn cc_rd8(off)    { return m_rd8(lq(&common_cfg) + off); }
+fn cc_rd16(off)   { return m_rd16(lq(&common_cfg) + off); }
+fn cc_rd32(off)   { return m_rd32(lq(&common_cfg) + off); }
+fn cc_wr8(off, v) { return m_wr8(lq(&common_cfg) + off, v); }
+fn cc_wr16(off, v){ return m_wr16(lq(&common_cfg) + off, v); }
+fn cc_wr32(off, v){ return m_wr32(lq(&common_cfg) + off, v); }
+
+# Legacy transitional port I/O.
+fn io_in8(off)    { return syscall(SC_DRVHOST_PIO_RD8,  lw(&io_base) + off); }
+fn io_in16(off)   { return syscall(SC_DRVHOST_PIO_RD16, lw(&io_base) + off); }
+fn io_in32(off)   { return syscall(SC_DRVHOST_PIO_RD32, lw(&io_base) + off); }
+fn io_out8(off, v){ return syscall(SC_DRVHOST_PIO_WR8,  lw(&io_base) + off, v); }
+fn io_out16(off,v){ return syscall(SC_DRVHOST_PIO_WR16, lw(&io_base) + off, v); }
+fn io_out32(off,v){ return syscall(SC_DRVHOST_PIO_WR32, lw(&io_base) + off, v); }
+
+fn wait_ms(ms) {
+    let deadline = syscall(SC_TICKS) + ms;
+    while syscall(SC_TICKS) < deadline { }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Notify a queue.  Value = queue index (no notification-data feature negotiated).
+# ---------------------------------------------------------------------------
+fn vq_notify(qidx) {
+    if lw(&transport) == TRANSPORT_MODERN {
+        if qidx == VIRTIO_NET_RX_QUEUE { return m_wr16(lq(&rx_notify), qidx); }
+        return m_wr16(lq(&tx_notify), qidx);
+    }
+    return io_out16(VIRTIO_PCI_QUEUE_NOTIFY, qidx);
+}
+
+# ---------------------------------------------------------------------------
+# Split-ring layout for a queue placed at grant-relative `vq_off` with `qsz`
+# descriptors.  Returns nothing; records avail/used offsets in state.
+#   desc  = vq_off
+#   avail = vq_off + 16*qsz
+#   used  = align_up(avail + 6 + 2*qsz, 4096)
+# ---------------------------------------------------------------------------
+fn ring_layout(qidx, vq_off, qsz) {
+    let avail = vq_off + 16 * qsz;
+    let used  = (avail + 6 + 2 * qsz + 4095) & 0xFFFFF000;
+    if qidx == VIRTIO_NET_RX_QUEUE {
+        sw(&rx_qsize, qsz);
+        sq(&rx_avail_off, avail);
+        sq(&rx_used_off, used);
+    } else {
+        sw(&tx_qsize, qsz);
+        sq(&tx_avail_off, avail);
+        sq(&tx_used_off, used);
+    }
+    return used;
+}
+
+# Zero a grant-relative region through the mapped DMA VA.
+fn dma_zero(off, bytes) {
+    let va = lq(&dma_va) + off;
+    let i = 0;
+    while i < bytes { sq(va + i, 0); i = i + 8; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Modern queue setup: publish desc/driver/device addresses + enable.
+# ---------------------------------------------------------------------------
+fn setup_queue_modern(qidx, vq_off) {
+    dma_zero(vq_off, VQ_REGION);
+    cc_wr16(VIRTIO_COMMON_QSELECT, qidx);
+    if cc_rd16(VIRTIO_COMMON_QENABLE) != 0 { return 0; }
+    let qsz = cc_rd16(VIRTIO_COMMON_QSIZE);
+    if qsz == 0 { return 0; }
+    if qsz > VIRTIO_NET_MAX_QUEUE { return 0; }
+    if (qsz & (qsz - 1)) != 0 { return 0; }          # power of two
+
+    let used = ring_layout(qidx, vq_off, qsz);
+    let phys = lq(&dma_phys);
+    let desc_p  = phys + vq_off;
+    let avail_p = phys + 16 * qsz + vq_off;
+    let used_p  = phys + used;
+
+    m_wr_dmaptr(lq(&common_cfg) + VIRTIO_COMMON_QDESC,   desc_p,  8);
+    m_wr_dmaptr(lq(&common_cfg) + VIRTIO_COMMON_QDRIVER, avail_p, 8);
+    m_wr_dmaptr(lq(&common_cfg) + VIRTIO_COMMON_QDEVICE, used_p,  8);
+
+    # Notify cell = notify_base + qnoff * notify_mult.
+    let qnoff = cc_rd16(VIRTIO_COMMON_QNOFF);
+    let ncell = lq(&notify_base) + qnoff * lw(&notify_mult);
+    if qidx == VIRTIO_NET_RX_QUEUE { sq(&rx_notify, ncell); }
+    else { sq(&tx_notify, ncell); }
+
+    cc_wr16(VIRTIO_COMMON_QENABLE, 1);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Legacy queue setup: single PFN register publishes the whole vq region.
+# ---------------------------------------------------------------------------
+fn setup_queue_legacy(qidx, vq_off) {
+    dma_zero(vq_off, VQ_REGION);
+    io_out16(VIRTIO_PCI_QUEUE_SEL, qidx);
+    let qsz = io_in16(VIRTIO_PCI_QUEUE_NUM);
+    if qsz == 0 { return 0; }
+    if qsz > VIRTIO_NET_MAX_QUEUE { return 0; }
+    if (qsz & (qsz - 1)) != 0 { return 0; }
+    if io_in32(VIRTIO_PCI_QUEUE_PFN) != 0 { return 0; }   # must be unconfigured
+
+    ring_layout(qidx, vq_off, qsz);
+    let pfn = (lq(&dma_phys) + vq_off) >> 12;
+    io_out32(VIRTIO_PCI_QUEUE_PFN, pfn);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Modern bring-up: reset, ACK+DRIVER, negotiate VERSION_1+MAC, read MAC, queues.
+# ---------------------------------------------------------------------------
+fn init_modern() {
+    cc_wr8(VIRTIO_COMMON_STATUS, 0);
+    let spins = 0;
+    while cc_rd8(VIRTIO_COMMON_STATUS) != 0 {
+        if spins > 100000 { return 0; }
+        spins = spins + 1;
+    }
+    cc_wr8(VIRTIO_COMMON_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+
+    cc_wr32(VIRTIO_COMMON_DFSELECT, 0);
+    if (cc_rd32(VIRTIO_COMMON_DFEATURE) & (1 << VIRTIO_NET_F_MAC)) == 0 { return 0; }
+    cc_wr32(VIRTIO_COMMON_DFSELECT, 1);
+    if (cc_rd32(VIRTIO_COMMON_DFEATURE) & 1) == 0 { return 0; }     # VERSION_1 (bit 32)
+
+    cc_wr32(VIRTIO_COMMON_GFSELECT, 0);
+    cc_wr32(VIRTIO_COMMON_GFEATURE, 1 << VIRTIO_NET_F_MAC);
+    cc_wr32(VIRTIO_COMMON_GFSELECT, 1);
+    cc_wr32(VIRTIO_COMMON_GFEATURE, 1);
+    cc_wr8(VIRTIO_COMMON_STATUS,
+           VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
+    if (cc_rd8(VIRTIO_COMMON_STATUS) & VIRTIO_STATUS_FEATURES_OK) == 0 { return 0; }
+
+    # CFGGEN snapshot/re-read: MAC is stable only when the generation is unchanged.
+    let tries = 8;
+    while tries > 0 {
+        let gen = cc_rd8(VIRTIO_COMMON_CFGGEN);
+        let lo = m_rd32(lq(&device_cfg) + 0);
+        let hi = m_rd16(lq(&device_cfg) + 4);
+        if cc_rd8(VIRTIO_COMMON_CFGGEN) == gen {
+            sw(&mac0, lo);
+            sw(&mac1, hi);
+            tries = 0;
+        } else {
+            tries = tries - 1;
+            if tries == 0 { return 0; }
+        }
+    }
+
+    if setup_queue_modern(VIRTIO_NET_RX_QUEUE, OFF_RX_VQ) == 0 { return 0; }
+    if setup_queue_modern(VIRTIO_NET_TX_QUEUE, OFF_TX_VQ) == 0 { return 0; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Legacy transitional bring-up on the I/O BAR.
+# ---------------------------------------------------------------------------
+fn init_legacy() {
+    io_out8(VIRTIO_PCI_STATUS, 0);
+    io_out8(VIRTIO_PCI_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+    if (io_in32(VIRTIO_PCI_HOST_FEATURES) & (1 << VIRTIO_NET_F_MAC)) == 0 { return 0; }
+    io_out32(VIRTIO_PCI_GUEST_FEATURES, 1 << VIRTIO_NET_F_MAC);
+
+    # Device config starts at +0x14 with MSI-X disabled; MAC guarantees 6 bytes.
+    let b0 = io_in8(VIRTIO_PCI_CONFIG + 0);
+    let b1 = io_in8(VIRTIO_PCI_CONFIG + 1);
+    let b2 = io_in8(VIRTIO_PCI_CONFIG + 2);
+    let b3 = io_in8(VIRTIO_PCI_CONFIG + 3);
+    let b4 = io_in8(VIRTIO_PCI_CONFIG + 4);
+    let b5 = io_in8(VIRTIO_PCI_CONFIG + 5);
+    sw(&mac0, b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+    sw(&mac1, b4 | (b5 << 8));
+
+    if setup_queue_legacy(VIRTIO_NET_RX_QUEUE, OFF_RX_VQ) == 0 { return 0; }
+    if setup_queue_legacy(VIRTIO_NET_TX_QUEUE, OFF_TX_VQ) == 0 { return 0; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Seed RX_SLOTS writable descriptors into queue 0 and publish them.
+# Descriptor i points at RX buffer i (grant-relative OFF_RX_BUFS + i*2048).
+# ---------------------------------------------------------------------------
+fn seed_rx() {
+    if lw(&rx_qsize) < RX_SLOTS { return 0; }
+    let desc_va = lq(&dma_va) + OFF_RX_VQ;
+    let phys = lq(&dma_phys);
+    let i = 0;
+    while i < RX_SLOTS {
+        let d = desc_va + i * 16;
+        let buf_p = phys + OFF_RX_BUFS + (i << RX_BUF_SHIFT);
+        sq(d + 0, buf_p);                       # addr
+        sw(d + 8, RX_BUF_SIZE);                 # len
+        sh(d + 12, VRING_DESC_F_WRITE);         # flags
+        sh(d + 14, 0);                          # next
+        # avail.ring[i] = i
+        sh(lq(&dma_va) + lq(&rx_avail_off) + 4 + i * 2, i);
+        i = i + 1;
+    }
+    # avail.idx = RX_SLOTS
+    sh(lq(&dma_va) + lq(&rx_avail_off) + 2, RX_SLOTS);
+    sw(&rx_last_used, 0);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# TX one complete Ethernet frame (synchronous, one descriptor).
+# Caller has written the frame into dma_va + OFF_TX_BUF + hdr_size.
+# ---------------------------------------------------------------------------
+fn tx_frame(frame_len) {
+    if frame_len < 14 { return 0; }
+    if frame_len > MAX_FRAME { return 0; }
+    if lw(&tx_busy) == 1 { return 0; }
+    sw(&tx_busy, 1);
+
+    let hdr = lw(&hdr_size);
+    let va  = lq(&dma_va);
+    # Zero the virtio-net header, frame already staged after it.
+    let j = 0;
+    while j < hdr { sb(va + OFF_TX_BUF + j, 0); j = j + 1; }
+
+    let desc_va = va + OFF_TX_VQ;
+    let phys = lq(&dma_phys);
+    sq(desc_va + 0, phys + OFF_TX_BUF);         # addr = header + frame
+    sw(desc_va + 8, hdr + frame_len);           # len
+    sh(desc_va + 12, 0);                        # flags (device reads)
+    sh(desc_va + 14, 0);
+
+    let tavail = va + lq(&tx_avail_off);
+    let idx = lh(tavail + 2);
+    let ring_slot = idx & (lw(&tx_qsize) - 1);
+    sh(tavail + 4 + ring_slot * 2, 0);          # descriptor 0
+    sh(tavail + 2, idx + 1);                    # publish
+    vq_notify(VIRTIO_NET_TX_QUEUE);
+
+    # Bounded wait for the used entry.
+    let deadline = syscall(SC_TICKS) + 100;
+    let tused = va + lq(&tx_used_off);
+    while lh(tused + 2) == lw(&tx_last_used) {
+        if syscall(SC_TICKS) >= deadline { sw(&tx_busy, 0); return 0; }
+    }
+    sw(&tx_last_used, lh(tused + 2));
+    sw(&tx_busy, 0);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# RX poll: drain the used ring, hand complete frames up, recycle buffers.
+#
+# THE P1 FIX: the device-supplied descriptor id lives in the local `desc_id`
+# across the whole iteration - including the SC_DRVHOST_NET_RX hand-up - so it
+# can never be clobbered by the frame path the way the in-kernel r8 was.  The
+# same `desc_id` is what we recycle into the avail ring.
+# ---------------------------------------------------------------------------
+fn poll_rx() {
+    let va = lq(&dma_va);
+    let rused  = va + lq(&rx_used_off);
+    let ravail = va + lq(&rx_avail_off);
+    let qmask  = lw(&rx_qsize) - 1;
+    let hdr    = lw(&hdr_size);
+    let processed = 0;
+
+    while processed < RX_SLOTS {
+        let last = lw(&rx_last_used);
+        let uidx = lh(rused + 2);
+        if (last & 0xFFFF) == uidx { processed = RX_SLOTS; }
+        else {
+            let slot = last & qmask;
+            let uelem = rused + 4 + slot * 8;
+            let desc_id  = lw(uelem + 0);           # device-supplied id (LOCAL)
+            let wrlen    = lw(uelem + 4);           # bytes written
+            sw(&rx_last_used, last + 1);
+
+            if desc_id < RX_SLOTS {
+                let min = hdr + 14;
+                if wrlen >= min {
+                    if wrlen <= RX_BUF_SIZE {
+                        # Frame payload starts after the virtio-net header.
+                        let foff = OFF_RX_BUFS + (desc_id << RX_BUF_SHIFT) + hdr;
+                        syscall(SC_DRVHOST_NET_RX, foff, wrlen - hdr);
+                    }
+                }
+                # Recycle THIS descriptor id back into the avail ring.
+                let aidx = lh(ravail + 2);
+                let aslot = aidx & qmask;
+                sh(ravail + 4 + aslot * 2, desc_id);
+                sh(ravail + 2, aidx + 1);
+            }
+            processed = processed + 1;
+        }
+    }
+    if processed > 0 { vq_notify(VIRTIO_NET_RX_QUEUE); }
+    return processed;
+}
+
+# ---------------------------------------------------------------------------
+# Initialisation.  The control plane passes resolved grant bases via a small
+# handoff block (already validated + granted before this process runs):
+#   transport, common_cfg, notify_base, notify_mult, device_cfg, io_base
+# are read from state pre-populated by the loader/broker handoff.
+# ---------------------------------------------------------------------------
+fn virtio_init() {
+    # Fork B (control-plane register/grant ordering): the signed loader has ALREADY
+    # registered this slot's driver and granted its MMIO windows BEFORE this
+    # one-shot probe runs (a driver cannot read MMIO before the grants exist, and
+    # the broker cannot grant to a not-yet-running driver - so the control plane
+    # owns both). The broker keys every request off the caller's slot (r15), never
+    # a driver-supplied id, so this driver needs no SC_DRVHOST_REGISTER of its own.
+    # The resolved transport + MMIO bases arrive pre-written in the state{} handoff.
+
+    # DMA window for virtqueues + RX/TX buffers (self-service, policy-bounded).
+    # The boot-time manager normally pre-allocates/maps this window before the
+    # first ring-3 entry. Keep the self-service path as a restart/hotplug
+    # fallback; both paths traverse the same policy-bounded broker functions.
+    if lq(&dma_va) == 0 {
+        let phys = syscall(SC_DRVHOST_GRANT_DMA, DMA_TOTAL);
+        if phys == 0 { return 0 - 3; }
+        sq(&dma_phys, phys);
+        let va = syscall(SC_DRVHOST_DMA_MAP, phys);
+        if va == 0 { return 0 - 4; }
+        sq(&dma_va, va);
+    }
+
+    let ok = 0;
+    if lw(&transport) == TRANSPORT_MODERN {
+        sw(&hdr_size, MODERN_HDR);
+        ok = init_modern();
+    } else {
+        sw(&hdr_size, LEGACY_HDR);
+        ok = init_legacy();
+    }
+    if ok == 0 { return 0 - 1; }
+
+    if seed_rx() == 0 { return 0 - 2; }
+
+    # DRIVER_OK.
+    if lw(&transport) == TRANSPORT_MODERN {
+        cc_wr8(VIRTIO_COMMON_STATUS,
+               VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+               VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+        vq_notify(VIRTIO_NET_RX_QUEUE);
+    } else {
+        io_out8(VIRTIO_PCI_STATUS,
+                VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
+    }
+    # Signal the control plane that the probe fully succeeded; it binds the driver
+    # (registers the tick, routes the IRQ) only when it reads ready == 1.
+    sw(&ready, 1);
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Execution model: TICK-CALLBACK (docs/virtio-net-ring3-migration.md §4b,
+# RESOLVED 2026-07-14 -> option 1).  Grit runs ring-3 code as cooperative
+# callbacks, not preemptive threads, so this driver exposes TWO entries the
+# control plane invokes instead of a long-running main()+event_loop():
+#
+#   * main()        - the ONE-SHOT spawn entry.  The loader calls it exactly
+#                     once, right after the process is created and its grants +
+#                     resolved bases are installed.  Runs virtio_init and
+#                     returns its rc; NEVER loops.
+#   * virtio_tick() - the PER-FRAME entry.  The kernel invokes it from the
+#                     driver's AP-homed tick job each frame.  Its whole body is
+#                     the bounded RX drain (poll_rx already self-terminates at
+#                     RX_SLOTS), so it is no-freeze BY CONSTRUCTION: it cannot
+#                     spin, wait, or block, and always returns to the kernel.
+#
+# IRQ_WAIT is intentionally NOT used: the tick model replaces the blocking
+# yield with the kernel's own bounded per-frame scheduling, which is what keeps
+# CPU use bounded without a driver-side wait.  (The SC_DRVHOST_IRQ_WAIT ABI
+# const is retained above for the broker/loader, not called here.)
+# ---------------------------------------------------------------------------
+fn virtio_tick() {
+    # VirtIO PCI ISR status is read-to-clear. ACK before draining so a level
+    # INTx line deasserts promptly; bit 0 denotes a queue interrupt.
+    if lw(&transport) == TRANSPORT_MODERN {
+        let cause = m_rd8(lq(&isr_cfg));
+        if (cause & 1) == 0 { return 0; }
+    } else {
+        let cause = io_in8(VIRTIO_PCI_ISR);
+        if (cause & 1) == 0 { return 0; }
+    }
+    return poll_rx();
+}
+
+# On-demand net.l2 TX callback. The kernel bridge has copied a complete Ethernet
+# frame after the VirtIO header in OFF_TX_BUF and published tx_request_len.
+fn virtio_tx() {
+    let len = lw(&tx_request_len);
+    let rc = tx_frame(len);
+    sw(&tx_result, rc);
+    return rc;
+}
+
+fn main() {
+    return virtio_init();
+}

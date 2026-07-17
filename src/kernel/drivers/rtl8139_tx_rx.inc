@@ -133,6 +133,15 @@ rtl8139_net_tx_frame:
     push rsi
     push rdi
     push r8
+    ; SECURITY (GSEC net): bound the caller length before the rep movsb below,
+    ; which copies ecx bytes into the fixed RTL_TX_BUF_ADDR DMA buffer. Without
+    ; this, an oversized length overruns into adjacent kernel memory (guard-page
+    ; PoC confirmed). Defence in depth: net_nic_tx_frame already checks, but this
+    ; wrapper is 'global' and reachable directly, so it must not trust callers.
+    cmp ecx, NET_ETH_FRAME_MAX
+    ja .reject
+    cmp ecx, NET_ETH_FRAME_MIN
+    jb .reject
     cmp byte [rtl_active], 1
     je .active
     call rtl8139_init
@@ -148,6 +157,14 @@ rtl8139_net_tx_frame:
     call rtl8139_tx
     mov eax, 1
     jmp .done
+.reject:
+%ifndef RELEASE_BUILD
+    ; Debug builds surface a rejected TX length loudly instead of copying it.
+    push rsi
+    mov rsi, ser_tx_len_reject
+    call debug_print
+    pop rsi
+%endif
 .fail:
     xor eax, eax
 .done:

@@ -75,6 +75,76 @@ FN_BEGIN l3_randomize_code_slide, 0, 0, FN_RET_VOID
     FN_END l3_randomize_code_slide
     ret
 
+; l3_randomize_driver_slide - choose a page-aligned driver placement wholly
+; below the fixed DMA VA window. This is deliberately independent of the GUI
+; app blob size: driver code/data may never overlap [L3_SLOT_DMA_OFF, ...).
+FN_BEGIN l3_randomize_driver_slide, 0, 0, FN_RET_VOID
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rdi
+    push r8
+    mov r8d, edi
+%ifdef GRIT_NO_MEM_RANDOM
+    mov ecx, r8d
+    mov qword [rel l3_slot_code_slide + rcx*8], 0
+    jmp .lrds_done
+%endif
+    mov rcx, L3_SLOT_DMA_OFF
+    sub rcx, driver_blob_end - driver_blob_start
+    jbe .lrds_zero
+    shr rcx, 12
+    inc rcx
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov rbx, rax
+    mov eax, 1
+    cpuid
+    test ecx, 1 << 30
+    jz .lrds_no_rdrand
+    mov ecx, 8
+.lrds_try_rdrand:
+    rdrand rax
+    jc .lrds_have_rdrand
+    dec ecx
+    jnz .lrds_try_rdrand
+    jmp .lrds_no_rdrand
+.lrds_have_rdrand:
+    xor rbx, rax
+.lrds_no_rdrand:
+    mov rax, L3_SLOT_DMA_OFF
+    sub rax, driver_blob_end - driver_blob_start
+    shr rax, 12
+    inc rax
+    mov rcx, rax
+    mov rax, rbx
+    xor rdx, rdx
+    div rcx
+    test rdx, rdx
+    jnz .lrds_have_page
+    cmp rcx, 1
+    jbe .lrds_have_page
+    mov edx, 1
+.lrds_have_page:
+    shl rdx, 12
+    mov ecx, r8d
+    mov [abs l3_slot_code_slide + rcx*8], rdx
+    jmp .lrds_done
+.lrds_zero:
+    mov ecx, r8d
+    mov qword [abs l3_slot_code_slide + rcx*8], 0
+.lrds_done:
+    pop r8
+    pop rdi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    FN_END l3_randomize_driver_slide
+    ret
+
 ; ============================================================================
 ; Per-slot cryptographic identity key (security_todo.md ??10).
 ;
