@@ -46,6 +46,8 @@
 # ============================================================================
 
 app "rtl8156" { stack = 8192; }
+capability mmio;
+capability dma;
 
 # ---------------------------------------------------------------------------
 # Broker syscall ABI (mirror of hda.ghl constants; see driver_host.ghl).

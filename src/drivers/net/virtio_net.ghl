@@ -33,6 +33,8 @@
 # ============================================================================
 
 app "virtio_net" { stack = 8192; }
+capability mmio;
+capability dma;
 
 # ---------------------------------------------------------------------------
 # Broker syscall ABI (mirror of rtl8156.ghl / driver_host.ghl).

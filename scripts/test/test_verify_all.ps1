@@ -30,6 +30,10 @@ Invoke-Step 'Source guards' {
     powershell -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\test\test_source_guards.ps1')
 }
 
+Invoke-Step 'Syscall documentation ABI' {
+    powershell -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\test\test_syscall_docs.ps1')
+}
+
 Invoke-Step 'Installable driver framework' {
     powershell -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\test\test_driver_framework.ps1')
 }

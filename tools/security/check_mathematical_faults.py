@@ -466,6 +466,79 @@ def check_blob_framing(root: Path, findings: list[Finding]) -> None:
             )
 
 
+DRIVER_BLOB_INCLUDE = '%include "src/drivers/driver_blob.asm"'
+
+
+def check_driver_blob_text_free(root: Path, findings: list[Finding]) -> None:
+    """Prove the installable-driver blob contributes zero `.text` bytes.
+
+    driver_blob.asm may legitimately follow apps.asm in kernel_build.asm only
+    because all of its content lands in `.driverblob follows=.appdata`, past
+    app_blob_code_end/app_blob_end, leaving the `.text`|`.appdata` W^X boundary
+    untouched. This check makes that a scanned invariant instead of trust:
+    every byte-producing line must sit in `.driverblob`, and the section must
+    chain off `.appdata`.
+    """
+    path = root / "src/drivers/driver_blob.asm"
+    text = read_text(path)
+    rel = repo_path(root, path)
+    section_re = re.compile(r"(?i)^\[?\s*section\s+(\.\w+)([^\]]*)\]?$")
+    current: str | None = None
+    for raw in text.splitlines():
+        line = strip_asm_comments(raw)
+        if not line:
+            continue
+        m = section_re.match(line)
+        if m:
+            current = m.group(1).lower()
+            if current == ".driverblob" and "follows=.appdata" not in m.group(2).replace(" ", ""):
+                add(
+                    findings,
+                    "wx-driver-blob-not-appdata-chained",
+                    f"{rel}:{line_of(text, raw)}",
+                    "`.driverblob` does not chain off `.appdata`, so NASM -f bin may place driver bytes inside the kernel `.text`/app-blob window, breaking the W^X boundary proof.",
+                    "Build the kernel; driver bytes land at an unproven offset relative to app_blob_code_end.",
+                    f"Section directive without follows=.appdata: `{line}`.",
+                    "Declare the driver section as `[section .driverblob follows=.appdata align=4096]`.",
+                )
+                return
+            continue
+        if line.startswith("%") and not re.match(r"(?i)^%include\b", line):
+            continue  # %define/%if/%error/... emit no bytes
+        if current != ".driverblob":
+            add(
+                findings,
+                "wx-driver-blob-text-content",
+                f"{rel}:{line_of(text, raw)}",
+                "driver_blob.asm emits bytes outside `.driverblob`; included after apps.asm those bytes extend kernel `.text` past the app blob, so the W^X manifest can mark real app code W+NX.",
+                "Build and launch any callback whose address is after the incorrectly early app_blob_code_end.",
+                f"Content in section `{current or '.text (inherited)'}`: `{line}`.",
+                "Keep every byte-producing line of driver_blob.asm inside `.driverblob follows=.appdata`.",
+            )
+            return
+    # The generated payload is a build artifact; when present, prove it does
+    # not switch sections out from under the `.driverblob` wrapper.
+    generated = root / "build/ghl/virtio_net.asm"
+    if generated.exists():
+        gen_text = read_text(generated)
+        for raw in gen_text.splitlines():
+            line = strip_asm_comments(raw)
+            if not line:
+                continue
+            m = section_re.match(line)
+            if m and m.group(1).lower() != ".driverblob":
+                add(
+                    findings,
+                    "wx-driver-blob-text-content",
+                    f"{repo_path(root, generated)}:{line_of(gen_text, raw)}",
+                    "The generated driver payload switches sections inside the `.driverblob` wrapper, so driver bytes can land in kernel `.text` past the app blob and break the W^X boundary proof.",
+                    "Build and launch any callback whose address is after the incorrectly early app_blob_code_end.",
+                    f"Section directive in generated driver payload: `{line}`.",
+                    "Emit the driver payload without section directives (or only `.driverblob`) so it inherits the wrapper section.",
+                )
+                return
+
+
 def check_apps_last_text_unit(root: Path, findings: list[Finding]) -> None:
     path = root / "src/kernel/kernel_build.asm"
     text = read_text(path)
@@ -491,6 +564,12 @@ def check_apps_last_text_unit(root: Path, findings: list[Finding]) -> None:
         if line in {"section .text", "section .bss", "alignb 16"}:
             continue
         if line in {"global _kernel_text_end", "_kernel_text_end:", "_bss_end:"}:
+            continue
+        if line == DRIVER_BLOB_INCLUDE:
+            # Allowed only because check_driver_blob_text_free proves the
+            # blob contributes zero `.text` bytes (all content chains off
+            # `.appdata`), so the app-blob W^X boundary is unaffected.
+            check_driver_blob_text_free(root, findings)
             continue
         add(
             findings,
@@ -688,11 +767,25 @@ def check_adjacent_asm_divide_by_zero(root: Path, findings: list[Finding]) -> No
 LISTING_EMIT_RE = re.compile(r"^\s*\d+\s+([0-9A-Fa-f]{6,16})\s+([0-9A-Fa-f][0-9A-Fa-f<>rep \-]*)")
 
 
+def is_section_switch(line: str) -> bool:
+    # Strip the trailing comment so prose mentioning `section .appdata` in a
+    # listing comment cannot masquerade as a directive.
+    return re.search(r"\bsection\s+\.\w", line.split(";", 1)[0]) is not None
+
+
 def first_emit_after(lines: Sequence[str], start_idx: int) -> int | None:
+    """First emitted address after start_idx WITHOUT crossing a section switch.
+
+    Addresses past a `section` directive belong to a different placement (e.g.
+    `.appdata` bytes after the `app_blob_code_end:` label), so returning one
+    would silently misplace the symbol being resolved.
+    """
     for i in range(start_idx, min(len(lines), start_idx + 400)):
         m = LISTING_EMIT_RE.match(lines[i])
         if m:
             return int(m.group(1), 16)
+        if is_section_switch(lines[i]):
+            return None
     return None
 
 
@@ -700,7 +793,23 @@ def listing_label_addr(lines: Sequence[str], label: str) -> int | None:
     pat = re.compile(rf"\b{re.escape(label)}:\s*(?:;.*)?$")
     for i, line in enumerate(lines):
         if pat.search(line):
-            return first_emit_after(lines, i + 1)
+            addr = first_emit_after(lines, i + 1)
+            if addr is not None:
+                return addr
+            # Label immediately followed by a section switch (the
+            # app_blob_code_end boundary shape): its address is the end of the
+            # `align N` padding just before it -- the padding's start address
+            # rounded up to N.
+            for j in range(i - 1, max(-1, i - 8), -1):
+                m = LISTING_EMIT_RE.match(lines[j])
+                if m:
+                    am = re.search(r"\balign\s+(\d+)\b", lines[j].split(";", 1)[0])
+                    if am:
+                        n = int(am.group(1))
+                        a = int(m.group(1), 16)
+                        return (a + n - 1) // n * n
+                    return None
+            return None
     return None
 
 

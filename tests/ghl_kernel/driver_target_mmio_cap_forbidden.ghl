@@ -1,0 +1,11 @@
+# Negative Track-8 compiler gate: brokered MMIO is safe only when the driver
+# explicitly declares the MMIO authority class.  Runtime signed policy and
+# window checks remain mandatory and independent.
+
+app "driver_target_mmio_cap_forbidden" { stack = 4096; }
+capability dma;  # a different authority must not satisfy the MMIO gate
+const SC_DRVHOST_MMIO_READ32 = 240;
+
+fn main() {
+    return syscall(SC_DRVHOST_MMIO_READ32, 0xFEBF0000);
+}

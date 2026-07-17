@@ -1,0 +1,10 @@
+# Negative Track-8 compiler gate: a driver cannot name DMA allocation/mapping
+# syscalls unless it declares the DMA authority class.
+
+app "driver_target_dma_cap_forbidden" { stack = 4096; }
+capability mmio;  # a different authority must not satisfy the DMA gate
+const SC_DRVHOST_DMA_MAP = 242;
+
+fn main() {
+    return syscall(SC_DRVHOST_DMA_MAP, 0x100000);
+}

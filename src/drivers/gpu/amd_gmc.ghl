@@ -62,6 +62,8 @@
 # ============================================================================
 
 app "amd_gmc" { stack = 8192; }
+capability mmio;
+capability dma;
 
 # ---------------------------------------------------------------------------
 # Broker syscall ABI (mirror of rtl8156.ghl / amdgpu.ghl; see driver_host.ghl).

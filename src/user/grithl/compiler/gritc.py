@@ -12,7 +12,7 @@ KEYWORDS = {
     "use","app","module","fn","let","if","else","while","for","return",
     "str","i8","i16","i32","i64","u8","u16","u32","u64","ptr","void","bool",
     "true","false","asm","syscall","extern","const","struct","state","break","continue",
-    "global","data","table","naked","align","unsafe","buffer","reserve",
+    "global","data","table","naked","align","unsafe","capability","buffer","reserve",
     # Blocking-effect type system: a fn may be declared `blocking` (it can
     # spin/wait/acquire-a-lock) or `nonblocking` (an interactive / IRQ entry
     # point that must never stall). The compiler rejects a blocking call from a
@@ -267,6 +267,14 @@ def parse(toks,path):
         elif t.v=="unsafe":
             p.eat(); cap=p.eat("id").v; p.match(";")
             decls.append(node("unsafe",cap=cap,line=t.line))
+        elif t.v=="capability":
+            # Ring-3 driver broker authority, deliberately separate from
+            # `unsafe`: this does not permit a privileged instruction or raw
+            # memory access.  It only permits the compiler to emit the named
+            # class of driver-host syscall; the broker still enforces the
+            # signed policy and per-device window at runtime.
+            p.eat(); cap=p.eat("id").v; p.match(";")
+            decls.append(node("capability",cap=cap,line=t.line))
         elif t.v=="data":
             # Kernel-mode data with an EXACT (unprefixed) symbol name. Forms:
             #   data NAME: <count> [x <width>] [= <init>];   element array
@@ -2683,6 +2691,42 @@ _KERNEL_PRIV_SUBSUMES={
     "kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable","kernel_vmx",
 }
 
+# Compile-time authority classes for --target driver.  These declarations are
+# a static least-authority gate over the stable driver-host syscall ABI; they do
+# not mint runtime authority.  The in-kernel broker independently intersects
+# requested capabilities with signed policy and checks every concrete window.
+_VALID_DRIVER_CAPS={"mmio","dma","pio","irq","ring","reset"}
+
+# Broker operations whose mere presence in a driver binary requires explicit
+# authority.  258 programs a device-visible DMA pointer through an MMIO window,
+# so it intentionally requires BOTH classes.
+_DRIVER_SYSCALL_CAPS={
+    233: frozenset(("mmio",)),       # GRANT_MMIO (control-plane denied today)
+    234: frozenset(("dma",)),        # GRANT_DMA / DMA_ALLOC
+    240: frozenset(("mmio",)),       # MMIO_READ32
+    241: frozenset(("mmio",)),       # MMIO_WRITE32
+    242: frozenset(("dma",)),        # DMA_MAP
+    249: frozenset(("mmio",)),       # GRANT_MMIO_FOR (control-plane denied)
+    250: frozenset(("mmio",)),       # MMIO_RD8
+    251: frozenset(("mmio",)),       # MMIO_RD16
+    252: frozenset(("mmio",)),       # MMIO_RD32
+    253: frozenset(("mmio",)),       # MMIO_RD64
+    254: frozenset(("mmio",)),       # MMIO_WR8
+    255: frozenset(("mmio",)),       # MMIO_WR16
+    256: frozenset(("mmio",)),       # MMIO_WR32
+    257: frozenset(("mmio",)),       # MMIO_WR64
+    258: frozenset(("mmio","dma")), # MMIO_WR_DMAPTR
+}
+
+def _require_driver_syscall_caps(cg, num):
+    required=_DRIVER_SYSCALL_CAPS.get(num, frozenset())
+    missing=sorted(required - getattr(cg,"driver_caps",set()))
+    if missing:
+        decls=", ".join(f"`capability {cap};`" for cap in missing)
+        raise SyntaxError(
+            f"driver broker syscall {num} requires {decls}; "
+            "compiler declarations do not replace signed broker grants")
+
 def _require_cap(cg, cap, what):
     caps=getattr(cg,"unsafe_caps",set())
     if cap in caps:
@@ -2705,6 +2749,13 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if deny_unsafe and declared_caps:
         caps=", ".join(d["cap"] for d in declared_caps[:8])
         raise SyntaxError(f"--deny-unsafe rejects unsafe capability declarations: {caps}")
+    declared_driver_caps=[d for d in decls if d.get("k")=="capability"]
+    for d in declared_driver_caps:
+        if target!="driver":
+            raise SyntaxError(
+                f"capability {d['cap']}: declaration requires --target driver")
+        if d["cap"] not in _VALID_DRIVER_CAPS:
+            raise SyntaxError(f"capability {d['cap']}: unknown driver capability")
     safety_module=app_prefix
     for d in decls:
         if d.get("k") in ("module","app"):
@@ -2713,6 +2764,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     cg=CG(app_prefix,kernel=kernel)
     cg.deny_unsafe=deny_unsafe
     cg.unsafe_caps={d["cap"] for d in declared_caps}
+    cg.driver_caps={d["cap"] for d in declared_driver_caps}
     cg.embed=embed
     cg.src=src
     cg.target=target
@@ -2746,7 +2798,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # collect top-level
     str_defs={}
     for d in decls:
-        if d["k"]=="unsafe":
+        if d["k"] in ("unsafe","capability"):
             continue
         if d["k"]=="cfgguard":
             # Top-level `cfg` guard line (%ifdef/%ifndef/%endif) emitted inline
@@ -3133,6 +3185,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             "declared": [{"cap": d["cap"], "line": d.get("line")} for d in declared_caps],
             "broad": sorted({d["cap"] for d in declared_caps if d["cap"] in broad_caps}),
             "privileged": sorted({d["cap"] for d in declared_caps if d["cap"] in privileged_caps}),
+        },
+        "driver_capabilities": {
+            "declared": [
+                {"cap": d["cap"], "line": d.get("line")}
+                for d in declared_driver_caps
+            ],
         },
         "symbols": {
             "externs": sorted(cg.externs),
@@ -4739,6 +4797,16 @@ def gen_expr(st,e):
         # move args into ABI regs, then syscall num in rax
         args=e["args"]
         if len(args)>6: raise SyntaxError("syscall has max 6 args")
+        numc=const_fold_int(cg, e["num"])
+        if getattr(cg,"target","user")=="driver":
+            # A dynamic syscall number would let a driver hide an MMIO/DMA op
+            # from this compile-time authority check.  Driver ABI calls must be
+            # statically enumerable; normal user/kernel targets retain their
+            # existing dynamic-syscall behavior.
+            if numc is None:
+                raise SyntaxError(
+                    "--target driver requires a compile-time constant syscall number")
+            _require_driver_syscall_caps(cg, numc)
         # evaluate to stack first (left-to-right), then pop in reverse
         if getattr(st,"_o4_passthru",None) is e:
             # --O4 Case B: read params from their incoming registers via a
@@ -4771,7 +4839,6 @@ def gen_expr(st,e):
         # emit it through APP_SYSNO so the build records a fixup for the loader to
         # rewrite per slot. A non-constant number falls back to a plain rax load
         # (not permuted - there is no immediate to rewrite).
-        numc=const_fold_int(cg, e["num"])
         if numc is not None:
             # Driver-host processes use the raw, stable broker ABI. Some broker
             # syscall numbers exceed 255, while the GUI APPS.BIN permutation
@@ -5532,7 +5599,9 @@ def main():
                          "and emit no inline asm. Combined with the ring-3 privilege gate (privileged "
                          "intrinsics inb/outb/write_cr*/lgdt/... already require --target kernel), a "
                          "driver binary provably holds ZERO ambient hardware authority: it reaches "
-                         "hardware only by syscalling the in-kernel driver_host broker.")
+                         "hardware only by syscalling the in-kernel driver_host broker. Brokered MMIO "
+                         "and DMA calls additionally require explicit `capability mmio;` / "
+                         "`capability dma;` declarations; dynamic syscall numbers are rejected.")
     ap.add_argument("--forbid-asm",action="store_true",
                     help="reject any inline asm block. Use for new code and migration gates.")
     ap.add_argument("--deny-unsafe",action="store_true",

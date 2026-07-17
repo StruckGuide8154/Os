@@ -7,6 +7,7 @@
 # load/store builtins (which the MMU confines to the process's own pages).
 
 app "driver_target_ok" { stack = 4096; }
+capability mmio;
 
 const SC_DRVHOST_MMIO_READ32  = 240;   # broker syscall ABI (see hda.ghl / Rung 1 wiring)
 const SC_DRVHOST_MMIO_WRITE32 = 241;

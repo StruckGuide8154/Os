@@ -103,6 +103,33 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Mathematical fault guard failed (deterministic trigger/evidence/fix finding emitted).'
 }
 
+Write-Host '[ghl-security] Checking tss_init_for_core core-index bound proof...' -ForegroundColor Yellow
+$TssBoundProof = Join-Path $Root 'tools\security\tss_core_index_bound_proof.py'
+if (-not (Test-Path -LiteralPath $TssBoundProof)) {
+    throw "Missing TSS core-index bound proof: $TssBoundProof"
+}
+& python $TssBoundProof
+if ($LASTEXITCODE -ne 0) {
+    throw 'TSS core-index bound proof failed (an admitted core index reaches an out-of-bounds GDT/pool write).'
+}
+
+Write-Host '[ghl-security] Checking cross-path Copy Fail device-length clamps (CVE-2026-31431 class)...' -ForegroundColor Yellow
+$CopyFailScanner = Join-Path $Root 'tools\security\check_async_copy_fail.py'
+if (-not (Test-Path -LiteralPath $CopyFailScanner)) {
+    throw "Missing Copy Fail scanner: $CopyFailScanner"
+}
+# Negative self-test first: prove the scanner trips on a planted unclamped sibling
+# (an async ingest path that drops the clamp its twin applies) and clears once the
+# clamp is added -- so the guard can never silently rot into a no-op.
+& python $CopyFailScanner --selftest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Copy Fail scanner self-test failed (it no longer catches a planted unclamped sibling).'
+}
+& python $CopyFailScanner --repo-root $Root
+if ($LASTEXITCODE -ne 0) {
+    throw 'Copy Fail scanner found a device-controlled RX length reaching a length-trusting sink without the upper-bound clamp a sibling path applies.'
+}
+
 Write-Host '[ghl-security] Checking frozen toolchain pins (gritc.py + ed25519_host.py sha256, nasm version)...' -ForegroundColor Yellow
 & powershell -NoProfile -ExecutionPolicy Bypass -File $ToolchainPinGuard
 if ($LASTEXITCODE -ne 0) {

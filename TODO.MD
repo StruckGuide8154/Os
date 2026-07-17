@@ -71,8 +71,8 @@ reduce maintenance risk.
 
 ## P1: Syscall Surface
 
-- [ ] Generate syscall docs from source or validate docs against source automatically.
-- [ ] Add a syscall table count check that also verifies documented range `0..21`.
+- [x] Generate syscall docs from source or validate docs against source automatically. *(The syscall-doc guard checks every individually documented ABI heading against the NASM wrappers and GritHL ABI constants.)*
+- [x] Add a syscall table count check that also verifies documented range `0..21`. *(`test_syscall_docs.ps1` requires 81 public rows and proves docs, wrappers, and dispatch handlers agree for all 22 core rows.)*
 - [ ] Add per-syscall return-value tests for validation failure.
 - [ ] Add tests for `SYS_FS_DELETE`, `SYS_FS_RENAME`, and `SYS_FS_MKDIR` edge cases.
 - [ ] Test negative and huge window IDs for `SYS_WM_CLOSE` and `SYS_WM_HANDLERS`.

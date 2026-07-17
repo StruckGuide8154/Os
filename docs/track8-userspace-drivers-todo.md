@@ -53,10 +53,13 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       bounded/SMAP-bracketed ring submission, and fail-closed control-plane
       rows. Remaining: verified driver-slot creation, concrete device grants,
       DMA mapping, IRQ events, and device-manager provisioning.
-- [ ] MMIO/DMA capability gates in `gritc` (the open `[ ]` items under "P0: GHL
-      Compiler Security": "capability gates for MMIO operations" / "for DMA
-      mapping" / "for device reset and firmware load") - these ARE the G1
-      substrate; land them here.
+- [~] MMIO/DMA capability gates in `gritc`: **MMIO + DMA LANDED 2026-07-17.**
+      `--target driver` requires explicit `capability mmio;` / `capability dma;`
+      for the corresponding broker syscall families, requires both for DMA
+      pointer programming through MMIO, and rejects dynamic syscall numbers so
+      the check cannot be hidden. Compiler declarations do not mint authority:
+      signed policy + broker window grants still decide at runtime. Remaining
+      open P0 item: capability gate for device reset and firmware load.
 - [ ] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
       broker (a driver_id can only reach windows in its granted table).
 
