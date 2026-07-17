@@ -301,6 +301,23 @@ foreach ($drvModule in $Track8Drivers) {
     if (Test-Path -LiteralPath $drvOut) { Remove-Item -LiteralPath $drvOut -Force }
 }
 
+Write-Host '[ghl-security] === Track-8 INV-DRIVER-NO-DMA-MINT re-proven against the real broker ===' -ForegroundColor Cyan
+$DrvhostDmaEval = Join-Path $Root 'scripts\test\eval_drvhost_dma_mint.py'
+if (-not (Test-Path -LiteralPath $DrvhostDmaEval)) {
+    throw "Missing Track-8 broker DMA-mint proof: $DrvhostDmaEval"
+}
+# Selftest first: the proof must catch three PLANTED broken brokers (ownership
+# check dropped, capability gate dropped, pointer-value containment dropped),
+# so this guard can never silently rot into a no-op.
+& python $DrvhostDmaEval --selftest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Broker DMA-mint proof selftest failed (a planted broken driver_host was NOT caught).'
+}
+& python $DrvhostDmaEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'INV-DRIVER-NO-DMA-MINT failed against the real broker (a driver_id can reach a DMA window outside its granted table, or a grant path mints unauthorized authority).'
+}
+
 Write-Host '[ghl-security] === Track-5 monitor-HAL detect/select/second-stage/IOMMU (real GHL math) ===' -ForegroundColor Cyan
 $MonHalEval = Join-Path $Root 'scripts\test\eval_mon_hal.py'
 if (-not (Test-Path -LiteralPath $MonHalEval)) {

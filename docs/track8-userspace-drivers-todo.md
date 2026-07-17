@@ -68,8 +68,16 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       `driver_target_{mmio,dma,reset,fwload}_cap_forbidden.ghl` +
       `driver_target_reset_fwload_ok.ghl` + the dynamic-syscall reject, all in
       `test_gritc_security.ps1`.
-- [ ] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
-      broker (a driver_id can only reach windows in its granted table).
+- [x] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
+      broker (a driver_id can only reach windows in its granted table). **DONE
+      2026-07-17:** `scripts/test/eval_drvhost_dma_mint.py` interprets the REAL
+      `driver_host.ghl` (production lexer/parser, emitted-code integer
+      semantics, adversarial kernel-primitive stubs) - 98,259 checks across 6
+      properties (containment soundness, grant gate/no-partial-mint, signed
+      DMA ceiling, pointer-programming no-mint incl. sibling windows,
+      cross-grant controller gate, map-own-base-only), plus a planted-broken-
+      broker selftest; wired into `test_ghl_security_guards.ps1`. Proof table:
+      `docs/track3-invariant-proofs.md` §1b.
 
 ## Rung 2 - First migration: `battery` / `acpi_ec`  **[DRIVER LANDED 2026-06-14]**
 
@@ -174,7 +182,8 @@ run in-kernel until the migration ladder finishes.
       usb_hid/display to ring-3; delete each `.asm` + its inventory line.
 - [ ] **(sec→10)** Rung 4: fault-budget quarantine-and-restart + the per-stage
       negative test (forged out-of-grant request refused, kernel authority unreachable).
-- [ ] **(sec→10)** Re-prove `INV-DRIVER-NO-DMA-MINT` (Track 3) against the broker.
+- [x] **(sec→10)** Re-prove `INV-DRIVER-NO-DMA-MINT` (Track 3) against the broker.
+      (eval_drvhost_dma_mint.py, 98,259 checks + selftest - see Rung 1.)
 - [ ] **Verify:** an independent agent re-rates this track **security 10**.
 - **(speed→max under sec 10)** Validate-once batched descriptor rings (TX = one
       submit/frame, RX = walk in ring-3, no per-frame syscall) keep the hot path fast;

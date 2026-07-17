@@ -78,6 +78,34 @@ counts are emitted by the run itself (the counts below are for `w = 7`).
 +4 Track-4 leak/elevation replay-binding and cap-mask theorems, +2 Track-2
 anti-rollback theorems). State counts are re-derived on every run.
 
+### 1b. INV-DRIVER-NO-DMA-MINT re-proven against the real broker (Track 8)
+
+The abstract `inv_driver_no_dma_mint` theorem above models "grant present" as
+one boolean. `scripts/test/eval_drvhost_dma_mint.py` closes the model-to-code
+gap: it parses the REAL enforcement module `src/kernel/grithlk/driver_host.ghl`
+with the production compiler's own lexer/parser and interprets the actual
+broker functions over a modeled data segment with the emitted-code integer
+semantics (64-bit wrap-around, signed comparisons, logical shifts). The kernel
+primitives outside the broker (`page_alloc_contig`, `l3_map_driver_dma`) are
+stubbed adversarially permissive, so the proof rests on the broker's own checks
+only, and the raw MMIO boundary helpers are intercepted so "the device saw the
+access" is an observed event, never a side effect.
+
+| # | Property (∀ over the bound) | Real functions exercised | Checks |
+|---|---|---|---|
+| P1 | `drvhost_dma_contained(id,addr,len)==1` ⇒ `[addr,addr+len)` lies (unsigned) inside a window RECORDED FOR `id`, incl. adversarially planted malformed rows; complete on well-formed rows | `drvhost_dma_contained` | 96,768 |
+| P2 | a DMA window row is minted only for a RUNNING driver holding `DRV_CAP_DMA`, never zero-length; a refused request mutates nothing (no partial mint) | `drvhost_grant_dma`, `drv_has_cap`, `drv_is_running` | 400 |
+| P3 | across alloc sequences a driver's granted-DMA total never exceeds its signed policy ceiling (size-mask/overflow edges included); refused allocs leave table+accounting untouched | `drvhost_dma_alloc`, `drv_dma_grant_len` | 68 |
+| P4 | the DMA-pointer MMIO write reaches the device iff the register is in the caller's MMIO grant AND the pointer VALUE is in the caller's OWN DMA grant - a sibling's window never satisfies it | `drvhost_mmio_write_dma_ptr` + the real admission path (`drvhost_policy_install` → `drvhost_register_slot` → grants) | 1,008 |
+| P5 | only a `DRV_CAP_PCICFG` controller may route a window to a DIFFERENT driver_id | `drvhost_grant_mmio_for` | 8 |
+| P6 | `drvhost_dma_map` maps only a granted base of the CALLER, idempotently; a second live mapping / a sibling base is refused | `drvhost_dma_map` | 7 |
+
+**98,259 checks, zero violations.** `--selftest` (run first in the guard suite)
+re-runs the proof over three PLANTED broken brokers - ownership check dropped,
+capability gate dropped, pointer-value containment dropped - and requires each
+to be caught, so the harness cannot silently rot into a no-op (same doctrine as
+the §4 translation-validation meta-tests).
+
 ---
 
 ## 2. Policy → authority derivation (the P3 mapping)
