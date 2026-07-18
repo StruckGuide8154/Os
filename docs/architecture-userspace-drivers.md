@@ -80,7 +80,8 @@ Capability classes (`driver_host.ghl`, `DRV_CAP_*`):
 | `DMA`   | DMA window | a coherent buffer the broker maps for the device only |
 | `IRQ`   | interrupt delivery | receive forwarded IRQ signals for a granted vector |
 | `RING`  | descriptor rings | establish shared-memory batch rings |
-| `RESET` | device reset / fw-load | the most dangerous op; **threshold-gated** |
+| `RESET` | device reset | transient reset of the granted device; **threshold-gated** |
+| `FWLOAD` | firmware load | persists past reboot - the most dangerous op; **threshold-gated**, never subsumed by `RESET` |
 
 Grants come from the **signed driver policy** (the per-driver manifest, bound
 into the Track 2 signed-everything chain), not from the driver asking nicely.

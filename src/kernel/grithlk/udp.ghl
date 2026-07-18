@@ -135,7 +135,9 @@ fn net_udp_rx_ipv4(pkt, len) {
 
     let paylen = dlen - 8;
     let payload = up + 8;
+    let srcip = (lb(pkt + 12) << 24) | (lb(pkt + 13) << 16)
+              | (lb(pkt + 14) << 8) | lb(pkt + 15);
     # net_dns_rx_udp(payload, srcport, dstport, len) - plain System-V; matches
     # the udp.asm call (rdi=payload, si=srcport, dx=dstport, ecx=len).
-    return net_dns_rx_udp(payload, srcport, dstport, paylen);
+    return net_dns_rx_udp(payload, srcport, dstport, paylen, srcip);
 }

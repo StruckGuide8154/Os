@@ -1,0 +1,14 @@
+# Negative Track-8 compiler gate: a dynamic syscall number could conceal an
+# MMIO/DMA broker operation from static capability analysis.
+
+app "driver_target_dynamic_syscall_forbidden" { stack = 4096; }
+capability mmio;
+capability dma;
+
+fn hidden_syscall(number) {
+    return syscall(number, 0);
+}
+
+fn main() {
+    return hidden_syscall(240);
+}

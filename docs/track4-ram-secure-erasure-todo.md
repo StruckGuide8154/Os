@@ -470,7 +470,7 @@ Audit and make each a tested barrier.
       `dump-guest-memory`) and grep the image for known secrets - `kernel_canary`,
       a known key, plaintext file contents, a planted at-rest sentinel. Assert
       NONE appear except the documented live-working-set residual.
-      _Implemented: `scripts/test/test_track4_pmemsave.ps1` (2026-06-09)._
+      _Implemented: `scripts/dev/test_track4_pmemsave.ps1` (2026-06-09)._
 - [x] Negative test: a secret planted in an at-rest (encrypted) region must NOT
       appear in the dump; the same secret while actively in use MAY (and the test
       documents exactly which residual it is).
@@ -514,12 +514,17 @@ Audit and make each a tested barrier.
       is the named, bounded residual, not an unbounded gap._
 - [x] A planted-leak negative test proves a fully-reversed dump still cannot
       elevate on a fresh boot - the exfiltration→elevation matrix holds (Part D).
-      _Implemented: `scripts/test/test_track4_planted_leak.ps1` (2026-06-09)._
+      _Implemented: `scripts/dev/test_track4_planted_leak.ps1`; reverified
+      2026-07-17 across two fresh boots, with the real planted 128-bit cap-MAC
+      stale-replay and independent lane-corruption rejection vectors executed
+      as Tier 4._
 - [x] The irreducible plaintext residual is named precisely in STATUS.md and
       proven bounded by the `pmemsave` test, with no claim exceeding it.
       _STATUS.md §9 + the Part A HARD LIMIT + `fme_memory_encryption_check.ghl`
       header caveat #3 name it; `test_track4_pmemsave.ps1` enumerates the residuals
-      it does NOT claim absent (.text, firmware, page tables)._
+      it does NOT claim absent (.text, firmware, page tables). Reverified
+      2026-07-17 with a fail-closed runtime-only positive control: sentinel absent
+      from KERNEL.BIN, present once in the pre-wipe dump, absent post-wipe._
 
 ## Follow-up: legacy v0 app blobs are W+X (security review finding)
 
@@ -541,3 +546,25 @@ execution.
       so v0/permissive becomes unreachable for first-party apps.
 - [ ] Verify: a v0 app that writes into its own code window after the change is
       rejected/faults; a normal app still boots and draws.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 5 / speed 5**. Software is complete; the cap is
+fundamental — XOR-whitening with a mask co-resident in DRAM gives ~zero protection
+against the one-shot dump, so the real closure is hardware FME, which QEMU can't test.
+
+- [ ] **(sec→10, HW-gated)** Live SME C-bit page-table marking on real silicon
+      (mask + policy already landed) so kernel-secret / slot-arena / FS-cache pages
+      are ciphertext in DRAM. Where TME is BIOS-locked-on, assert + report.
+- [ ] **(sec→10)** Close the v0 W+X blob hole (compiler split + auto-manifest above)
+      so a memory-corruption bug can't compose into write-then-execute.
+- [ ] **(sec→10)** Derive the at-rest/volatile key from a per-machine root (Track 7
+      P1 / Track 10 board), never a shipped constant — then a DIMM dump + full image
+      disclosure still yields ciphertext.
+- [ ] **Verify:** an independent agent re-rates this track **security 10**
+      *conditional on FME-present hardware* (stated as a bounded 10, per SCOPE rule).
+- **(speed→max under sec 10)** FME is transparent memory-controller AES (≈0 CPU
+      cost); route any decrypt-on-demand + zeroize/rekey onto the Track 9 async
+      offload. Realistic ceiling **security 10 (HW present) / speed 9**.
+- **Honest cap:** on legacy hardware with no TME/SME this track cannot reach
+      security 10 — it stays at the software bound. Document as "10 where FME present."

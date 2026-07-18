@@ -17,9 +17,7 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     mov byte [xhci_slot2_mode], 1
 
     ; Serial: '[' = slot2 init starting
-    mov dx, 0x3F8
-    mov al, '['
-    out dx, al
+    SER '['
 
     ; Look for another port with a device (past the current port)
     call xhci_find_port_next
@@ -27,9 +25,7 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     jz .slot2_fail
 
     ; Serial: 'p' = port found for slot2
-    mov dx, 0x3F8
-    mov al, 'p'
-    out dx, al
+    SER 'p'
 
     ; Enable slot for second device
     call xhci_enable_slot
@@ -37,9 +33,7 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     jz .slot2_fail
 
     ; Serial: 's' = slot enabled for slot2
-    mov dx, 0x3F8
-    mov al, 's'
-    out dx, al
+    SER 's'
 
     ; Address device (uses xhci_slot_id which now = slot2)
     call xhci_address_device
@@ -47,9 +41,7 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     jz .slot2_fail
 
     ; Serial: 'a' = address device ok for slot2
-    mov dx, 0x3F8
-    mov al, 'a'
-    out dx, al
+    SER 'a'
 
     ; Get device descriptor
     mov rdi, XHCI_CTRL_BUF_ADDR
@@ -102,9 +94,7 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     je .slot2_restore_fail
 
     ; Serial: 'e' = endpoint found for slot2
-    mov dx, 0x3F8
-    mov al, 'e'
-    out dx, al
+    SER 'e'
 
     ; Save slot2 endpoint info
     mov al, [usb_ep_addr]
@@ -222,18 +212,14 @@ FN_BEGIN usb_hid_init_slot2, 0, 0, FN_RET_SCALAR
     mov byte [usb_slot2_active], 0
 
     ; Serial: ']' = slot2 init failed
-    mov dx, 0x3F8
-    mov al, ']'
-    out dx, al
+    SER ']'
     mov byte [usb_accept_keyboard], 0
     xor eax, eax
     jmp .slot2_ret
 
 .slot2_ok:
     ; Serial: ')' = slot2 init OK
-    mov dx, 0x3F8
-    mov al, ')'
-    out dx, al
+    SER ')'
     mov byte [usb_accept_keyboard], 0
     mov eax, 1
 .slot2_ret:
@@ -256,38 +242,38 @@ usb_control_transfer_in:
     ; 1. Setup Stage
     push rcx
     push rdi
-    
+
     ; Setup TRB:
     ; DW0, DW1: Setup Data (R8, R9) -> TRB has IDT (Immediate Data)
     ; But XHCI spec says Setup TRB uses Immediate Data for the 8 setup bytes.
     ; DW0: RequestType | Request | Value
     ; DW1: Index | Length
-    
+
     ; Note: R8/R9 passed by caller are the content of the 8 bytes.
     ; TRB fields:
     ; DW0 = R8
     ; DW1 = R9
     ; DW2 = 8 (Length of immediate data always 8)
     ; DW3 = TRB_SETUP | TRB_IDT | TRB_TRT_IN
-    
+
     mov r10d, 8
     mov r11d, TRB_SETUP | TRB_IDT | TRB_TRT_IN
     call xhci_queue_ctrl_trb
-    
+
     ; 2. Data Stage
     pop rdi
     pop rcx
-    
+
     cmp rcx, 0
     je .no_data
-    
+
     ; Data TRB
     mov r8d, edi             ; Buffer low
     xor r9d, r9d             ; Buffer high
     mov r10d, ecx            ; Length
     mov r11d, TRB_DATA | TRB_DIR_IN
     call xhci_queue_ctrl_trb
-    
+
 .no_data:
     ; 3. Status Stage (OUT)
     xor r8d, r8d
@@ -295,12 +281,12 @@ usb_control_transfer_in:
     xor r10d, r10d
     mov r11d, TRB_STATUS | TRB_DIR_OUT | TRB_IOC
     call xhci_queue_ctrl_trb
-    
+
     ; 4. Ring Doorbell (Slot 1, EP1=Control)
     movzx edi, byte [xhci_slot_id]
     mov esi, 1               ; EP 1 = Control
     call xhci_ring_doorbell
-    
+
     ; 5. Wait for completion
     call usb_wait_completion
     ret
@@ -314,19 +300,19 @@ usb_control_transfer_nodata:
     mov r10d, 8
     mov r11d, TRB_SETUP | TRB_IDT | TRB_TRT_NO_DATA
     call xhci_queue_ctrl_trb
-    
+
     ; 2. Status Stage (IN)
     xor r8d, r8d
     xor r9d, r9d
     xor r10d, r10d
     mov r11d, TRB_STATUS | TRB_DIR_IN | TRB_IOC
     call xhci_queue_ctrl_trb
-    
+
     ; 3. Ring Doorbell
     movzx edi, byte [xhci_slot_id]
     mov esi, 1
     call xhci_ring_doorbell
-    
+
     ; 4. Wait
     call usb_wait_completion
     ret

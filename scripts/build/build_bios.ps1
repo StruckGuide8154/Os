@@ -44,15 +44,13 @@ Write-Host ("Mode:   " + ($(if ($Release) { 'release' } else { 'debug' })))
 Write-Host "Perf:   $PerfProfile"
 Write-Host ("Trace:  " + ($(if ($Trace) { 'on' } else { 'off' })))
 
-$NxhBuildArgs = @()
-if ($Release) { $NxhBuildArgs += '-Release' }
-& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_ghl.ps1') @NxhBuildArgs
-if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL compile' -ForegroundColor Red; exit 1 }
-$CoverageTool = Join-Path $Root 'tools\check_coverage.py'
-if (Test-Path $CoverageTool) {
-    & python $CoverageTool
-    if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED signature coverage' -ForegroundColor Red; exit 1 }
-}
+# BIOS and UEFI consume the same generated app/kernel assembly. Use the UEFI
+# generator-only mode as the single module registry so a clean BIOS build can
+# never reuse stale output for any of the 55 GritHLK modules.
+$GenerationArgs = @('-KernelGenerationOnly')
+if ($Release) { $GenerationArgs += '-Release' }
+& powershell -NoProfile -File (Join-Path $Root 'scripts\build\build_uefi.ps1') @GenerationArgs
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED GritHL/GritHLK generation' -ForegroundColor Red; exit 1 }
 Write-Host "Source: $SRC_DIR"
 Write-Host "Build:  $BUILD_DIR"
 
@@ -83,16 +81,30 @@ Write-Host "[2/3] Assembling Stage 2..." -ForegroundColor Yellow
 & $NASM -f bin -o "$BUILD_DIR\stage2.bin" -I "$INCLUDE_DIR\" -I "$SRC_DIR\boot\" "$SRC_DIR\boot\stage2.asm"
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
-# 3. Kernel (Monolithic)
-Write-Host "[3/3] Assembling Kernel..." -ForegroundColor Yellow
-& $NASM @KernelDefines -w-pp-macro-redef-multi -f bin -o "$BUILD_DIR\kernel.bin" -I "$INCLUDE_DIR\" -I "$USER_LIB_DIR\" -I "$SRC_DIR\boot\" -I "$BUILD_DIR\" "$SRC_DIR\kernel\kernel_build.asm"
+# 3. Kernel (monolithic, two passes). Even though BIOS uses a fixed runtime
+# base, the blob/manifest patchers need the second ORG to identify absolute
+# qwords inside app segments. Package pass A after both images are finalized.
+Write-Host "[3/3] Assembling Kernel (two-pass manifest finalization)..." -ForegroundColor Yellow
+$KernelA = Join-Path $BUILD_DIR 'kernel.bin'
+$KernelB = Join-Path $BUILD_DIR 'kernel.bios.reloc.bin'
+& $NASM @KernelDefines -w-pp-macro-redef-multi -f bin -o $KernelA -I "$INCLUDE_DIR\" -I "$USER_LIB_DIR\" -I "$SRC_DIR\boot\" -I "$BUILD_DIR\" "$SRC_DIR\kernel\kernel_build.asm"
 if ($LASTEXITCODE -ne 0) { exit 1 }
+& $NASM @KernelDefines '-dKERNEL_BASE_OVERRIDE=0x200000' -w-pp-macro-redef-multi -f bin -o $KernelB -I "$INCLUDE_DIR\" -I "$USER_LIB_DIR\" -I "$SRC_DIR\boot\" -I "$BUILD_DIR\" "$SRC_DIR\kernel\kernel_build.asm"
+if ($LASTEXITCODE -ne 0) { exit 1 }
+if ((Get-Item $KernelA).Length -ne (Get-Item $KernelB).Length) {
+    throw 'BIOS kernel ORG passes differ in size; cannot derive relocation-aware app hashes.'
+}
+
+& python (Join-Path $Root 'tools\build\patch_blob_sig.py') --a $KernelA --b $KernelB
+if ($LASTEXITCODE -ne 0) { throw 'BIOS kernel blob-signature patch failed.' }
+& python (Join-Path $Root 'tools\build\gen_app_manifest.py') --a $KernelA --b $KernelB
+if ($LASTEXITCODE -ne 0) { throw 'BIOS kernel app-manifest patch failed.' }
 
 # 4. Create Disk Image (Concatenate headers + kernel)
 Write-Host "[4/4] Creating Disk Image (Grit.img)..." -ForegroundColor Yellow
 $mbrPath = "$BUILD_DIR\mbr.bin"
 $stage2Path = "$BUILD_DIR\stage2.bin"
-$kernelPath = "$BUILD_DIR\kernel.bin"
+$kernelPath = $KernelA
 $imgPath = "$BUILD_DIR\Grit.img"
 
 # Combine files: MBR + Stage2 + Kernel using byte array concatenation in memory for safety/control
@@ -153,7 +165,7 @@ try {
     $imgBytes[$bpbOff + 1] = 0x3C
     $imgBytes[$bpbOff + 2] = 0x90
     # OEM Name
-    $oem = [System.Text.Encoding]::ASCII.GetBytes("GRIT ")
+    $oem = [System.Text.Encoding]::ASCII.GetBytes("GRIT    ")
     [Array]::Copy($oem, 0, $imgBytes, $bpbOff + 3, 8)
     # Bytes per sector (11-12)
     $imgBytes[$bpbOff + 11] = [byte]($bytesPerSect -band 0xFF)

@@ -40,6 +40,7 @@ src/boot/mbr.asm | boot | high | legacy | TBD
 src/boot/paging.asm | boot | high | legacy | TBD
 src/boot/stage2.asm | boot | high | legacy | TBD
 src/boot/uefi_loader.asm | boot | high | legacy | TBD
+src/boot/uefi_loader_boottrace.inc | boot | high | legacy | bounded debug framebuffer tracer
 src/boot/uefi_loader_data.inc | boot | high | legacy | TBD
 src/boot/uefi_loader_defs.inc | boot | high | legacy | TBD
 src/boot/uefi_loader_entry.inc | boot | high | legacy | TBD
@@ -110,7 +111,6 @@ src/kernel/drivers/acpi_ec.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/acpi_pci.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/amd_display.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/ata.asm | kernel-drivers | medium | legacy | TBD
-src/kernel/drivers/battery.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display_blend.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display_core.inc | kernel-drivers | medium | legacy | TBD
@@ -173,8 +173,15 @@ src/kernel/drivers/xhci_rings.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/xhci_slots.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/xhci_trb.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/gui/cursor.asm | kernel-gui | medium | legacy | TBD
-src/kernel/gui/desktop.asm | kernel-gui | medium | legacy | TBD
 src/kernel/gui/resources.asm | kernel-gui | medium | legacy | TBD
+# In-kernel desktop/taskbar shell. The ring-3 gshell rewrite was PARKED (now under
+# docs/design-system/deprecated-shell-restyle/) and the in-kernel asm shell is
+# AUTHORITATIVE AGAIN (see src/user/apps/launch_dispatch.inc:343-345): these files
+# are %included by kernel_build.asm:330,332 and are the live input/draw path
+# (input_dispatch.ghl -> tb_handle_click/desktop_handle_click; window_desktop.inc
+# -> desktop_draw_icons). They are active legacy asm with no committed GHL
+# replacement, so they are quarantined as `legacy`/TBD like cursor.asm/resources.asm.
+src/kernel/gui/desktop.asm | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar.asm | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar_draw.inc | kernel-gui | medium | legacy | TBD
 src/kernel/gui/taskbar_data.inc | kernel-gui | medium | legacy | TBD
@@ -208,6 +215,7 @@ src/kernel/proc/syscall_xscc_selftest.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode.asm | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_callbacks.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_decls.inc | kernel-proc | high | legacy | TBD
+src/kernel/proc/usermode_driver_dma.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_entry.inc | kernel-proc | high | legacy | TBD
 src/kernel/proc/usermode_integrity.inc | kernel-proc | high | migrating | src/kernel/grithlk/usermode_callbacks.ghl
 src/kernel/proc/usermode_paging.inc | kernel-proc | high | legacy | TBD
@@ -218,8 +226,6 @@ src/kernel/proc/usermode_translate.inc | kernel-proc | high | legacy | TBD
 src/resources/design-system/font_16x32.inc | resources | low | legacy | TBD
 src/resources/design-system/font_24x48.inc | resources | low | legacy | TBD
 src/resources/design-system/font_8x16.inc | resources | low | legacy | TBD
-src/resources/design-system/palette_dark.inc | resources | low | legacy | TBD
-src/resources/design-system/palette_light.inc | resources | low | legacy | TBD
 src/resources/design-system/parser_example.asm | resources | low | legacy | TBD
 src/user/apps.asm | user-apps | medium | legacy | TBD
 src/user/apps/about.inc | user-apps | medium | migrating | src/user/grithl/apps/about.ghl
@@ -250,6 +256,9 @@ src/user/poc/stack_overflow_poc.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_jit_alias_fuzz.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_jit_alias_pos.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_poc_exec_w.asm | user-poc | low | legacy | TBD
+src/user/poc/wx_poc_manifestless_blob.asm | user-poc | low | legacy | GHL security-regression harness
 src/user/poc/wx_poc_pos.asm | user-poc | low | legacy | TBD
 src/user/poc/wx_poc_write_x.asm | user-poc | low | legacy | TBD
 src/user/templates/hello_callback.asm | user-templates | low | legacy | TBD
+scripts/dev/poc_strike_immunity.inc | dev-poc | low | legacy | TBD
+src/drivers/driver_blob.asm | driver-package | high | legacy | dedicated GritHL driver-blob linker wrapper

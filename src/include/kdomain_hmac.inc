@@ -9,9 +9,12 @@
 ;   * CPI callback signing  (cpi_sign_callback / cpi_verify_callback) -
 ;       low16(kernel_canary ^ &window ^ field_offset), stamped into bits[48:64]
 ;       of a stored callback pointer.
-;   * Cap-mask authenticator (cap_mask_sign + the dispatcher's inline verify) -
-;       low8(kernel_canary ^ slot ^ mask ^ CAP_HMAC_DOMAIN), stored beside the
-;       1-byte mask in slot_cap_hmac[].
+;   * Cap-mask authenticator - MOVED OUT of this macro. It was low8(kernel_canary
+;       ^ slot ^ mask ^ CAP_HMAC_DOMAIN), an 8-bit tag that a repeatable
+;       corrupt-and-retry primitive could forge (256 values). It is now a 128-bit
+;       two-lane SplitMix64 MAC in syscall_secure.ghl (cap_mask_store /
+;       cap_mask_verify), keyed by kernel_canary with domain KDOM_CAP_MASK. The
+;       macro below is retained for the CPI and USER_ARG tags only.
 ;   * WIN_OFF_USER_ARG tag   (sc_wm_set_user_arg / sc_wm_get_user_arg) -
 ;       low16(kernel_canary ^ &window), stamped into bits[48:64] of user_arg.
 ;

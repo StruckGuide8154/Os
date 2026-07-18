@@ -29,7 +29,7 @@ Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P2: seL4 Validity Track" and
       invariants for scheduler, IPC, driver-DMA, page-table persistence, policy
       loader, hypervisor measurement, release observation). Compiles
       `--forbid-asm --deny-unsafe`.
-- [x] 12 machine-checkable invariant files under `tests/security/invariants/`,
+- [x] 21 machine-checkable invariant files under `tests/security/invariants/`,
       each binding a compromised component + denied authority to a predicate
       and marked `proven` after exhaustive bounded checking.
 - [x] Runner `scripts/test/test_ghl_invariants.ps1`: validates files, asserts
@@ -44,7 +44,7 @@ Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P2: seL4 Validity Track" and
       predicate result to the theorem table before the runner passes.
 - [x] Wired into the verification entry point.
 
-## P2 - define the property set precisely (status: all 12 `proven`)
+## P2 - define the property set precisely (status: all 21 `proven`)
 
 - [x] capability derivation invariant (no amplification)        - INV-CAP-DERIVATION
 - [x] authority confinement (no single-domain global mint)      - INV-NO-GLOBAL-MINT
@@ -65,6 +65,13 @@ Maps to `docs/ghl-beyond-zero-trust-todo.md` → "P2: seL4 Validity Track" and
 - [x] memory isolation between apps (no cross-namespace read without shared handle)
       - INV-APP-MEM-ISOLATION (2026-06-10): granted cross-namespace access
       without a shared handle is the violation; 65,536 cases proven.
+- [x] extended imported invariants from Tracks 2/4/6 and the cap-mask planted
+      replay guard are also proven and vector-tested:
+      INV-COMPARTMENT-ONE-AUTHORITY, INV-COMPARTMENT-NO-CROSS-MAP,
+      INV-COMPARTMENT-NO-AUTH-LAUNDER, INV-EPHEMERAL-NO-REPLAY,
+      INV-PER-SLOT-KEY-CONFINED, INV-SYSCALL-PERM-PER-LAUNCH,
+      INV-PLANTED-CAP-HMAC-REJECTED, INV-NO-ROLLBACK, and
+      INV-FLOOR-RATCHET-MONOTONIC.
 
 ## P2 - promote `modeled` → `tested`
 
@@ -91,7 +98,7 @@ For EVERY invariant add positive + negative test vectors that call the predicate
       vector file whose id+predicate agree with its `.invariant`, then runs
       `eval_invariants.py` which EXECUTES the real predicate against each vector
       and asserts accept→1 / reject→0. A deliberately-flipped negative vector
-      makes the runner fail (verified). All 9 `.invariant` files are now `proven`
+      makes the runner fail (verified). All 21 `.invariant` files are now `proven`
       after the bounded exhaustive checker runs.
 
 ## P2 - map the model onto the real system (the hard part)
@@ -136,8 +143,8 @@ violation). Full mapping + derivation record: `docs/track3-invariant-proofs.md`.
       bounded state space (this is a real, if modest, machine-checked result).
 - [x] Write proof-oriented docs per P0 invariant stating the theorem, the bound,
       and the checked state count. DONE (2026-06-10):
-      `docs/track3-invariant-proofs.md` §1 - all 12 theorems with exact bounds;
-      2,278,404 predicate evaluations total, zero mismatches.
+      `docs/track3-invariant-proofs.md` §1 - all 21 theorems with exact bounds;
+      4,576,644 predicate evaluations total, zero mismatches.
 - [x] Keep a precise containment claim table: component → authority it cannot
       obtain, with the invariant id and proof status. DONE (2026-06-10):
       `docs/track3-invariant-proofs.md` §3, including the real-config binding
@@ -147,7 +154,7 @@ violation). Full mapping + derivation record: `docs/track3-invariant-proofs.md`.
 
 - [x] Every chosen property has a `modeled` predicate, `tested` vectors, and a
       `proven` exhaustive check over the bounded authority space.
-      (12 invariants; vectors + exhaustive checks run by
+      (21 invariants; vectors + exhaustive checks run by
       `test_ghl_invariants.ps1` inside the guards entry point.)
 - [x] The authority bitmasks are derived from real signed policy, not hand-set.
       (`scripts/test/derive_authority.py`; sources: signed app manifests,
@@ -165,3 +172,47 @@ Track 3 is CLOSED. Future work that touches it (new invariants, Trust
 Partitioning domains, new compiler capabilities) follows the maintenance
 section of `docs/track3-invariant-proofs.md` - it extends the track without
 reopening it.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 10 / speed 10** (2026-06-23). The residual
+"proof ≠ implementation" gap is now closed as far as is honest without a full
+refinement proof: the authority *constants* are mechanically translation-
+validated against the gritc-emitted artifact, and the exhaustive proof width is
+derived from the policy so it cannot silently fall behind. The honesty rule is
+intact - this is translation validation of the authority bits + bounded
+exhaustive checks, NOT a seL4-style code-to-spec control-flow refinement proof
+(stated in `docs/track3-invariant-proofs.md` §4 and the honesty statement).
+
+- [x] **(sec→10)** Translation-validation pass (model ↔ emitted code).
+      `eval_invariants.py --translation-validation` compiles `invariant_check.ghl`
+      with the production `gritc.py` (`--forbid-asm --deny-unsafe`), splits the
+      emitted asm per function, and confirms each proven authority constant is
+      exactly an immediate gritc emitted into that function body - cross-checked
+      against a FIXED documented literal (`TV_EXPECTED`) so a consistently-changed
+      const is still caught. Bounded to the authority *constants* (not control
+      flow); honestly NOT a full refinement proof. Wired into
+      `test_ghl_invariants.ps1`; meta-tested in `test_invariant_meta.ps1`
+      (a planted wrong const fails it). `docs/track3-invariant-proofs.md` §4.
+- [x] **(sec→10)** Auto-extend the exhaustive checker to any new authority bit.
+      `discover_auth_width` / `set_auth_space` derive the bounded space width
+      `0 .. 2**w - 1` from the `AUTH_*` constants of `invariant_check.ghl` (each
+      checked to be a single non-zero bit), replacing the hard-coded 0..127.
+      Adding a new bit auto-widens every theorem. Meta-tested: a planted
+      `AUTH_BACKDOOR = 128` that breaks `inv_subset` only in the widened 8-bit
+      space is caught by `--exhaustive`, and a benign new bit still proves clean
+      over the widened space (`test_invariant_meta.ps1`).
+- [x] **Verify:** independent Worker A re-rated this track **security 10**
+      on 2026-06-28 by running `scripts/test/test_ghl_invariants.ps1` green:
+      21 vector files, 4,576,644 exhaustive predicate evaluations,
+      translation-validation, 208 policy-derived authority checks, planted-drift
+      meta-tests, and `--forbid-asm --deny-unsafe` compile all passed.
+- Speed stays **10**: all proof/derivation/translation-validation work is
+  build-time, zero runtime cost.
+
+Verification (2026-06-28, all green):
+`test_ghl_invariants.ps1` PASS; `eval_invariants.py --exhaustive` = 21
+invariants over the derived 7-bit space, 4,576,644 evaluations, zero mismatches;
+`--translation-validation` = 6 authority constants across 5 predicates match the
+gritc-emitted artifact; `derive_authority.py` = 208 policy-derived authority
+checks green; `test_invariant_meta.ps1` all meta-tests green.

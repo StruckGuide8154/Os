@@ -66,7 +66,7 @@ extern acct_idle_acc;
 extern tick_count;        # qword: PIT tick counter
 extern cpu_tsc_per_tick;  # qword: calibrated TSC cycles per PIT tick
 extern bsp_util;          # dword: published 0..100 utilization
-extern smp_core_states;   # per-core state table (offsets above)
+const SMP_CORE_STATES = 0xC40000; # SMP_CORE_STATE_ADDR in constants.inc
 
 const MSR_MPERF      = 0xE7;   # IA32_MPERF
 const MSR_APERF      = 0xE8;   # IA32_APERF
@@ -94,8 +94,8 @@ fn cpu_acct_init() {
     sq(&acct_work_start, now);
     sq(&acct_tsc_start, now);
     sq(&acct_win_tick, lq(&tick_count));
-    sw(&smp_core_states + SCS_UTIL, 0);
-    sw(&smp_core_states + SCS_MHZ, lq(&cpu_tsc_per_tick) / TSC_KHZ_SCALE);
+    sw(SMP_CORE_STATES + SCS_UTIL, 0);
+    sw(SMP_CORE_STATES + SCS_MHZ, lq(&cpu_tsc_per_tick) / TSC_KHZ_SCALE);
     cpu_acct_init_aperf();
 }
 
@@ -123,7 +123,7 @@ fn cpu_acct_work_end() {
             let util = (busy * 100) / total;
             if util > 100 { util = 100; }
             sw(&bsp_util, util);
-            sw(&smp_core_states + SCS_UTIL, util);
+            sw(SMP_CORE_STATES + SCS_UTIL, util);
         }
         cpu_acct_publish_mhz(elapsed, now);
         sq(&acct_tsc_start, now);
@@ -137,8 +137,8 @@ fn cpu_acct_work_end() {
 # cpu_acct_publish_mhz is meaningful. No-op on CPUs without the MSRs.
 fn cpu_acct_init_aperf() {
     if aperf_mperf_supported() {
-        sq(&smp_core_states + SCS_APERF, rdmsr(MSR_APERF));
-        sq(&smp_core_states + SCS_MPERF, rdmsr(MSR_MPERF));
+        sq(SMP_CORE_STATES + SCS_APERF, rdmsr(MSR_APERF));
+        sq(SMP_CORE_STATES + SCS_MPERF, rdmsr(MSR_MPERF));
     }
 }
 
@@ -152,16 +152,16 @@ fn cpu_acct_init_aperf() {
 fn cpu_acct_publish_mhz(elapsed, now) {
     if aperf_mperf_supported() {
         let aperf = rdmsr(MSR_APERF);
-        let aperf_delta = aperf - lq(&smp_core_states + SCS_APERF);
-        sq(&smp_core_states + SCS_APERF, aperf);
+        let aperf_delta = aperf - lq(SMP_CORE_STATES + SCS_APERF);
+        sq(SMP_CORE_STATES + SCS_APERF, aperf);
 
         let mperf = rdmsr(MSR_MPERF);
-        let mperf_delta = mperf - lq(&smp_core_states + SCS_MPERF);
-        sq(&smp_core_states + SCS_MPERF, mperf);
+        let mperf_delta = mperf - lq(SMP_CORE_STATES + SCS_MPERF);
+        sq(SMP_CORE_STATES + SCS_MPERF, mperf);
 
         if mperf_delta != 0 {
             let base = lq(&cpu_tsc_per_tick) / TSC_KHZ_SCALE;
-            sw(&smp_core_states + SCS_MHZ, ((base * aperf_delta) / mperf_delta));
+            sw(SMP_CORE_STATES + SCS_MHZ, ((base * aperf_delta) / mperf_delta));
             return;
         }
         # mperf_delta == 0: fall through to the TSC fallback (matches the old
@@ -171,6 +171,6 @@ fn cpu_acct_publish_mhz(elapsed, now) {
     let tsc_delta = now - lq(&acct_tsc_start);
     let denom = elapsed * TSC_KHZ_SCALE;
     if denom != 0 {
-        sw(&smp_core_states + SCS_MHZ, tsc_delta / denom);
+        sw(SMP_CORE_STATES + SCS_MHZ, tsc_delta / denom);
     }
 }

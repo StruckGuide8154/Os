@@ -152,3 +152,23 @@ both in STATUS.md §9; claim neither closed without the hardware tier.
 - [ ] LOAD-MON is the only executable-map path; verify→hash→map enforced.
 - [ ] The two un-closeable-in-software residuals (floor-disable, device DMA) are
       documented and handed to Track 5; nothing overclaims.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 6 / speed 6**. The C3 isolation invariants are proven,
+but the compartments (PT/KEY/HASH/CAP/DMA/LOAD-MON) are still design-only — the
+realizable software floor is not yet built.
+
+- [ ] **(sec→10)** Land Phase C0+C1: the six single-authority compartments as real
+      isolated PTE sub-trees with per-compartment WP windows, plus the C1 negative
+      test (a compromised compartment cannot read KEY-MON / map on PT-MON's behalf /
+      widen caps) green at `tested-tcg`.
+- [ ] **(sec→10)** LOAD-MON becomes the ONLY executable-map path (Phase C2), closing
+      the legacy permissive map + v0 W+X hole.
+- [ ] **(sec→10)** Containment claim table (C3) maps each compartment to exactly its
+      authority and what it provably cannot reach.
+- [ ] **Verify:** an independent agent re-rates this track **security 10**.
+- **Honest cap:** the floor-disable residual is un-closeable in software — Track 6's
+      10 is "10 against compartment-cross-compromise"; full un-disableability needs
+      Track 5 G1. Speed: WP-window bracketing is cheap; batch cross-compartment
+      requests + O3-hoist the window. Realistic ceiling **sec 10 (with Track 5) / speed 8**.

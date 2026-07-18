@@ -1,0 +1,589 @@
+# ============================================================================
+# gpu_pnp.ghl - GPU device controller (PnP), Track-8 ring-3 process.
+# Compile: --target driver  (forces --forbid-asm + --deny-unsafe; no unsafe
+# cap, no privileged intrinsic; reaches hardware ONLY via SC_DRVHOST_* broker
+# syscalls). See docs/gpu-driver/TODO.md §4 and §3, and
+# docs/architecture-userspace-drivers.md.
+#
+# WHAT THIS IS (Milestone M0 / TODO.md §4 - the device controller):
+#   The standalone PnP controller process that OWNS device->driver binding so
+#   that multiple GPUs and/or multiple driver versions never conflict. It
+#   mirrors how the net stack identifies and claims a NIC:
+#     1. Enumerate PCI config space (via the broker, NOT ambient port I/O).
+#     2. Match AMD GPUs (vendor_id 0x1002) against a SIGNED, DATA-DRIVEN match
+#        table: (vendor, device-id range, IP-version) -> driver package.
+#     3. Assign each detected device a UNIQUE instance id and EXCLUSIVE
+#        ownership of its BAR windows. A second matching instance (two AMD GPUs,
+#        or a stale duplicate driver build) is REFUSED the same windows - no
+#        conflict is possible.
+#     4. Bind by what the device REPORTS (PCI ids + IP-discovery version), NOT
+#        by load order or hardcoded assumptions, so it generalizes to unseen
+#        SKUs and coexists with future Intel/NVIDIA drivers under one controller.
+#     5. FAIL-CLOSED on unknown devices (no driver package -> no grant -> no
+#        bind).
+#
+# COMPARTMENT NOTE (TODO.md §3): this is the `gpu-pnp` compartment. Its ONLY
+#   granted authority is PCI-config READ. It holds NO GPU MMIO, NO DMA, NO
+#   port I/O. If fully code-exec-compromised it cannot touch a single GPU
+#   register - its entire reach is reading PCI config dwords. The actual engine
+#   compartments (gpu-fwload / gpu-mem / gpu-gfx / gpu-display, see amdgpu.ghl)
+#   receive their per-instance MMIO/DMA grants directly from the broker against
+#   the windows this controller computed; the controller never proxies their
+#   data path and never holds their authority.
+#
+# THREAT MODEL: a compromise here can, at worst, mis-identify a device or claim
+#   an instance id. It cannot:
+#     - widen its own grant (broker effective caps = requested & policy_granted),
+#     - read/write GPU MMIO (no MMIO grant requested or held),
+#     - hand another compartment a window outside what the broker authorizes
+#       (per-instance BAR grants are minted by the broker, not by this process).
+# ============================================================================
+
+app "gpu_pnp" { stack = 8192; }
+capability mmio;
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of amdgpu.ghl / rtl8156.ghl; see driver_host.ghl).
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232   # (req_caps, policy_caps, code_hash) -> driver_id
+const SC_DRVHOST_GRANT_MMIO   = 233   # (base, len) -> rc  (policy-authorized window; SELF only)
+# SC_DRVHOST_GRANT_MMIO_FOR - cross-compartment grant (TODO.md §2b item 3).
+# (target_driver_id, base, len) -> rc. Routes a window to a DIFFERENT driver_id
+# than the caller's own - only legal for a caller holding CAP_PCICFG (i.e. this
+# controller), enforced broker-side by drvhost_grant_mmio_for in driver_host.ghl.
+# Picked 249: the next free slot after PCI_CFG_READ32 (248) in the SC_DRVHOST_*
+# family. Same "landed at the GHL broker layer, not yet a routed kernel syscall
+# row" caveat as SC_DRVHOST_PCI_CFG_READ32 - see the note below.
+const SC_DRVHOST_GRANT_MMIO_FOR = 249
+const SC_TICKS                = 18
+
+# ---------------------------------------------------------------------------
+# BROKER-SIDE PCI-config primitive (TODO.md §2b item 1) - GHL LANDED.
+#
+# driver_host.ghl now defines DRV_CAP_PCICFG (bit 64) and
+# drvhost_pci_cfg_read32(id, bus, dev, func, reg): the broker assembles the
+# 0x80000000 | bus<<16 | dev<<11 | func<<8 | (reg & 0xFC) CF8 address itself,
+# out-dwords 0xCF8, in-dwords 0xCFC, and returns the dword - gated by
+# DRV_CAP_PCICFG so only a driver_id whose SIGNED policy grants that bit can
+# reach it (drv_has_cap, same discipline as every other brokered primitive in
+# this file: effective caps = requested & policy_granted, never widened here).
+# A ring-3 PnP controller therefore still never issues raw 0xCF8/0xCFC port
+# I/O itself; the broker performs it on the caller's behalf. Returns 0xFFFFFFFF
+# (open bus) for an absent function or a denied/out-of-range request - by
+# design a deny is indistinguishable from open bus, the safe direction.
+#
+# REMAINING GAP (kernel-side syscall dispatch, NOT this GHL module): the
+# generic SC_DRVHOST_* family (232-236, 240-248) is not yet present as rows in
+# the kernel's real positional syscall_table (src/kernel/proc/syscall_support.inc,
+# currently ~84 dense entries, no gap-filling to 232+) or in the CAP_* app-
+# manifest system (src/include/syscall_caps.inc has no CAP_PCICFG / driver-app
+# manifest class). This is NOT new to the GPU work - rtl8156.ghl / hda.ghl /
+# battery.ghl already assume the same unwired SC_DRVHOST_* numbers. Until that
+# asm-side dispatch wiring lands (a separate, larger, pre-existing task
+# spanning every userspace driver, not GPU-specific), `syscall(SC_DRVHOST_*, ...)`
+# from ANY ring-3 driver process is a call to a syscall number the real
+# dispatcher does not route - the call fails (SC_INVALID / not routed), which
+# is the SAFE direction (no ambient authority is ever granted by default) but
+# means gpu_pnp does not actually execute against real hardware yet. This
+# module compiles broker-only (--target driver) and its GHL-side logic against
+# the driver_host.ghl broker is now correct and gated end-to-end at the GHL
+# layer; what remains is exclusively the kernel asm dispatch-table rows.
+#
+# Picked syscall number 248: 232-236 and 240-247 are already assigned across
+# the existing drivers (see driver_host.ghl / rtl8156.ghl / battery.ghl);
+# 248 is the first free slot in the SC_DRVHOST_* family.
+# Picked capability bit 64: driver_host.ghl uses 1/2/4/8/16/32 for
+# MMIO/PIO/DMA/IRQ/RING/RESET; 64 is DRV_CAP_PCICFG (now defined, see above).
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_PCI_CFG_READ32 = 248
+
+# Capability classes (driver_host.ghl DRV_CAP_*; PCICFG is the new one above).
+const CAP_PCICFG = 64
+
+const DRV_OK = 0
+
+# ---------------------------------------------------------------------------
+# PCI config-space layout (standard, vendor-agnostic header type 0).
+# reg offsets are byte offsets; the broker reads them as aligned dwords.
+# ---------------------------------------------------------------------------
+const PCI_REG_VENDOR_DEVICE = 0x00   # [15:0]=vendor, [31:16]=device
+const PCI_REG_CLASS_REV     = 0x08   # [31:8]=class/subclass/progif, [7:0]=rev
+const PCI_REG_HEADER_TYPE   = 0x0C   # [23:16] = header type (bit7 = multi-fn)
+const PCI_REG_BAR0          = 0x10   # base address register 0
+const PCI_REG_BAR2          = 0x18   # base address register 2 (often the FB/dorbell)
+
+const PCI_NO_DEVICE         = 0xFFFF # vendor id read from an absent function
+
+# PCI topology bounds (full first-segment scan; 256 buses is the legacy max).
+const PCI_MAX_BUS  = 256
+const PCI_MAX_DEV  = 32
+const PCI_MAX_FUNC = 8
+
+# Header-type bit 7 set => function is multi-function (probe all 8 funcs).
+const PCI_HEADER_MULTIFUNC = 0x80
+
+# Display-controller PCI class (0x03). We match AMD's vendor id regardless,
+# but the class is a sanity cross-check that this 0x1002 function is a GPU and
+# not, e.g., an AMD audio/USB function on the same device.
+const PCI_CLASS_DISPLAY = 0x03
+
+# ---------------------------------------------------------------------------
+# THE SIGNED, DATA-DRIVEN MATCH TABLE (TODO.md §4).
+#
+# Logical schema (one row): { vendor, dev_lo, dev_hi, ipver_lo, ipver_hi,
+#                             driver_pkg }
+#   vendor            : PCI vendor id (AMD = 0x1002).
+#   [dev_lo, dev_hi]  : inclusive PCI device-id RANGE this row covers.
+#   [ipver_lo, ipver_hi]: inclusive IP-discovery GFX version range (e.g. gfx11
+#                         => 0x000B0000 .. 0x000B00FF). 0..0xFFFFFFFF = "any"
+#                         (used before IP-discovery has run, or when the device
+#                         id alone is decisive).
+#   driver_pkg        : the GHL driver package id to bind for this row.
+#
+# "Signed, data-driven": the ROWS are the contract; new SKUs that report a known
+# IP version bind an existing driver_pkg with NO code change (TODO.md §4). In a
+# full build these rows live in a signed table blob loaded + verified at boot.
+# GHL app-mode (--target driver) has no initialized-data array primitive (only
+# `state{}` zero-init scratch and `const` scalars - see MEMORY: "GHL kernel
+# modules have NO zero-cost .bss primitive"), so the table is encoded here as a
+# DETERMINISTIC const-driven decision ladder: each `if` IS one signed row. This
+# keeps the data and the matcher byte-identical and reviewable, and is trivially
+# regenerated by the §5 extractor (one emitted `if` per row). When a signed
+# table-blob loader exists, pnp_match_pkg() becomes a loop over the verified
+# rows instead - the row SEMANTICS below are the stable interface.
+#
+# IP-version encoding matches amdgpu IP_VERSION(maj,min,rev) packed as
+# (maj<<16)|(min<<8)|rev; GFX11 = 11.0.x = 0x000B0000-range.
+# ---------------------------------------------------------------------------
+const PCI_VENDOR_AMD = 0x1002
+
+# Driver package ids (the binding target). 0 = NO MATCH (fail-closed).
+const PKG_NONE       = 0
+const PKG_AMDGPU_GFX11 = 1    # Phoenix/Strix APUs + RDNA3 dGPU (gfx11)  -> amdgpu.ghl
+const PKG_AMDGPU_GFX10 = 2    # RDNA1/2 (gfx10) - future, same generic runtime
+const PKG_AMDGPU_GFX12 = 3    # RDNA4 (gfx12) - future
+
+# IP-version range bounds for the gfx generations (maj.min.rev packed).
+const IPV_GFX10_LO = 0x000A0000
+const IPV_GFX10_HI = 0x000AFFFF
+const IPV_GFX11_LO = 0x000B0000
+const IPV_GFX11_HI = 0x000BFFFF
+const IPV_GFX12_LO = 0x000C0000
+const IPV_GFX12_HI = 0x000CFFFF
+
+# "IP-version not yet known" sentinel: before IP-discovery runs we match on the
+# (vendor, device range) alone by passing this, which every row treats as "any".
+const IPV_UNKNOWN = 0xFFFFFFFF
+
+# Per-instance bookkeeping. INSTANCE_MAX bounded + fail-closed on overflow.
+const INSTANCE_MAX = 8
+
+# ---------------------------------------------------------------------------
+# Controller state. All ring-3 local, MMU-confined, outside any broker-writable
+# slot (a compromised controller cannot widen its own grants by writing here).
+#
+# Each instance row records the device it claimed and the EXCLUSIVE BAR window
+# it reserved, so a second match against the same physical window is refused.
+# ---------------------------------------------------------------------------
+state {
+    self_id:        4;     # our broker driver_id (from SC_DRVHOST_REGISTER)
+    inst_count:     4;     # number of instances assigned so far
+
+    # Parallel arrays, one entry per assigned instance (index 0..inst_count-1).
+    # 8 instances * field-size.
+    inst_id:        32;    # 8 x u32 : unique instance id (1-based)
+    inst_bdf:       32;    # 8 x u32 : packed bus<<16 | dev<<8 | func
+    inst_devid:     32;    # 8 x u32 : [15:0]=vendor, [31:16]=device
+    inst_pkg:       32;    # 8 x u32 : bound driver package id
+    inst_bar0:      64;    # 8 x u64 : claimed BAR0 window base (exclusive)
+    inst_bar0_end:  64;    # 8 x u64 : claimed BAR0 window end (base+len)
+    inst_engine_id: 32;    # 8 x u32 : spawned engine compartment's driver_id
+                            #           (ENGINE_ID_UNSPAWNED until the compartment
+                            #           spawn/IPC path exists - TODO.md §3/§2b item 3)
+
+    next_instance:  4;     # monotonic instance-id allocator (never reused)
+}
+
+# Default BAR0 register-window length to reserve per instance (1 MiB, matches
+# amdgpu.ghl BAR0_WINDOW_LEN). Real length comes from BAR sizing on HW; this is
+# the reserved-ownership extent for conflict detection.
+const BAR0_WINDOW_LEN = 0x100000
+
+# Sentinel: no engine compartment has been spawned for this instance yet.
+# Real driver_ids from SC_DRVHOST_REGISTER start at 1 (0 = "no driver" in
+# driver_host.ghl's drv_valid_id), so 0 doubles as "unspawned" here too -
+# drvhost_grant_mmio_for's target-validity check (drv_is_running) already
+# fails closed on it, so an unspawned instance simply gets no grant (safe).
+const ENGINE_ID_UNSPAWNED = 0
+
+# ---------------------------------------------------------------------------
+# Brokered PCI config read. The controller never touches 0xCF8/0xCFC; the
+# broker does, gated by DRV_CAP_PCICFG. Until the broker side lands this
+# returns open-bus (0xFFFFFFFF) => everything fails closed (safe).
+# ---------------------------------------------------------------------------
+fn pci_cfg_rd32(bus, dev, func, reg) {
+    return syscall(SC_DRVHOST_PCI_CFG_READ32, bus, dev, func, reg);
+}
+
+# Helper field extractors from the vendor/device dword.
+fn pci_vendor(vd) { return vd & 0xFFFF; }
+fn pci_device(vd) { return (vd >> 16) & 0xFFFF; }
+
+# ---------------------------------------------------------------------------
+# pnp_match_pkg - THE MATCH TABLE, as a deterministic row ladder.
+# Each `if` is one signed row: (vendor, [dev_lo,dev_hi], [ipv_lo,ipv_hi]) -> pkg.
+# Returns PKG_NONE (0) for anything unmatched => FAIL-CLOSED (TODO.md §4).
+#
+# Binding is decided ONLY by what the device reports: the PCI vendor/device id
+# and the IP-discovery version. There is NO dependence on probe order. The same
+# (vendor,device,ipver) always yields the same package, on any machine, in any
+# order, with any number of GPUs present.
+#
+# `ipver` may be IPV_UNKNOWN (pre-discovery): rows whose IP range is "any"
+# (0..0xFFFFFFFF) still match; rows that REQUIRE a specific IP range do not match
+# an unknown version (so a device whose binding genuinely depends on the IP
+# version stays unbound until discovery has run - fail-closed, never guess).
+# ---------------------------------------------------------------------------
+fn ipv_in(ipver, lo, hi) {
+    # IPV_UNKNOWN only satisfies a fully-open ("any") range; a constrained row
+    # is NOT matched on an unknown version (no guessing).
+    if ipver == IPV_UNKNOWN {
+        if lo == 0 {
+            if hi == 0xFFFFFFFF { return 1; }
+        }
+        return 0;
+    }
+    if ipver < lo { return 0; }
+    if ipver > hi { return 0; }
+    return 1;
+}
+
+fn pnp_match_pkg(vendor, device, ipver) {
+    # --- Only AMD is handled by THIS controller's table. Other vendors are not
+    #     a failure - they are simply not ours (a future Intel/NVIDIA table
+    #     coexists under the same controller, TODO.md §4). Return PKG_NONE.
+    if vendor != PCI_VENDOR_AMD { return PKG_NONE; }
+
+    # ---- AMD GPU rows (signed table). Device-id ranges are deliberately broad
+    #      and the IP-version range is the decisive key, per TODO.md §6 (the unit
+    #      of work is the IP version, not the SKU). A new SKU reporting a known
+    #      IP version binds an existing package with NO code change.
+
+    # Row: AMD gfx11 (Phoenix/Strix APU + RDNA3) -> amdgpu.ghl.
+    #   device range covers the current AMD GPU/APU id space; the gfx11 IP
+    #   version is the real discriminator.
+    if device >= 0x1300 {
+        if device <= 0x77FF {
+            if ipv_in(ipver, IPV_GFX11_LO, IPV_GFX11_HI) == 1 {
+                return PKG_AMDGPU_GFX11;
+            }
+        }
+    }
+
+    # Row: AMD gfx10 (RDNA1/2) -> generic runtime, gfx10 data set.
+    if device >= 0x7300 {
+        if device <= 0x73FF {
+            if ipv_in(ipver, IPV_GFX10_LO, IPV_GFX10_HI) == 1 {
+                return PKG_AMDGPU_GFX10;
+            }
+        }
+    }
+
+    # Row: AMD gfx12 (RDNA4) -> generic runtime, gfx12 data set.
+    if ipv_in(ipver, IPV_GFX12_LO, IPV_GFX12_HI) == 1 {
+        return PKG_AMDGPU_GFX12;
+    }
+
+    # Row: AMD device, IP version not yet known (pre-discovery). We DO recognize
+    #   it as an AMD GPU candidate so the controller can grant the BAR window the
+    #   engine compartment needs to RUN IP-discovery, but we bind no specific
+    #   generation package yet. Returning PKG_AMDGPU_GFX11 here would be a guess;
+    #   instead we report the generic "AMD, pre-discovery" provisional package so
+    #   the caller knows to re-match after discovery. We reuse PKG_AMDGPU_GFX11
+    #   ONLY as the provisional bring-up package because amdgpu.ghl is the file
+    #   that runs IP-discovery; the re-match after discovery picks the real row.
+    if ipver == IPV_UNKNOWN {
+        return PKG_AMDGPU_GFX11;
+    }
+
+    # No row matched a KNOWN ip version => fail-closed.
+    return PKG_NONE;
+}
+
+# ---------------------------------------------------------------------------
+# EXCLUSIVE OWNERSHIP / CONFLICT DETECTION (TODO.md §4 "Claim/ownership").
+#
+# A BAR window is claimed by exactly one instance. bar_window_claimed() returns
+# 1 if ANY already-assigned instance overlaps [base, base+len) - in which case
+# the new claim is REFUSED. This is what makes two AMD GPUs, or a stale
+# duplicate driver build, unable to grab the same window: the FIRST claim wins,
+# every overlapping later claim is denied. (The broker enforces the real
+# per-instance grant too; this is the controller-side first line.)
+# ---------------------------------------------------------------------------
+fn ranges_overlap(a_base, a_end, b_base, b_end) {
+    # Overlap iff a_base < b_end AND b_base < a_end.
+    if a_base >= b_end { return 0; }
+    if b_base >= a_end { return 0; }
+    return 1;
+}
+
+fn bar_window_claimed(base, len) {
+    let end = base + len;
+    if end < base { return 1; }   # overflow => treat as conflict (refuse)
+    let n = ld(&inst_count);
+    let i = 0;
+    while i < n {
+        let b = lq(&inst_bar0 + i * 8);
+        let e = lq(&inst_bar0_end + i * 8);
+        if b != 0 {
+            if ranges_overlap(base, end, b, e) == 1 { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Has this exact bus/dev/func already been claimed? (Duplicate-enumeration /
+# stale-driver guard: re-running the scan must not double-claim a device.)
+fn bdf_already_claimed(bdf) {
+    let n = ld(&inst_count);
+    let i = 0;
+    while i < n {
+        if ld(&inst_bdf + i * 4) == bdf { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# pnp_assign_instance - assign a unique instance id + claim the BAR0 window.
+# The broker grant is now routed by pnp_bind_engine_instance (below), keyed to
+# the SPAWNED engine compartment's driver_id, once that id is known - NOT here,
+# and NOT to this controller's own driver_id (the placeholder bug TODO.md §2b
+# item 3 flagged: the old code called plain SC_DRVHOST_GRANT_MMIO, which - by
+# the self-only contract on drvhost_grant_mmio - would have minted the window
+# for the PnP controller's OWN driver_id, not the engine that actually needs
+# to touch GPU MMIO. The PnP compartment must hold NO MMIO authority at all
+# per its threat model in TODO.md §3, so that grant would have been both wrong
+# AND a compartment-boundary violation).
+#
+# Returns the new instance id (>=1) on success, or 0 on refusal (table full,
+# window already owned, duplicate bdf). FAIL-CLOSED: any refusal leaves NO
+# partial claim.
+#
+# CONFLICT RULE: a second matching instance is refused the SAME windows. The
+# first device to claim a physical BAR window owns it; an overlapping later
+# claim (second GPU mis-reporting, or a stale duplicate driver) is denied here
+# AND would be denied by the broker's per-instance grant table - defence in
+# depth, "no conflict possible" (TODO.md §4).
+# ---------------------------------------------------------------------------
+fn pnp_assign_instance(bdf, devid, pkg, bar0_base) {
+    # Fail-closed: never bind an unmatched device.
+    if pkg == PKG_NONE { return 0; }
+
+    let n = ld(&inst_count);
+    if n >= INSTANCE_MAX { return 0; }          # table full -> refuse
+
+    if bdf_already_claimed(bdf) == 1 { return 0; }   # duplicate enumeration
+
+    # BAR0 must be a real, non-zero MMIO window (mask off the low BAR flag bits;
+    # bit0=I/O-space indicator, bits[3:1] type/prefetch). A zero BAR is unusable.
+    let base = bar0_base & 0xFFFFFFFFFFFFFFF0;
+    if base == 0 { return 0; }
+
+    # EXCLUSIVE claim: refuse if any existing instance already owns this window.
+    if bar_window_claimed(base, BAR0_WINDOW_LEN) == 1 { return 0; }
+
+    # Allocate a never-reused instance id.
+    let iid = ld(&next_instance) + 1;
+    sd(&next_instance, iid);
+
+    # Record the claim (commit the row). inst_engine_id starts UNSPAWNED - no
+    # compartment spawn/IPC path exists yet (TODO.md §3 dependency), so there
+    # is no engine driver_id to grant to at claim time. pnp_bind_engine_instance
+    # is the (future) completion step once a spawner exists.
+    sd(&inst_id    + n * 4, iid);
+    sd(&inst_bdf   + n * 4, bdf);
+    sd(&inst_devid + n * 4, devid);
+    sd(&inst_pkg   + n * 4, pkg);
+    sq(&inst_bar0     + n * 8, base);
+    sq(&inst_bar0_end + n * 8, base + BAR0_WINDOW_LEN);
+    sd(&inst_engine_id + n * 4, ENGINE_ID_UNSPAWNED);
+    sd(&inst_count, n + 1);
+
+    return iid;
+}
+
+# ---------------------------------------------------------------------------
+# pnp_bind_engine_instance - route the claimed BAR0 window to the SPAWNED
+# engine compartment's driver_id (TODO.md §2b item 3, the completion half).
+#
+# Call this once a compartment-spawn/IPC path exists and has produced the real
+# driver_id for the instance's engine process (gpu-fwload / gpu-mem / gpu-gfx /
+# gpu-display, per TODO.md §3 - which one binds first depends on the milestone
+# ladder; M3/M4 spawn before M5-M7). Until that spawn path lands this function
+# is UNCALLED in main() - there is no engine_driver_id to pass - which is the
+# honest, fail-closed state: no grant is minted for anyone, not even this
+# controller (this controller never requests DRV_CAP_MMIO, so a self-grant
+# would be refused by drvhost_grant_mmio's own cap check regardless).
+#
+# Uses SC_DRVHOST_GRANT_MMIO_FOR (broker: drvhost_grant_mmio_for), which only
+# succeeds if THIS controller's own driver_id holds DRV_CAP_PCICFG - the same
+# bit gpu_pnp_init() requests below - so only the signed PnP controller can
+# ever route a grant to a driver_id other than its own.
+#
+# Returns DRV_OK / DRV_ERR_* from the broker, or DRV_ERR_NODRV (1) if `iid` is
+# not a known instance.
+# ---------------------------------------------------------------------------
+fn pnp_bind_engine_instance(iid, engine_driver_id) {
+    let idx = pnp_find_instance(iid);
+    if idx == 0xFFFFFFFF { return 1; }   # DRV_ERR_NODRV - unknown instance
+
+    let base = lq(&inst_bar0 + idx * 8);
+    let end  = lq(&inst_bar0_end + idx * 8);
+    let len  = end - base;
+
+    let rc = syscall(SC_DRVHOST_GRANT_MMIO_FOR, engine_driver_id, base, len);
+    if rc == DRV_OK {
+        sd(&inst_engine_id + idx * 4, engine_driver_id);
+    }
+    return rc;
+}
+
+# ---------------------------------------------------------------------------
+# pnp_probe_function - probe one PCI bus/dev/func: read ids, match, claim+bind.
+# Returns the assigned instance id (>=1) if a GPU was matched and claimed, else
+# 0 (absent function, non-AMD, non-display, unmatched, or refused).
+# ---------------------------------------------------------------------------
+fn pnp_probe_function(bus, dev, func) {
+    let vd = pci_cfg_rd32(bus, dev, func, PCI_REG_VENDOR_DEVICE);
+    let vendor = pci_vendor(vd);
+
+    # Absent function => open bus (0xFFFF vendor). Skip. (Also the SAFE default
+    # while the broker PCI primitive is unwired: every read is 0xFFFFFFFF.)
+    if vendor == PCI_NO_DEVICE { return 0; }
+
+    # Only AMD is ours; other vendors are skipped (not a failure).
+    if vendor != PCI_VENDOR_AMD { return 0; }
+
+    # Cross-check the PCI class is a display controller (0x03) - guards against
+    # binding an AMD non-GPU function (audio/USB) sharing the vendor id.
+    let cr = pci_cfg_rd32(bus, dev, func, PCI_REG_CLASS_REV);
+    let class_hi = (cr >> 24) & 0xFF;
+    if class_hi != PCI_CLASS_DISPLAY { return 0; }
+
+    let device = pci_device(vd);
+
+    # IP-version is not known from PCI config alone; it comes from IP-discovery,
+    # which the engine compartment runs AFTER it has a BAR window. So at PnP time
+    # we match with IPV_UNKNOWN: rows decidable on (vendor,device) bind now; rows
+    # that need the IP version stay provisional until the engine reports back.
+    let pkg = pnp_match_pkg(vendor, device, IPV_UNKNOWN);
+    if pkg == PKG_NONE { return 0; }            # fail-closed on unknown device
+
+    # Read BAR0 (the register aperture this GPU exposes).
+    let bar0 = pci_cfg_rd32(bus, dev, func, PCI_REG_BAR0);
+
+    # Pack bus/dev/func for the duplicate guard.
+    let bdf = (bus << 16) | (dev << 8) | func;
+
+    return pnp_assign_instance(bdf, vd, pkg, bar0);
+}
+
+# ---------------------------------------------------------------------------
+# pnp_scan_bus - full PCI enumeration. Walks every bus/dev/func. For function 0
+# of each device, header-type bit 7 says whether the device is multi-function;
+# single-function devices skip funcs 1..7 (matches standard PCI enumeration and
+# avoids phantom matches from id-aliasing on non-multifunction devices).
+# Returns the number of GPU instances bound.
+# ---------------------------------------------------------------------------
+fn pnp_scan_bus() {
+    let bound = 0;
+    let bus = 0;
+    while bus < PCI_MAX_BUS {
+        let dev = 0;
+        while dev < PCI_MAX_DEV {
+            # Probe function 0 first to learn presence + multi-function bit.
+            let vd0 = pci_cfg_rd32(bus, dev, 0, PCI_REG_VENDOR_DEVICE);
+            if pci_vendor(vd0) != PCI_NO_DEVICE {
+                if pnp_probe_function(bus, dev, 0) != 0 { bound = bound + 1; }
+
+                # Multi-function? Probe funcs 1..7.
+                let ht = pci_cfg_rd32(bus, dev, 0, PCI_REG_HEADER_TYPE);
+                let htype = (ht >> 16) & 0xFF;
+                if (htype & PCI_HEADER_MULTIFUNC) != 0 {
+                    let func = 1;
+                    while func < PCI_MAX_FUNC {
+                        if pnp_probe_function(bus, dev, func) != 0 {
+                            bound = bound + 1;
+                        }
+                        func = func + 1;
+                    }
+                }
+            }
+            dev = dev + 1;
+        }
+        bus = bus + 1;
+    }
+    return bound;
+}
+
+# ---------------------------------------------------------------------------
+# pnp_rebind_after_discovery - once an engine compartment for an instance has
+# run IP-discovery and learned the real IP version, it reports the version back
+# and the controller re-matches the SAME (vendor,device) against the table WITH
+# the now-known IP version, pinning the final driver package. This is the
+# "binding decided by what the device reports" step completing - the IP version,
+# not load order, decides. Updates the instance's package in place. Returns the
+# (possibly changed) package, or PKG_NONE if the device no longer matches (which
+# the caller treats as a quarantine condition - a device that matched on vendor
+# but reports an unsupported IP version is fail-closed).
+# ---------------------------------------------------------------------------
+fn pnp_find_instance(iid) {
+    let n = ld(&inst_count);
+    let i = 0;
+    while i < n {
+        if ld(&inst_id + i * 4) == iid { return i; }
+        i = i + 1;
+    }
+    return 0xFFFFFFFF;     # not found
+}
+
+fn pnp_rebind_after_discovery(iid, ipver) {
+    let idx = pnp_find_instance(iid);
+    if idx == 0xFFFFFFFF { return PKG_NONE; }
+    let vd = ld(&inst_devid + idx * 4);
+    let pkg = pnp_match_pkg(pci_vendor(vd), pci_device(vd), ipver);
+    sd(&inst_pkg + idx * 4, pkg);          # may be PKG_NONE => caller quarantines
+    return pkg;
+}
+
+# ---------------------------------------------------------------------------
+# Init: register with the broker requesting ONLY the PCI-config capability
+# (no MMIO/DMA/PIO/IRQ), then enumerate + bind.
+# ---------------------------------------------------------------------------
+fn gpu_pnp_init() {
+    # Request ONLY CAP_PCICFG. Effective caps = requested & policy_granted, so
+    # even a bug requesting more cannot widen authority past the signed policy.
+    let id = syscall(SC_DRVHOST_REGISTER, CAP_PCICFG, 0, 0);
+    sd(&self_id, id);
+
+    sd(&inst_count, 0);
+    sd(&next_instance, 0);
+
+    # Enumerate PCI -> match -> assign instance + claim BAR -> request grant.
+    return pnp_scan_bus();
+}
+
+fn main() {
+    let bound = gpu_pnp_init();
+    # bound = number of AMD GPU instances claimed. 0 is a valid outcome (no GPU,
+    # or broker PCI primitive not yet wired => all reads open-bus => fail-closed).
+
+    # Controller idles, owning the bind table. Future work: serve
+    # pnp_rebind_after_discovery() requests from engine compartments over IPC,
+    # and respond to hot-plug events. For M0 the one-shot boot scan is the
+    # deliverable.
+    while 1 { }
+    return DRV_OK;
+}

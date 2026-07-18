@@ -5,6 +5,10 @@
 worktrees/
 
 # Local-only internal notes / scratch (never publish)
+# .gsec/ = the daily 6am security-run's private workspace (checklist, per-file
+# cleared+hash ledger, GSEC standard). Independent of the tracked security/
+# tooling under tools/security & docs/security; never published.
+/.gsec/
 /MEMORY.md
 /docs/The final goal after the rest.txt
 /docs/security_todo.md
@@ -36,6 +40,8 @@ qemu_out.txt
 qemu_err.txt
 
 # External or sensitive material that belongs outside the OS repo
+/datasets/
+/morph5_age_webui/
 Unrelated/
 router-backups/
 KC.MacTelnet/

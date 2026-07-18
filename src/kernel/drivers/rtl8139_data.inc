@@ -21,6 +21,7 @@ ser_dhcp_offer_8139 db "[DHCP OFFER]", 10, 0
 ser_dhcp_ack_8139 db "[DHCP ACK]", 10, 0
 ser_dhcp_fail_8139 db "[DHCP FAIL]", 10, 0
 ser_dhcp_udp_hit db "[UDP]", 10, 0
+ser_tx_len_reject db "[RTL8139 TX LEN REJECT]", 10, 0
 
 section .bss
 global rtl_active

@@ -89,3 +89,24 @@ unsafe code - the sandbox stays on.
   cores for the micro-area.
 - The duel.com/HFT framing is a **use case example**, not an endorsement of any
   specific operator - the deliverable is the secure fast-execution primitive.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 5 / speed 9 (target)**. Design-only. Uniquely, this
+track's *purpose* is speed ("faster than perfect asm") and its security is entirely
+inherited from the Track 2/3/6/8 envelope it nests in.
+
+- [ ] **(sec→10, inherited)** Bind the micro-area to: signed-artifact-only scripts
+      (Track 2/7), admit-time-locked default-deny cap manifest (Track 3),
+      compartment-isolated arena (Track 6), broker-proxied module/net access
+      (Track 8). It cannot exceed those tracks' security — so its 10 is gated on
+      Tracks 2/3/6/8 reaching 10.
+- [ ] **(sec→10)** Negative tests: a micro-area script cannot escape its cap
+      manifest, cannot touch another compartment, cannot run unsigned, cannot un-pin.
+- [ ] **Verify:** an independent agent re-rates this track **security 10** (once the
+      tracks it inherits from are 10).
+- **(speed→10, the whole point)** Whole-program O3 expression-tree + QUBO regalloc,
+      core-pinned isolated APs, pre-faulted arenas, shared-ring vDSO fast-path so the
+      hot loop pays no per-syscall cost. Publish the "faster than naive asm" benchmark.
+      This is the one track targeting **speed 10** — caps resolved at admit so the
+      sandbox stays on with zero hot-path check.

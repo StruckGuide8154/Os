@@ -287,36 +287,55 @@ fn inv_syscall_perm_per_launch(blob_perm_id, live_perm_id, dispatches) {
     return inv_context_bound(blob_perm_id, live_perm_id, dispatches);
 }
 
-# --- Planted-leak NEGATIVE test: dumped cap-mask + tag rejected on fresh boot ---
+# --- Planted-leak NEGATIVE test: dumped cap-mask + MAC rejected on fresh boot ---
 #
 # The empirical "plant the dumped secret and prove elevation fails" half of Track
-# 4 Part D, over the REAL cap-mask authenticator arithmetic (not an abstract
-# label). The dispatcher trusts slot_cap_mask[] only if slot_cap_hmac[slot]
-# re-derives to the stored tag under the LIVE per-boot canary:
-#     tag = low8(kernel_canary ^ slot ^ fold(mask) ^ KDOM_CAP_MASK)
-# where fold = mask_hi ^ mask_lo. See syscall_caps.inc, syscall_dispatch_core.inc,
-# and KDOM_CAP_MASK (0x5C) in kdomain_hmac.inc.
+# 4 Part D, over the REAL 128-bit cap-mask MAC arithmetic (not an abstract
+# label). The dispatcher trusts slot_cap_mask[] only if BOTH 64-bit lanes in
+# slot_cap_hmac[slot] re-derive under the LIVE per-boot canary. This mirrors
+# cap_mask_store/cap_mask_verify in syscall_secure.ghl exactly: a keyed base over
+# (canary, slot, full 16-bit mask, domain), followed by the same 64-bit finalizer
+# with an independent gamma for each lane.
 #
-# A one-shot dump of boot A yields a (mask, tag) pair (mask WIDENED, tag valid
+# A one-shot dump of boot A yields a (mask, MAC) tuple (mask WIDENED, MAC valid
 # under boot A's canary). Planted on a fresh boot B, acceptance is sound ONLY when
-# the tag recomputed under the live canary equals the planted tag - which for a
-# foreign-canary tag happens only on collision. A fresh boot draws a new canary,
-# so the planted tag fails closed -> CANARY panic, never a silent widen.
+# both lanes recomputed under the live canary equal the planted pair - which for
+# a foreign-canary MAC happens only on a 128-bit collision. A fresh boot draws a
+# new canary, so the planted MAC fails closed -> CANARY panic, never a silent
+# widen.
 const KDOM_CAP_MASK = 0x5C;
-const CAP_TAG_BYTE  = 0xFF;
+const CAPMAC_U64    = 0xFFFFFFFFFFFFFFFF;
+const CAPMAC_SLOT_MASK = 0xFF;
+const CAPMAC_MASK_MASK = 0xFFFF;
+const CAPMAC_SM_A   = 0x9E3779B97F4A7C15;
+const CAPMAC_SM_B   = 0xC2B2AE3D27D4EB4F;
+const CAPMAC_C1     = 0xBF58476D1CE4E5B9;
+const CAPMAC_C2     = 0x94D049BB133111EB;
+const CAPMAC_G0     = 0xD1B54A32D192ED03;
+const CAPMAC_G1     = 0xA0761D6478BD642F;
 
-fn cap_mask_tag(canary, slot, mask) {
-    let fold = ((mask >> 8) & CAP_TAG_BYTE) ^ (mask & CAP_TAG_BYTE);
-    return (canary ^ slot ^ fold ^ KDOM_CAP_MASK) & CAP_TAG_BYTE;
+# Explicit CAPMAC_U64 masks make the production machine-word wrapping visible
+# to the pure host evaluator as well as to compiled GHL.
+fn cap_mask_mac_lane(canary, slot, mask, gamma) {
+    let slot_term = ((slot & CAPMAC_SLOT_MASK) * CAPMAC_SM_A) & CAPMAC_U64;
+    let mask_term = ((mask & CAPMAC_MASK_MASK) * CAPMAC_SM_B) & CAPMAC_U64;
+    let base = (canary ^ slot_term ^ mask_term ^ KDOM_CAP_MASK) & CAPMAC_U64;
+    let x = (base ^ gamma) & CAPMAC_U64;
+    x = ((x ^ (x >> 30)) * CAPMAC_C1) & CAPMAC_U64;
+    x = ((x ^ (x >> 27)) * CAPMAC_C2) & CAPMAC_U64;
+    return (x ^ (x >> 31)) & CAPMAC_U64;
 }
 
-fn inv_planted_cap_hmac_rejected(dump_canary, live_canary, slot, mask, planted_tag, accepted) {
-    let live_tag = cap_mask_tag(live_canary, slot, mask);
+fn inv_planted_cap_hmac_rejected(dump_canary, live_canary, slot, mask, planted_lane0, planted_lane1, accepted) {
+    let live_lane0 = cap_mask_mac_lane(live_canary, slot, mask, CAPMAC_G0);
+    let live_lane1 = cap_mask_mac_lane(live_canary, slot, mask, CAPMAC_G1);
     if accepted == 0 {
         return 1;
     }
-    if planted_tag == live_tag {
-        return 1;
+    if planted_lane0 == live_lane0 {
+        if planted_lane1 == live_lane1 {
+            return 1;
+        }
     }
     return 0;
 }

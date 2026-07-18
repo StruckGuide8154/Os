@@ -7,16 +7,18 @@ reduce maintenance risk.
 
 ## P0: Verification Blockers
 
-- [ ] Fix final `scripts\test\test_verify_all.ps1` failure: `scripts\test\test_smp_boot.ps1` reports `Missing extended SMP counters`.
-- [ ] Inspect why `build/cache32_serial.log` contains bare `SMP:` lines instead of the expected extended format: `SMP:<detected>/<target>/<started>/<alive>/<parked>`.
-- [ ] Verify whether `perfdiag_print_smp` in `src/kernel/core/perfdiag.asm` is being called in the Cache32Max BIOS boot path.
-- [ ] Confirm whether the SMP counters are missing because boot logging is truncated, the marker format changed, or AP startup state is not initialized before printing.
-- [ ] Add or adjust a serial marker that always emits extended SMP counters after AP startup, before `scripts\test\test_smp_boot.ps1` reads the log.
-- [ ] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes.
+- [x] Fix final `scripts\test\test_verify_all.ps1` failure: `scripts\test\test_smp_boot.ps1` reports `Missing extended SMP counters`.
+- [x] Inspect why `build/cache32_serial.log` contains bare `SMP:` lines instead of the expected extended format: `SMP:<detected>/<target>/<started>/<alive>/<parked>`.
+- [x] Verify whether `perfdiag_print_smp` in `src/kernel/core/perfdiag.asm` is being called in the Cache32Max BIOS boot path.
+- [x] Confirm whether the SMP counters are missing because boot logging is truncated, the marker format changed, or AP startup state is not initialized before printing. *(The harness ignored a failed/oversized BIOS build and inspected stale output; after the build pipeline was repaired, the complete marker was present.)*
+- [x] Add or adjust a serial marker that always emits extended SMP counters after AP startup, before `scripts\test\test_smp_boot.ps1` reads the log. *(Verified together with eight per-core `APAT` markers.)*
+- [x] Re-run `.\scripts\test\test_smp_boot.ps1` alone until it passes. *(8/8 detected/target/started/alive/parked.)*
 - [ ] Re-run full `.\scripts\test\test_verify_all.ps1` after the SMP marker fix.
-- [ ] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`.
-- [ ] Ensure QEMU is fully stopped before rebuilding `build\Grit.img`.
-- [ ] Consider making `scripts\test\test_cache32_boot.ps1` delete/retry the image only after confirming no QEMU process holds it.
+- [x] Reconcile the cream/gold palette guard with the runtime palette. *(Replaced XML/manual three-way sync with the validated, generated, CPU-only unified theme system in `assets/themes/theme-spec.json` + `tools/theme_tool.py`; kernel chrome, apps, and NPL resources now derive from one source.)*
+- [ ] Decide how BIOS boots obtain the required signed `SYSSIG.ENV` payload. Cache32 diagnostics are available before the current `SSG0` fail-closed stop, but an interactive BIOS boot cannot pass the signed-artifact join yet.
+- [x] Investigate the Cache32 build warning/error during full verify: `WriteAllBytes ... file with a user-mapped section open`. *(The harness previously killed all QEMU processes and did not fail fast on a nonzero BIOS build, allowing stale/mapped-image behavior.)*
+- [x] Ensure the Cache32-owned QEMU is fully stopped before rebuilding `build\Grit.img`, without terminating unrelated interactive QEMU sessions.
+- [x] Make `scripts\test\test_cache32_boot.ps1` wait for its image-owning QEMU process to exit before rebuilding; fail closed if it remains mapped.
 
 ## P0: Test And Guard Staleness
 
@@ -51,10 +53,26 @@ reduce maintenance risk.
 - [ ] Add a negative test for app code trying to dereference live kernel window pointers.
 - [ ] Add per-syscall tests for invalid pointers: below app arena, above arena, kernel address, null, unaligned edge.
 
+## P1: Installable Driver Framework
+
+- [x] Define the installable package, permission review, device binding, class ABI,
+      recovery, update, and Wi-Fi integration architecture in
+      `docs/installable-driver-architecture.md`.
+- [ ] Complete Stage 0: wire the existing `SC_DRVHOST_*` broker into the real syscall
+      dispatcher with kernel-derived caller identity and driver-slot capabilities.
+- [ ] Define the shared versioned handle/message/ring ABI and implement `net.l2` as
+      the first dynamic device-class broker.
+- [ ] Generalize GPU PnP into a bus-neutral PCI/USB/ACPI device manager with
+      deterministic matching and exclusive transactional binding.
+- [ ] Implement signed external `.gdrv` packages, permission-diff review, revocation,
+      and anti-rollback updates through the existing `ART_DRIVER` envelope gate.
+- [ ] Add `wlan.radio`, a separate Wi-Fi service/supplicant, and a credential broker
+      before implementing the first hardware Wi-Fi chipset package.
+
 ## P1: Syscall Surface
 
-- [ ] Generate syscall docs from source or validate docs against source automatically.
-- [ ] Add a syscall table count check that also verifies documented range `0..21`.
+- [x] Generate syscall docs from source or validate docs against source automatically. *(The syscall-doc guard checks every individually documented ABI heading against the NASM wrappers and GritHL ABI constants.)*
+- [x] Add a syscall table count check that also verifies documented range `0..21`. *(`test_syscall_docs.ps1` requires 81 public rows and proves docs, wrappers, and dispatch handlers agree for all 22 core rows.)*
 - [ ] Add per-syscall return-value tests for validation failure.
 - [ ] Add tests for `SYS_FS_DELETE`, `SYS_FS_RENAME`, and `SYS_FS_MKDIR` edge cases.
 - [ ] Test negative and huge window IDs for `SYS_WM_CLOSE` and `SYS_WM_HANDLERS`.
@@ -156,8 +174,8 @@ reduce maintenance risk.
 
 ## P2: Documentation
 
-- [ ] Update `docs/verification.md` with the current full stage list, including Explorer marker validation.
-- [ ] Add a "known flaky/generated outputs" section explaining which tests rewrite `build`.
+- [x] Update `docs/verification.md` with the current full stage list, including Explorer marker validation.
+- [x] Add a "known flaky/generated outputs" section explaining which tests rewrite `build`.
 - [ ] Update `docs/audit-checklist.md` with the current SMP failure status.
 - [ ] Promote recurring audit findings into permanent check scripts where practical.
 - [ ] Document L3 slot memory layout with an ASCII map.

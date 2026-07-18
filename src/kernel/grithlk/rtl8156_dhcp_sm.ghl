@@ -42,6 +42,12 @@ global rtl8156_dhcp_pump;
 # constants.inc mirrors.
 const RTL8156_RX_BUF_ADDR = 0x1B30000;
 const RX_LEN_MASK         = 0x00007FFF;
+# Largest frame body that can physically fit after the 24-byte Realtek rx_desc in
+# the RTL8156_RX_DMA_LEN(4096)-byte RX buffer: 4096 - 24 = 4072. Mirrors
+# RTL8156_RX_MAX_FRAME in constants.inc. The device-reported length is UNTRUSTED
+# (low 15 bits -> up to 32767) and MUST be clamped to this before it drives a read
+# of the frame body (GSEC G1; see rtl8156_consume_event / rtl8156_usb.inc).
+const RTL8156_RX_MAX_FRAME = 4072;
 const DHCP_XID_FALLBACK   = 0x47524448;   # "HDRG" if xid wraps to 0
 
 # ---------------------------------------------------------------------------
@@ -232,11 +238,24 @@ fn rtl8156_dhcp_pump() preserves(all) {
     # set the dhcp_* slots but never promote the lease (guest_ip/next_hop stay "-")
     # and the transaction would hit its deadline and FAIL despite a valid OFFER/ACK.
     let got = rtl8156_bulk_in_nonblocking(RTL8156_RX_BUF_ADDR, 0, 0, 4096);
-    if got != 0 {
+    if got >= 24 {
         let rxlen = lw(RTL8156_RX_BUF_ADDR) & RX_LEN_MASK;
-        if rxlen >= 32 {                     # 18 + 14 minimum
-            let flen = rxlen - 4;            # drop the 4-byte Realtek RX CRC tail
-            call rtl8156_handle_frame(rdi: RTL8156_RX_BUF_ADDR + 24, rcx: flen);
+        # SECURITY (GSEC G1 - device-reported length OOB): rxlen is fully device-
+        # controlled (masked to 0x7FFF => up to 32767) but only RTL8156_RX_DMA_LEN
+        # (4096) bytes were DMA'd, with the frame body starting after the 24-byte
+        # rx_desc. This second RX-ingest path (added for the async pump) must apply
+        # the SAME upper clamp rtl8156_consume_event does, or handle_frame walks the
+        # IP/TCP/DNS parsers up to ~28 KiB past the buffer into adjacent kernel DMA.
+        # Reject fail-closed: a real Ethernet frame is <= RTL8156_RX_MAX_FRAME.
+        if rxlen <= RTL8156_RX_MAX_FRAME {
+            if rxlen >= 32 {                 # 18 + 14 minimum
+                if rxlen <= got - 24 {
+                    if rxlen <= 1526 {       # NET_ETH_FRAME_MAX(1522) + CRC
+                        let flen = rxlen - 4; # drop the 4-byte Realtek RX CRC tail
+                        call rtl8156_handle_frame(rdi: RTL8156_RX_BUF_ADDR + 24, rcx: flen);
+                    }
+                }
+            }
         }
     }
 

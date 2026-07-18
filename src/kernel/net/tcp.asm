@@ -266,18 +266,29 @@ net_tcp_rx_ipv4:
     xchg al, ah
     cmp [rdi + 2], ax                    ; destination port
     jne .drop
-    mov al, [rdi + 13]
-    test al, 0x04                        ; RST
-    jnz .rst
-    mov dl, al
-    and dl, 0x12                         ; SYN|ACK
-    cmp dl, 0x12
-    jne .drop
-    mov eax, [rdi + 8]                   ; ACK number
-    bswap eax
+    mov al, [rdi + 13]                   ; TCP flags
+    ; Expected ACK acknowledging our SYN = iss + 1 (full 32-bit). BOTH a valid
+    ; SYN-ACK and a legitimate RST in SYN_SENT must acknowledge our ISN. This is
+    ; the RFC 793 / RFC 5961 acceptability gate: it forces an off-path attacker
+    ; to guess the full 32-bit keyed-PRNG ISN, not merely the 14-bit ephemeral
+    ; source port that is the only secret in the 4-tuple. esi/edx are restored on
+    ; exit (rsi pushed at entry, rdx pushed at entry).
     mov edx, [rel net_tcp_connect_iss]
-    inc edx
-    cmp eax, edx
+    inc edx                              ; edx = iss + 1
+    mov esi, [rdi + 8]                   ; segment ACK number (network order)
+    bswap esi                            ; -> host order
+    test al, 0x04                        ; RST?
+    jnz .rst
+    ; --- SYN-ACK path: only meaningful while we are in SYN_SENT (state 1). A
+    ; spurious / replayed SYN-ACK must not re-arm an already-established or
+    ; closed connection (state gate, defence in depth). ---
+    cmp byte [rel net_tcp_state], 1
+    jne .drop
+    mov cl, al
+    and cl, 0x12                         ; SYN|ACK
+    cmp cl, 0x12
+    jne .drop
+    cmp esi, edx                         ; ACK must acknowledge our ISN
     jne .drop
     mov eax, [rdi + 4]                   ; remote sequence
     bswap eax
@@ -286,6 +297,17 @@ net_tcp_rx_ipv4:
     mov eax, 1
     jmp .done
 .rst:
+    ; A RST is honoured only while a connection exists (state >= 1; CLOSED=0 has
+    ; nothing to reset) AND only if it acknowledges our SYN (ACK bit set and ACK
+    ; == iss+1). This blocks blind off-path connection teardown: without the
+    ; 32-bit ISN an attacker who merely guesses the 4-tuple can no longer forge a
+    ; teardown.
+    cmp byte [rel net_tcp_state], 1
+    jb .drop                             ; state 0 (CLOSED): no connection
+    test al, 0x10                        ; ACK bit must be present
+    jz .drop
+    cmp esi, edx                         ; ACK must acknowledge our ISN
+    jne .drop
     mov byte [rel net_tcp_state], 4
     xor eax, eax
     jmp .done

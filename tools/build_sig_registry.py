@@ -62,10 +62,19 @@ def fnv1a64(text: str) -> int:
 
 
 def iter_asm_files(root: Path):
-    for base in (root / "src", root / "build" / "ghl"):
-        if base.exists():
-            yield from sorted(base.rglob("*.asm"))
-            yield from sorted(base.rglob("*.inc"))
+    source_root = root / "src"
+    if source_root.exists():
+        yield from sorted(source_root.rglob("*.asm"))
+        yield from sorted(source_root.rglob("*.inc"))
+
+    # Only the top-level build/ghl units are canonical kernel/app outputs.
+    # Subdirectories contain independently compiled test fixtures and cached
+    # diagnostics; recursively registering those can duplicate the same source
+    # under multiple generated names and make an otherwise clean build fail.
+    generated_root = root / "build" / "ghl"
+    if generated_root.exists():
+        yield from sorted(generated_root.glob("*.asm"))
+        yield from sorted(generated_root.glob("*.inc"))
 
 
 def parse_file(path: Path, root: Path):

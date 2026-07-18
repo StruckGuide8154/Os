@@ -50,6 +50,15 @@ RTL_CR_RST      equ 0x10
 RTL_RX_BUF_ADDR equ 0x01B00000
 RTL_TX_BUF_ADDR equ 0x01B04000
 RTL_RX_BUF_LEN  equ 8192
+; Reserved TX DMA window: everything from the TX buffer up to the next reserved
+; region (the RTL8156 bulk-IN ring). The tx path copies at most NET_ETH_FRAME_MAX
+; bytes here; pin the invariant so a future memory-map change that shrinks this
+; window below the max frame fails the build instead of silently reintroducing
+; the DMA overrun this bounds check closes.
+RTL_TX_BUF_LEN  equ (RTL8156_BULK_IN_RING_ADDR - RTL_TX_BUF_ADDR)
+%if (RTL_TX_BUF_LEN < NET_ETH_FRAME_MAX)
+  %error "RTL8139 TX DMA window smaller than NET_ETH_FRAME_MAX"
+%endif
 %include "src/kernel/drivers/rtl8139_init.inc"
 %include "src/kernel/drivers/rtl8139_tx_rx.inc"
 %include "src/kernel/drivers/rtl8139_dhcp.inc"

@@ -118,6 +118,36 @@ if ($DrvMmioExit -eq 0) {
     throw 'driver target accepted an unsafe raw_mem declaration (G1 violated: a driver could map MMIO)'
 }
 
+Write-Host '[gritc-security] driver target: MMIO/DMA/reset/fwload broker syscalls require declared capabilities' -ForegroundColor Yellow
+foreach ($capFixture in @(
+    'driver_target_mmio_cap_forbidden.ghl',
+    'driver_target_dma_cap_forbidden.ghl',
+    'driver_target_dynamic_syscall_forbidden.ghl',
+    'driver_target_reset_cap_forbidden.ghl',
+    'driver_target_fwload_cap_forbidden.ghl'
+)) {
+    $OldEAPCap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    python $Compiler `
+        (Join-Path $Root ('tests\ghl_kernel\' + $capFixture)) `
+        -o (Join-Path $OutDir ([System.IO.Path]::GetFileNameWithoutExtension($capFixture) + '.asm')) `
+        -L $LibDir --target driver *> $null
+    $CapExit = $LASTEXITCODE
+    $ErrorActionPreference = $OldEAPCap
+    if ($CapExit -eq 0) {
+        throw "driver capability gate accepted forbidden fixture: $capFixture"
+    }
+}
+
+Write-Host '[gritc-security] driver target: declared reset+fwload capabilities compile' -ForegroundColor Yellow
+python $Compiler `
+    (Join-Path $Root 'tests\ghl_kernel\driver_target_reset_fwload_ok.ghl') `
+    -o (Join-Path $OutDir 'driver_target_reset_fwload_ok.asm') `
+    -L $LibDir --target driver
+if ($LASTEXITCODE -ne 0) {
+    throw 'driver capability gate rejected declared reset+fwload authority (gate is a deny-everything wall)'
+}
+
 Write-Host '[gritc-security] driver target: HDA class driver compiles broker-only' -ForegroundColor Yellow
 python $Compiler `
     (Join-Path $Root 'src\drivers\audio\hda.ghl') `

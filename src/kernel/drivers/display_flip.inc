@@ -10,79 +10,25 @@ FN_BEGIN display_flip, 0, 0, FN_RET_SCALAR
     push rcx
     push rsi
     push rdi
+    push rdx
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    cld
     extern fbperf_flip_full_begin
     extern fbperf_flip_full_end
     call fbperf_flip_full_begin
 
-    mov rdi, [fb_addr]       ; Destination: framebuffer (VRAM)
-    mov rsi, [bb_addr]       ; Source: back buffer (RAM)
-
-    ; Calculate total size in bytes: pitch * height, CLAMPED to the loader-mapped
-    ; FB span (fb_mapped_end_q - fb_addr). A display_set_mode to a taller mode
-    ; enlarges scr_height/scr_pitch without remapping VRAM, so an unclamped copy
-    ; would walk straight off the mapped framebuffer into the unmapped guard page
-    ; every frame. edx carries the clamped total through to the tail.
-    push rdx
-    mov eax, [scr_pitch]
-    imul eax, [scr_height]
-    mov rdx, [fb_mapped_end_q]
-    test rdx, rdx
-    jz .flip_no_clamp        ; not latched yet -> trust pitch*height
-    sub rdx, [fb_addr]       ; rdx = mapped byte span
-    sub rdx, 0x80            ; one SSE-chunk margin (see display_flip_rect)
-    cmp eax, edx
-    jbe .flip_no_clamp
-    mov eax, edx             ; clamp to what the loader mapped
-.flip_no_clamp:
-    mov edx, eax             ; edx = clamped total bytes (reused by .flip_tail)
-    mov ecx, eax             ; Total bytes
-
-    ; SSE2 non-temporal copy: 128 bytes per iteration (8x movntdq)
-    shr ecx, 7               ; / 128 for 128-byte chunks
-    jz .flip_tail
-
-.flip_sse_loop:
-    ; Load 128 bytes from RAM (cached, fast)
-    movdqa xmm0, [rsi]
-    movdqa xmm1, [rsi + 16]
-    movdqa xmm2, [rsi + 32]
-    movdqa xmm3, [rsi + 48]
-    movdqa xmm4, [rsi + 64]
-    movdqa xmm5, [rsi + 80]
-    movdqa xmm6, [rsi + 96]
-    movdqa xmm7, [rsi + 112]
-    ; Store 128 bytes to VRAM (non-temporal, bypasses cache)
-    movntdq [rdi], xmm0
-    movntdq [rdi + 16], xmm1
-    movntdq [rdi + 32], xmm2
-    movntdq [rdi + 48], xmm3
-    movntdq [rdi + 64], xmm4
-    movntdq [rdi + 80], xmm5
-    movntdq [rdi + 96], xmm6
-    movntdq [rdi + 112], xmm7
-    add rsi, 128
-    add rdi, 128
-    dec ecx
-    jnz .flip_sse_loop
-
-    ; Memory fence to ensure all NT stores are visible
-    sfence
-
-.flip_tail:
-    ; Handle remaining bytes (< 128) with rep movsq, using the SAME clamped total
-    ; (edx) as the SSE loop above - never the raw pitch*height (which may exceed
-    ; the mapped FB).
-    mov eax, edx
-    and eax, 127             ; Remainder
-    mov ecx, eax
-    shr ecx, 3
-    rep movsq
-    mov ecx, eax
-    and ecx, 7
-    rep movsb
-
-    pop rdx
+    ; Full-screen presents use the same per-row guarded path as dirty rects.
+    ; The old monolithic rep/SIMD copy repeatedly #GP'd in QEMU's GOP/LFB path
+    ; near the end of the visible aperture and left half-presented frames.
+    xor edi, edi
+    xor esi, esi
+    mov edx, [scr_width]
+    mov ecx, [scr_height]
+    call display_flip_rect
     call fbperf_flip_full_end
+    pop rdx
     pop rdi
     pop rsi
     pop rcx
@@ -100,6 +46,10 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     push r10
     push r11
     push r12
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    cld
     extern fbperf_flip_rect_begin
     extern fbperf_flip_rect_end
     extern fbperf_flip_rect_note_size
@@ -271,10 +221,16 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     test rdi, 15
     jnz .fr_row_unaligned
 
-    ; SSE2 NT copy: 64 bytes per iteration (aligned path)
+    ; SSE2 NT copy: 64 bytes per iteration (aligned path). Bound the loop with
+    ; an end pointer derived from the already-clamped row byte count. This is a
+    ; second, local safety boundary: even if a volatile counter is corrupted,
+    ; the NT-store cursor can never escape this row and reach the framebuffer
+    ; guard page. RBX is scratch here and is recomputed by the next row guard.
     mov eax, ecx
-    shr eax, 6               ; / 64
-    jz .fr_row_small
+    and eax, -64             ; bytes covered by complete 64-byte chunks
+    lea rbx, [rdi + rax]     ; exclusive end of the SSE portion
+    cmp rdi, rbx
+    jae .fr_row_small
 
 .fr_sse_row:
     movdqu xmm0, [rsi]       ; Unaligned load (source may not be aligned)
@@ -287,8 +243,8 @@ FN_BEGIN display_flip_rect, 0, 0, FN_RET_SCALAR
     movntdq [rdi + 48], xmm3
     add rsi, 64
     add rdi, 64
-    dec eax
-    jnz .fr_sse_row
+    cmp rdi, rbx
+    jb .fr_sse_row
 
 .fr_row_small:
     ; Remaining bytes with qword/byte copy (clamped count in edx)
@@ -339,6 +295,10 @@ FN_BEGIN display_clear, 0, 0, FN_RET_SCALAR
     push rcx
     push rdi
     push rdx
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    cld
 
     ; Broadcast color to XMM register
     movd xmm0, edi
@@ -356,7 +316,7 @@ FN_BEGIN display_clear, 0, 0, FN_RET_SCALAR
     jz .clear_tail
 
 .clear_sse_loop:
-    movdqa [rdi], xmm0
+    movdqu [rdi], xmm0       ; bb_addr is RAM; tolerate unaligned allocator output
     add rdi, 16
     dec ecx
     jnz .clear_sse_loop
@@ -396,7 +356,7 @@ global fb_native_width, fb_native_height
 global scr_taskbar_y, scr_clock_x, scr_clock_y
 global scr_start_btn_y, scr_start_menu_y
 global scr_tb_btn_y, scr_bat_ind_x, scr_bat_ind_y
-extern tb_start_menu_h
+; tb_start_menu_h retired with taskbar.asm (ring-3 shell owns the Start menu).
 ; --- Display flags (bit 0 vsync, bit 1 fps, bit 2 stretch) --------------
 ; STRETCH is "plumbing for now": when set, display_set_mode will allow
 ; modes that differ from the native fb size and (later) cause display_flip
@@ -404,7 +364,7 @@ extern tb_start_menu_h
 ; effective behavior is unchanged regardless of the bit. The bit is
 ; persisted across mode changes so Settings can toggle it cleanly.
 global display_stretch
-global raster_target_addr, raster_target_width, raster_target_height, raster_target_pitch_q
+global raster_target_tbl
 
 fb_addr:    dq 0
 bb_addr:    dq 0
@@ -412,14 +372,20 @@ scr_width:  dd SCREEN_WIDTH
 scr_height: dd SCREEN_HEIGHT
 scr_pitch:  dd SCREEN_PITCH
 scr_pitch_q: dq SCREEN_PITCH
-raster_target_addr:    dq BACK_BUFFER_ADDR
-raster_target_width:   dd SCREEN_WIDTH
-raster_target_height:  dd SCREEN_HEIGHT
-raster_target_pitch_q: dq SCREEN_PITCH
-; Serializes mutation of the raster_target_* fields above between the BSP
-; and the wallpaper renderer running on an AP. Held only across a single
-; raster syscall: acquire in raster_select_syscall_target, release in
-; raster_sc_release_target.
+; Raster target record (addr/width/height/pitch at RTGT_* offsets, see
+; constants.inc). Slot 0 of this table is the single shared raster destination;
+; the hot per-pixel primitives address it ABSOLUTELY ([raster_target_tbl +
+; RTGT_*]). A per-core GS-base scheme was tried but is unusable in this flat
+; no-swapgs model: every kernel entry/exit reloads the GS selector (smap.inc
+; SANITIZE_SEG_*), zeroing GS base, so [gs:RTGT_*] dereferenced a null slot and
+; every blit page-faulted. The table layout (per-core slots) is kept as infra.
+align 64
+raster_target_tbl: times SMP_MAX_CORES * RTGT_STRIDE db 0
+; Serializes mutation of the shared raster target across a single raster syscall
+; (acquire in raster_select_syscall_target, release in raster_sc_release_target).
+; The BSP compositor never runs concurrently with an AP wallpaper raster because
+; render_frame defers the whole frame while wallpaper_render_active (frame_present
+; .ghl); the lock guards the brief select/release window against that AP path.
 align 8
 raster_target_lock: db 0
 fb_native_width:  dd SCREEN_WIDTH

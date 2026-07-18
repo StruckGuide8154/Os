@@ -26,6 +26,32 @@ $ManifestPath = Join-Path $OUT_DIR 'manifest.json'
 $IncludePath  = Join-Path $OUT_DIR 'generated_apps.inc'
 New-Item -Path $OUT_DIR -ItemType Directory -Force | Out-Null
 
+# Theme colors have one canonical authoring file. Refuse stale generated app
+# tables/kernel constants rather than silently building a split-color image.
+$ThemeTool = Join-Path $ROOT 'tools\theme_tool.py'
+& $PY $ThemeTool check
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '  FAILED unified theme validation (run: python tools/theme_tool.py generate)' -ForegroundColor Red
+    exit 1
+}
+
+# GHL cannot import NASM equates. Fail the build if its FAT partition base
+# drifts from the loader/disk-layout constants instead of producing a kernel
+# that hangs while probing the wrong LBA.
+$constantsText = Get-Content (Join-Path $ROOT 'src\include\constants.inc') -Raw
+$fatCoreText = Get-Content (Join-Path $ROOT 'src\kernel\grithlk\fat16_core.ghl') -Raw
+$startMatch = [regex]::Match($constantsText, '(?m)^KERNEL_START_SECTOR\s+equ\s+(\d+)')
+$countMatch = [regex]::Match($constantsText, '(?m)^KERNEL_SECTORS\s+equ\s+(\d+)')
+$ghlMatch = [regex]::Match($fatCoreText, '(?m)^const FAT16_PART_LBA\s*=\s*(\d+)')
+if (-not ($startMatch.Success -and $countMatch.Success -and $ghlMatch.Success)) {
+    throw 'Unable to parse the shared/GHL FAT16 partition constants.'
+}
+$expectedFatLba = [int64]$startMatch.Groups[1].Value + [int64]$countMatch.Groups[1].Value
+$ghlFatLba = [int64]$ghlMatch.Groups[1].Value
+if ($ghlFatLba -ne $expectedFatLba) {
+    throw "fat16_core.ghl FAT16_PART_LBA=$ghlFatLba, expected $expectedFatLba from constants.inc."
+}
+
 Write-Host ''
 Write-Host '  GritHL Build' -ForegroundColor Cyan
 Write-Host '  =============' -ForegroundColor Cyan

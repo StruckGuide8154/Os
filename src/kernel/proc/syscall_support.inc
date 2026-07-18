@@ -54,54 +54,86 @@ sc_validate_from_table:
     SER 13
     SER 10
     pop rdi
-    ; Default length probe is 1 byte. If the descriptor names a sibling
-    ; SCALAR arg as the length source, load that scalar and use it as the
-    ; full byte length instead - this is the single place where PTR args
-    ; get range-validated, so a handler that forgets the explicit check is
-    ; still safe.
+    ; Default length probe is 1 byte (legacy, non-STRICT rows only). The
+    ; descriptor decides the real length: this is the single place where PTR
+    ; args get range-validated, so a handler that forgets its own check is safe.
     mov rsi, 1
-    ; Compute the descriptor nibble for this arg without clobbering rcx
-    ; (the outer argc loop counter). r9 is scratch.
+    ; Extract this arg's 8-bit descriptor field from r13 (arg_desc) without
+    ; clobbering rcx (the outer argc loop counter). r9 is scratch.
     push rcx
     mov rdx, r13
     mov r9d, r8d
-    shl r9d, 2                  ; bit shift = arg_index * 4
+    shl r9d, 3                  ; bit shift = arg_index * 8 (8 bits per arg)
     mov ecx, r9d
     shr rdx, cl
     pop rcx
-    and edx, 0x0F
-    jnz .check_ptr_has_desc
-    ; Nibble 0 = this PTR arg was never migrated to a sibling-length
-    ; descriptor. STRICT rows (security_todo.md §2, "Mandatory non-zero
-    ; arg_desc for every PTR arg") deny-on-unmigrated instead of falling back
-    ; to the 1-byte probe - eliminates the "handler forgot the range check"
-    ; class for opted-in rows. Non-STRICT rows keep the legacy 1-byte probe.
+    and edx, 0xFF               ; edx = this arg's descriptor byte
+    mov r9d, edx
+    and r9d, 0x0F               ; r9d = LEN_SRC nibble
+    shr edx, 4
+    and edx, 0x0F               ; edx = SIZE index nibble
+    cmp r9d, SC_DESC_HANDLER_CODE
+    je .check_ptr_handler       ; 0xE: handler owns the range check
+    cmp r9d, SC_DESC_CONST_CODE
+    je .check_ptr_const         ; 0xF: constant length = size_table[SIZE]
+    test r9d, r9d
+    jnz .check_ptr_sibling      ; 1..6: sibling count * size_table[SIZE]
+    ; LEN_SRC 0 = unmigrated PTR arg. STRICT rows deny (eliminates the "handler
+    ; forgot the range check" class); non-STRICT rows keep the 1-byte probe.
     test byte [r12 + SYSCALL_FLAGS_OFF], SC_FLAG_STRICT
     jnz .validate_fail
     jmp .check_ptr_do
-.check_ptr_has_desc:
-    ; edx = 1-based sibling index; reload that scalar via the same helper.
-    push rdi
+.check_ptr_handler:
+    ; The handler range-validates this pointer itself (length not expressible as
+    ; sibling*size). Trust it: skip the dispatcher probe and pass the arg.
+    jmp .check_ptr_ok
+.check_ptr_const:
+    lea rax, [rel sc_arg_size_table]
+    mov esi, [rax + rdx*4]      ; rsi = constant byte length
+    test esi, esi
+    jz .validate_fail           ; reserved/unknown size index -> deny
+    jmp .check_ptr_do
+.check_ptr_sibling:
+    ; Load the sibling scalar (r9d = 1-based index) as the element COUNT, then
+    ; multiply by size_table[SIZE] with a 64-bit overflow check.
+    push rdx                    ; save SIZE index across the frame load
+    push rdi                    ; save ptr value
     push r8                     ; save current arg index (loop state)
-    mov r8d, edx
+    mov r8d, r9d
     dec r8d                     ; 0-based sibling index
-    ; Two saved qwords now sit below the validator, but this direct load has no
-    ; helper CALL return address. Relative to SC_VALIDATE_FRAME_OFF that makes
-    ; the required adjustment +8. Calling the helper
-    ; here with its normal SC_VALIDATE_FRAME_OFF would read two registers
-    ; early (arg1 became saved RBP), turning valid lengths into huge values.
+    ; Direct frame load (no helper CALL, so no return address): relative to the
+    ; helper's SC_VALIDATE_FRAME_OFF the adjustment is +16 for the THREE saved
+    ; qwords (rdx, rdi, r8) now below the read.
     mov eax, 5
     cmp r8d, 5
-    cmova r8d, eax
+    cmova r8d, eax              ; clamp any index > 5 to 5 (branchless)
     lea rax, [rel sc_arg_off_table]
     mov eax, [rax + r8*4]
-    add eax, SC_VALIDATE_FRAME_OFF + 8
-    mov rdi, [rsp + rax]
-    mov rsi, rdi                ; rsi = sibling's value = byte length
+    add eax, SC_VALIDATE_FRAME_OFF + 16
+    mov rsi, [rsp + rax]        ; rsi = sibling value = element count
     pop r8
     pop rdi
+    pop rdx                     ; rdx = SIZE index
+    lea rax, [rel sc_arg_size_table]
+    mov eax, [rax + rdx*4]      ; eax = element size (bytes)
+    test eax, eax
+    jz .validate_fail           ; reserved/unknown size index -> deny
+    mul rsi                     ; rdx:rax = elem_size * count
+    jc .validate_fail           ; product overflowed 64 bits -> deny
+    mov rsi, rax                ; rsi = total byte length
 .check_ptr_do:
+    ; Descriptor bits 48..53 encode pointer direction. READ is the default and
+    ; may accept the immutable shared app blob; WRITE accepts only the caller's
+    ; private slot. Handler validators remain in place as defense in depth.
+    mov eax, r8d
+    add eax, SC_DESC_WRITE_SHIFT
+    bt r13, rax
+    jc .check_ptr_do_write
     call sc_validate_user_range
+    jmp .check_ptr_done
+.check_ptr_do_write:
+    call sc_validate_user_write
+.check_ptr_done:
     test eax, eax
     jnz .check_ptr_ok
     SER 'V'
@@ -182,6 +214,14 @@ sc_load_arg_for_validation:
 align 4
 sc_arg_off_table:
     dd ALL_RDI, ALL_RSI, ALL_RDX, ALL_R10, ALL_R8, ALL_R9
+
+; Element/constant size table for the per-arg descriptor SIZE nibble (SCSZ_*).
+; Index -> byte size. A 0 entry (reserved rows 11..15) is treated as an invalid
+; descriptor and denies the syscall. Keep row order in lockstep with the SCSZ_*
+; equ block above.
+align 4
+sc_arg_size_table:
+    dd 1, 2, 4, 8, 11, 16, 20, 24, 32, 48, 64, 0, 0, 0, 0, 0
 
 ; sc_resolve_dir_entry_arg - translate an untrusted user-supplied dir-entry
 ; handle into the matching real FAT16 root-cache entry pointer.
@@ -274,12 +314,53 @@ sc_resolve_dir_entry_arg:
     dq %5         ; arg_desc at offset 16
 %endmacro
 
-; Per-arg descriptor helpers. Nibble N (4 bits) encodes the 1-based index of
-; the SCALAR sibling that holds the byte length of PTR arg N. 0 means "no
-; sibling; fall back to the 1-byte probe". Chain with bitwise OR:
-;   SC_DESC_LEN(1, 3) | SC_DESC_LEN(3, 4)
-; says "PTR arg 1 takes its length from arg 3; PTR arg 3 from arg 4".
-%define SC_DESC_LEN(arg_idx, len_sibling_1based) ((len_sibling_1based) << ((arg_idx)*4))
+; Per-arg descriptor helpers (finding: every PTR arg must be range-validated at
+; the dispatcher, not left to the handler). Each arg gets an 8-BIT field; arg N
+; occupies bits [N*8 .. N*8+7] of the arg_desc qword (6 args = 48 bits used):
+;   bits[3:0] LEN_SRC : 0        no descriptor (STRICT -> deny; else 1-byte probe)
+;                       1..6     1-based index of the SCALAR sibling giving the
+;                                element COUNT
+;                       0xE      handler-validated (dispatcher skips; STRICT ok)
+;                       0xF      constant length (no sibling)
+;   bits[7:4] SIZE    : index into sc_arg_size_table - the element size for the
+;                       sibling form, or the exact byte count for the constant
+;                       form. The dispatcher computes count*size (64-bit,
+;                       overflow -> deny) so a `pixels * 4` / `records * 64`
+;                       buffer is validated whole, in one place.
+;   bits[48:53] WRITE : one bit per arg. Set for kernel-to-user output buffers;
+;                       clear for user-to-kernel inputs. A set bit selects
+;                       sc_validate_user_write (slot only) at the dispatcher.
+; Chain with bitwise OR (e.g. SC_DESC_CONST(0, SCSZ_11) |
+; SC_DESC_LEN(1, 3) | SC_DESC_WRITE(1)).
+;
+; Size-index symbols - MUST match sc_arg_size_table's row order below.
+SCSZ_1  equ 0
+SCSZ_2  equ 1
+SCSZ_4  equ 2
+SCSZ_8  equ 3
+SCSZ_11 equ 4
+SCSZ_16 equ 5
+SCSZ_20 equ 6
+SCSZ_24 equ 7
+SCSZ_32 equ 8
+SCSZ_48 equ 9
+SCSZ_64 equ 10
+SC_DESC_HANDLER_CODE equ 0x0E
+SC_DESC_CONST_CODE   equ 0x0F
+SC_DESC_WRITE_SHIFT  equ 48
+; PTR arg <arg_idx> byte length = sibling scalar <sib> (1-based) * size_table[sz].
+%define SC_DESC_LENx(arg_idx, sib, sz) ((((sib) & 0x0F) | (((sz) & 0x0F) << 4)) << ((arg_idx)*8))
+; Back-compat: raw byte length straight from the sibling scalar (element size 1).
+%define SC_DESC_LEN(arg_idx, sib) SC_DESC_LENx(arg_idx, sib, SCSZ_1)
+; PTR arg <arg_idx> byte length = a fixed constant (a size_table entry).
+%define SC_DESC_CONST(arg_idx, sz) ((SC_DESC_CONST_CODE | (((sz) & 0x0F) << 4)) << ((arg_idx)*8))
+; PTR arg <arg_idx> is fully range-validated INSIDE its handler; the dispatcher
+; skips its probe and STRICT is satisfied. Use ONLY where the length is not
+; expressible as sibling*size (e.g. two-dimensional packed dims - media blit).
+%define SC_DESC_HANDLER(arg_idx) (SC_DESC_HANDLER_CODE << ((arg_idx)*8))
+; PTR arg <arg_idx> is an OUTPUT destination. The dispatcher applies the
+; slot-only write validator; handler validation is retained as a second check.
+%define SC_DESC_WRITE(arg_idx) (1 << (SC_DESC_WRITE_SHIFT + (arg_idx)))
 
 section .text
 align 8
@@ -292,20 +373,21 @@ syscall_table:
     SYSCALL_ENTRY syscall_entry.sc_fs_entry,         1, SC_KIND1(FN_KIND_SCALAR),   CAP_FS
     SYSCALL_ENTRY syscall_entry.sc_fs_chdir,         1, SC_KIND1(FN_KIND_SCALAR),   CAP_FS
     SYSCALL_ENTRY syscall_entry.sc_wm_create,        6, SC_KIND6(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_CSTRING, FN_KIND_SCALAR), CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_fs_read,          3, SC_KIND3(FN_KIND_HANDLE, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS, SC_DESC_LEN(1, 3), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_fs_read,          3, SC_KIND3(FN_KIND_HANDLE, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS, (SC_DESC_LEN(1, 3) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_wm_handlers,      3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_app_done,         0, 0,                          CAP_CORE
-    SYSCALL_ENTRY syscall_entry.sc_fs_format_name,   2, SC_KIND2(FN_KIND_HANDLE, FN_KIND_PTR), CAP_FS
+    SYSCALL_ENTRY syscall_entry.sc_fs_format_name,   2, SC_KIND2(FN_KIND_HANDLE, FN_KIND_PTR), CAP_FS, (SC_DESC_CONST(1, SCSZ_16) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_app_launch,       1, SC_KIND1(FN_KIND_SCALAR),   CAP_APP_CTRL
-    SYSCALL_ENTRY syscall_entry.sc_fs_write,         3, SC_KIND3(FN_KIND_PTR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS
+    ; arg0 = 11-byte raw FAT16 short name (const); arg1 = data buffer of arg2 bytes.
+    SYSCALL_ENTRY syscall_entry.sc_fs_write,         3, SC_KIND3(FN_KIND_PTR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS, (SC_DESC_CONST(0, SCSZ_11) | SC_DESC_LEN(1, 3)), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_fs_sync_root,     0, 0,                          CAP_FS
     SYSCALL_ENTRY syscall_entry.sc_wm_close,         1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_display_set_mode, 3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DISPLAY
     SYSCALL_ENTRY syscall_entry.sc_cursor_init,      0, 0,                          CAP_GUI_DISPLAY
     SYSCALL_ENTRY syscall_entry.sc_ticks,            0, 0,                          CAP_CORE
     SYSCALL_ENTRY syscall_entry.sc_fs_delete,        1, SC_KIND1(FN_KIND_HANDLE),   CAP_FS_DELETE
-    SYSCALL_ENTRY syscall_entry.sc_fs_rename,        2, SC_KIND2(FN_KIND_HANDLE, FN_KIND_PTR), CAP_FS_WRITE
-    SYSCALL_ENTRY syscall_entry.sc_fs_mkdir,         1, SC_KIND1(FN_KIND_PTR),      CAP_FS_WRITE
+    SYSCALL_ENTRY syscall_entry.sc_fs_rename,        2, SC_KIND2(FN_KIND_HANDLE, FN_KIND_PTR), CAP_FS_WRITE, SC_DESC_CONST(1, SCSZ_11), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_fs_mkdir,         1, SC_KIND1(FN_KIND_PTR),      CAP_FS_WRITE, SC_DESC_CONST(0, SCSZ_11), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_open_file_np,     1, SC_KIND1(FN_KIND_HANDLE),   CAP_APP_CTRL
     SYSCALL_ENTRY syscall_entry.sc_app_open,         1, SC_KIND1(FN_KIND_CSTRING),  CAP_APP_CTRL
     SYSCALL_ENTRY syscall_entry.sc_display_flags,    0, 0,                          CAP_GUI_DISPLAY
@@ -317,42 +399,50 @@ syscall_table:
     SYSCALL_ENTRY syscall_entry.sc_xml_parse,        2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(0, 2), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_xml_root,         0, 0,                          CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_xml_tag,          1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_xml_tag_name,     3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(1, 3), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_tag_name,     3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(1, 3) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_xml_first_child,  1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_xml_next_sibling, 1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_xml_parent,       1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_xml_attr,         5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(1, 3) | SC_DESC_LEN(3, 5)), SC_FLAG_STRICT
-    SYSCALL_ENTRY syscall_entry.sc_xml_text,         3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(1, 3), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_attr,         5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(1, 3) | SC_DESC_LEN(3, 5) | SC_DESC_WRITE(3)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_text,         3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(1, 3) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_xml_free,         0, 0,                          CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_draw_line,        5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_fill_circle,      4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_fill_triangle,    2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW
+    ; arg0 = 24-byte vertex struct (6 int32); handler also re-checks 24 bytes.
+    SYSCALL_ENTRY syscall_entry.sc_fill_triangle,    2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_CONST(0, SCSZ_24), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_xml_last_error,   0, 0,                          CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_xml_node_count,   0, 0,                          CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_blend_pixel,      3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_blend_span,       4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
     SYSCALL_ENTRY syscall_entry.sc_xml_text_runs,    1, SC_KIND1(FN_KIND_SCALAR),   CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_xml_text_run,     4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(2, 4), SC_FLAG_STRICT
-    SYSCALL_ENTRY syscall_entry.sc_xml_namespace,    5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(3, 5), SC_FLAG_STRICT
-    SYSCALL_ENTRY syscall_entry.sc_xml_node_namespace, 3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(1, 3), SC_FLAG_STRICT
-    SYSCALL_ENTRY syscall_entry.sc_xml_entity_value, 4, SC_KIND4(FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(0, 2) | SC_DESC_LEN(2, 4)), SC_FLAG_STRICT
-    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb,  4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb_screen, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW
-    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb_multiply, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW
+    SYSCALL_ENTRY syscall_entry.sc_xml_text_run,     4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(2, 4) | SC_DESC_WRITE(2)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_namespace,    5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(3, 5) | SC_DESC_WRITE(3)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_node_namespace, 3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(1, 3) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_xml_entity_value, 4, SC_KIND4(FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, (SC_DESC_LEN(0, 2) | SC_DESC_LEN(2, 4) | SC_DESC_WRITE(2)), SC_FLAG_STRICT
+    ; arg3 = ARGB source = arg2 (pixel count) * 4 bytes.
+    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb,  4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW, SC_DESC_LENx(3, 3, SCSZ_4), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb_screen, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW, SC_DESC_LENx(3, 3, SCSZ_4), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_blend_span_argb_multiply, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_PTR), CAP_GUI_DRAW, SC_DESC_LENx(3, 3, SCSZ_4), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_sysinfo,          2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_CORE
     SYSCALL_ENTRY syscall_entry.sc_net_ping4,        1, SC_KIND1(FN_KIND_SCALAR),   CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_net_info,         1, SC_KIND1(FN_KIND_SCALAR),   CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_net_dhcp_renew,   0, 0,                          CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_net_dhcp_start,   0, 0,                          CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_net_tcp_connect4,  3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_NET
-    SYSCALL_ENTRY syscall_entry.sc_net_dns_a,        1, SC_KIND1(FN_KIND_PTR),      CAP_NET
+    ; hostname is a bounded C-string; FN_KIND_CSTRING makes the dispatcher scan
+    ; it in-slot + NUL-terminated (was FN_KIND_PTR + silent 1-byte probe).
+    SYSCALL_ENTRY syscall_entry.sc_net_dns_a,        1, SC_KIND1(FN_KIND_CSTRING),  CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_net_ping4_tick,   1, SC_KIND1(FN_KIND_SCALAR),   CAP_NET
     SYSCALL_ENTRY syscall_entry.sc_desktop_bg_busy,   0, 0,                         CAP_GUI_DISPLAY
     SYSCALL_ENTRY syscall_entry.sc_open_file_media,   1, SC_KIND1(FN_KIND_HANDLE),  CAP_APP_CTRL
     SYSCALL_ENTRY syscall_entry.sc_wm_set_user_arg,   2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
-    ; sc_media_blit_scaled - secure aspect-preserving BGRA blit; src is
-    ; PTR-validated to live inside the calling slot before the scaler runs.
-    SYSCALL_ENTRY syscall_entry.sc_media_blit_scaled, 5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW | CAP_MEDIA
+    ; sc_media_blit_scaled - secure aspect-preserving BGRA blit. arg1 (src) length
+    ; is src_w*src_h*4 with both dims packed into arg2, so it is NOT expressible as
+    ; sibling*size; the handler bounds both dims to [1,4096], computes the 64-bit
+    ; byte length, caps it at MEDIA_MAX_BYTES, and calls sc_validate_user_range.
+    ; SC_DESC_HANDLER marks that explicit delegation so STRICT is satisfied without
+    ; a silent 1-byte probe.
+    SYSCALL_ENTRY syscall_entry.sc_media_blit_scaled, 5, SC_KIND5(FN_KIND_SCALAR, FN_KIND_PTR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW | CAP_MEDIA, SC_DESC_HANDLER(1), SC_FLAG_STRICT
     SYSCALL_ENTRY syscall_entry.sc_wx_install_manifest, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
     SYSCALL_ENTRY syscall_entry.sc_mprotect_wx,      2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
     SYSCALL_ENTRY syscall_entry.sc_wx_jit_alias,     3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_WX
@@ -361,9 +451,10 @@ syscall_table:
     SYSCALL_ENTRY syscall_entry.sc_handle_close,     1, SC_KIND1(FN_KIND_SCALAR),   CAP_CORE
     ; SYS_FS_ENTRY_INFO - (handle, out_buf, out_buf_len). The handle is
     ; FN_KIND_HANDLE so a bad handle is rejected before sc_fs_entry_info
-    ; runs; out_buf is FN_KIND_PTR with a 1-byte probe (the handler does
-    ; the full 20-byte range check against the user mapping).
-    SYSCALL_ENTRY syscall_entry.sc_fs_entry_info,    3, SC_KIND3(FN_KIND_HANDLE, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS_READ
+    ; runs; out_buf is a fixed FS_ENTRY_INFO_SIZE (20-byte) snapshot, so the
+    ; dispatcher validates a constant 20 bytes (handler re-checks against the
+    ; user mapping). Was FN_KIND_PTR with only a 1-byte probe.
+    SYSCALL_ENTRY syscall_entry.sc_fs_entry_info,    3, SC_KIND3(FN_KIND_HANDLE, FN_KIND_PTR, FN_KIND_SCALAR), CAP_FS_READ, (SC_DESC_CONST(1, SCSZ_20) | SC_DESC_WRITE(1)), SC_FLAG_STRICT
     ; SYS_APP_DECLARE_MANIFEST(app_id) - narrow the calling slot's cap mask
     ; to the manifest declared for app_id in syscall_caps.inc. One-way: a
     ; sandboxed app can never widen its mask. Tagged CAP_CORE so even a
@@ -387,13 +478,76 @@ syscall_table:
     ; record_count * 64 bytes; arg_desc ties PTR arg 1's length to scalar arg 2
     ; (* GUI_REC_SIZE done in-handler) so the dispatcher range-checks before the
     ; record walk. STRICT denies an unmigrated PTR nibble.
-    SYSCALL_ENTRY syscall_entry.sc_gui_batch,        2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(0, 2), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_gui_batch,        2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LENx(0, 2, SCSZ_64), SC_FLAG_STRICT
     ; SYS_GUI_PRESENT(damage_ptr, rect_count) -> rect count. damage is
     ; rect_count * 32 bytes (4 quads each); arg_desc ties PTR arg 1 to scalar 2.
-    SYSCALL_ENTRY syscall_entry.sc_gui_present,      2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LEN(0, 2), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_gui_present,      2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_GUI_DRAW, SC_DESC_LENx(0, 2, SCSZ_32), SC_FLAG_STRICT
     ; SYS_GUI_GLYPH_BAKE(codepoint, fg, bg) -> atlas cell index or -1. All
     ; scalars; returns GLYPH_NONE (-1) for now (no atlas surface yet).
     SYSCALL_ENTRY syscall_entry.sc_gui_glyph_bake,   3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_GUI_DRAW
+    ; SYS_WM_LIST(out_buf, max_entries) -> count of open windows written (-1 reject).
+    ; Read-only enumeration for the ring-3 desktop shell's taskbar. Each record is
+    ; WM_LIST_REC bytes: u32 id, u32 flags, 40-byte title (=48). CAP_WM_QUERY-gated
+    ; so only the shell can see the window list. arg_desc validates the PTR for
+    ; count * WM_LIST_REC(48) bytes at the dispatcher (was count*1 - an
+    ; under-check the handler had to cover); STRICT denies a raw nibble.
+    SYSCALL_ENTRY syscall_entry.sc_wm_list,          2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_WM_QUERY, (SC_DESC_LENx(0, 2, SCSZ_48) | SC_DESC_WRITE(0)), SC_FLAG_STRICT
+
+    ; Fixed sparse driver ABI. Reserved rows fail closed. CAP_DRIVER is absent
+    ; from every built-in app manifest and is installed only for an admitted
+    ; driver slot by the future external-driver loader.
+    %rep (232 - 81)
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied, 0, 0, CAP_DRIVER
+    %endrep
+    ; 232 REGISTER(requested_caps): policy and identity are kernel-owned.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_register,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    ; 233 MMIO, 235 IRQ, 236 PIO grants stay control-plane only (those windows
+    ; come from PCI enumeration the driver cannot see). 234 GRANT_DMA is the ONE
+    ; driver-callable DMA path: the handler calls drvhost_dma_alloc, which mints a
+    ; policy-bounded coherent buffer INTERNALLY (never a drvhost_grant_* call from
+    ; ring 3 - test_driver_framework.ps1) and returns its device-physical base.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_dma_alloc,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    ; 237..239 reserved.
+    %rep 3
+        SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,   0, 0, CAP_DRIVER
+    %endrep
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_read32,  1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_write32, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 242 DMA_MAP(phys) -> ring-3 VA of the driver's OWN granted DMA window
+    ; (broker proves phys is a grant base, then l3_map_driver_dma aliases it
+    ; PRESENT|USER|W+NX into the caller slot). 243 IRQ_WAIT() -> forwarded-IRQ
+    ; event count; a bounded yield that returns 0 on the tick-deadline timeout so
+    ; a driver degrades cleanly to polling and never wedges its core (no-freeze).
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_dma_map,      1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_irq_wait,     0, 0, CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_read8,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_write8,   2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_ring_establish, 1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_ring_submit,  2, SC_KIND2(FN_KIND_PTR, FN_KIND_SCALAR), CAP_DRIVER, (SC_DESC_LENx(0, 2, SCSZ_16) | SC_DESC_WRITE(0)), SC_FLAG_STRICT
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pci_cfg_read32, 4, SC_KIND4(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 249 cross-driver MMIO grant is control-plane only.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_denied,       0, 0, CAP_DRIVER
+    ; 250..262 width-parametric brokered MMIO/PIO + DMA-pointer program op
+    ; (VirtIO modern common_cfg is byte/word/qword; legacy is word/dword I/O).
+    ; Every access is bounds-checked to a granted window inside the broker.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd8,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd16,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_read32,  1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_rd64,    1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr8,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr16,    2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_write32, 2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr64,    2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_mmio_wr_dmaptr, 3, SC_KIND3(FN_KIND_SCALAR, FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_rd16,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_wr16,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_rd32,     1, SC_KIND1(FN_KIND_SCALAR), CAP_DRIVER
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_pio_wr32,     2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
+    ; 263 net.l2 RX: grant-relative offset + bounded Ethernet frame length.
+    SYSCALL_ENTRY syscall_entry.sc_drvhost_net_rx,       2, SC_KIND2(FN_KIND_SCALAR, FN_KIND_SCALAR), CAP_DRIVER
 syscall_table_end:
 syscall_table_count equ (syscall_table_end - syscall_table) / SYSCALL_ENTRY_SIZE
 

@@ -5,6 +5,8 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $NoAsmGuard = Join-Path $Root 'tools\security\check_no_asm.ps1'
 $PrivacyGuard = Join-Path $Root 'tools\security\check_release_privacy.ps1'
 $BuildIntegrityGuard = Join-Path $Root 'tools\security\check_build_integrity.ps1'
+$MathematicalFaultGuard = Join-Path $Root 'tools\security\check_mathematical_faults.ps1'
+$ToolchainPinGuard = Join-Path $Root 'tools\security\check_toolchain_pins.ps1'
 $PresubmitGuard = Join-Path $Root 'tools\security\check_ghl_presubmit.ps1'
 $FixtureGuard = Join-Path $Root 'scripts\test\test_ghl_security_fixtures.ps1'
 $InvariantGuard = Join-Path $Root 'scripts\test\test_ghl_invariants.ps1'
@@ -37,6 +39,12 @@ if (-not (Test-Path -LiteralPath $PrivacyGuard)) {
 }
 if (-not (Test-Path -LiteralPath $BuildIntegrityGuard)) {
     throw "Missing build-graph integrity guard: $BuildIntegrityGuard"
+}
+if (-not (Test-Path -LiteralPath $MathematicalFaultGuard)) {
+    throw "Missing mathematical fault guard: $MathematicalFaultGuard"
+}
+if (-not (Test-Path -LiteralPath $ToolchainPinGuard)) {
+    throw "Missing toolchain pin guard: $ToolchainPinGuard"
 }
 if (-not (Test-Path -LiteralPath $PresubmitGuard)) {
     throw "Missing GHL presubmit guard: $PresubmitGuard"
@@ -87,6 +95,45 @@ Write-Host '[ghl-security] Checking build-graph integrity (legacy vs new-archite
 & powershell -NoProfile -ExecutionPolicy Bypass -File $BuildIntegrityGuard
 if ($LASTEXITCODE -ne 0) {
     throw 'Build-graph integrity guard failed (asm/include/nasm leak, generated-as-source, or deprecated import).'
+}
+
+Write-Host '[ghl-security] Checking mathematically triggerable fault proofs...' -ForegroundColor Yellow
+& powershell -NoProfile -ExecutionPolicy Bypass -File $MathematicalFaultGuard -RepoRoot $Root
+if ($LASTEXITCODE -ne 0) {
+    throw 'Mathematical fault guard failed (deterministic trigger/evidence/fix finding emitted).'
+}
+
+Write-Host '[ghl-security] Checking tss_init_for_core core-index bound proof...' -ForegroundColor Yellow
+$TssBoundProof = Join-Path $Root 'tools\security\tss_core_index_bound_proof.py'
+if (-not (Test-Path -LiteralPath $TssBoundProof)) {
+    throw "Missing TSS core-index bound proof: $TssBoundProof"
+}
+& python $TssBoundProof
+if ($LASTEXITCODE -ne 0) {
+    throw 'TSS core-index bound proof failed (an admitted core index reaches an out-of-bounds GDT/pool write).'
+}
+
+Write-Host '[ghl-security] Checking cross-path Copy Fail device-length clamps (CVE-2026-31431 class)...' -ForegroundColor Yellow
+$CopyFailScanner = Join-Path $Root 'tools\security\check_async_copy_fail.py'
+if (-not (Test-Path -LiteralPath $CopyFailScanner)) {
+    throw "Missing Copy Fail scanner: $CopyFailScanner"
+}
+# Negative self-test first: prove the scanner trips on a planted unclamped sibling
+# (an async ingest path that drops the clamp its twin applies) and clears once the
+# clamp is added -- so the guard can never silently rot into a no-op.
+& python $CopyFailScanner --selftest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Copy Fail scanner self-test failed (it no longer catches a planted unclamped sibling).'
+}
+& python $CopyFailScanner --repo-root $Root
+if ($LASTEXITCODE -ne 0) {
+    throw 'Copy Fail scanner found a device-controlled RX length reaching a length-trusting sink without the upper-bound clamp a sibling path applies.'
+}
+
+Write-Host '[ghl-security] Checking frozen toolchain pins (gritc.py + ed25519_host.py sha256, nasm version)...' -ForegroundColor Yellow
+& powershell -NoProfile -ExecutionPolicy Bypass -File $ToolchainPinGuard
+if ($LASTEXITCODE -ne 0) {
+    throw 'Toolchain pin guard failed (a swapped/edited compiler or assembler).'
 }
 
 Write-Host '[ghl-security] Checking GHL source presubmit rules...' -ForegroundColor Yellow
@@ -174,6 +221,26 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Ed25519 verifier evaluation failed.'
 }
 
+Write-Host '[ghl-security] === Track-1 reproducible-build attestation (pinned gritc double-compile vs recorded digests) ===' -ForegroundColor Cyan
+$ReproBuild = Join-Path $Root 'scripts\test\check_reproducible_build.py'
+if (-not (Test-Path -LiteralPath $ReproBuild)) {
+    throw "Missing reproducible-build attestation: $ReproBuild"
+}
+& python $ReproBuild
+if ($LASTEXITCODE -ne 0) {
+    throw 'Reproducible-build attestation failed (non-reproducible compile or digest drift).'
+}
+
+Write-Host '[ghl-security] === Track-1 signed CI provenance (SLSA-style, verified by the Track-2/7 Ed25519 root) ===' -ForegroundColor Cyan
+$ProvenanceEval = Join-Path $Root 'scripts\test\eval_provenance.py'
+if (-not (Test-Path -LiteralPath $ProvenanceEval)) {
+    throw "Missing signed-provenance evaluator: $ProvenanceEval"
+}
+& python $ProvenanceEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'Signed CI provenance evaluation failed (gen/sign/verify round-trip or a negative).'
+}
+
 Write-Host '[ghl-security] === Enforcement meta-tests (the guards have negative tests) ===' -ForegroundColor Cyan
 & powershell -NoProfile -ExecutionPolicy Bypass -File $MetaTest
 if ($LASTEXITCODE -ne 0) {
@@ -234,6 +301,23 @@ foreach ($drvModule in $Track8Drivers) {
     if (Test-Path -LiteralPath $drvOut) { Remove-Item -LiteralPath $drvOut -Force }
 }
 
+Write-Host '[ghl-security] === Track-8 INV-DRIVER-NO-DMA-MINT re-proven against the real broker ===' -ForegroundColor Cyan
+$DrvhostDmaEval = Join-Path $Root 'scripts\test\eval_drvhost_dma_mint.py'
+if (-not (Test-Path -LiteralPath $DrvhostDmaEval)) {
+    throw "Missing Track-8 broker DMA-mint proof: $DrvhostDmaEval"
+}
+# Selftest first: the proof must catch three PLANTED broken brokers (ownership
+# check dropped, capability gate dropped, pointer-value containment dropped),
+# so this guard can never silently rot into a no-op.
+& python $DrvhostDmaEval --selftest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Broker DMA-mint proof selftest failed (a planted broken driver_host was NOT caught).'
+}
+& python $DrvhostDmaEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'INV-DRIVER-NO-DMA-MINT failed against the real broker (a driver_id can reach a DMA window outside its granted table, or a grant path mints unauthorized authority).'
+}
+
 Write-Host '[ghl-security] === Track-5 monitor-HAL detect/select/second-stage/IOMMU (real GHL math) ===' -ForegroundColor Cyan
 $MonHalEval = Join-Path $Root 'scripts\test\eval_mon_hal.py'
 if (-not (Test-Path -LiteralPath $MonHalEval)) {
@@ -256,9 +340,9 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host '[ghl-security] === Track-5 G1 REAL VT-x back-end compiles (kernel_vmx intrinsics) ===' -ForegroundColor Cyan
 # The back-end emits real VMXON/VMCS/VMLAUNCH; VMX #UDs on TCG so it is NOT run
-# here (verified tested-accel per scripts/test/run_vmx_accel.md). This guard
-# proves the module + the new kernel_vmx/sgdt/sidt/str intrinsics keep compiling
-# in kernel emit mode, so the privileged path can never silently rot.
+# here. scripts/test/run_vmx_accel.md documents the separate accel/HW procedure;
+# this guard only proves the module + the kernel_vmx/sgdt/sidt/str intrinsics
+# keep compiling in kernel emit mode, so the privileged path can never silently rot.
 $VmxBackend = Join-Path $Root 'src\kernel\grithlk\mon_hal_vmx_backend.ghl'
 if (-not (Test-Path -LiteralPath $VmxBackend)) {
     throw "Missing Track-5 VT-x back-end: $VmxBackend"

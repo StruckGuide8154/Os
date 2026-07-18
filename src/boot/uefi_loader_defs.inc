@@ -119,3 +119,17 @@ default rel
   pop rbx
 %endif
 %endmacro
+
+; --- Boot-progress visual block (GRIT_BOOT_TRACE, debug-only) ---------------
+; Paint the next loader boot-progress block to the GOP framebuffer. Companion to
+; the kernel's boot_block_next (boot_timing.ghl): the loader marches a row of
+; colored squares across the TOP band (y=4); the kernel uses the band below. The
+; rightmost block visible at a hang is the last loader stage that finished. The
+; heavy lifting lives in bootblk_next (uefi_loader_boottrace.inc), which saves +
+; restores every register, so BOOTBLK is safe to drop after any loader step once
+; the framebuffer exists (i.e. after gop_init). No-op unless GRIT_BOOT_TRACE.
+%macro BOOTBLK 0
+%ifdef GRIT_BOOT_TRACE
+    call bootblk_next
+%endif
+%endmacro

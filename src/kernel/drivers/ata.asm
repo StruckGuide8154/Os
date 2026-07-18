@@ -43,6 +43,13 @@ ATA_SR_ERR      equ 0x01
 ; Returns: eax = 0 on success, -1 on error
 ; ============================================================================
 ata_read_sectors:
+    ; Fail-closed sector-count ceiling (GSEC 2026-07-06). edx is caller-supplied
+    ; and is trusted both for the destination window and by ramdisk_classify.
+    ; Reject anything above the largest provisioned FS buffer BEFORE any path so
+    ; a wild/hostile count can neither run an unbounded PIO loop nor overflow the
+    ; ramdisk range add. No legitimate caller exceeds ATA_MAX_SECTORS_PER_CALL.
+    cmp edx, ATA_MAX_SECTORS_PER_CALL
+    ja .read_count_reject
     ; RAM-disk fast path. If a ramdisk region covers this LBA range, the
     ; entire request is served from memory and we never touch the IDE
     ; ports. This is what makes the kernel work on real hardware that
@@ -57,6 +64,9 @@ ata_read_sectors:
     ret
 .read_ramdisk_ok:
     xor eax, eax
+    ret
+.read_count_reject:
+    mov eax, -1                 ; count over cap: bug/attack, fail closed
     ret
 
 .ata_pio_read:
@@ -162,6 +172,10 @@ ata_read_sectors:
 ; Returns: eax = 0 on success, -1 on error
 ; ============================================================================
 ata_write_sectors:
+    ; Fail-closed sector-count ceiling - see ata_read_sectors. Same edx trust
+    ; on the source window and the ramdisk range add; reject before any path.
+    cmp edx, ATA_MAX_SECTORS_PER_CALL
+    ja .write_count_reject
     ; RAM-disk fast path. See ata_read_sectors for rationale. Writes are
     ; not propagated back to DATA.IMG on disk - they live for the boot
     ; session only, matching QEMU without -snapshot=off.
@@ -174,6 +188,9 @@ ata_write_sectors:
     ret
 .write_ramdisk_ok:
     xor eax, eax
+    ret
+.write_count_reject:
+    mov eax, -1                 ; count over cap: bug/attack, fail closed
     ret
 
 .ata_pio_write:

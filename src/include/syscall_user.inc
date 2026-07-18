@@ -763,4 +763,15 @@ MPROT_WX_MODE_XRO equ 1
     syscall
 %endmacro
 
+; --- desktop shell ---
+; SYS_WM_LIST(out_buf, max_entries) -> rax = #windows written (-1 reject).
+;   out_buf is max_entries fixed WM_LIST_REC-byte records (u32 id, u32 flags,
+;   40-byte title). CAP_WM_QUERY - only the desktop shell's manifest grants it.
+%macro SYS_WM_LIST 2
+    APP_SYSNO 80
+    mov rdi, %1
+    mov rsi, %2
+    syscall
+%endmacro
+
 %endif

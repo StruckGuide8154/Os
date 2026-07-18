@@ -31,30 +31,83 @@ module "driver_host";
 unsafe raw_mem;          # lq/sq over the broker's own tables + brokered MMIO
 unsafe kernel_io;        # inb/outb/ind/outd for brokered PORT I/O at the boundary
 unsafe implicit_extern;  # &drv_* module-local table addresses
+unsafe kernel_priv;      # atomic_xchg for bounded per-driver ring serialization
+
+# --- kernel primitives the broker leans on (all outside the driver's reach) ----
+# page_alloc_contig(n_pages) -> device-physical base of a physically-contiguous
+#   run (constrained <4 GiB, so it is also a valid identity-mapped kernel VA), or
+#   0 on failure. This is the ONLY minter of DMA-reachable memory; a driver can
+#   never name a physical address, only ask the broker to allocate a bounded one.
+# l3_map_driver_dma(slot, phys, len) -> the ring-3 VA the broker mapped `len`
+#   bytes of `phys` into inside `slot`'s own arena (PRESENT|USER|W+NX), or 0.
+# l3_unmap_driver_dma(slot) -> tears that mapping down (containment on revoke).
+extern page_alloc_contig;
+extern l3_map_driver_dma;
+extern l3_unmap_driver_dma;
 
 # --- registration / lifecycle ----------------------------------------------
 global drvhost_register;
+global drvhost_policy_install;
+global drvhost_register_slot;
+global drvhost_id_for_slot;
 global drvhost_effective_caps;
 global drvhost_state;
 # --- grants (policy-authorized only) ---------------------------------------
 global drvhost_grant_mmio;
+global drvhost_grant_mmio_for;
 global drvhost_grant_pio;
 global drvhost_grant_dma;
 global drvhost_grant_irq;
 global drvhost_dma_contained;
+# --- DMA self-service (policy-bounded; the ONLY driver-callable DMA path) -----
+global drvhost_dma_alloc;
+global drvhost_dma_map;
+global drvhost_dma_adopt;
+global drvhost_dma_unmap;
+global drvhost_net_rx;
+# --- IRQ delivery bookkeeping (vector stub -> per-driver pending word) --------
+global drvhost_irq_note;
+global drvhost_irq_take;
+# --- per-frame tick model (option 1, docs/virtio-net-ring3-migration.md §4b) ---
+global drvhost_register_tick;
+global drvhost_tick_entry;
+global drvhost_tick_begin;
+global drvhost_tick_end;
 # --- brokered access (the ONLY way a driver touches hardware) ---------------
 global drvhost_mmio_read32;
 global drvhost_mmio_write32;
 global drvhost_pio_read8;
 global drvhost_pio_write8;
+global drvhost_pci_cfg_read32;
+# --- width-parametric brokered access (VirtIO modern common_cfg + legacy) ----
+global drvhost_mmio_rd8;
+global drvhost_mmio_rd16;
+global drvhost_mmio_rd64;
+global drvhost_mmio_wr8;
+global drvhost_mmio_wr16;
+global drvhost_mmio_wr64;
+global drvhost_mmio_write_dma_ptr;
+global drvhost_pio_rd16;
+global drvhost_pio_rd32;
+global drvhost_pio_wr16;
+global drvhost_pio_wr32;
 # --- descriptor rings (fast path) ------------------------------------------
 global drvhost_ring_establish;
 global drvhost_ring_submit;
+# --- stable device-class ABI (kernel-owned, generation-safe handles) --------
+global drvclass_publish;
+global drvclass_publish_net_l2;
+global drvclass_resolve;
+global drvclass_revoke;
+global drvclass_net_l2_mtu;
+global drvclass_net_l2_features;
 # --- containment (G4) -------------------------------------------------------
 global drvhost_fault;
+global drvhost_charge_result;
 global drvhost_quarantine;
 global drvhost_restart;
 global drvhost_irq_deliver;
+global drvhost_revoke_resources;
 
 # ---------------------------------------------------------------------------
 # Capability classes - coarse "what kind of access is conceivable" bits. A set
@@ -66,7 +119,21 @@ const DRV_CAP_PIO   = 2;        # brokered port I/O within a granted port range
 const DRV_CAP_DMA   = 4;        # a DMA window the broker maps for the device
 const DRV_CAP_IRQ   = 8;        # receive forwarded IRQ signals
 const DRV_CAP_RING  = 16;       # establish shared-memory descriptor rings
-const DRV_CAP_RESET = 32;       # device reset / firmware load (threshold-gated)
+const DRV_CAP_RESET = 32;       # transient device reset (threshold-gated).
+                                 # ABI row 264 SC_DRVHOST_DEVICE_RESET is reserved
+                                 # for it (compiler-gated by `capability reset;`,
+                                 # control-plane denied until dispatched).
+const DRV_CAP_PCICFG = 64;      # brokered PCI config-space READ (enumeration only;
+                                 # gated so only a signed PnP/enumeration controller
+                                 # is ever registered with this bit, see docs/gpu-driver/
+                                 # TODO.md §2b item 1). Grants no MMIO/DMA/PIO authority.
+const DRV_CAP_FWLOAD = 128;     # firmware load into the device (threshold-gated).
+                                 # Split from DRV_CAP_RESET on purpose: loaded
+                                 # firmware PERSISTS past a reboot, so reset
+                                 # authority must never subsume it. ABI row 265
+                                 # SC_DRVHOST_FW_LOAD is reserved (compiler-gated
+                                 # by `capability fwload;`, control-plane denied
+                                 # until dispatched).
 
 # Driver lifecycle states.
 const DRV_ST_NONE       = 0;    # slot unused
@@ -89,6 +156,30 @@ const DRV_ERR_GRANT = 3;        # no granted window contains the access
 const DRV_ERR_FULL  = 4;        # a table is full
 const DRV_ERR_STATE = 5;        # driver quarantined / dead
 
+# Common class-handle ABI v1.  Handles are positive 63-bit opaque values:
+#   bits  0..7   registry entry + 1 (zero is never a handle)
+#   bits  8..15  class kind
+#   bits 16..23  negotiated ABI version
+#   bits 24..31  authoritative driver id
+#   bits 32..62  restart generation
+# Every field is revalidated against kernel-owned rows on resolve.  The packed
+# generation makes a handle from a quarantined/restarted instance permanently
+# stale; restart fails closed before the 31-bit generation could wrap.
+const DRVCLASS_ABI_V1       = 1;
+const DRVCLASS_NET_L2       = 1;
+const DRVCLASS_BLOCK        = 2;
+const DRVCLASS_AUDIO_PCM    = 3;
+const DRVCLASS_INPUT        = 4;
+const DRVCLASS_DISPLAY      = 5;
+const DRVCLASS_WLAN_RADIO   = 6;
+const DRVCLASS_KIND_MAX     = 6;
+const DRVCLASS_MAX          = 64;
+const DRVCLASS_GEN_MAX      = 0x7FFFFFFF;
+const DRVCLASS_NET_F_CSUM   = 1;
+const DRVCLASS_NET_F_VLAN   = 2;
+const DRVCLASS_NET_F_SG     = 4;
+const DRVCLASS_NET_F_ALL    = 7;
+
 # --- driver process table ---------------------------------------------------
 data drv_state:   16 x 4;       # DRV_ST_*
 data drv_caps_req: 16 x 4;      # mask the driver asked for
@@ -97,6 +188,60 @@ data drv_policy:  16 x 4;       # policy-granted mask (from the signed manifest)
 data drv_code_hash: 16 x 8;     # bound identity (component_id tie-in)
 data drv_faults:  16 x 4;       # running fault count
 data drv_restarts: 16 x 4;      # restart generation
+
+# Stable class registry.  A zero owner is a free row.  Publication is a trusted
+# device-manager operation performed only after the class health check passes.
+# No function pointer or raw address crosses this boundary.
+data drvclass_owner:      64 x 4;
+data drvclass_kind:       64 x 4;
+data drvclass_version:    64 x 4;
+data drvclass_generation: 64 x 4;
+data drvclass_flags:      64 x 4;
+data drvclass_mtu:        64 x 4;  # net.l2 only; zero for other classes
+
+# Kernel-owned admission policy, indexed by the authoritative ring-3 slot.
+# Only the verified package/device-manager control plane installs these rows;
+# BSS-zero means "not a driver" and registration fails closed.
+data drv_slot_policy_caps: 16 x 4;
+data drv_slot_code_hash: 16 x 8;
+# Signed per-driver DMA byte ceiling (the loader installs it alongside caps).
+# drvhost_dma_alloc refuses once a driver's running total would exceed this, so
+# a compromised driver can never exhaust physical memory by looping GRANT_DMA.
+# BSS-zero => no DMA budget => every self-service alloc fails closed.
+data drv_slot_policy_dma_cap: 16 x 8;
+
+# --- driver-facing DMA accounting (keyed by driver_id) ----------------------
+# One mapped DMA region per driver: base phys, mapped VA (0 = unmapped), and
+# byte length, so quarantine/restart can tear the VA mapping down deterministically.
+# drv_dma_used is the running allocated total checked against the policy cap.
+data drv_dma_used:     16 x 8;
+data drv_dma_map_phys: 16 x 8;
+data drv_dma_map_va:   16 x 8;
+data drv_dma_map_len:  16 x 8;
+
+# --- forwarded-IRQ pending counts (vector stub bumps; IRQ_WAIT drains) --------
+data drv_irq_pending:  16 x 4;
+
+# --- per-frame tick model (option 1) ----------------------------------------
+# A ring-3 driver in the tick model exposes a bounded per-frame `virtio_tick`
+# entry. The signed loader records its in-slot ring-3 VA here AFTER spawn; the
+# kernel's per-frame tick job reads it and invokes it via the ring-3 callback
+# path. drv_tick_busy is the re-entrancy guard (mirrors l3_slot_in_flight for
+# GUI callbacks): at most one tick per driver is ever in flight, so the kernel
+# can never stack tick->syscall->...->tick for the same driver. Both are keyed
+# by driver_id and cleared on quarantine/restart so a contained driver is no
+# longer ticked and a restart must re-register its entry through the loader.
+data drv_tick_entry: 16 x 8;     # ring-3 tick entry VA (0 = none registered)
+data drv_tick_busy:  16 x 4;     # 1 while this driver's tick is in flight
+
+# A ring batch is copied once from ring-3 memory into the caller's private,
+# kernel-owned 4 KiB snapshot.  The busy word prevents two threads in the same
+# driver slot from sharing scratch.  Hardware execution never reloads address,
+# operation, or write data from the mutable user batch.
+data drv_ring_busy: 16 x 4;
+data drv_ring_scratch: 65536 x 1;       # 16 slots * 4096 bytes
+data drv_net_rx_scratch: 1536 x 1;      # bounded kernel-owned Ethernet copy
+data drv_pci_cfg_busy: 1 x 4;           # CF8/CFC is one global transaction port
 
 # --- MMIO grant table -------------------------------------------------------
 data mg_drv:   32 x 4;
@@ -134,9 +279,174 @@ fn drv_valid_id(id) {
     return 1;
 }
 
+fn drv_valid_slot(slot) {
+    if slot < 0 { return 0; }
+    # driver_id is slot+1; id 0 remains the sentinel.
+    if slot >= DRV_MAX - 1 { return 0; }
+    return 1;
+}
+
+# Bounded lifecycle/data-plane serialization.  Failure is safe: quarantine has
+# already made the driver non-running, and restart refuses to restore it until
+# the prior bounded batch releases this lock.
+fn drvhost_ring_lock(id) {
+    let spins = 0;
+    while spins < 4096 {
+        if atomic_xchg(&drv_ring_busy + id * 4, 1) == 0 { return 1; }
+        spins = spins + 1;
+    }
+    return 0;
+}
+
+# Remove every hardware authority row owned by `id`.  The tables are compacted
+# in place so repeated quarantine/restart cycles cannot exhaust capacity with
+# dead rows.  State is set non-running before this helper is called, making all
+# data-plane checks fail closed while revocation completes.
+fn drvhost_revoke_resources(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+
+    let mn = lw(&mg_count);
+    let ms = 0;
+    let md = 0;
+    while ms < mn {
+        if lw(&mg_drv + ms * 4) != id {
+            if md != ms {
+                sw(&mg_drv + md * 4, lw(&mg_drv + ms * 4));
+                sq(&mg_base + md * 8, lq(&mg_base + ms * 8));
+                sq(&mg_end + md * 8, lq(&mg_end + ms * 8));
+            }
+            md = md + 1;
+        }
+        ms = ms + 1;
+    }
+    let mkeep = md;
+    while md < mn {
+        sw(&mg_drv + md * 4, 0);
+        sq(&mg_base + md * 8, 0);
+        sq(&mg_end + md * 8, 0);
+        md = md + 1;
+    }
+    sw(&mg_count, mkeep);
+
+    let pn = lw(&pg_count);
+    let ps = 0;
+    let pd = 0;
+    while ps < pn {
+        if lw(&pg_drv + ps * 4) != id {
+            if pd != ps {
+                sw(&pg_drv + pd * 4, lw(&pg_drv + ps * 4));
+                sw(&pg_lo + pd * 4, lw(&pg_lo + ps * 4));
+                sw(&pg_hi + pd * 4, lw(&pg_hi + ps * 4));
+            }
+            pd = pd + 1;
+        }
+        ps = ps + 1;
+    }
+    let pkeep = pd;
+    while pd < pn {
+        sw(&pg_drv + pd * 4, 0);
+        sw(&pg_lo + pd * 4, 0);
+        sw(&pg_hi + pd * 4, 0);
+        pd = pd + 1;
+    }
+    sw(&pg_count, pkeep);
+
+    let dn = lw(&dg_count);
+    let ds = 0;
+    let dd = 0;
+    while ds < dn {
+        if lw(&dg_drv + ds * 4) != id {
+            if dd != ds {
+                sw(&dg_drv + dd * 4, lw(&dg_drv + ds * 4));
+                sq(&dg_base + dd * 8, lq(&dg_base + ds * 8));
+                sq(&dg_end + dd * 8, lq(&dg_end + ds * 8));
+            }
+            dd = dd + 1;
+        }
+        ds = ds + 1;
+    }
+    let dkeep = dd;
+    while dd < dn {
+        sw(&dg_drv + dd * 4, 0);
+        sq(&dg_base + dd * 8, 0);
+        sq(&dg_end + dd * 8, 0);
+        dd = dd + 1;
+    }
+    sw(&dg_count, dkeep);
+
+    let v = 0;
+    while v < IRQ_MAX {
+        if lw(&irq_owner + v * 4) == id { sw(&irq_owner + v * 4, 0); }
+        v = v + 1;
+    }
+
+    # Tear down the driver's DMA VA mapping (if any) and reset its DMA accounting
+    # so a quarantined/restarted driver keeps NO device-reachable memory. The dg
+    # windows themselves were already compacted out above; here we drop the ring-3
+    # VA alias and zero the running total + pending IRQ count.
+    if lq(&drv_dma_map_va + id * 8) != 0 {
+        l3_unmap_driver_dma(id - 1);
+        sq(&drv_dma_map_va + id * 8, 0);
+        sq(&drv_dma_map_phys + id * 8, 0);
+        sq(&drv_dma_map_len + id * 8, 0);
+    }
+    sq(&drv_dma_used + id * 8, 0);
+    sw(&drv_irq_pending + id * 4, 0);
+
+    # Drop the tick entry + clear its in-flight guard: a quarantined/restarted
+    # driver is no longer ticked, and a restart must re-register through the
+    # signed loader (so a contained instance cannot silently keep being called).
+    sq(&drv_tick_entry + id * 8, 0);
+    sw(&drv_tick_busy + id * 4, 0);
+    # Class endpoints are authority too.  Remove them before recovery so no
+    # consumer can resolve a half-restarted device; the loader republishes only
+    # after its class-specific health check succeeds.
+    drvclass_revoke(id);
+    return DRV_OK;
+}
+
+# Kernel-only control-plane hook. `caps`, `code_hash`, and `dma_cap` must already
+# have passed signed ART_DRIVER admission and concrete device permission review.
+# Installing policy grants no MMIO/PIO/DMA window by itself; `dma_cap` is merely
+# the ceiling the driver's later self-service DMA allocations are bounded to (0
+# means the driver may allocate no DMA even if it carries DRV_CAP_DMA).
+fn drvhost_policy_install(slot, caps, code_hash, dma_cap) {
+    if drv_valid_slot(slot) == 0 { return DRV_ERR_NODRV; }
+    if caps == 0 { return DRV_ERR_CAP; }
+    let id = slot + 1;
+    if lw(&drv_state + id * 4) != DRV_ST_NONE { return DRV_ERR_STATE; }
+    sw(&drv_slot_policy_caps + slot * 4, caps);
+    sq(&drv_slot_code_hash + slot * 8, code_hash);
+    sq(&drv_slot_policy_dma_cap + slot * 8, dma_cap);
+    return DRV_OK;
+}
+
+# Ring-3 registration wrapper. Caller identity is the slot derived by syscall
+# entry, never an id supplied by the driver. Policy and image identity come
+# only from the kernel-owned admission row. Returns id, or 0 on denial.
+fn drvhost_register_slot(slot, requested) {
+    if drv_valid_slot(slot) == 0 { return 0; }
+    let policy = lw(&drv_slot_policy_caps + slot * 4);
+    if policy == 0 { return 0; }
+    let id = slot + 1;
+    let rc = drvhost_register(id, requested, policy,
+                              lq(&drv_slot_code_hash + slot * 8));
+    if rc != DRV_OK { return 0; }
+    return id;
+}
+
+# Map the authoritative caller slot to its live broker identity. Data-plane
+# syscall wrappers use this on every operation, preventing sibling impersonation.
+fn drvhost_id_for_slot(slot) {
+    if drv_valid_slot(slot) == 0 { return 0; }
+    let id = slot + 1;
+    if drv_is_running(id) == 0 { return 0; }
+    return id;
+}
+
 fn drv_is_running(id) {
     if drv_valid_id(id) == 0 { return 0; }
-    if ld(&drv_state + id * 4) != DRV_ST_RUNNING { return 0; }
+    if lw(&drv_state + id * 4) != DRV_ST_RUNNING { return 0; }
     return 1;
 }
 
@@ -152,29 +462,33 @@ fn drv_is_running(id) {
 # ---------------------------------------------------------------------------
 fn drvhost_register(id, requested, policy_grant, code_hash) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    # Registration is a one-shot admission transition.  A quarantined, dead,
+    # or already-running driver must use the kernel-only recovery path; ring 3
+    # cannot reset its own fault state by registering again.
+    if lw(&drv_state + id * 4) != DRV_ST_NONE { return DRV_ERR_STATE; }
     let eff = requested & policy_grant;
-    sd(&drv_caps_req + id * 4, requested);
-    sd(&drv_policy   + id * 4, policy_grant);
-    sd(&drv_caps_eff + id * 4, eff);
+    sw(&drv_caps_req + id * 4, requested);
+    sw(&drv_policy   + id * 4, policy_grant);
+    sw(&drv_caps_eff + id * 4, eff);
     sq(&drv_code_hash + id * 8, code_hash);
-    sd(&drv_faults   + id * 4, 0);
-    sd(&drv_state    + id * 4, DRV_ST_RUNNING);
+    sw(&drv_faults   + id * 4, 0);
+    sw(&drv_state    + id * 4, DRV_ST_RUNNING);
     return DRV_OK;
 }
 
 fn drvhost_effective_caps(id) {
     if drv_valid_id(id) == 0 { return 0; }
-    return ld(&drv_caps_eff + id * 4);
+    return lw(&drv_caps_eff + id * 4);
 }
 
 fn drvhost_state(id) {
     if drv_valid_id(id) == 0 { return DRV_ST_NONE; }
-    return ld(&drv_state + id * 4);
+    return lw(&drv_state + id * 4);
 }
 
 fn drv_has_cap(id, cap_bit) {
     if drv_is_running(id) == 0 { return 0; }
-    if (ld(&drv_caps_eff + id * 4) & cap_bit) == 0 { return 0; }
+    if (lw(&drv_caps_eff + id * 4) & cap_bit) == 0 { return 0; }
     return 1;
 }
 
@@ -189,13 +503,44 @@ fn drvhost_grant_mmio(id, base, len) {
     if len == 0 { return DRV_ERR_GRANT; }
     let end = base + len;
     if end < base { return DRV_ERR_GRANT; }      # address-space overflow
-    let n = ld(&mg_count);
+    let n = lw(&mg_count);
     if n >= MMIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&mg_drv  + n * 4, id);
+    sw(&mg_drv  + n * 4, id);
     sq(&mg_base + n * 8, base);
     sq(&mg_end  + n * 8, end);
-    sd(&mg_count, n + 1);
+    sw(&mg_count, n + 1);
     return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_grant_mmio_for - cross-compartment MMIO grant (TODO.md §2b item 3).
+#
+# The plain drvhost_grant_mmio above authorizes a window for a `id` chosen by
+# the CALLER; nothing in it checks that `id` is the caller's own slot, so on
+# its own it would let ANY driver mint grants for ANY other driver_id (a
+# confused-deputy hole). This wrapper is the actual entry point a controller
+# process is meant to use: `granter` is the caller's OWN driver_id and must
+# hold DRV_CAP_PCICFG - the same bit that marks a signed enumeration/PnP
+# controller (TODO.md's `gpu-pnp` compartment). Only that class of process may
+# route a grant to a DIFFERENT driver_id than its own; every other driver_id
+# keeps using drvhost_grant_mmio(id,...) to grant only to itself (id==caller,
+# enforced at whatever syscall ABI wraps this - the ABI is not yet wired, see
+# TODO.md §2b, but the capability discipline here holds regardless of which
+# syscall row eventually calls it).
+#
+# This is what lets a PnP controller (which itself never touches GPU MMIO -
+# CAP_PCICFG grants no MMIO/DMA/PIO authority of its own) hand the BAR0 window
+# it discovered to the ALREADY-SPAWNED engine compartment's driver_id instead
+# of mis-granting to its own id (the placeholder bug in gpu_pnp.ghl before this
+# change). `target` must already be a DRV_ST_RUNNING driver holding
+# DRV_CAP_MMIO for its own signed policy - this does not create a driver or
+# widen ITS policy, it only authorizes one more window within what its own
+# policy already allows (drvhost_grant_mmio's existing DRV_CAP_MMIO check on
+# `target` still applies unchanged).
+# ---------------------------------------------------------------------------
+fn drvhost_grant_mmio_for(granter, target, base, len) {
+    if drv_has_cap(granter, DRV_CAP_PCICFG) == 0 { return DRV_ERR_CAP; }
+    return drvhost_grant_mmio(target, base, len);
 }
 
 # Find a granted MMIO window owned by `id` that fully contains [addr, addr+len).
@@ -204,10 +549,10 @@ fn drv_mmio_contained(id, addr, len) {
     if len == 0 { return 0; }
     let aend = addr + len;
     if aend < addr { return 0; }
-    let n = ld(&mg_count);
+    let n = lw(&mg_count);
     let i = 0;
     while i < n {
-        if ld(&mg_drv + i * 4) == id {
+        if lw(&mg_drv + i * 4) == id {
             let b = lq(&mg_base + i * 8);
             let e = lq(&mg_end + i * 8);
             if addr >= b {
@@ -227,8 +572,8 @@ fn drv_mmio_contained(id, addr, len) {
 # via drv_mmio_contained semantics: a deny is indistinguishable from open bus,
 # which is the safe direction). write returns DRV_OK / DRV_ERR_*.
 # ---------------------------------------------------------------------------
-fn drvhost_raw_mmio_read32(addr) { return ld(addr); }      # the named HW boundary
-fn drvhost_raw_mmio_write32(addr, val) { sd(addr, val); }  # the named HW boundary
+fn drvhost_raw_mmio_read32(addr) { return lw(addr); }      # the named HW boundary
+fn drvhost_raw_mmio_write32(addr, val) { sw(addr, val); }  # the named HW boundary
 
 fn drvhost_mmio_read32(id, addr) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFFFFFFFF; }
@@ -244,6 +589,83 @@ fn drvhost_mmio_write32(id, addr, val) {
 }
 
 # ---------------------------------------------------------------------------
+# Width-parametric brokered MMIO (8/16/32/64).  VirtIO-1.x common_cfg mixes
+# byte (STATUS/CFGGEN), word (QSELECT/QSIZE/QENABLE/QNOFF), dword (DFEATURE/
+# GFEATURE) and qword (QDESC/QDRIVER/QDEVICE) registers with side effects, so a
+# read-modify-write of a wider unit is NOT safe - each access must be its exact
+# width.  Every variant proves the FULL width lies inside one of the driver's
+# granted MMIO windows (drv_mmio_contained with the real byte count), same
+# default-deny discipline as the 32-bit path.  Denied reads return the all-ones
+# the bus would (safe direction); denied writes return DRV_ERR_*.
+# ---------------------------------------------------------------------------
+fn drvhost_raw_mmio_rd8(addr)  { return lb(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_rd16(addr) { return lh(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_rd64(addr) { return lq(addr); }        # the named HW boundary
+fn drvhost_raw_mmio_wr8(addr, val)  { sb(addr, val); }     # the named HW boundary
+fn drvhost_raw_mmio_wr16(addr, val) { sh(addr, val); }     # the named HW boundary
+fn drvhost_raw_mmio_wr64(addr, val) { sq(addr, val); }     # the named HW boundary
+
+fn drvhost_mmio_rd8(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFF; }
+    if drv_mmio_contained(id, addr, 1) == 0 { return 0xFF; }
+    return drvhost_raw_mmio_rd8(addr);
+}
+fn drvhost_mmio_rd16(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0xFFFF; }
+    if drv_mmio_contained(id, addr, 2) == 0 { return 0xFFFF; }
+    return drvhost_raw_mmio_rd16(addr);
+}
+fn drvhost_mmio_rd64(id, addr) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return 0 - 1; }
+    if drv_mmio_contained(id, addr, 8) == 0 { return 0 - 1; }
+    return drvhost_raw_mmio_rd64(addr);
+}
+fn drvhost_mmio_wr8(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 1) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr8(addr, val & 255);
+    return DRV_OK;
+}
+fn drvhost_mmio_wr16(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 2) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr16(addr, val & 0xFFFF);
+    return DRV_OK;
+}
+fn drvhost_mmio_wr64(id, addr, val) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_mmio_contained(id, addr, 8) == 0 { return DRV_ERR_GRANT; }
+    drvhost_raw_mmio_wr64(addr, val);
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_mmio_write_dma_ptr - program a device-physical POINTER register.  This
+# is the one write where the VALUE is itself a device-reachable address (a
+# VirtIO virtqueue base written into QDESC/QDRIVER/QDEVICE, or an HD-Audio BDL
+# base).  A compromised driver must not be able to point the device at memory it
+# was not granted, so the broker proves BOTH: (1) the MMIO register at `addr`
+# lies in one of the driver's MMIO windows, AND (2) `dma_addr` lies fully inside
+# one of the driver's granted DMA windows (drvhost_dma_contained).  Only then is
+# the pointer written, at the requested width (8 for a 64-bit vq address on the
+# 32-bit-register path is rejected; VirtIO modern uses width 8).  Fail-closed on
+# either check.  (INV-DRIVER-NO-DMA-MINT, re-proven for pointer programming.)
+# ---------------------------------------------------------------------------
+fn drvhost_mmio_write_dma_ptr(id, addr, dma_addr, width) {
+    if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return DRV_ERR_CAP; }
+    if width != 4 {
+        if width != 8 { return DRV_ERR_GRANT; }
+    }
+    if drv_mmio_contained(id, addr, width) == 0 { return DRV_ERR_GRANT; }
+    # The pointer VALUE must be a device address inside this driver's DMA grant.
+    if drvhost_dma_contained(id, dma_addr, 1) == 0 { return DRV_ERR_GRANT; }
+    if width == 8 { drvhost_raw_mmio_wr64(addr, dma_addr); }
+    else { drvhost_raw_mmio_write32(addr, dma_addr); }
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
 # drvhost_grant_dma - authorize a {base,len} coherent DMA window for a driver.
 # Only valid if the driver holds DRV_CAP_DMA (from signed policy). The broker is
 # the only party that mints DMA-reachable memory: a driver can never widen this
@@ -255,12 +677,12 @@ fn drvhost_grant_dma(id, base, len) {
     if len == 0 { return DRV_ERR_GRANT; }
     let end = base + len;
     if end < base { return DRV_ERR_GRANT; }      # address-space overflow
-    let n = ld(&dg_count);
+    let n = lw(&dg_count);
     if n >= MMIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&dg_drv  + n * 4, id);
+    sw(&dg_drv  + n * 4, id);
     sq(&dg_base + n * 8, base);
     sq(&dg_end  + n * 8, end);
-    sd(&dg_count, n + 1);
+    sw(&dg_count, n + 1);
     return DRV_OK;
 }
 
@@ -273,10 +695,10 @@ fn drvhost_dma_contained(id, addr, len) {
     if len == 0 { return 0; }
     let aend = addr + len;
     if aend < addr { return 0; }
-    let n = ld(&dg_count);
+    let n = lw(&dg_count);
     let i = 0;
     while i < n {
-        if ld(&dg_drv + i * 4) == id {
+        if lw(&dg_drv + i * 4) == id {
             let b = lq(&dg_base + i * 8);
             let e = lq(&dg_end + i * 8);
             if addr >= b {
@@ -288,28 +710,246 @@ fn drvhost_dma_contained(id, addr, len) {
     return 0;
 }
 
+# ===========================================================================
+# Driver-facing DMA self-service (the ONLY DMA path reachable from ring 3).
+#
+# A driver asks the broker to allocate a coherent DMA buffer of `len` bytes; it
+# never names a physical address.  The broker:
+#   (1) requires the driver hold DRV_CAP_DMA (from signed policy),
+#   (2) bounds the request against the driver's signed dma_cap (running total),
+#   (3) allocates physically-contiguous <4 GiB memory itself (page_alloc_contig),
+#   (4) records a {base,len} DMA grant via the SAME drvhost_grant_dma discipline
+#       the control plane uses, and
+#   (5) returns the device-physical base.
+# INV-DRIVER-NO-DMA-MINT holds: the driver bounds neither the address (the broker
+# chooses it) nor the size beyond its own signed ceiling.  Fail-closed returns 0
+# (no partial allocation is ever recorded).
+#
+# This is deliberately NOT named drvhost_grant_* : the ring-3 syscall wrapper is
+# allowed to call THIS (a bounded self-service allocator) but is forbidden from
+# ever calling a raw grant/policy primitive (test_driver_framework.ps1).
+# ===========================================================================
+fn drvhost_dma_alloc(id, len) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    if len == 0 { return 0; }
+    # Round the request up to whole pages before every bound check so the cap
+    # accounts for exactly what is reserved.
+    let need = (len + 4095) & 0xFFFFF000;
+    if need < len { return 0; }                       # size overflow
+    let cap = lq(&drv_slot_policy_dma_cap + (id - 1) * 8);
+    let used = lq(&drv_dma_used + id * 8);
+    let total = used + need;
+    if total < used { return 0; }                     # accounting overflow
+    if total > cap { return 0; }                      # over the signed ceiling
+    let pages = need >> 12;
+    let phys = page_alloc_contig(pages);
+    if phys == 0 { return 0; }                         # out of contiguous memory
+    # Record the window with the broker's own fail-closed grant discipline; on
+    # the (table-full) rejection the physical run leaks a bounded amount but no
+    # authority is minted -- still fail-closed toward the driver.
+    if drvhost_grant_dma(id, phys, need) != DRV_OK { return 0; }
+    sq(&drv_dma_used + id * 8, total);
+    return phys;
+}
+
+# Prove `phys` is the base of one of `id`'s granted DMA windows and return that
+# window's byte length (0 if `phys` is not a grant base for this driver). Used by
+# drvhost_dma_map so a driver can only map memory the broker already granted it.
+fn drv_dma_grant_len(id, phys) {
+    let n = lw(&dg_count);
+    let i = 0;
+    while i < n {
+        if lw(&dg_drv + i * 4) == id {
+            if lq(&dg_base + i * 8) == phys {
+                return lq(&dg_end + i * 8) - phys;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# drvhost_dma_map - map a previously-allocated DMA window into the driver's OWN
+# ring-3 arena and return the mapped VA.  `phys` must be the base of one of the
+# caller's DMA grants (proven above).  Exactly one DMA region is mapped per
+# driver at the fixed per-slot DMA VA window; a second map of the same base is
+# idempotent, a map of a different base while one is live fails closed.  The
+# actual PTE writes happen in the paging TCB helper l3_map_driver_dma, which
+# marks the window PRESENT|USER|W+NX inside the caller's slot only.
+# ---------------------------------------------------------------------------
+fn drvhost_dma_map(id, phys) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    let len = drv_dma_grant_len(id, phys);
+    if len == 0 { return 0; }
+    let cur = lq(&drv_dma_map_va + id * 8);
+    if cur != 0 {
+        # Already mapped: only the same base is honoured (idempotent), else deny.
+        if lq(&drv_dma_map_phys + id * 8) == phys { return cur; }
+        return 0;
+    }
+    let va = l3_map_driver_dma(id - 1, phys, len);
+    if va == 0 { return 0; }
+    sq(&drv_dma_map_phys + id * 8, phys);
+    sq(&drv_dma_map_va + id * 8, va);
+    sq(&drv_dma_map_len + id * 8, len);
+    return va;
+}
+
+# Adopt an early-boot physical reservation into a running driver's signed DMA
+# budget. Kernel control-plane only: unlike ring-3 allocation, the caller names
+# `phys`, but the same cap, alignment, accounting, and grant-table checks apply.
+fn drvhost_dma_adopt(id, phys, len) {
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return DRV_ERR_CAP; }
+    if phys == 0 { return DRV_ERR_GRANT; }
+    if (phys & 4095) != 0 { return DRV_ERR_GRANT; }
+    if len == 0 { return DRV_ERR_GRANT; }
+    let need = (len + 4095) & 0xFFFFF000;
+    if need < len { return DRV_ERR_GRANT; }
+    let cap = lq(&drv_slot_policy_dma_cap + (id - 1) * 8);
+    let used = lq(&drv_dma_used + id * 8);
+    let total = used + need;
+    if total < used { return DRV_ERR_GRANT; }
+    if total > cap { return DRV_ERR_CAP; }
+    if drvhost_grant_dma(id, phys, need) != DRV_OK { return DRV_ERR_GRANT; }
+    sq(&drv_dma_used + id * 8, total);
+    return DRV_OK;
+}
+
+# Explicit unmap (cooperative teardown; quarantine/restart also unmap via
+# drvhost_revoke_resources). Idempotent and fail-closed on a bad id.
+fn drvhost_dma_unmap(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    if lq(&drv_dma_map_va + id * 8) == 0 { return DRV_OK; }
+    l3_unmap_driver_dma(id - 1);
+    sq(&drv_dma_map_va + id * 8, 0);
+    sq(&drv_dma_map_phys + id * 8, 0);
+    sq(&drv_dma_map_len + id * 8, 0);
+    return DRV_OK;
+}
+
+# net.l2 RX hand-up. The driver passes a grant-relative offset, never a pointer.
+# Re-prove the complete frame lies inside its live DMA mapping, then copy only
+# that bounded slice into kernel-owned memory. The DMA alias is USER-marked, so
+# parsing it directly under SMAP would fault (and would also permit TOCTOU).
+fn drvhost_net_rx(id, off, len) {
+    if drv_is_running(id) == 0 { return 0; }
+    if drv_has_cap(id, DRV_CAP_DMA) == 0 { return 0; }
+    if len < 14 { return 0; }
+    if len > 1522 { return 0; }
+    let total = lq(&drv_dma_map_len + id * 8);
+    if off > total { return 0; }
+    if len > total - off { return 0; }
+    let phys = lq(&drv_dma_map_phys + id * 8);
+    if phys == 0 { return 0; }
+    let src = phys + off;
+    let i = 0;
+    smap_open();
+    while i < len {
+        sb(&drv_net_rx_scratch + i, lb(src + i));
+        i = i + 1;
+    }
+    smap_close();
+    call net_rx_frame(rdi: &drv_net_rx_scratch, ecx: len);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Forwarded-IRQ bookkeeping. The kernel vector stub ACKs the line, then calls
+# drvhost_irq_note(vector); if that vector is routed to a running driver, its
+# per-driver pending count is bumped. SC_DRVHOST_IRQ_WAIT drains the count via
+# drvhost_irq_take. Counts saturate at a bound so a storm cannot wrap the word.
+# ---------------------------------------------------------------------------
+const IRQ_PENDING_MAX = 0x40000000;
+
+fn drvhost_irq_note(vector) {
+    let id = drvhost_irq_deliver(vector);              # validates routed + running
+    if id == 0 { return 0; }
+    let p = lw(&drv_irq_pending + id * 4);
+    if p < IRQ_PENDING_MAX { sw(&drv_irq_pending + id * 4, p + 1); }
+    return id;
+}
+
+# Consume and return the pending IRQ count for a running driver (0 if none / not
+# running). SC_DRVHOST_IRQ_WAIT calls this each poll; a non-zero return wakes it.
+fn drvhost_irq_take(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    let p = lw(&drv_irq_pending + id * 4);
+    if p != 0 { sw(&drv_irq_pending + id * 4, 0); }
+    return p;
+}
+
+# ---------------------------------------------------------------------------
+# Per-frame tick model (option 1, docs/virtio-net-ring3-migration.md §4b).
+# Grit runs ring-3 code as cooperative callbacks, not preemptive threads, so a
+# ring-3 driver cannot run a long `while(1)` event loop. Instead the signed
+# loader registers the driver's bounded ring-3 `virtio_tick` entry here after
+# spawn, and the kernel's per-frame tick job invokes it once per frame via the
+# ring-3 callback path. This is no-freeze by construction: the tick body is
+# bounded and always returns; if it faults, the caller charges drvhost_fault and
+# the existing quarantine path contains it.
+#
+# CONTROL PLANE ONLY: like grant/policy_install, drvhost_register_tick is called
+# by the kernel loader, never from a ring-3 syscall wrapper (a driver cannot
+# name a slot VA, and must not be able to point its own tick at arbitrary code).
+# ---------------------------------------------------------------------------
+fn drvhost_register_tick(id, entry) {
+    if drv_is_running(id) == 0 { return DRV_ERR_STATE; }
+    if entry == 0 { return DRV_ERR_GRANT; }
+    sq(&drv_tick_entry + id * 8, entry);
+    return DRV_OK;
+}
+
+# Read a driver's registered tick entry VA (0 if none / not running). Non-mutating
+# accessor for diagnostics / the dispatcher's pre-check.
+fn drvhost_tick_entry(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    return lq(&drv_tick_entry + id * 8);
+}
+
+# Per-frame tick admission. Returns the ring-3 tick entry VA to invoke (nonzero)
+# iff a tick MAY start for this driver right now: running, a tick entry is
+# registered, and no tick is already in flight. On success it marks the driver
+# tick-busy (paired with drvhost_tick_end when the tick returns), so a second
+# tick for the same driver can never be stacked. Returns 0 to skip this frame.
+fn drvhost_tick_begin(id) {
+    if drv_is_running(id) == 0 { return 0; }
+    let entry = lq(&drv_tick_entry + id * 8);
+    if entry == 0 { return 0; }
+    if atomic_xchg(&drv_tick_busy + id * 4, 1) != 0 { return 0; }   # already in flight
+    return entry;
+}
+
+# Release the tick in-flight guard once the driver's tick has returned to the
+# kernel (or been abandoned on fault). Idempotent; fail-closed on a bad id.
+fn drvhost_tick_end(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    atomic_xchg(&drv_tick_busy + id * 4, 0);
+    return DRV_OK;
+}
+
 # ---------------------------------------------------------------------------
 # Brokered port I/O. A granted [lo,hi] port range; default-deny outside it.
 # ---------------------------------------------------------------------------
 fn drvhost_grant_pio(id, lo, hi) {
     if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
     if hi < lo { return DRV_ERR_GRANT; }
-    let n = ld(&pg_count);
+    let n = lw(&pg_count);
     if n >= PIO_GRANT_MAX { return DRV_ERR_FULL; }
-    sd(&pg_drv + n * 4, id);
-    sd(&pg_lo  + n * 4, lo);
-    sd(&pg_hi  + n * 4, hi);
-    sd(&pg_count, n + 1);
+    sw(&pg_drv + n * 4, id);
+    sw(&pg_lo  + n * 4, lo);
+    sw(&pg_hi  + n * 4, hi);
+    sw(&pg_count, n + 1);
     return DRV_OK;
 }
 
 fn drv_pio_allowed(id, port) {
-    let n = ld(&pg_count);
+    let n = lw(&pg_count);
     let i = 0;
     while i < n {
-        if ld(&pg_drv + i * 4) == id {
-            if port >= ld(&pg_lo + i * 4) {
-                if port <= ld(&pg_hi + i * 4) { return 1; }
+        if lw(&pg_drv + i * 4) == id {
+            if port >= lw(&pg_lo + i * 4) {
+                if port <= lw(&pg_hi + i * 4) { return 1; }
             }
         }
         i = i + 1;
@@ -330,6 +970,91 @@ fn drvhost_pio_write8(id, port, val) {
     return DRV_OK;
 }
 
+# Width-parametric brokered port I/O (16/32) for the VirtIO legacy transitional
+# I/O BAR.  A 16-bit access at `port` needs both `port` and `port+1` inside the
+# granted range; 32-bit needs port..port+3.  Same default-deny as the 8-bit path.
+fn drv_pio_range_allowed(id, port, hi) {
+    if drv_pio_allowed(id, port) == 0 { return 0; }
+    if drv_pio_allowed(id, hi) == 0 { return 0; }
+    return 1;
+}
+fn drvhost_pio_rd16(id, port) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return 0xFFFF; }
+    if drv_pio_range_allowed(id, port, port + 1) == 0 { return 0xFFFF; }
+    return inw(port);                                   # the named HW boundary
+}
+fn drvhost_pio_rd32(id, port) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return 0xFFFFFFFF; }
+    if drv_pio_range_allowed(id, port, port + 3) == 0 { return 0xFFFFFFFF; }
+    return ind(port);                                   # the named HW boundary
+}
+fn drvhost_pio_wr16(id, port, val) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
+    if drv_pio_range_allowed(id, port, port + 1) == 0 { return DRV_ERR_GRANT; }
+    outw(port, val & 0xFFFF);                           # the named HW boundary
+    return DRV_OK;
+}
+fn drvhost_pio_wr32(id, port, val) {
+    if drv_has_cap(id, DRV_CAP_PIO) == 0 { return DRV_ERR_CAP; }
+    if drv_pio_range_allowed(id, port, port + 3) == 0 { return DRV_ERR_GRANT; }
+    outd(port, val);                                    # the named HW boundary
+    return DRV_OK;
+}
+
+# ---------------------------------------------------------------------------
+# Brokered PCI config-space READ (TODO.md §2b item 1). This is the ONLY path a
+# ring-3 process may reach PCI config space: the caller never issues raw
+# 0xCF8/0xCFC port I/O itself (that would be ambient PIO authority, exactly
+# what the no-ambient-authority rule forbids - TODO.md §0.2). Instead the
+# broker performs the CF8/CFC access on the caller's behalf and returns just
+# the resulting dword, gated by DRV_CAP_PCICFG - a capability class deliberately
+# DISJOINT from DRV_CAP_PIO/DRV_CAP_MMIO, so a normal device driver's policy
+# never carries it; only a signed enumeration/PnP controller's manifest grants
+# it. Unlike the {base,len} grant tables above, this primitive has no separate
+# window grant step - the capability bit alone is the authorization, because
+# the entire accessible surface is already bounded (bus/dev/func/reg below),
+# never an absolute address, and the access is READ-ONLY (no config-space
+# write primitive exists here - enumeration never needs one, and adding one
+# would let a compromised PnP process reprogram BARs/command registers, which
+# is explicitly out of its threat-model reach per TODO.md's compartment table).
+#
+# Bounds every field to its real hardware width before assembling the CF8
+# address so an out-of-range bus/dev/func/reg can never alias into another
+# field (bus:8 dev:5 func:3 reg:8, reg forced dword-aligned exactly as the
+# CF8 mechanism does in hardware). Absent function -> the bus returns
+# 0xFFFFFFFF, same as unbrokered hardware - this is deliberately
+# indistinguishable from a denied/out-of-range request (the safe direction,
+# same convention as drvhost_mmio_read32).
+# ---------------------------------------------------------------------------
+const PCICFG_CF8    = 0xCF8;
+const PCICFG_CFC    = 0xCFC;
+const PCICFG_ENABLE = 0x80000000;
+const PCICFG_OPEN_BUS = 0xFFFFFFFF;
+
+fn drvhost_raw_pci_cfg_read32(bus, dev, func, reg) {  # the named HW boundary
+    let addr = PCICFG_ENABLE | (bus << 16) | (dev << 11) | (func << 8) | (reg & 0xFC);
+    outd(PCICFG_CF8, addr);
+    return ind(PCICFG_CFC);
+}
+
+fn drvhost_pci_cfg_read32(id, bus, dev, func, reg) {
+    if drv_has_cap(id, DRV_CAP_PCICFG) == 0 { return PCICFG_OPEN_BUS; }
+    if bus < 0 { return PCICFG_OPEN_BUS; }
+    if bus > 255 { return PCICFG_OPEN_BUS; }
+    if dev < 0 { return PCICFG_OPEN_BUS; }
+    if dev > 31 { return PCICFG_OPEN_BUS; }
+    if func < 0 { return PCICFG_OPEN_BUS; }
+    if func > 7 { return PCICFG_OPEN_BUS; }
+    if reg < 0 { return PCICFG_OPEN_BUS; }
+    if reg > 255 { return PCICFG_OPEN_BUS; }
+    # CF8 selects global chipset state and CFC consumes it. Serialize the pair
+    # so another CPU cannot redirect this read between the two port accesses.
+    if atomic_xchg(&drv_pci_cfg_busy, 1) != 0 { return PCICFG_OPEN_BUS; }
+    let value = drvhost_raw_pci_cfg_read32(bus, dev, func, reg);
+    atomic_xchg(&drv_pci_cfg_busy, 0);
+    return value;
+}
+
 # ---------------------------------------------------------------------------
 # IRQ routing. A vector is routed to at most one driver, and only if it holds
 # DRV_CAP_IRQ. The kernel vector stub ACKs, then calls drvhost_irq_deliver,
@@ -340,7 +1065,7 @@ fn drvhost_grant_irq(id, vector) {
     if drv_has_cap(id, DRV_CAP_IRQ) == 0 { return DRV_ERR_CAP; }
     if vector < 0 { return DRV_ERR_GRANT; }
     if vector >= IRQ_MAX { return DRV_ERR_GRANT; }
-    sd(&irq_owner + vector * 4, id);
+    sw(&irq_owner + vector * 4, id);
     return DRV_OK;
 }
 
@@ -350,7 +1075,7 @@ fn drvhost_grant_irq(id, vector) {
 fn drvhost_irq_deliver(vector) {
     if vector < 0 { return 0; }
     if vector >= IRQ_MAX { return 0; }
-    let id = ld(&irq_owner + vector * 4);
+    let id = lw(&irq_owner + vector * 4);
     if drv_is_running(id) == 0 { return 0; }
     return id;
 }
@@ -368,8 +1093,10 @@ fn drvhost_irq_deliver(vector) {
 # ---------------------------------------------------------------------------
 const RING_ABI_VERSION = 1;
 const DESC_STRIDE = 16;          # {addr:8 @0, data:4 @8, op:4 @12}
+const RING_MAX_DESC = 256;       # bound one syscall's validation/execution work
 const DESC_OP_READ32  = 0;
 const DESC_OP_WRITE32 = 1;
+const RING_SNAPSHOT_BYTES = 4096;      # 256 descriptors * 16 bytes
 
 fn drvhost_ring_establish(id, abi_version) {
     if drv_has_cap(id, DRV_CAP_RING) == 0 { return DRV_ERR_CAP; }
@@ -377,34 +1104,196 @@ fn drvhost_ring_establish(id, abi_version) {
     return DRV_OK;
 }
 
-# Validate the whole batch first, then execute. Returns DRV_OK only if every
-# descriptor was in-window; otherwise DRV_ERR_GRANT and NOTHING was executed.
+# Copy the whole batch into kernel-owned per-driver scratch, validate that
+# immutable snapshot, then execute the same bytes.  Read results are copied
+# only into the documented user data slots after hardware execution.  Returns
+# DRV_OK only if every descriptor was in-window; otherwise NOTHING executes.
 fn drvhost_ring_submit(id, desc_base, count) {
     if drv_has_cap(id, DRV_CAP_RING) == 0 { return DRV_ERR_CAP; }
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
-    # Pass 1: validate every descriptor's window before touching hardware.
+    if count < 1 { return DRV_ERR_GRANT; }
+    if count > RING_MAX_DESC { return DRV_ERR_GRANT; }
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+
+    let snap = &drv_ring_scratch + id * RING_SNAPSHOT_BYTES;
     let i = 0;
+    # Snapshot all authorization and data fields exactly once while the syscall
+    # wrapper has enabled bounded user access for the pre-validated span.
     while i < count {
-        let d = desc_base + i * DESC_STRIDE;
-        let addr = lq(d);                                  # field @0
-        if drv_mmio_contained(id, addr, 4) == 0 { return DRV_ERR_GRANT; }
+        let u = desc_base + i * DESC_STRIDE;
+        let s = snap + i * DESC_STRIDE;
+        sq(s, lq(u));
+        sw(s + 8, lw(u + 8));
+        sw(s + 12, lw(u + 12));
         i = i + 1;
     }
-    # Pass 2: all validated - execute. `data` is field @8, `op` is field @12.
+
+    # Validate every descriptor in the immutable kernel snapshot.
+    let rc = DRV_OK;
     i = 0;
     while i < count {
-        let d = desc_base + i * DESC_STRIDE;
-        let addr = lq(d);
-        let op = ld(d + 12);
-        if op == DESC_OP_WRITE32 {
-            drvhost_raw_mmio_write32(addr, ld(d + 8));     # data slot = value to write
+        let s = snap + i * DESC_STRIDE;
+        let addr = lq(s);                                  # field @0
+        let op = lw(s + 12);
+        if op != DESC_OP_READ32 {
+            if op != DESC_OP_WRITE32 { rc = DRV_ERR_GRANT; }
         }
-        if op == DESC_OP_READ32 {
-            sd(d + 8, drvhost_raw_mmio_read32(addr));       # data slot <- read result
+        if drv_mmio_contained(id, addr, 4) == 0 { rc = DRV_ERR_GRANT; }
+        i = i + 1;
+    }
+    if rc != DRV_OK {
+        atomic_xchg(&drv_ring_busy + id * 4, 0);
+        return rc;
+    }
+
+    # Execute only snapshot fields.  User mutations after the copy cannot alter
+    # the address, operation, or write value reaching the raw hardware sink.
+    i = 0;
+    while i < count {
+        let s = snap + i * DESC_STRIDE;
+        let addr = lq(s);
+        let op = lw(s + 12);
+        # Quarantine flips state before waiting on this lock.  Recheck at every
+        # hardware boundary so a concurrent fault stops the batch promptly.
+        if drv_is_running(id) == 0 {
+            rc = DRV_ERR_STATE;
+        } else {
+            if op == DESC_OP_WRITE32 {
+                drvhost_raw_mmio_write32(addr, lw(s + 8));
+            }
+            if op == DESC_OP_READ32 {
+                sw(s + 8, drvhost_raw_mmio_read32(addr));
+            }
+        }
+        i = i + 1;
+    }
+
+    # Copy back read results only.  The dispatcher already proved the complete
+    # count*16 span is writable; user-modified op fields are ignored here.
+    if rc == DRV_OK {
+        i = 0;
+        while i < count {
+            let s = snap + i * DESC_STRIDE;
+            if lw(s + 12) == DESC_OP_READ32 {
+                sw(desc_base + i * DESC_STRIDE + 8, lw(s + 8));
+            }
+            i = i + 1;
+        }
+    }
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
+    return rc;
+}
+
+# ---------------------------------------------------------------------------
+# Stable device-class registry.  This is the common foundation used by class
+# brokers; it deliberately carries no callable address.  Hot paths resolve one
+# handle using fixed-index table reads, then submit bounded descriptor batches.
+# ---------------------------------------------------------------------------
+fn drvclass_handle(entry, id, kind, version, generation) {
+    return (generation << 32) | (id << 24) | (version << 16)
+           | (kind << 8) | (entry + 1);
+}
+
+fn drvclass_publish(id, kind, abi_min, abi_max, flags) {
+    if drv_is_running(id) == 0 { return 0; }
+    if kind < 1 { return 0; }
+    if kind > DRVCLASS_KIND_MAX { return 0; }
+    if abi_min < 1 { return 0; }
+    if abi_min > abi_max { return 0; }
+    if abi_min > DRVCLASS_ABI_V1 { return 0; }
+    if abi_max < DRVCLASS_ABI_V1 { return 0; }
+    let generation = lw(&drv_restarts + id * 4) + 1;
+    if generation > DRVCLASS_GEN_MAX { return 0; }
+
+    # A live owner/class pair may publish only once. Recovery revokes first and
+    # can then publish a fresh generation; rejecting an in-place refresh avoids
+    # mixed metadata under a concurrent resolver. Many distinct drivers of the
+    # same class still coexist in separate rows.
+    let i = 0;
+    let free = DRVCLASS_MAX;
+    while i < DRVCLASS_MAX {
+        let owner = lw(&drvclass_owner + i * 4);
+        if owner == 0 {
+            if free == DRVCLASS_MAX { free = i; }
+        } else {
+            if owner == id {
+                if lw(&drvclass_kind + i * 4) == kind { return 0; }
+            }
+        }
+        i = i + 1;
+    }
+    if free >= DRVCLASS_MAX { return 0; }
+    sw(&drvclass_kind + free * 4, kind);
+    sw(&drvclass_version + free * 4, DRVCLASS_ABI_V1);
+    sw(&drvclass_generation + free * 4, generation);
+    sw(&drvclass_flags + free * 4, flags);
+    sw(&drvclass_mtu + free * 4, 0);
+    # Owner is the publication commit word and is written last.
+    sw(&drvclass_owner + free * 4, id);
+    return drvclass_handle(free, id, kind, DRVCLASS_ABI_V1, generation);
+}
+
+fn drvclass_resolve(handle, required_kind, required_version) {
+    if handle == 0 { return 0; }
+    # Bit 63 must remain clear so handles never become negative under GHL's
+    # signed comparisons, and bits above the 31-bit generation are forbidden.
+    if (handle >> 63) != 0 { return 0; }
+    let encoded = handle & 0xFF;
+    if encoded == 0 { return 0; }
+    let entry = encoded - 1;
+    if entry >= DRVCLASS_MAX { return 0; }
+    let kind = (handle >> 8) & 0xFF;
+    let version = (handle >> 16) & 0xFF;
+    let id = (handle >> 24) & 0xFF;
+    let generation = (handle >> 32) & DRVCLASS_GEN_MAX;
+    if kind != required_kind { return 0; }
+    if version != required_version { return 0; }
+    if drv_is_running(id) == 0 { return 0; }
+    if lw(&drvclass_owner + entry * 4) != id { return 0; }
+    if lw(&drvclass_kind + entry * 4) != kind { return 0; }
+    if lw(&drvclass_version + entry * 4) != version { return 0; }
+    if lw(&drvclass_generation + entry * 4) != generation { return 0; }
+    if generation != lw(&drv_restarts + id * 4) + 1 { return 0; }
+    return id;
+}
+
+fn drvclass_revoke(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    let i = 0;
+    while i < DRVCLASS_MAX {
+        if lw(&drvclass_owner + i * 4) == id {
+            # Owner is cleared first so a concurrent resolver fails closed.
+            sw(&drvclass_owner + i * 4, 0);
+            sw(&drvclass_kind + i * 4, 0);
+            sw(&drvclass_version + i * 4, 0);
+            sw(&drvclass_generation + i * 4, 0);
+            sw(&drvclass_flags + i * 4, 0);
+            sw(&drvclass_mtu + i * 4, 0);
         }
         i = i + 1;
     }
     return DRV_OK;
+}
+
+fn drvclass_publish_net_l2(id, abi_min, abi_max, mtu, features) {
+    if mtu < 576 { return 0; }
+    if mtu > 9216 { return 0; }
+    if (features & DRVCLASS_NET_F_ALL) != features { return 0; }
+    let handle = drvclass_publish(id, DRVCLASS_NET_L2, abi_min, abi_max, features);
+    if handle == 0 { return 0; }
+    let entry = (handle & 0xFF) - 1;
+    sw(&drvclass_mtu + entry * 4, mtu);
+    return handle;
+}
+
+fn drvclass_net_l2_mtu(handle) {
+    if drvclass_resolve(handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1) == 0 { return 0; }
+    return lw(&drvclass_mtu + ((handle & 0xFF) - 1) * 4);
+}
+
+fn drvclass_net_l2_features(handle) {
+    if drvclass_resolve(handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1) == 0 { return 0; }
+    return lw(&drvclass_flags + ((handle & 0xFF) - 1) * 4);
 }
 
 # ---------------------------------------------------------------------------
@@ -416,16 +1305,29 @@ fn drvhost_ring_submit(id, desc_base, count) {
 # ---------------------------------------------------------------------------
 fn drvhost_fault(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    let f = ld(&drv_faults + id * 4) + 1;
-    sd(&drv_faults + id * 4, f);
+    let f = lw(&drv_faults + id * 4) + 1;
+    sw(&drv_faults + id * 4, f);
     if f >= FAULT_BUDGET { return drvhost_quarantine(id); }
     return DRV_OK;
 }
 
+# Syscall-boundary fault accounting. Broker helpers stay pure enough for the
+# control plane and invariant evaluator; driver-facing wrappers pass every
+# non-zero data-plane result through here. Eight rejected forged requests thus
+# revoke grants/IRQs and quarantine the caller, while successful operations do
+# not consume budget. The original error is preserved for the caller.
+fn drvhost_charge_result(id, rc) {
+    if rc != DRV_OK { drvhost_fault(id); }
+    return rc;
+}
+
 fn drvhost_quarantine(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    sd(&drv_state + id * 4, DRV_ST_QUARANTINE);
-    return DRV_OK;
+    sw(&drv_state + id * 4, DRV_ST_QUARANTINE);
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+    let rc = drvhost_revoke_resources(id);
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
+    return rc;
 }
 
 # Restart: only from QUARANTINE/DEAD. Clears the fault count, bumps the restart
@@ -434,12 +1336,22 @@ fn drvhost_quarantine(id) {
 # a window a compromised instance set up).
 fn drvhost_restart(id) {
     if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
-    let st = ld(&drv_state + id * 4);
+    let st = lw(&drv_state + id * 4);
     if st != DRV_ST_QUARANTINE {
         if st != DRV_ST_DEAD { return DRV_ERR_STATE; }
     }
-    sd(&drv_faults + id * 4, 0);
-    sd(&drv_restarts + id * 4, ld(&drv_restarts + id * 4) + 1);
-    sd(&drv_state + id * 4, DRV_ST_RUNNING);
+    # Never let a packed class-handle generation wrap and revalidate ancient
+    # authority.  A device that somehow restarts 2^31-1 times remains offline.
+    if lw(&drv_restarts + id * 4) >= DRVCLASS_GEN_MAX - 1 { return DRV_ERR_STATE; }
+    if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
+    let rc = drvhost_revoke_resources(id);
+    if rc != DRV_OK {
+        atomic_xchg(&drv_ring_busy + id * 4, 0);
+        return rc;
+    }
+    sw(&drv_faults + id * 4, 0);
+    sw(&drv_restarts + id * 4, lw(&drv_restarts + id * 4) + 1);
+    sw(&drv_state + id * 4, DRV_ST_RUNNING);
+    atomic_xchg(&drv_ring_busy + id * 4, 0);
     return DRV_OK;
 }

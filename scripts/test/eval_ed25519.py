@@ -229,7 +229,7 @@ class Unit:
         if k == 'call':
             args = ', '.join(self._expr(a) for a in e['args'])
             nm = e['name']
-            if nm in ('lb', 'lw', 'lq', 'sb', 'sw', 'sq', 'ror32'):
+            if nm in ('lb', 'lw', 'lq', 'sb', 'sw', 'sq', 'ror32', 'mulhi'):
                 return '_U.%s(%s)' % (nm, args)
             if nm not in self.fns:
                 if nm in STUB_NOOP_FNS:
@@ -324,6 +324,10 @@ class Unit:
         x &= 0xFFFFFFFF
         n &= 31
         return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+    def mulhi(self, a, b):
+        # High 64 bits of the unsigned 64x64->128 product (mirrors `mul`).
+        return ((a & 0xFFFFFFFFFFFFFFFF) * (b & 0xFFFFFFFFFFFFFFFF)) >> 64
 
     # ---- extern stubs ---------------------------------------------------------
 
@@ -782,6 +786,139 @@ def main():
           rc == 2, 'rc=%d' % rc)
     check('corrupt record is never trusted (floors unchanged)',
           u.call('floor_required_version', ART_UPDATE) == 3)
+
+    # 11. Cross-device replay (Track 2 sec->10: device_id fully unpinned).
+    # The gate derives a REAL per-machine id from CPUID (gate_device_id_init);
+    # there is no `=1` fallback in the verifier any more - gate_device_id()
+    # answers the build-time WILDCARD (1) ONLY until init runs, and an
+    # envelope that names a CONCRETE target device must EXACT-match this
+    # machine's derived id (gate_device_for_target). We simulate two distinct
+    # machines by writing the CPUID-derived state (gate_dev_id/gate_dev_init)
+    # the kernel's gate_device_id_init would have produced, then prove an
+    # envelope signed FOR device A is REJECTED on device B (ENVR_ERR_DEVICE),
+    # accepted on device A, and that the device-agnostic (wildcard-target)
+    # build artifacts still admit on any machine.
+    ENVR_ERR_DEVICE = 12   # ENVR_ERR_TARGET_DEVICE (envelope_reader.ghl)
+    DEV_A, DEV_B = 0xA1B2C3D4, 0x5E6F7081
+
+    def set_machine(dev_id):
+        # Stand in for gate_device_id_init's CPUID derivation: pin the derived
+        # id + mark init done so gate_device_id() returns the REAL machine id
+        # (no wildcard fallback) for the rest of this admission.
+        u.sw(u.data_addr['gate_dev_id'], dev_id)
+        u.sb(u.data_addr['gate_dev_init'], 1)
+
+    # Envelope cryptographically bound to device A (TARGET_DEVICE EXACT == A).
+    devA_kw = dict(gkw)
+    devA_kw.update(min_cosigners=3, sig_count=3, device_id=DEV_A)
+    devA_env = we.build_envelope(payload=b'artifact for machine A', **devA_kw)
+
+    set_machine(DEV_A)
+    rc = admit(devA_env, ART_APP)
+    check('device-A-targeted envelope admitted on machine A', rc == 0,
+          'rc=%d' % rc)
+
+    set_machine(DEV_B)
+    rc = admit(devA_env, ART_APP)
+    check('cross-device replay: device-A envelope REJECTED on machine B '
+          '(ENVR_ERR_DEVICE)', rc == ENVR_ERR_DEVICE, 'rc=%d' % rc)
+
+    # A device-B-targeted envelope is the mirror image: rejected on A.
+    devB_kw = dict(devA_kw); devB_kw.update(device_id=DEV_B)
+    devB_env = we.build_envelope(payload=b'artifact for machine B', **devB_kw)
+    set_machine(DEV_A)
+    rc = admit(devB_env, ART_APP)
+    check('cross-device replay: device-B envelope REJECTED on machine A '
+          '(ENVR_ERR_DEVICE)', rc == ENVR_ERR_DEVICE, 'rc=%d' % rc)
+    set_machine(DEV_B)
+    rc = admit(devB_env, ART_APP)
+    check('device-B-targeted envelope admitted on machine B', rc == 0,
+          'rc=%d' % rc)
+
+    # Device-agnostic build artifacts (wildcard target) admit on any machine -
+    # the gate maps a wildcard-target envelope to the wildcard, never the
+    # derived id, so build outputs stay portable.
+    agnostic = we.build_envelope(payload=b'portable build artifact', **dict(
+        gkw, min_cosigners=3, sig_count=3))   # gkw device_id=1 == WILDCARD
+    for m in (DEV_A, DEV_B):
+        set_machine(m)
+        rc = admit(agnostic, ART_APP)
+        check('device-agnostic (wildcard) artifact admits on machine '
+              '0x%08X' % m, rc == 0, 'rc=%d' % rc)
+
+    # Restore the host default (uninit -> wildcard) for any later use.
+    u.sb(u.data_addr['gate_dev_init'], 0)
+
+    # 12. Driver/Config/Policy artifact classes have LIVE, tested call sites
+    # (Track 2 sec->10: every declared class is wired through the gate). The
+    # call site (boot_artifact_class_check) latches a per-class verdict; absent
+    # files latch "none", a validly signed class artifact latches accepted, and
+    # a wrong-class artifact is refused (CALLER_TYPE) - so a declared class can
+    # never be a silent no-op, and a mis-targeted artifact can never slip in.
+    u.sb(u.data_addr['gate_dev_init'], 0)
+    VBE_DRV, VBE_CFG, VBE_POL = 0x90D0, 0x90E0, 0x90F0
+    ART_DRIVER, ART_CONFIG = 4, 7
+
+    # Absent files -> all three latch "none" (present=0, rc=0).
+    for off in (VBE_DRV, VBE_CFG, VBE_POL):
+        u.sq(off, 0)
+        u.sq(off + 8, 0)
+    u.call('boot_artifact_class_check')
+    check('absent driver/config/policy artifacts latch none',
+          u.lb(u.data_addr['kdriver_present']) == 0 and
+          u.lb(u.data_addr['kconfig_present']) == 0 and
+          u.lb(u.data_addr['kpolicy_present']) == 0)
+
+    # Build one validly signed artifact per class. The quorum policy (min 2,
+    # POLICY-bit required, threshold mask 0x04) is the same per-class floor the
+    # APP gkw envelopes satisfy; only the SIGNER_ROLE field (envelope field 6,
+    # ROLE_DRIVER=3 / ROLE_POLICY=5 per signed_artifact_check.ghl) changes per
+    # class. Auto-sign (sign_roles=None) builds a quorum from required_mask.
+    def class_env(kind, domain, signer_role, mincos=None, reqmask=None):
+        ckw = dict(gkw)
+        ckw.update(kind=kind, domain=domain, role=signer_role, device_id=1)
+        if mincos is not None:
+            ckw.update(min_cosigners=mincos, sig_count=mincos)
+        if reqmask is not None:
+            ckw.update(required_mask=reqmask)
+        return we.build_envelope(payload=b'class artifact %d' % kind, **ckw)
+
+    drv_env = class_env(ART_DRIVER, 4, 3)   # signer ROLE_DRIVER
+    # CONFIG (class 7) quorum was ratcheted to min 3 / required 0x0C by the
+    # section-8 boot_quorum_check staged change; declare+sign at the active rule.
+    cfg_env = class_env(ART_CONFIG, 7, 5, mincos=3, reqmask=0x0C)
+    pol_env = class_env(ART_POLICY, 6, 5)   # signer ROLE_POLICY
+    for off, env in ((VBE_DRV, drv_env), (VBE_CFG, cfg_env), (VBE_POL, pol_env)):
+        a = u.place(env)
+        u.sq(off, a)
+        u.sq(off + 8, len(env))
+    u.call('boot_artifact_class_check')
+    check('signed driver artifact accepted through its call site',
+          u.lb(u.data_addr['kdriver_present']) == 1 and
+          u.lw(u.data_addr['kdriver_rc']) == 0,
+          'rc=%d' % u.lw(u.data_addr['kdriver_rc']))
+    check('signed config artifact accepted through its call site',
+          u.lb(u.data_addr['kconfig_present']) == 1 and
+          u.lw(u.data_addr['kconfig_rc']) == 0,
+          'rc=%d' % u.lw(u.data_addr['kconfig_rc']))
+    check('signed policy artifact accepted through its call site',
+          u.lb(u.data_addr['kpolicy_present']) == 1 and
+          u.lw(u.data_addr['kpolicy_rc']) == 0,
+          'rc=%d' % u.lw(u.data_addr['kpolicy_rc']))
+
+    # A validly-signed APP envelope staged in the DRIVER slot must be refused
+    # (CALLER_TYPE): the class is bound at the call site, not just structurally.
+    app_in_drv = we.build_envelope(payload=b'app masquerading as driver',
+                                   **dict(gkw, min_cosigners=3, sig_count=3))
+    a = u.place(app_in_drv)
+    u.sq(VBE_DRV, a)
+    u.sq(VBE_DRV + 8, len(app_in_drv))
+    u.sq(VBE_CFG, 0); u.sq(VBE_CFG + 8, 0)
+    u.sq(VBE_POL, 0); u.sq(VBE_POL + 8, 0)
+    u.call('boot_artifact_class_check')
+    check('wrong-class (app-in-driver-slot) artifact refused at the call site '
+          '(CALLER_TYPE)', u.lw(u.data_addr['kdriver_rc']) == 23,
+          'rc=%d' % u.lw(u.data_addr['kdriver_rc']))
 
     if FAILURES:
         sys.stderr.write('[ed25519] FAIL - %d problem(s):\n' % len(FAILURES))

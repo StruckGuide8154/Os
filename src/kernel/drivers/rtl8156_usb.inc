@@ -117,8 +117,9 @@ rtl8156_bulk_in:
 ; ----------------------------------------------------------------------------
 ; rtl8156_consume_event - driven from the SINGLE shared USB event-ring poller
 ; (currently usb_poll_mouse) once it has decided that the popped transfer
-; event belongs to our NIC slot. Caller passes the completion code in EAX and
-; the DW0/DW1 fields in EBX/ECX (matching xhci_poll_event's return ABI). We
+; event belongs to our NIC slot. Caller passes the completion code in EAX,
+; DW3/DW0 in EBX/ECX, and the DW2 residual length in EDX (matching
+; xhci_poll_event's return ABI). We
 ; mark the in-flight bulk-IN as cleared, run handle_frame on the RX buffer
 ; if the event was Success/Short, then queue a fresh bulk-IN so a continuous
 ; RX stream is maintained without any per-syscall polling.
@@ -139,6 +140,7 @@ rtl8156_consume_event:
     push r9
     push r10
     push r11
+    mov r11d, edx                  ; preserve residual before EDX becomes scratch
     ; Endpoint DCI lives in EBX (DW3) bits 20:16.
     mov edx, ebx
     shr edx, 16
@@ -161,6 +163,13 @@ rtl8156_consume_event:
 
 .rx_completion:
     mov byte [rtl8156_bulk_in_inflight], 0
+    ; Convert the controller-reported residual to the actual completed byte
+    ; count. An impossible residual is rejected just like a failed transfer.
+    cmp r11d, RTL8156_RX_DMA_LEN
+    ja .requeue
+    mov edx, RTL8156_RX_DMA_LEN
+    sub edx, r11d
+    mov r11d, edx
     ; Only Success(1) and Short(13) carry valid RX data.
     cmp eax, 1
     je .have_rx
@@ -168,19 +177,37 @@ rtl8156_consume_event:
     je .have_rx
     jmp .requeue
 .have_rx:
+    cmp r11d, RTL8156_RX_DESC_LEN
+    jb .requeue
     mov eax, [abs RTL8156_RX_BUF_ADDR]
     and eax, RTL8156_RX_LEN_MASK
     cmp eax, 18 + 14
     jb .requeue
+    ; SECURITY (GSEC G1 - device-reported length OOB, same class as rtl8139):
+    ; the length field is fully device-controlled (masked to 0x7FFF => up to
+    ; 32767) but only RTL8156_RX_DMA_LEN bytes were DMA'd into the single RX
+    ; buffer, with the frame body starting after the 24-byte rx_desc. A
+    ; descriptor claiming more than fits would make handle_frame read stale or
+    ; unmapped memory past the buffer. Reject fail-closed (a real Ethernet frame
+    ; is <=1518, far under this cap; a legit large frame is truncated by the
+    ; 4096-byte TRB anyway, so an over-claim can only be corrupt/hostile).
+    mov r10d, r11d
+    sub r10d, RTL8156_RX_DESC_LEN
+    cmp eax, r10d
+    ja .requeue
+    ; Enforce the supported non-jumbo Ethernet-frame contract after removing
+    ; the four-byte Realtek CRC tail.
+    cmp eax, NET_ETH_FRAME_MAX + 4
+    ja .requeue
     sub eax, 4
-    lea rdi, [abs RTL8156_RX_BUF_ADDR + 24]
+    lea rdi, [abs RTL8156_RX_BUF_ADDR + RTL8156_RX_DESC_LEN]
     mov ecx, eax
     call rtl8156_handle_frame
 .requeue:
     ; Queue the next bulk-IN TRB so the next frame can arrive.
     mov r8d, RTL8156_RX_BUF_ADDR
     xor r9d, r9d
-    mov r10d, 4096
+    mov r10d, RTL8156_RX_DMA_LEN
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2)
     mov rdi, RTL8156_BULK_IN_RING_ADDR
     lea rsi, [rel rtl8156_bulk_in_enqueue]
@@ -223,7 +250,7 @@ rtl8156_arm_rx:
     je .out
     mov r8d, RTL8156_RX_BUF_ADDR
     xor r9d, r9d
-    mov r10d, 4096
+    mov r10d, RTL8156_RX_DMA_LEN
     mov r11d, TRB_NORMAL | TRB_IOC | (1 << 2)
     mov rdi, RTL8156_BULK_IN_RING_ADDR
     lea rsi, [rel rtl8156_bulk_in_enqueue]
@@ -245,7 +272,7 @@ rtl8156_arm_rx:
     pop rax
     ret
 
-; EDI = buf addr, ECX = max len. Returns EAX=1 if a NIC bulk-IN transfer
+; EDI = buf addr, ECX = max len. Returns EAX=actual_received if a NIC bulk-IN
 ; event completed this call (data is in [edi]), EAX=0 otherwise. Never
 ; blocks: at most one xhci_poll_event call and at most one new TRB queued.
 global rtl8156_bulk_in_nonblocking
@@ -259,6 +286,8 @@ rtl8156_bulk_in_nonblocking:
     push r9
     push r10
     push r11
+    push r12
+    mov r12d, ecx                 ; queued transfer length
     ; Queue a fresh bulk-IN TRB if none is currently in flight.
     cmp byte [rtl8156_bulk_in_inflight], 1
     je .poll
@@ -278,6 +307,7 @@ rtl8156_bulk_in_nonblocking:
     call xhci_poll_event
     test eax, eax
     jz .no_event
+    mov r8d, edx                  ; preserve residual before endpoint checks
     ; Only care about Transfer Events (TRB type 32 in DWord3 bits 15:10).
     mov ecx, ebx
     shr ecx, 10
@@ -301,7 +331,10 @@ rtl8156_bulk_in_nonblocking:
     xor eax, eax
     jmp .out
 .ok:
-    mov eax, 1
+    cmp r8d, r12d
+    ja .no_event
+    mov eax, r12d
+    sub eax, r8d                  ; return actual_received, not a boolean
     jmp .out
 .other_slot:
     ; HID Transfer Event - re-prime its ring and report "no data" to caller.
@@ -312,6 +345,7 @@ rtl8156_bulk_in_nonblocking:
 .no_event:
     xor eax, eax
 .out:
+    pop r12
     pop r11
     pop r10
     pop r9
@@ -400,6 +434,7 @@ rtl8156_wait_completion:
     call xhci_poll_event
     test eax, eax
     jz .check_time
+    mov r8d, edx                  ; preserve residual for RX-event dispatch
     mov ecx, ebx
     shr ecx, 10
     and ecx, 0x3F
@@ -462,6 +497,7 @@ rtl8156_wait_completion:
     pop rax
     je .event
     ; Not bulk-OUT - it's bulk-IN (or interrupt). Route via consume_event.
+    mov edx, r8d
     call rtl8156_consume_event
     jmp .poll
 .nic_ep_is_completion:

@@ -63,6 +63,7 @@ global nx_mem_key_epoch;
 global nx_mem_key_rekey_selftest;
 global nx_mem_key_rekey_selftest_ok;
 global nx_track4_selftest_report;
+global nx_track4_pmemsave_sentinel_seed;
 
 # Per-boot / per-slot kernel secrets (defined in syscall_data.ghl +
 # usermode_storage.inc + tcp.asm). Single -f bin TU: these resolve as local
@@ -75,7 +76,7 @@ extern l3_slot_code_slide;   # qword[MAX_WINDOWS] per-slot code ASLR slide
 extern l3_slot_ustack_off;   # qword[MAX_WINDOWS] per-slot user-stack ASLR off
 extern l3_code_hash;         # qword[MAX_WINDOWS] code-range baseline hash
 extern l3_code_hash_valid;   # byte[MAX_WINDOWS] baseline-live flags
-extern slot_cap_hmac;        # byte[MAX_WINDOWS] cap-mask authenticator
+extern slot_cap_hmac;        # byte[MAX_WINDOWS*16] 128-bit cap-mask authenticator
 extern net_tcp_rng_key;      # qword TCP ISN key (RDTSC^RDRAND, per boot)
 extern net_tcp_rng_state;    # qword TCP ISN running state
 extern l3_slot_live;         # qword[MAX_WINDOWS] != 0 => slot arena is mapped present
@@ -170,6 +171,22 @@ data nx_mem_key_done: 1 x 1 = 0;
 align 8;
 data nx_mem_key_epoch: 1 x 8 = 0;
 data nx_mem_key_rekey_selftest_ok: 1 x 1 = 0;
+
+# Debug-only positive control for the pmemsave erasure test.  The complete
+# marker is assembled into writable RAM at boot (rather than stored as a string
+# in read-only kernel image bytes), so a pre-wipe hit and post-wipe miss prove
+# that the dump grep observed an actually scrubbed region.
+align 8;
+data nx_track4_pmemsave_sentinel: 3 x 8 = 0;
+
+fn nx_track4_pmemsave_sentinel_seed() {
+    cfg "ENABLE_DEBUG_SERIAL" {
+        # Little-endian bytes: "GRIT_TRACK4_SENTINEL" + four zero bytes.
+        sq(&nx_track4_pmemsave_sentinel + 0, 0x4152545F54495247);
+        sq(&nx_track4_pmemsave_sentinel + 8, 0x544E45535F344B43);
+        sq(&nx_track4_pmemsave_sentinel + 16, 0x000000004C454E49);
+    }
+}
 
 # nx_splitmix64(x) -> well-mixed 64-bit avalanche of x. Pure; the multipliers are
 # loaded into registers (let bindings) so the emitted imul is reg*reg, not the
@@ -298,6 +315,7 @@ fn nx_volatile_scrub_secrets() {
     # together with the whitening mask derived from it (else a dump XORs masked
     # secrets back) and the at-rest window (may hold a decrypted plaintext granule).
     nx_zero(&nx_mem_key, NX_MEM_KEY_QWORDS * 8);
+    nx_zero(&nx_track4_pmemsave_sentinel, 3 * 8);
     sb(&nx_mem_key_done, 0);
     sq(&nx_secret_mask, 0);
     nx_zero(&nx_atrest_win, ATREST_WIN_BYTES);
@@ -309,7 +327,7 @@ fn nx_volatile_scrub_secrets() {
     nx_zero(&l3_slot_ustack_off, MAX_WINDOWS * 8);
     nx_zero(&l3_code_hash, MAX_WINDOWS * 8);
     nx_zero(&l3_code_hash_valid, MAX_WINDOWS);
-    nx_zero(&slot_cap_hmac, MAX_WINDOWS);
+    nx_zero(&slot_cap_hmac, MAX_WINDOWS * 16);   # 128-bit MAC/slot (CAP_HMAC_BYTES)
     sq(&net_tcp_rng_key, 0);
     sq(&net_tcp_rng_state, 0);
 }

@@ -31,6 +31,8 @@
 # ============================================================================
 
 app "hda" { stack = 8192; }
+capability mmio;
+capability dma;
 
 # ---------------------------------------------------------------------------
 # driver_host broker syscall ABI (the SC_DRVHOST_* family; wired into the

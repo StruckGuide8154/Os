@@ -52,6 +52,18 @@ SPI_CID_DESC        equ 0x05    ; device descriptor
 SPI_STATE_IDLE      equ 0
 SPI_STATE_WAIT      equ 1       ; waiting for device ready
 
+; --- buffer sizing & the security invariants that keep every device-controlled
+;     transfer length in-bounds (proof: security/audits/spi_hid_asm.md) ---
+%define SPI_RX_HDR          4       ; SPI response header: [sync][cid][len_lo][len_hi]
+%define SPI_RX_REPORT_MAX   64      ; max input-report payload bytes read/parsed per poll
+%define SPI_RDESC_MAX       512     ; max HID report descriptor accepted
+%define SPI_TX_BUF_SIZE     16
+%define SPI_RX_BUF_SIZE     72
+%define SPI_RDESC_BUF_SIZE  (SPI_RDESC_MAX + SPI_RX_HDR)   ; desc + header => no OOB on a full 512B desc
+%if SPI_RX_BUF_SIZE < (SPI_RX_HDR + SPI_RX_REPORT_MAX)
+  %error "spi_rx_buf too small: header + input-report payload would overrun it"
+%endif
+
 section .text
 global spi_hid_init
 global spi_hid_poll
@@ -170,10 +182,12 @@ spi_hid_get_device_desc:
     ; [14-15] wCommandRegister [16-17] wDataRegister
     ; [18-19] wVendorID [20-21] wProductID
 
-    movzx eax, word [spi_rx_buf + 8]   ; wReportDescLength
+    movzx eax, word [spi_rx_buf + 8]   ; wReportDescLength (device-controlled, 0..65535)
     test eax, eax
     jz .fail_desc
-    cmp eax, SPI_RDESC_BUF_SIZE
+    ; Accept at most SPI_RDESC_MAX descriptor bytes. The receive buffer is sized
+    ; SPI_RDESC_MAX + SPI_RX_HDR, so the later "len + header" read stays in-bounds.
+    cmp eax, SPI_RDESC_MAX
     jg .fail_desc
     mov [spi_report_desc_len], ax
 
@@ -214,16 +228,28 @@ spi_hid_get_report_desc:
     lea rdi, [spi_tx_buf]
     mov rsi, 6
     lea rdx, [spi_rdesc_buf]
-    ; read descriptor length + 4 header bytes
-    mov rcx, [spi_report_desc_len]
+    ; read descriptor length + header. report_desc_len is bounded to SPI_RDESC_MAX by
+    ; spi_hid_get_device_desc, and spi_rdesc_buf is SPI_RDESC_MAX + SPI_RX_HDR bytes, so
+    ; this RX count (<= SPI_RDESC_MAX + SPI_RX_HDR = SPI_RDESC_BUF_SIZE) never overruns it.
     movzx rcx, word [spi_report_desc_len]
-    add rcx, 4
+    add rcx, SPI_RX_HDR
     call spi_transfer
     test eax, eax
     jz .rdesc_fail
 
     ; Check sync
     cmp byte [spi_rdesc_buf + 0], SPI_SYNC_DEV
+    jne .rdesc_fail
+
+    ; The wire header is device-controlled too.  Do not parse descriptor bytes
+    ; beyond the packet length the device returned, and reject an over-claim
+    ; beyond the transfer we requested even though the backing buffer is large
+    ; enough.  A valid descriptor response is exactly header + advertised HID
+    ; report-descriptor bytes.
+    movzx eax, word [spi_rdesc_buf + 2]
+    movzx ecx, word [spi_report_desc_len]
+    add ecx, SPI_RX_HDR
+    cmp eax, ecx
     jne .rdesc_fail
 
     ; Parse: descriptor starts at offset 4
@@ -247,7 +273,18 @@ spi_hid_get_report_desc:
 ; ============================================================================
 spi_hid_poll:
     cmp byte [spi_hid_active], 1
-    jne .poll_ret
+    jne .poll_skip
+
+    ; SECURITY (reentrancy / TOCTOU): this routine mutates shared spi_tx_buf/spi_rx_buf
+    ; and drives the SPI state machine. It is documented "callable from the main loop"
+    ; and is already invoked from the touchpad IRQ (isr.asm .irq_apic_touchpad). An
+    ; atomic test-and-set makes any concurrent or reentrant entry skip cleanly instead
+    ; of corrupting an in-flight transfer. xchg carries an implicit LOCK (mirrors the
+    ; i2c_hid_poll / mouse_handler busy-flag idiom).
+    mov al, 1
+    xchg al, [spi_poll_busy]
+    test al, al
+    jnz .poll_skip
 
     ; Request input report: SYNC + CID_OUTPUT + length=4 + register=0x0003
     mov byte [spi_tx_buf + 0], SPI_SYNC_HOST
@@ -257,11 +294,13 @@ spi_hid_poll:
     mov byte [spi_tx_buf + 4], 0x03    ; wInputRegister = 0x0003
     mov byte [spi_tx_buf + 5], 0x00
 
-    ; Read response: header (4B) + up to 64B report
+    ; Read response: header (SPI_RX_HDR) + up to SPI_RX_REPORT_MAX payload bytes.
+    ; This RX count is <= SPI_RX_BUF_SIZE (static-asserted above), so the transfer
+    ; cannot overrun spi_rx_buf.
     lea rdi, [spi_tx_buf]
     mov rsi, 6
     lea rdx, [spi_rx_buf]
-    mov rcx, 68
+    mov rcx, SPI_RX_HDR + SPI_RX_REPORT_MAX
     call spi_transfer
     test eax, eax
     jz .poll_ret
@@ -278,6 +317,16 @@ spi_hid_poll:
     je .poll_ret
     sub ecx, 4                         ; subtract header
     jle .poll_ret
+
+    ; SECURITY (OOB read): the device-claimed length in header [2-3] is NOT a promise of
+    ; how many bytes were actually clocked in. We only read SPI_RX_REPORT_MAX payload
+    ; bytes into spi_rx_buf, so clamp the parse length to that. Without this the parser
+    ; (hid_process_touchpad_report, ECX = data length) would walk up to ~64 KiB past the
+    ; buffer on a malicious/faulty report header.
+    cmp ecx, SPI_RX_REPORT_MAX
+    jbe .len_ok
+    mov ecx, SPI_RX_REPORT_MAX
+.len_ok:
 
     ; Process data at spi_rx_buf + 4
     lea rsi, [spi_rx_buf + 4]
@@ -369,18 +418,19 @@ spi_hid_poll:
     mov byte [mouse_moved], 1
 
 .poll_ret:
+    mov byte [spi_poll_busy], 0        ; release the reentrancy guard
+.poll_skip:
     ret
 
 section .data
 spi_hid_active:         db 0
 spi_poll_state:         db 0
+spi_poll_busy:          db 0           ; atomic test-and-set reentrancy guard (see spi_hid_poll)
 spi_report_desc_len:    dw 0
 
 section .bss
-SPI_TX_BUF_SIZE     equ 16
-SPI_RX_BUF_SIZE     equ 72
-SPI_RDESC_BUF_SIZE  equ 512
-
+; sizes are defined as %define constants at the top of the file so the
+; %if static-assert can validate the header+payload invariant at assemble time.
 spi_tx_buf:     resb SPI_TX_BUF_SIZE
 spi_rx_buf:     resb SPI_RX_BUF_SIZE
 spi_rdesc_buf:  resb SPI_RDESC_BUF_SIZE

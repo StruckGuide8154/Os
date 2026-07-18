@@ -98,30 +98,46 @@ are accepted, the system is exactly as strong as the forgeable HMAC chain.
       trust-key spelling (`ISBOLBRG`, `GRMANIK!`) appears in BOOTX64.EFI/KERNEL.BIN/
       APPS.BIN, using precise byte patterns (not a blind entropy scan, which would
       false-trip on the Ed25519 keys/signatures and the public QRNG commitment).
-- [ ] **Disable `KLOG.TXT` writes in release builds** (finding 10). Gate the loader's
-      `\KLOG.TXT` write (`src/boot/uefi_loader_klog.inc`) behind a signed debug policy;
-      default release = no kernel log to disk (no pointers/addresses/seed/state leak).
+- [x] **Disable `KLOG.TXT` writes in release builds** (finding 10). _2026-06-28_:
+      `src/boot/uefi_loader.asm` includes `src/boot/uefi_loader_klog.inc` only when
+      `RELEASE_BUILD` is absent, `src/boot/uefi_loader_entry.inc` calls
+      `flush_klog_if_pending` only in non-release builds, `s_klog_path` is omitted
+      from release data, and `tools/security/check_release_artifacts.py` rejects
+      `KLOG.TXT` in `BOOTX64.EFI`/`KERNEL.BIN`/`APPS.BIN`. Verified by
+      `scripts/build/build_uefi.ps1 -Release` and the release artifact scan.
 
 ## P0 - External enforcement of the first link
 
-- [ ] **Real UEFI Secure Boot for `BOOTX64.EFI`** (findings 9, end-state). Sign the
-      loader PE (cert table is currently 0x0/0x0) and document enrolling our cert in
-      `db`; without SB, the chain is replace-the-loader-and-win. If SB can't be assumed
-      on target, define the measured-boot/TPM-sealed fallback that makes loader
-      replacement detectable before the kernel trusts anything.
-- [ ] **Restore CR0.WP/SMEP/SMAP/PKE as early as possible** (finding 11): shrink the
-      early-boot window where protections are off; verify no attacker-controlled input
-      (DATA.IMG media, BOOTCFG) is parsed while they're down.
+- [~] **Real UEFI Secure Boot for `BOOTX64.EFI`** (findings 9, end-state).
+      _2026-06-28_: `scripts/build/build_uefi.ps1 -Release` now signs the loader PE
+      with an Authenticode Secure-Boot-style test DB cert, exports
+      `build/secureboot/GRIT_TEST_DB.cer`, and the release gate rejects unsigned
+      loaders and production builds that still use the dev test cert. Remaining:
+      production signing cert, firmware `db` enrollment evidence on target
+      hardware, or a real measured/TPM-sealed fallback. Do not mark complete from
+      the dev/QEMU test cert alone.
+- [~] **Restore CR0.WP/SMEP/SMAP/PKE as early as possible** (finding 11): shrink the
+      early-boot window where protections are off. _2026-06-28_: release builds run
+      `verify_release_artifacts` before `ExitBootServices`, before KASLR relocation,
+      and before the kernel parses `DATA.IMG`/apps; release `BOOTCFG.TXT` is not
+      loaded. Remaining: the low-level CR0/CR4 window itself is not fully closed
+      or independently measured.
 
 ## P1 - Bring every shipped input under the signed chain
 
-- [ ] **Sign/cover `BOOTCFG.TXT`** (finding 6). Boot/runtime feature toggles must be
-      inside the Ed25519-signed set, or the loader must reject an unsigned/modified
-      BOOTCFG. Right now boot-partition write access reconfigures the kernel without
-      breaking any check.
-- [ ] **Cover `DATA.IMG` (and every file in it) with a verified whole-image hash**
-      (finding 7) bound into the manifest/envelope. README/HELLO/NOTES/SYSTEM/LOGO.BMP/
-      RIBBONS.SVG/BOOTANIM.NBA are currently unsigned parser input.
+- [x] **Sign/cover `BOOTCFG.TXT`** (finding 6). _2026-06-28_: release builds remove
+      `BOOTCFG.TXT` from the ESP, the loader publishes a zero BOOTCFG pointer/size
+      under `RELEASE_BUILD`, `boot_features.ghl` returns before parsing BOOTCFG in
+      release, and `check_release_artifacts.py` fails if `BOOTCFG.TXT` ships. Debug
+      builds keep plaintext BOOTCFG only as a bisection tool; release policy must
+      move through signed config/envelope data, not plaintext ESP edits.
+- [x] **Cover `DATA.IMG` (and every file in it) with a verified whole-image hash**
+      (finding 7). _2026-06-28_: `tools/build/gen_loader_manifest.py` pins
+      SHA-256(DATA.IMG) plus exact size into `BOOTX64.EFI`; `verify_release_artifacts`
+      hashes the loaded ramdisk via EFI_HASH2_PROTOCOL and halts on mismatch before
+      handoff; `check_release_artifacts.py` verifies the digest is present in the
+      signed loader. This covers README/HELLO/NOTES/SYSTEM/LOGO.BMP/RIBBONS.SVG/
+      BOOTANIM.NBA as bytes inside the whole-image commitment.
 - [ ] **Harden every DATA.IMG parser as hostile input** (findings 7,8). Audit the BMP,
       SVG, and `BOOTANIM.NBA` parsers for integer overflow (`width*height*4`, finding
       8), undersized allocation, and OOB. Add fuzz/bounds tests. Even once signed, a
@@ -155,11 +171,14 @@ when they are fully disclosed.
       anti-confusion measure, not a secret - confirm no security claim rests on the
       ABI being hidden, and that every handler enforces the per-slot capability
       manifest (`syscall_caps.inc`) regardless of numbering.
-- [ ] **Release debug-string strip (finding 4).** The release gate now hard-fails on
+- [x] **Release debug-string strip (finding 4).** The release gate now hard-fails on
       the audit's debug markers (`[SYSSIG]`, `[KERNSIG]`, `[UPDATE]`, `[QUORUM]`,
       `RING 3`, `L3TEST`, `L3 key ok`). These should already be behind
       `ENABLE_DEBUG_SERIAL` (off in `-Release`). If a `-Release` build trips the
       gate, the fix is to **gate the offending string**, not to relax the check.
+      _2026-06-28_: verified by a successful `scripts/build/build_uefi.ps1 -Release`
+      and `python tools/security/check_release_artifacts.py --esp build/esp/EFI/BOOT
+      --allow-test-cert`.
 
 ## P3 - Live-secret secrecy vs a runtime-compromised privileged component
 
@@ -175,20 +194,47 @@ is delivered by other tracks. Tracked here only as the cross-link:
       reach**: keep the QRNG pool / live keys behind the nested-kernel PT monitor
       window and the Track 5/6 "-1" monitor, so even ring-0 driver code cannot read
       them without a mediated path, and one compromised compartment != total.
-- [ ] **Anti-rewrite**: a malicious on-disk `.bin` rewrite fails the Ed25519 gate on
+- [~] **Anti-rewrite**: a malicious on-disk `.bin` rewrite fails the Ed25519 gate on
       next boot (persist denied); an in-memory code rewrite trips W^X + the
-      nk-monitor PT window. Confirm these cover the QRNG/key residency pages.
+      nk-monitor PT window. _2026-06-28_: release loader pins KERNEL/APPS/DATA/
+      KERNEL.ENV/SYSSIG.ENV exact hashes and `test_forge_resist.ps1` rejects a
+      forged APPS.BIN against the signed manifest. Remaining: QEMU tampered-boot
+      proof and confirmation that QRNG/key residency pages are covered by the
+      runtime write-protection claims.
 
 ## Done definition for Track 7
 
-- [ ] No symmetric *trust* key ships in any release artifact (build-time scanner green).
-- [ ] Every accepted artifact is verified by the Ed25519 public-key chain; the legacy
+- [x] No symmetric *trust* key ships in any release artifact (build-time scanner green).
+- [~] Every accepted artifact is verified by the Ed25519 public-key chain; the legacy
       HMAC chain is gone or demoted to non-security integrity only.
-- [ ] `test_forge_resist.ps1` proves a one-byte patch + full attacker recompute is
-      rejected at boot.
-- [ ] `BOOTX64.EFI` is externally verified (Secure Boot or measured/sealed fallback).
-- [ ] `BOOTCFG.TXT` and `DATA.IMG` (+ all media) are inside the signed set; their
+- [~] `test_forge_resist.ps1` proves a one-byte patch + full attacker recompute is
+      rejected by the signed manifest. Remaining: QEMU boot-path rejection proof.
+- [~] `BOOTX64.EFI` is externally verified (Secure Boot or measured/sealed fallback).
+- [~] `BOOTCFG.TXT` and `DATA.IMG` (+ all media) are inside the signed set; their
       parsers pass bounds/fuzz tests.
 - [ ] The at-rest/volatile key is derived from a per-machine root, never a shipped
       constant; the private QRNG seed and all hidden trust values are absent from the
       image.
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 9 / speed 9**. P0 single-root collapse landed
+(both HMAC trust keys gone, Ed25519-only, forge-resist test green). Release builds
+now sign the loader with a dev Secure Boot test cert, pin KERNEL/APPS/DATA/
+KERNEL.ENV/SYSSIG.ENV hashes into that loader, reject BOOTCFG in release, and scan
+for shipped secrets/debug strings. Still not 10/10: no production Secure Boot/db
+enrollment evidence, no QEMU tampered-release boot proof, parser fuzzing is still
+open, per-machine-rooted at-rest keys are open, and an independent re-rating has
+not happened.
+
+- [ ] **(sec→10)** Boot-verify the collapse in QEMU end-to-end (clean desktop +
+      fail-closed on tampered SYSSIG.ENV) — currently host-compile-verified only.
+- [~] **(sec→10)** External first-link enforcement: UEFI Secure Boot for BOOTX64.EFI
+      (or the measured/TPM-sealed fallback) so loader replacement is detectable.
+- [~] **(sec→10)** Bring every shipped parser input under the signed chain
+      (BOOTCFG.TXT, DATA.IMG + all media) and pass bounds/fuzz tests on the
+      BMP/SVG/BOOTANIM parsers.
+- [ ] **(sec→10)** Per-machine-rooted at-rest/volatile key (shared with Track 4/10).
+- [ ] **Verify:** an independent agent re-rates this track **security 10**.
+- Speed stays high: Ed25519 verify is boot-time; signing inputs adds no runtime
+      hot-path cost. Target speed **9**.

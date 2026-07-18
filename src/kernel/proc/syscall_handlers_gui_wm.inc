@@ -177,6 +177,24 @@
     ; so the serial log shows which app is spawning windows and how often.
     call dbg_wmcreate_log
     call wm_create_window_ex
+    ; Mark the new window as manifested (informational window flag). NOTE: strike
+    ; accounting no longer keys off WIN_OFF_FLAGS - it uses the per-slot
+    ; slot_sandboxed[] byte (keyed on r15, the calling slot), so a running tenant
+    ; cannot become strike-immune by creating/closing windows regardless of this
+    ; flag. See docs/security/finding-strike-immunity-via-self-close.md.
+    cmp rax, -1
+    je .sc_wm_create_store
+    movzx ecx, ax
+    imul ecx, ecx, WINDOW_STRUCT_SIZE
+    add rcx, WINDOW_POOL_ADDR
+    ; App-created windows are provisioned by their already-sandboxed caller (the
+    ; calling slot's manifest is live and it supplied its own drawfn), so there
+    ; is no launch gap to protect against -- mark the window ready to render now.
+    ; WF_READY is the wm_draw_window gate; without it the app's own window would
+    ; never paint. (Informational WF_MANIFEST_OK retained; strike accounting
+    ; keys off slot_sandboxed[r15], not window flags.)
+    or qword [rcx + WIN_OFF_FLAGS], WF_MANIFEST_OK | WF_READY
+.sc_wm_create_store:
     mov [rsp + ALL_RAX], rax
     jmp .done
 .sc_wm_create_reject:
@@ -194,7 +212,7 @@
     push rdi                              ; save kernel entry pointer
     mov rdi, rsi
     mov rsi, rdx
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: file data written into user buf (slot-only)
     pop rdi
     test eax, eax
     jz .sc_fs_read_reject
@@ -367,7 +385,7 @@
     push rdi                              ; kernel entry pointer
     mov rdi, rsi
     mov rsi, 16
-    call sc_validate_user_io_range
+    call sc_validate_user_write           ; OUTPUT: formatted name written to user buf (slot-only)
     pop rdi
     test eax, eax
     jz .sc_fs_format_name_reject
@@ -400,6 +418,77 @@
     mov [rsp + ALL_RAX], rax
     jmp .done
 .sc_app_launch_reject:
+    mov qword [rsp + ALL_RAX], -1
+    jmp .done
+
+.sc_wm_list:
+    ; rdi = user out buffer, rsi = max_entries. Writes up to min(max_entries,
+    ; MAX_WINDOWS) WM_LIST_REC-byte records for each WF_ACTIVE window and returns
+    ; the count. Read-only: the kernel never trusts the buffer for anything but a
+    ; bounded write, and exposes only id/flags/title - no kernel pointers cross.
+    mov rcx, rsi                          ; requested cap
+    cmp rcx, MAX_WINDOWS
+    jbe .wl_have_cap
+    mov rcx, MAX_WINDOWS
+.wl_have_cap:
+    test rcx, rcx
+    jz .wl_zero                           ; cap 0 -> write nothing, return 0
+    ; Validate the user buffer for cap * WM_LIST_REC bytes before any store.
+    mov rax, rcx
+    imul rax, WM_LIST_REC
+    push rdi                              ; preserve dst + cap across validate
+    push rcx
+    mov rsi, rax
+    call sc_validate_user_write           ; OUTPUT: window records written to user buf (slot-only)
+    pop rcx
+    pop rdi
+    test eax, eax
+    jz .sc_wm_list_reject
+    mov r8, WINDOW_POOL_ADDR
+    xor r9d, r9d                          ; pool index
+    xor r10d, r10d                        ; written count
+.wl_loop:
+    cmp r9d, MAX_WINDOWS
+    jge .wl_done
+    cmp r10, rcx                          ; reached caller's cap?
+    jge .wl_done
+    test qword [r8 + WIN_OFF_FLAGS], WF_ACTIVE
+    jz .wl_next
+    ; Never list the ring-3 desktop shell itself: gshell reads SYS_WM_LIST to
+    ; populate its taskbar, so listing the WF_SHELL window would show the desktop
+    ; as an open "window" in its own taskbar.
+    test qword [r8 + WIN_OFF_FLAGS], WF_SHELL
+    jnz .wl_next
+    USER_ACCESS_BEGIN
+    mov eax, [r8 + WIN_OFF_ID]
+    mov [rdi + 0], eax
+    mov eax, [r8 + WIN_OFF_FLAGS]
+    mov [rdi + 4], eax
+    mov rax, [r8 + WIN_OFF_TITLE + 0]
+    mov [rdi + WM_LIST_TITLE_OFF + 0], rax
+    mov rax, [r8 + WIN_OFF_TITLE + 8]
+    mov [rdi + WM_LIST_TITLE_OFF + 8], rax
+    mov rax, [r8 + WIN_OFF_TITLE + 16]
+    mov [rdi + WM_LIST_TITLE_OFF + 16], rax
+    mov rax, [r8 + WIN_OFF_TITLE + 24]
+    mov [rdi + WM_LIST_TITLE_OFF + 24], rax
+    mov rax, [r8 + WIN_OFF_TITLE + 32]
+    mov [rdi + WM_LIST_TITLE_OFF + 32], rax
+    USER_ACCESS_END
+    add rdi, WM_LIST_REC
+    inc r10
+.wl_next:
+    add r8, WINDOW_STRUCT_SIZE
+    inc r9d
+    jmp .wl_loop
+.wl_done:
+    mov [rsp + ALL_RAX], r10
+    jmp .done
+.wl_zero:
+    xor eax, eax
+    mov [rsp + ALL_RAX], rax
+    jmp .done
+.sc_wm_list_reject:
     mov qword [rsp + ALL_RAX], -1
     jmp .done
 

@@ -138,9 +138,17 @@ Write-Host '[ghl-invariants] evaluate vectors against real predicate source...' 
 & python $Evaluator
 if ($LASTEXITCODE -ne 0) { throw 'invariant vector evaluation failed.' }
 
-Write-Host '[ghl-invariants] prove bounded 7-bit authority space exhaustively...' -ForegroundColor Yellow
+Write-Host '[ghl-invariants] prove bounded authority space exhaustively (bit-width derived from invariant_check.ghl)...' -ForegroundColor Yellow
 & python $Evaluator --exhaustive
 if ($LASTEXITCODE -ne 0) { throw 'invariant exhaustive authority check failed.' }
+
+# Translation-validation (model <-> emitted code): compile invariant_check.ghl
+# with the production gritc and confirm the PROVEN authority constants are the
+# exact immediates emitted into the artifact - binds the proof to the compiled
+# bits, closing the model<->code constant-drift gap (NOT a full refinement proof).
+Write-Host '[ghl-invariants] translation-validate proven authority constants against gritc-emitted code...' -ForegroundColor Yellow
+& python $Evaluator --translation-validation
+if ($LASTEXITCODE -ne 0) { throw 'invariant translation-validation failed.' }
 
 # P3 mapping: the authority bitmasks are DERIVED from the real signed policy
 # (app manifests, policy graph, compiler unsafe caps, artifact-class quorums)
@@ -148,6 +156,14 @@ if ($LASTEXITCODE -ne 0) { throw 'invariant exhaustive authority check failed.' 
 Write-Host '[ghl-invariants] derive authority bitmasks from real signed policy...' -ForegroundColor Yellow
 & python (Join-Path $PSScriptRoot 'derive_authority.py')
 if ($LASTEXITCODE -ne 0) { throw 'policy-derived authority check failed.' }
+
+# Meta-tests: prove the closures actually fire - a planted wrong constant is
+# caught by translation-validation, and a planted new authority bit that breaks
+# an invariant is caught by the auto-widened exhaustive proof (a proof/guard
+# that never fails is no proof).
+Write-Host '[ghl-invariants] meta-test: planted drift must be caught (translation-validation + dynamic width)...' -ForegroundColor Yellow
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test_invariant_meta.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'invariant meta-tests failed.' }
 
 $OutDir = Join-Path ([System.IO.Path]::GetTempPath()) ('ghl-invariants-' + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null

@@ -83,8 +83,9 @@ section .text
 ; vmx_exit_trampoline). Emits actual VMXON/VMCS/VMLAUNCH via the gritc kernel_vmx
 ; intrinsics. Dead unless mon_hal_detect reports VMX usable AND the boot path
 ; calls vmx_backend_arm (it does not on the TCG CI boot, where VMX #UDs), so its
-; presence in the image does not change boot behavior. Verified tested-accel on
-; a nested-VMX / real-Intel host per scripts/test/run_vmx_accel.md.
+; presence in the image does not change boot behavior. The accel/HW verification
+; procedure is documented in scripts/test/run_vmx_accel.md; until that run lands
+; this is compile-covered only, not `tested-accel`.
 %include "build/ghl/mon_hal_vmx_backend.asm"
 section .text
 ; Track 2 signed-envelope enforcement: structural policy kernel
@@ -177,6 +178,14 @@ section .text
 ; cap_mask_sign, cap_mask_store, slot_cap_hmac_init) are defined before the
 ; dispatcher/handler/security .inc files (and kernel_main) reference them.
 %include "build/ghl/syscall_secure.asm"
+section .text
+; Installable-driver hardware security boundary. Ring-3 syscall wrappers derive
+; identity from the active slot; signed policy installation remains kernel-only.
+%include "build/ghl/driver_host.asm"
+section .text
+; Signed device-manager control plane: PCI match/probe/bind for the dedicated
+; ring-3 driver package. Kept adjacent to the broker it provisions.
+%include "build/ghl/driver_loader.asm"
 section .text
 %include "src/kernel/proc/syscall.asm"
 ; GritHLK syscall data section (Stage 1 of docs/ghlk-syscall-rearchitecture.md):
@@ -292,6 +301,8 @@ section .text
 ; net_dhcp_configure / net_dhcp_start ported out of nic.asm to zero-asm GHLK.
 %include "build/ghl/net_dhcp_dispatch.asm"
 section .text
+%include "build/ghl/net_dhcp_l2.asm"
+section .text
 %include "src/kernel/drivers/driver_debug.asm"
 section .text
 %include "src/kernel/drivers/spi.asm"
@@ -302,7 +313,6 @@ section .text
 section .text
 %include "src/kernel/drivers/hid_parser.asm"
 section .text
-%include "src/kernel/drivers/battery.asm"
 
 ; --- Filesystem ---
 ; Zero-asm GritHLK FAT16 driver (replaces fat16.asm + fat16_init/io/dirops/nav
@@ -337,10 +347,6 @@ section .text
 ; GritHLK boot animation player (zero-asm; compiled with --forbid-asm).
 %include "build/ghl/boot_anim.asm"
 
-; --- Built-in User Apps ---
-section .text
-%include "src/user/apps.asm"
-
 ; --- Libraries ---
 section .text
 ; GritHLK (zero-asm) string/memory utilities (ported from lib/string.asm).
@@ -372,6 +378,21 @@ fn_strlen_wrapper:
 memcpy equ fn_memcpy
 memset equ fn_memset
 strlen equ fn_strlen
+
+; --- Built-in User Apps (LAST .text unit) ---
+; Placed after the kernel libraries/helpers so the app blob's code is the TAIL
+; of `.text`. NASM -f bin then places the `.appdata` section (declared
+; `follows=.text` in apps.asm) -- the writable-data half of the blob -- page-
+; aligned immediately after the app code, with no kernel bytes in between, so
+; tools/build/extract_apps.ps1 (sentinel scan) captures exactly [code | data].
+; _kernel_text_end still follows, so app code stays inside the measured/locked
+; kernel text range [_start, _kernel_text_end) exactly as before.
+section .text
+%include "src/user/apps.asm"
+
+; Dedicated installable-driver package. Its .drivertext/.driverdata sections
+; remain disjoint from the GUI app blob and leave the fixed DMA VA window free.
+%include "src/drivers/driver_blob.asm"
 
 ; End-of-text marker. NASM `-f bin` concatenates section CONTENT by name in the
 ; order [.text | .data | .rodata | .bss] regardless of include order, so every

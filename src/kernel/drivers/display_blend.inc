@@ -109,7 +109,7 @@ FN_BEGIN blend_span_argb, 0, 0, FN_RET_SCALAR
     lea r15, [r15 + rax * 4]      ; advance src past skipped pixels
     xor r12d, r12d
 .bsa_cl_right:
-    mov eax, [raster_target_width]
+    mov eax, [raster_target_tbl + RTGT_WIDTH]
     cmp r12, rax
     jge .bsa_done
     mov rbx, rax
@@ -121,7 +121,7 @@ FN_BEGIN blend_span_argb, 0, 0, FN_RET_SCALAR
     ; dst row addr = bb_addr + y * pitch + x * 4
     mov rax, r13
     imul rax, [scr_pitch_q]
-    mov rdi, [raster_target_addr]
+    mov rdi, [raster_target_tbl + RTGT_ADDR]
     add rdi, rax
     lea rdi, [rdi + r12 * 4]         ; rdi = dst pixel pointer
     mov rsi, r15                     ; rsi = src pixel pointer
@@ -259,7 +259,7 @@ FN_BEGIN blend_span_argb_screen, 0, 0, FN_RET_SCALAR
     lea r15, [r15 + rax * 4]
     xor r12d, r12d
 .bss_cl_right:
-    mov eax, [raster_target_width]
+    mov eax, [raster_target_tbl + RTGT_WIDTH]
     cmp r12, rax
     jge .bss_done
     mov rbx, rax
@@ -270,7 +270,7 @@ FN_BEGIN blend_span_argb_screen, 0, 0, FN_RET_SCALAR
 .bss_setup:
     mov rax, r13
     imul rax, [scr_pitch_q]
-    mov rdi, [raster_target_addr]
+    mov rdi, [raster_target_tbl + RTGT_ADDR]
     add rdi, rax
     lea rdi, [rdi + r12 * 4]         ; rdi = dst pixel pointer
     mov rsi, r15                     ; rsi = src pixel pointer
@@ -406,7 +406,7 @@ FN_BEGIN blend_span_argb_multiply, 0, 0, FN_RET_SCALAR
     jle .bsm_done
     cmp r13, 0
     jl .bsm_done
-    mov eax, [raster_target_height]
+    mov eax, [raster_target_tbl + RTGT_HEIGHT]
     cmp r13, rax
     jge .bsm_done
     cmp r12, 0
@@ -418,7 +418,7 @@ FN_BEGIN blend_span_argb_multiply, 0, 0, FN_RET_SCALAR
     lea r15, [r15 + rax * 4]
     xor r12d, r12d
 .bsm_cl_right:
-    mov eax, [raster_target_width]
+    mov eax, [raster_target_tbl + RTGT_WIDTH]
     cmp r12, rax
     jge .bsm_done
     mov rbx, rax
@@ -428,8 +428,8 @@ FN_BEGIN blend_span_argb_multiply, 0, 0, FN_RET_SCALAR
     mov r14, rbx
 .bsm_setup:
     mov rax, r13
-    imul rax, [raster_target_pitch_q]
-    mov rdi, [raster_target_addr]
+    imul rax, [raster_target_tbl + RTGT_PITCH]
+    mov rdi, [raster_target_tbl + RTGT_ADDR]
     add rdi, rax
     lea rdi, [rdi + r12 * 4]
     mov rsi, r15

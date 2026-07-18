@@ -1,0 +1,20 @@
+# Positive companion for the reset/fwload capability gate: a driver that
+# DECLARES both authority classes may name the device-reset and firmware-load
+# broker syscalls. The declarations mint no runtime authority - the broker
+# still requires the signed policy to grant DRV_CAP_RESET / DRV_CAP_FWLOAD and
+# both rows stay control-plane denied until the dispatcher wires them - but the
+# gate must not be a deny-everything wall, or real recovery/fw-update drivers
+# could never be expressed.
+
+app "driver_target_reset_fwload_ok" { stack = 4096; }
+capability reset;
+capability fwload;
+
+const SC_DRVHOST_DEVICE_RESET = 264;   # reserved broker ABI (Rung 1 wiring)
+const SC_DRVHOST_FW_LOAD      = 265;   # reserved broker ABI (Rung 1 wiring)
+
+fn main() {
+    let rc = syscall(SC_DRVHOST_DEVICE_RESET, 0);
+    if rc != 0 { return rc; }
+    return syscall(SC_DRVHOST_FW_LOAD, 0x200000, 4096);
+}

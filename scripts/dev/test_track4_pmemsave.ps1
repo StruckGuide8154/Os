@@ -96,12 +96,10 @@ $DumpSizeHex = '0x{0:X}' -f ($DumpSizeMB * 1024 * 1024)
 #   M=0x4D E=0x45 M=0x4D K=0x4B E=0x45 Y=0x59 0=0x30 1=0x31
 $SentinelMemkey01 = [byte[]]@(0x4D,0x45,0x4D,0x4B,0x45,0x59,0x30,0x31)
 
-# Sentinel: the ASCII string "GRIT_TRACK4_SENTINEL" planted at a known
-# kernel data offset. We write this via a build flag or detect if it exists
-# in the build; for the pmemsave test we look for it in the pre-wipe dump
-# (planted → should be found) and assert it is gone post-wipe (scrubbed).
-# NOTE: if this string is not in the binary (no debug sentinel compiled in),
-# we skip the planted-sentinel assertion and note it in the output.
+# Sentinel: the ASCII string "GRIT_TRACK4_SENTINEL" assembled at runtime in
+# nx_track4_pmemsave_sentinel. It is deliberately absent from the read-only
+# kernel image, MUST be present in the live pre-wipe dump, and MUST disappear
+# after nx_volatile_scrub_secrets zeroes that writable region.
 $SentinelString = 'GRIT_TRACK4_SENTINEL'
 $SentinelBytes  = [System.Text.Encoding]::ASCII.GetBytes($SentinelString)
 
@@ -231,15 +229,16 @@ try {
         Write-Host '[track4-pmemsave] -SkipBuild: reusing existing build.' -ForegroundColor DarkGray
     }
 
-    # Check whether the planted sentinel is in the binary
+    # The positive-control sentinel must not be embedded as a contiguous string
+    # in the immutable image, or its post-wipe residual would be ambiguous.
     $BinPath = Join-Path $BuildDir 'esp\EFI\BOOT\KERNEL.BIN'
+    if (-not (Test-Path $BinPath)) { throw "Kernel binary not found at $BinPath" }
     $binBytes = [System.IO.File]::ReadAllBytes($BinPath)
     $sentinelInBin = (Search-BytePattern $binBytes $SentinelBytes).Count -gt 0
     if ($sentinelInBin) {
-        Write-Host "[track4-pmemsave] Planted sentinel '$SentinelString' found in binary." -ForegroundColor Green
+        throw "Positive-control sentinel '$SentinelString' is embedded in KERNEL.BIN; it must be constructed only in writable runtime RAM."
     } else {
-        Write-Host "[track4-pmemsave] INFO: sentinel '$SentinelString' not compiled into binary." -ForegroundColor DarkGray
-        Write-Host '                  Planted-sentinel assertion skipped; MEMKEY01 + canary token checks will run.' -ForegroundColor DarkGray
+        Write-Host "[track4-pmemsave] Positive-control sentinel is absent from immutable KERNEL.BIN (expected)." -ForegroundColor Green
     }
 
     # ------------------------------------------------------------------
@@ -293,8 +292,9 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not (Test-Path $DumpPre)) {
-        Write-Host '[track4-pmemsave] WARN: pre-wipe dump file not created - monitor may have failed.' -ForegroundColor DarkYellow
-        Write-Host '  Check QEMU monitor connectivity. Skipping Phase 1 assertions.' -ForegroundColor DarkYellow
+        $overall = $false
+        $fails.Add('Phase 1: pre-wipe dump file not created - positive control cannot be established.')
+        Write-Host '[track4-pmemsave] FAIL: pre-wipe dump file not created.' -ForegroundColor Red
     } else {
         $preBytes = [System.IO.File]::ReadAllBytes($DumpPre)
         Write-Host "  Pre-wipe dump: $([Math]::Round($preBytes.Length/1MB,1)) MiB" -ForegroundColor Gray
@@ -311,14 +311,15 @@ try {
             Write-Host '  MEMKEY01 not found in pre-wipe dump (good - entropy succeeded).' -ForegroundColor Green
         }
 
-        # If binary has planted sentinel, verify it IS in the pre-wipe dump
-        if ($sentinelInBin) {
-            $presentHits = Search-BytePattern $preBytes $SentinelBytes
-            if ($presentHits.Count -gt 0) {
-                Write-Host "  Planted sentinel '$SentinelString' FOUND in pre-wipe dump at $($presentHits.Count) offset(s). (Expected)" -ForegroundColor Green
-            } else {
-                Write-Host "  [WARN] Planted sentinel '$SentinelString' NOT found in pre-wipe dump - may not be in a RAM region." -ForegroundColor DarkYellow
-            }
+        # Positive control: prove the exact must-vanish bytes were live in DRAM
+        # before accepting their absence after the wipe.
+        $presentHits = Search-BytePattern $preBytes $SentinelBytes
+        if ($presentHits.Count -gt 0) {
+            Write-Host "  [B0] Runtime sentinel '$SentinelString' FOUND pre-wipe at $($presentHits.Count) offset(s). (PASS)" -ForegroundColor Green
+        } else {
+            $overall = $false
+            $fails.Add("Phase 1 Assertion B0: runtime sentinel '$SentinelString' absent from PRE-WIPE dump - positive control failed.")
+            Write-Host "  [B0] FAIL: runtime sentinel '$SentinelString' absent from pre-wipe dump." -ForegroundColor Red
         }
 
         # If canary token was extracted from serial, search for it as a byte pattern
@@ -398,20 +399,14 @@ try {
             Write-Host '  [A] MEMKEY01 absent from post-wipe dump. (PASS - mem-key region zeroed)' -ForegroundColor Green
         }
 
-        # --- Assertion B: Planted sentinel must NOT appear post-wipe ---
-        if ($sentinelInBin) {
-            $postSentHits = Search-BytePattern $postBytes $SentinelBytes
-            if ($postSentHits.Count -gt 0) {
-                # Only fail if the sentinel is in a DRAM data region (not RO .text)
-                # The kernel binary lives in DRAM as RO text, so if it appears in the
-                # binary it will appear in the post-wipe dump as part of the code image.
-                # We record this as a documented residual, not a scrub failure.
-                Write-Host "  [B] Planted sentinel '$SentinelString' still found in post-wipe dump ($($postSentHits.Count) hits)." -ForegroundColor DarkYellow
-                Write-Host '      This is expected if the sentinel is in the kernel .text (RO, not scrubbed).' -ForegroundColor DarkYellow
-                Write-Host '      DOCUMENTED RESIDUAL: kernel .text and page tables are NOT scrubbed (irreducible live set).' -ForegroundColor DarkYellow
-            } else {
-                Write-Host "  [B] Planted sentinel '$SentinelString' absent from post-wipe dump. (PASS)" -ForegroundColor Green
-            }
+        # --- Assertion B: runtime-planted sentinel must vanish post-wipe ---
+        $postSentHits = Search-BytePattern $postBytes $SentinelBytes
+        if ($postSentHits.Count -gt 0) {
+            $overall = $false
+            $fails.Add("Phase 2 Assertion B: runtime sentinel '$SentinelString' remains at $($postSentHits.Count) offset(s) in POST-WIPE dump.")
+            Write-Host "  [B] FAIL: runtime sentinel remains post-wipe ($($postSentHits.Count) hits)." -ForegroundColor Red
+        } else {
+            Write-Host "  [B] Runtime sentinel '$SentinelString' absent post-wipe. (PASS - planted secret erased)" -ForegroundColor Green
         }
 
         # --- Assertion C: Canary token bytes must NOT appear post-wipe ---
@@ -465,6 +460,7 @@ try {
         Write-Host ' What was tested:' -ForegroundColor Gray
         Write-Host '  - nx_volatile_wipe_halt() triggered via serial w command' -ForegroundColor Gray
         Write-Host '  - [WIPED] confirmation marker received (debug build)' -ForegroundColor Gray
+        Write-Host '  - Runtime-only sentinel present before wipe and absent afterward' -ForegroundColor Gray
         Write-Host '  - MEMKEY01 fallback constant absent from post-wipe dump' -ForegroundColor Gray
         Write-Host '  - Canary token bytes absent from post-wipe dump (if available)' -ForegroundColor Gray
         Write-Host ''

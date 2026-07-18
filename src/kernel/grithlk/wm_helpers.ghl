@@ -81,9 +81,15 @@ const WIN_OFF_DRAGFN      = 144;
 const WIN_OFF_RCLICKFN    = 152;
 const WF_VISIBLE          = 0x01;
 const WF_ACTIVE           = 0x10;
-const WF_FOCUSED          = 0x04;
+const WF_SHELL            = 0x80;   # ring-3 desktop shell window (constants.inc)
+# WF_FOCUSED is 0x02 in constants.inc (0x04 is WF_DRAGGING). Import the real
+# value rather than hardcoding it, the way frame_present.ghl does -- a previous
+# hardcoded 0x04 here toggled WF_DRAGGING instead of the focus bit, leaving the
+# asm-set WF_FOCUSED (0x02) stuck on, which the draw loop's pass-1 skip then hid
+# behind the desktop whenever the window was not the single global focus.
+const WF_FOCUSED          = extern;
 const BORDER_WIDTH        = 2;
-const TITLEBAR_HEIGHT     = 28;
+const TITLEBAR_HEIGHT     = extern;
 const CLOSE_BTN_SIZE      = 20;
 const MIN_BTN_SIZE        = 20;
 const BTN_LEFT            = 1;
@@ -248,8 +254,45 @@ fn click_dbg_callback_end(focus_after) {
     }
 }
 
-fn wm_client_x(win, mouse_x) { return mouse_x - lq(win + WIN_OFF_X) - BORDER_WIDTH; }
-fn wm_client_y(win, mouse_y) { return mouse_y - lq(win + WIN_OFF_Y) - TITLEBAR_HEIGHT; }
+# The WF_SHELL desktop window is chromeless, so its client origin is the window
+# origin (no border / titlebar inset) -- mouse coords map straight through.
+fn wm_client_x(win, mouse_x) {
+    if (lq(win + WIN_OFF_FLAGS) & WF_SHELL) != 0 { return mouse_x - lq(win + WIN_OFF_X); }
+    return mouse_x - lq(win + WIN_OFF_X) - BORDER_WIDTH;
+}
+fn wm_client_y(win, mouse_y) {
+    if (lq(win + WIN_OFF_FLAGS) & WF_SHELL) != 0 { return mouse_y - lq(win + WIN_OFF_Y); }
+    return mouse_y - lq(win + WIN_OFF_Y) - TITLEBAR_HEIGHT;
+}
+
+# Find the mounted ring-3 desktop-shell window (WF_SHELL), or NO_WINDOW.
+fn wm_shell_window() {
+    let i = 0;
+    while i < MAX_WINDOWS {
+        let fl = lq(wm_ptr(i) + WIN_OFF_FLAGS);
+        if (fl & WF_ACTIVE) != 0 {
+            if (fl & WF_SHELL) != 0 { return i; }
+        }
+        i = i + 1;
+    }
+    return NO_WINDOW;
+}
+
+# Deliver an empty-desktop click to the shell's client click handler. The shell
+# is never the wm_hit_window_at target (so no titlebar drag / close-button path
+# runs) and is never focused (so it cannot lift over app windows). This is the
+# ring-3 replacement for the retired desktop_handle_click + tb_handle_click.
+fn wm_handle_shell_click(sh, swin, mouse_x, mouse_y) {
+    let stored = lq(swin + WIN_OFF_CLICKFN);
+    if stored == 0 { return 0; }
+    # Only act on the press edge; a held button is an in-progress interaction.
+    if (lq(&wm_last_buttons) & BTN_LEFT) != 0 { return 1; }
+    let cx = wm_client_x(swin, mouse_x);
+    let cy = wm_client_y(swin, mouse_y);
+    let target = cpi_verify_callback(stored, swin, WIN_OFF_CLICKFN);
+    if target != 0 { dispatch_app_callback(target, swin, cx, cy); }
+    return 1;
+}
 
 fn wm_hit_window_at(x, y) {
     let f = lq(&wm_focused_window);
@@ -257,7 +300,7 @@ fn wm_hit_window_at(x, y) {
         if f >= 0 && f < MAX_WINDOWS {
             let p = wm_ptr(f);
             let fl = lq(p + WIN_OFF_FLAGS);
-            if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 {
+            if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 && (fl & WF_SHELL) == 0 {
                 let wx = lq(p + WIN_OFF_X);
                 let wy = lq(p + WIN_OFF_Y);
                 if x >= wx && x < wx + lq(p + WIN_OFF_W) {
@@ -270,7 +313,7 @@ fn wm_hit_window_at(x, y) {
     while i >= 0 {
         let p = wm_ptr(i);
         let fl = lq(p + WIN_OFF_FLAGS);
-        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 {
+        if (fl & WF_ACTIVE) != 0 && (fl & WF_VISIBLE) != 0 && (fl & WF_SHELL) == 0 {
             let wx = lq(p + WIN_OFF_X);
             let wy = lq(p + WIN_OFF_Y);
             if x >= wx && x < wx + lq(p + WIN_OFF_W) {
@@ -286,7 +329,9 @@ fn wm_clear_focus_flags() {
     let i = 0;
     while i < MAX_WINDOWS {
         let win = wm_ptr(i);
-        sq(win + WIN_OFF_FLAGS, lq(win + WIN_OFF_FLAGS) & 0xFFFFFFFFFFFFFFFB);
+        # Clear WF_FOCUSED (0x02); mask = ~0x02. (Was 0xFFFFFFFFFFFFFFFB = ~0x04,
+        # which cleared WF_DRAGGING and left the real focus bit stuck on.)
+        sq(win + WIN_OFF_FLAGS, lq(win + WIN_OFF_FLAGS) & 0xFFFFFFFFFFFFFFFD);
         i = i + 1;
     }
 }
@@ -349,6 +394,12 @@ fn wm_handle_title_drag(mouse_x, mouse_y, buttons) {
     wm_dirty_outline(x, y, lq(&wm_drag_preview_w), lq(&wm_drag_preview_h));
     sq(win + WIN_OFF_X, x);
     sq(win + WIN_OFF_Y, y);
+    # Design System chrome carries a soft drop shadow that extends beyond the
+    # window rect (render_drop_shadow). A partial dirty flush of only the window
+    # outline would leave shadow trails at the old position, so a moving window
+    # forces a full-scene redraw this frame: the old shadow is cleared and the
+    # new one drawn cleanly. Drag is interactive (async flip absorbs the cost).
+    render_mark_full();
     return 0;
 }
 
@@ -483,6 +534,14 @@ fn wm_handle_mouse_event(rdi mouse_x, rsi mouse_y, rdx buttons)
         click_dbg_mouse(78, mouse_x, mouse_y, buttons, focus_at_entry, id, 0); # "CLKN"
         wm_clear_focus_flags();
         sq(&wm_focused_window, NO_WINDOW);
+        # Empty desktop area: hand the click to the ring-3 shell (its taskbar /
+        # desktop icons / Start menu). The shell is deliberately not focused.
+        let sh = wm_shell_window();
+        if sh != NO_WINDOW {
+            let handled_shell = wm_handle_shell_click(sh, wm_ptr(sh), mouse_x, mouse_y);
+            sq(&wm_last_buttons, buttons);
+            return handled_shell;
+        }
         sq(&wm_last_buttons, buttons);
         return 0;
     }
@@ -542,6 +601,7 @@ fn wm_get_window_at(rdi x, rsi y)
             let fl = lq(p + WIN_OFF_FLAGS);
             if (fl & WF_ACTIVE) != 0 {
                 if (fl & WF_VISIBLE) != 0 {
+                    if (fl & WF_SHELL) == 0 {
                     let wx = lq(p + WIN_OFF_X);
                     if x >= wx {
                         if x < wx + lq(p + WIN_OFF_W) {
@@ -552,6 +612,7 @@ fn wm_get_window_at(rdi x, rsi y)
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

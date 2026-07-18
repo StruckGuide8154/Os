@@ -12,7 +12,7 @@ KEYWORDS = {
     "use","app","module","fn","let","if","else","while","for","return",
     "str","i8","i16","i32","i64","u8","u16","u32","u64","ptr","void","bool",
     "true","false","asm","syscall","extern","const","struct","state","break","continue",
-    "global","data","table","naked","align","unsafe","buffer","reserve",
+    "global","data","table","naked","align","unsafe","capability","buffer","reserve",
     # Blocking-effect type system: a fn may be declared `blocking` (it can
     # spin/wait/acquire-a-lock) or `nonblocking` (an interactive / IRQ entry
     # point that must never stall). The compiler rejects a blocking call from a
@@ -267,6 +267,14 @@ def parse(toks,path):
         elif t.v=="unsafe":
             p.eat(); cap=p.eat("id").v; p.match(";")
             decls.append(node("unsafe",cap=cap,line=t.line))
+        elif t.v=="capability":
+            # Ring-3 driver broker authority, deliberately separate from
+            # `unsafe`: this does not permit a privileged instruction or raw
+            # memory access.  It only permits the compiler to emit the named
+            # class of driver-host syscall; the broker still enforces the
+            # signed policy and per-device window at runtime.
+            p.eat(); cap=p.eat("id").v; p.match(";")
+            decls.append(node("capability",cap=cap,line=t.line))
         elif t.v=="data":
             # Kernel-mode data with an EXACT (unprefixed) symbol name. Forms:
             #   data NAME: <count> [x <width>] [= <init>];   element array
@@ -2263,8 +2271,8 @@ def _enforce_no_asm(decls, why):
 
 # Function-level safety inference. This is deliberately conservative: unknown
 # extern calls are surfaced as contract debt instead of being assumed safe.
-_MEM_READ_BUILTINS={"lb","lw","lq"}
-_MEM_WRITE_BUILTINS={"sb","sw","sq"}
+_MEM_READ_BUILTINS={"lb","lh","lw","lq"}
+_MEM_WRITE_BUILTINS={"sb","sh","sw","sq"}
 _USER_MEM_BUILTINS={"smap_open","smap_close","rep_movsq","rep_movsd"}
 _SERIAL_NAMES={"serial_putc","serial_puts","serial_crlf","svg_dump_putc","ser_print_hex64","debug_print"}
 _FRAMEBUFFER_NAMES={
@@ -2276,6 +2284,11 @@ _FRAMEBUFFER_NAMES={
 # Externs with a narrow, GHL-facing contract. These are still emitted in
 # extern_calls for visibility, but they are not ABI debt in the safety budget.
 _CONTRACTED_EXTERN_NAMES={
+    # Core network helpers with stable GHL-facing scalar/pointer ABIs.
+    "net_arp_resolve_ipv4_try",
+    "net_arp_resolved_mac_ptr",
+    "net_checksum",
+    "net_info",
     "render_flush",
     "render_mark_dirty",
     "render_mark_full",
@@ -2297,7 +2310,7 @@ _INTRINSIC_NAMES=(
         "inb","outb","inw","outw","ind","outd","rdmsr","wrmsr","wrmsr_split",
         "write_cr0","write_cr3","write_cr4","read_cr0","read_cr2","read_cr3","read_cr4",
         "invlpg","lgdt","lidt","ltr","intn","load_ds","load_es","load_fs","load_gs","load_ss",
-        "xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","xmm_bcast32","isqrt",
+        "xmm_loadu","xmm_loada","xmm_store","xmm_store_nt","xmm_bcast32","isqrt","mulhi",
         "rep_movsq","rep_movsd","rep_stosd","atomic_xchg","atomic_cmpxchg","atomic_add",
         "syscall_raw","call_table",
         "cpuid_eax","cpuid_ebx","cpuid_ecx","cpuid_edx","write_rsp","push_val","pop_val",
@@ -2678,6 +2691,48 @@ _KERNEL_PRIV_SUBSUMES={
     "kernel_creg","kernel_pgtable","kernel_dtable","kernel_idtable","kernel_vmx",
 }
 
+# Compile-time authority classes for --target driver.  These declarations are
+# a static least-authority gate over the stable driver-host syscall ABI; they do
+# not mint runtime authority.  The in-kernel broker independently intersects
+# requested capabilities with signed policy and checks every concrete window.
+# `reset` (transient device reset) and `fwload` (persistent firmware load) are
+# deliberately SEPARATE classes: firmware load outlives a reboot, so neither
+# declaration may subsume the other (mirrors DRV_CAP_RESET / DRV_CAP_FWLOAD in
+# driver_host.ghl).
+_VALID_DRIVER_CAPS={"mmio","dma","pio","irq","ring","reset","fwload"}
+
+# Broker operations whose mere presence in a driver binary requires explicit
+# authority.  258 programs a device-visible DMA pointer through an MMIO window,
+# so it intentionally requires BOTH classes.
+_DRIVER_SYSCALL_CAPS={
+    233: frozenset(("mmio",)),       # GRANT_MMIO (control-plane denied today)
+    234: frozenset(("dma",)),        # GRANT_DMA / DMA_ALLOC
+    240: frozenset(("mmio",)),       # MMIO_READ32
+    241: frozenset(("mmio",)),       # MMIO_WRITE32
+    242: frozenset(("dma",)),        # DMA_MAP
+    249: frozenset(("mmio",)),       # GRANT_MMIO_FOR (control-plane denied)
+    250: frozenset(("mmio",)),       # MMIO_RD8
+    251: frozenset(("mmio",)),       # MMIO_RD16
+    252: frozenset(("mmio",)),       # MMIO_RD32
+    253: frozenset(("mmio",)),       # MMIO_RD64
+    254: frozenset(("mmio",)),       # MMIO_WR8
+    255: frozenset(("mmio",)),       # MMIO_WR16
+    256: frozenset(("mmio",)),       # MMIO_WR32
+    257: frozenset(("mmio",)),       # MMIO_WR64
+    258: frozenset(("mmio","dma")), # MMIO_WR_DMAPTR
+    264: frozenset(("reset",)),      # DEVICE_RESET (reserved; not yet dispatched)
+    265: frozenset(("fwload",)),     # FW_LOAD (reserved; not yet dispatched)
+}
+
+def _require_driver_syscall_caps(cg, num):
+    required=_DRIVER_SYSCALL_CAPS.get(num, frozenset())
+    missing=sorted(required - getattr(cg,"driver_caps",set()))
+    if missing:
+        decls=", ".join(f"`capability {cap};`" for cap in missing)
+        raise SyntaxError(
+            f"driver broker syscall {num} requires {decls}; "
+            "compiler declarations do not replace signed broker grants")
+
 def _require_cap(cg, cap, what):
     caps=getattr(cg,"unsafe_caps",set())
     if cap in caps:
@@ -2700,6 +2755,13 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if deny_unsafe and declared_caps:
         caps=", ".join(d["cap"] for d in declared_caps[:8])
         raise SyntaxError(f"--deny-unsafe rejects unsafe capability declarations: {caps}")
+    declared_driver_caps=[d for d in decls if d.get("k")=="capability"]
+    for d in declared_driver_caps:
+        if target!="driver":
+            raise SyntaxError(
+                f"capability {d['cap']}: declaration requires --target driver")
+        if d["cap"] not in _VALID_DRIVER_CAPS:
+            raise SyntaxError(f"capability {d['cap']}: unknown driver capability")
     safety_module=app_prefix
     for d in decls:
         if d.get("k") in ("module","app"):
@@ -2708,6 +2770,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     cg=CG(app_prefix,kernel=kernel)
     cg.deny_unsafe=deny_unsafe
     cg.unsafe_caps={d["cap"] for d in declared_caps}
+    cg.driver_caps={d["cap"] for d in declared_driver_caps}
     cg.embed=embed
     cg.src=src
     cg.target=target
@@ -2741,7 +2804,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # collect top-level
     str_defs={}
     for d in decls:
-        if d["k"]=="unsafe":
+        if d["k"] in ("unsafe","capability"):
             continue
         if d["k"]=="cfgguard":
             # Top-level `cfg` guard line (%ifdef/%ifndef/%endif) emitted inline
@@ -3019,7 +3082,7 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
                 continue   # FN_BEGIN already emitted `global g` for this fn
             out.append(f"global {g}")
     if not embed:
-        out.append("section .text")
+        out.append("section .driverblob" if target=="driver" else "section .text")
     # Phase 0 (--O4): drop wrapper fns that were inlined everywhere and are now
     # called nowhere, before the line-level passes run on the survivors.
     text=cg.text
@@ -3051,17 +3114,55 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     if cg.o4 and optimize:
         body=_o4_dead_result_elim(body, target)
     out.extend(body)
-    # Strings: emit as inert bytes in current section. In standalone mode put
-    # them in .rodata; in embed mode keep them in .text (safe - no code falls
-    # through into them since every fn ends with `ret`).
+    # A driver package is one contiguous flat section so NASM can prove every
+    # copy/entry bound with scalar label differences. Runtime W^X still needs a
+    # whole-page code/data split, so emit that boundary before all generated
+    # rodata/state bytes.
+    if target=="driver":
+        out.append("align 4096")
+        # Per-app boundary label so MULTIPLE driver packages can be framed into
+        # one kernel image (Track 8 migration ladder): each blob section aliases
+        # its own `driverN_blob_code_end equ <app>_driver_code_end`.
+        out.append(f"{app_prefix}_driver_code_end:")
+    # Strings: emit as inert bytes in standalone .rodata. In the embedded app
+    # blob they are still data objects: some apps intentionally mutate string
+    # storage as scratch buffers, and even read-only literals must not force a
+    # page to be both writable and executable. Route all embedded user rodata
+    # into `.appdata` so the slot W^X split can keep [code) X+!W and [data) W+NX.
     if cg.rodata:
-        if not embed:
+        if embed and not kernel:
+            if target=="driver":
+                out.extend(cg.rodata)
+            else:
+                out.append("section .appdata")
+                out.extend(cg.rodata)
+                out.append("section .text")
+        else:
             out.append("section .rodata")
-        out.extend(cg.rodata)
+            out.extend(cg.rodata)
     if cg.data:
-        if target!="boot" and (not embed or kernel):
+        if target=="boot":
+            # boot images have a fixed org; keep data inline in the current section.
+            out.extend(cg.data)
+        elif embed and not kernel:
+            # W^X (airtight): writable app data must NOT share an executable page
+            # with code. In embed mode the previous behavior left `cg.data` inline
+            # in `.text`, so a single 4 KiB page could hold both code and writable
+            # data and the per-slot W^X policy was forced to leave it W+X. Route it
+            # into a distinct `.appdata` section instead; the blob framing in
+            # src/user/apps.asm groups `.appdata` page-aligned AFTER all app code
+            # (global app_blob_code_end), so slot install can mark [code) X+!W and
+            # the data tail W+NX with one clean boundary. Restore `.text` so the next %include'd
+            # app (and the app_seg_<name>_end label) lands back in the code stream.
+            if target=="driver":
+                out.extend(cg.data)
+            else:
+                out.append("section .appdata")
+                out.extend(cg.data)
+                out.append("section .text")
+        else:
             out.append("section .data")
-        out.extend(cg.data)
+            out.extend(cg.data)
     # Uninitialized `reserve` arenas. Emitted LAST and into `.bss` (NOBITS) so
     # under the kernel's `-f bin` single-TU link they occupy address space but
     # contribute zero file bytes - a multi-MiB reserve does not grow KERNEL.BIN.
@@ -3070,6 +3171,11 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             raise SyntaxError("`reserve` is not valid for --target boot")
         out.append("section .bss")
         out.extend(cg.bss)
+        # In embed mode the generated unit is %include'd straight into apps.asm's
+        # code stream; leaving `.bss` active would drop the following app's code
+        # (and its app_seg_<name>_end label) into NOBITS. Restore `.text`.
+        if embed and not kernel:
+            out.append("section .driverblob" if target=="driver" else "section .text")
     LAST_SIGS=cg.sigs
     LAST_MEMMAP={"buffers":cg.buffers,"used":cg.buffer_used,"cap":BUFFER_REGION_CAP}
     broad_caps={"raw_mem","implicit_extern","kernel_priv"}
@@ -3088,6 +3194,12 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
             "declared": [{"cap": d["cap"], "line": d.get("line")} for d in declared_caps],
             "broad": sorted({d["cap"] for d in declared_caps if d["cap"] in broad_caps}),
             "privileged": sorted({d["cap"] for d in declared_caps if d["cap"] in privileged_caps}),
+        },
+        "driver_capabilities": {
+            "declared": [
+                {"cap": d["cap"], "line": d.get("line")}
+                for d in declared_driver_caps
+            ],
         },
         "symbols": {
             "externs": sorted(cg.externs),
@@ -4694,6 +4806,16 @@ def gen_expr(st,e):
         # move args into ABI regs, then syscall num in rax
         args=e["args"]
         if len(args)>6: raise SyntaxError("syscall has max 6 args")
+        numc=const_fold_int(cg, e["num"])
+        if getattr(cg,"target","user")=="driver":
+            # A dynamic syscall number would let a driver hide an MMIO/DMA op
+            # from this compile-time authority check.  Driver ABI calls must be
+            # statically enumerable; normal user/kernel targets retain their
+            # existing dynamic-syscall behavior.
+            if numc is None:
+                raise SyntaxError(
+                    "--target driver requires a compile-time constant syscall number")
+            _require_driver_syscall_caps(cg, numc)
         # evaluate to stack first (left-to-right), then pop in reverse
         if getattr(st,"_o4_passthru",None) is e:
             # --O4 Case B: read params from their incoming registers via a
@@ -4726,9 +4848,14 @@ def gen_expr(st,e):
         # emit it through APP_SYSNO so the build records a fixup for the loader to
         # rewrite per slot. A non-constant number falls back to a plain rax load
         # (not permuted - there is no immediate to rewrite).
-        numc=const_fold_int(cg, e["num"])
         if numc is not None:
-            cg.emit(f"    APP_SYSNO {numc}")
+            # Driver-host processes use the raw, stable broker ABI. Some broker
+            # syscall numbers exceed 255, while the GUI APPS.BIN permutation
+            # record is a packed u8 and is meaningful only for that shared blob.
+            if getattr(cg,"target","user")=="driver":
+                cg.emit(f"    mov eax, {numc}")
+            else:
+                cg.emit(f"    APP_SYSNO {numc}")
         else:
             gen_expr(st,e["num"])
         cg.emit("    syscall")
@@ -4736,7 +4863,7 @@ def gen_expr(st,e):
         args=e["args"]
         name=e["name"]
         # Builtins: memory load/store - compile inline, no actual call.
-        if name in ("lb","lw","lq","sb","sw","sq"):
+        if name in ("lb","lh","lw","lq","sb","sh","sw","sq"):
             # Ring-3 targets (user apps AND Track-8 driver-host processes) may use
             # the load/store builtins without a capability: the MMU confines every
             # such access to the process's own mapped pages, so they can never
@@ -4745,18 +4872,22 @@ def gen_expr(st,e):
             # physical addresses, so there they stay gated behind `unsafe raw_mem`.
             if getattr(cg,"target","user") not in ("user","driver"):
                 _require_cap(cg,"raw_mem",f"{cg.target} raw memory builtin {name}()")
-            if name in ("lb","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
-            if name in ("sb","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
+            if name in ("lb","lh","lw","lq") and len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
+            if name in ("sb","sh","sw","sq") and len(args)!=2: raise SyntaxError(f"{name} takes 2 args")
             if name=="lb":
                 gen_expr(st,args[0]); cg.emit("    movzx rax, byte [rax]")
+            elif name=="lh":
+                # 16-bit unsigned load (VirtIO split-ring idx/flags/desc fields).
+                gen_expr(st,args[0]); cg.emit("    movzx rax, word [rax]")
             elif name=="lw":
                 gen_expr(st,args[0]); cg.emit("    movsxd rax, dword [rax]")
             elif name=="lq":
                 gen_expr(st,args[0]); cg.emit("    mov rax, [rax]")
-            elif name in ("sb","sw","sq"):
+            elif name in ("sb","sh","sw","sq"):
                 gen_expr(st,args[0]); cg.emit("    push rax")
                 gen_expr(st,args[1]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
                 if name=="sb": cg.emit("    mov [rax], cl")
+                elif name=="sh": cg.emit("    mov [rax], cx")
                 elif name=="sw": cg.emit("    mov [rax], ecx")
                 else: cg.emit("    mov [rax], rcx")
                 cg.emit("    xor rax, rax")
@@ -4770,6 +4901,20 @@ def gen_expr(st,e):
             else:
                 cg.emit("    rol eax, cl")
             cg.emit("    mov eax, eax")
+            return
+        if name=="mulhi":
+            # mulhi(a, b) -> rax = high 64 bits of the UNSIGNED 128-bit product
+            # a*b. The low 64 bits are the ordinary `*` operator; together they
+            # give a full 64x64->128 widening multiply (needed for radix-2^51
+            # field arithmetic). `mul rcx` writes rdx:rax = rax*rcx; the high
+            # half lands in rdx. Clobbers rdx/rcx (both caller-saved; the stack
+            # machine keeps live values in rbp slots). Pure arithmetic, so it is
+            # available in every target (no kernel_priv).
+            if len(args)!=2: raise SyntaxError("mulhi takes 2 args (a, b)")
+            gen_expr(st,args[0]); cg.emit("    push rax")
+            gen_expr(st,args[1]); cg.emit("    mov rcx, rax"); cg.emit("    pop rax")
+            cg.emit("    mul rcx")
+            cg.emit("    mov rax, rdx")
             return
         # Builtin: bounds-checked dispatch. call_table(TBL, idx) calls the
         # idx-th handler fn registered in `table TBL { ... }`, after checking
@@ -4892,8 +5037,15 @@ def gen_expr(st,e):
                 cg.emit("    seta al"); cg.emit("    movzx rax, al"); cg.emit("    xor rax, 1")
             return
         if name in ("write_rsp","push_val"):
+            # Direct stack-pointer mutation. Requires --target kernel AND the
+            # kernel_priv unsafe capability, exactly like the comparable
+            # privileged stack intrinsics (pop_to_mem / save_rsp / write_flags /
+            # push_reg). Without the cap gate these two slipped past the safety
+            # manifest's review marker (a kernel-source supply-chain hazard).
             if not getattr(cg,"kernel",False):
                 raise SyntaxError(f"{name}() intrinsic requires --target kernel")
+            if getattr(cg,"target","user")!="boot":
+                _require_cap(cg,"kernel_priv",f"kernel intrinsic {name}()")
             if len(args)!=1: raise SyntaxError(f"{name} takes 1 arg")
             gen_expr(st,args[0])
             if name=="write_rsp":
@@ -5432,7 +5584,7 @@ def main():
     ap.add_argument("-L","--lib",default=os.path.join(os.path.dirname(__file__),"..","lib"))
     ap.add_argument("--prefix",default=None)
     ap.add_argument("--embed",action="store_true",
-                    help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives, strings inline in .text")
+                    help="emit for %%include into a larger NASM unit: no bits/default/section/extern directives; user app data/strings go to .appdata")
     ap.add_argument("--emit-sigs",action="store_true",
                     help="write a .sig.json sidecar next to the generated assembly")
     ap.add_argument("--memmap",default=None,metavar="PATH",
@@ -5456,7 +5608,10 @@ def main():
                          "and emit no inline asm. Combined with the ring-3 privilege gate (privileged "
                          "intrinsics inb/outb/write_cr*/lgdt/... already require --target kernel), a "
                          "driver binary provably holds ZERO ambient hardware authority: it reaches "
-                         "hardware only by syscalling the in-kernel driver_host broker.")
+                         "hardware only by syscalling the in-kernel driver_host broker. Brokered MMIO, "
+                         "DMA, device-reset, and firmware-load calls additionally require explicit "
+                         "`capability mmio;` / `capability dma;` / `capability reset;` / "
+                         "`capability fwload;` declarations; dynamic syscall numbers are rejected.")
     ap.add_argument("--forbid-asm",action="store_true",
                     help="reject any inline asm block. Use for new code and migration gates.")
     ap.add_argument("--deny-unsafe",action="store_true",

@@ -18,6 +18,15 @@ FN_BEGIN app_blob_init, 0, 0, FN_RET_SCALAR
     mov [rel app_blob_size_v], rcx
     add rax, rcx
     mov [rel app_blob_end_v], rax
+    ; W^X split offset (Codex review finding 2): app_blob_code_end - app_blob_start
+    ; is the page-aligned code/data boundary. The in-image labels keep their
+    ; relative positions after the post-build strip, and the loaded APPS.BIN has
+    ; the identical internal layout, so this single constant drives every slot's
+    ; v1 W^X manifest regardless of where the live blob actually sits.
+    lea rax, [rel app_blob_code_end]
+    lea rcx, [rel app_blob_start]
+    sub rax, rcx
+    mov [rel app_blob_code_size_v], rax
     mov rax, [abs VBE_INFO_ADDR + VBE_APP_ARENA_BASE_OFF]
     test rax, rax
     jnz .have_arena_base
@@ -29,6 +38,20 @@ FN_BEGIN app_blob_init, 0, 0, FN_RET_SCALAR
     jnz .have_arena_size
     mov rcx, MAX_WINDOWS * APP_SLOT_SIZE
 .have_arena_size:
+    ; Clamp the firmware/boot-supplied arena size to the provisioned span
+    ; (GSEC 2026-07-18, root cause of dispatch-core F1). l3_app_arena_size_v is
+    ; the sole bound SC_SLOT_FROM_RIP uses to derive the syscall slot id; the
+    ; runtime record pool and the kernel syscall-stack region are each sized for
+    ; exactly MAX_WINDOWS slots. A VBE_INFO arena larger than
+    ; MAX_WINDOWS*APP_SLOT_SIZE would let a user RIP high in the (over-reported)
+    ; arena derive slot >= MAX_WINDOWS -> ring-0 OOB write in the dispatcher.
+    ; Cap here so no consumer of l3_app_arena_size_v can exceed the provisioned
+    ; slot count; the dispatcher keeps its own ceiling as defence in depth.
+    mov rax, MAX_WINDOWS * APP_SLOT_SIZE
+    cmp rcx, rax
+    jbe .arena_size_ok
+    mov rcx, rax
+.arena_size_ok:
     mov [rel l3_app_arena_size_v], rcx
     pop rcx
     pop rax
@@ -115,7 +138,7 @@ FN_BEGIN l3_user_stack_top, 0, 0, FN_RET_SCALAR
     jb .l3_ust_slot_ok
     xor ecx, ecx
 .l3_ust_slot_ok:
-    mov rax, [rel l3_slot_ustack_off + rcx*8]
+    mov rax, [abs l3_slot_ustack_off + rcx*8]
     test rax, rax
     jnz .l3_ust_have_off
     mov rax, L3_SLOT_USTACK_TOP_HIGH
@@ -179,7 +202,7 @@ FN_BEGIN l3_randomize_user_stack_top, 0, 0, FN_RET_VOID
 %endif
 .lrust_store:
     mov ecx, r8d
-    mov [rel l3_slot_ustack_off + rcx*8], rdx
+    mov [abs l3_slot_ustack_off + rcx*8], rdx
 .lrust_done:
     pop r8
     pop rdi

@@ -291,6 +291,9 @@ FEAT_SYSCALL_SET_MODE      equ 32
 FEAT_DISPLAY_INIT          equ 64
 FEAT_FBPERF_WC             equ 128
 FEAT_FX_BENCH              equ 256
+FEAT_DEBUG_OVERLAY         equ 512
+FEAT_USBHID_INIT           equ 1024
+FEAT_USBNIC_INIT           equ 2048
 
 STORAGE_EXTENTS_ADDR    equ 0x9200   ; 4 KiB scratch for extent table
 STORAGE_EXTENTS_MAX     equ 256      ; max extents (256 * 16B = 4 KiB)
@@ -312,6 +315,26 @@ L3_HANDLE_TABLE_OFF     equ 0x1D5000
 HANDLE_TABLE_CAP        equ 64
 L3_HANDLE_ENTRY_SIZE    equ 16
 L3_HANDLE_TABLE_SZ      equ (HANDLE_TABLE_CAP * L3_HANDLE_ENTRY_SIZE) ; 1 KiB
+
+; --- per-driver DMA window (Track 8 external-driver loader) ------------------
+; A fixed sub-window of every slot's 2 MiB VA that the driver-host broker maps a
+; driver's granted coherent DMA buffer into (PRESENT|USER|W+NX) via the paging
+; helper l3_map_driver_dma. Placed 1 MiB into the slot: safely ABOVE any small
+; driver blob (driver blobs are tens of KiB, and the loader pins their code below
+; this offset - the map helper fail-closes if a slot's committed code range would
+; reach the window) and BELOW the handle table (0x1D5000), user stack, and guard
+; (0x1FA000). Only ever PRESENT inside a live driver slot; torn down on
+; quarantine/restart. Never executable (NX), never in a non-driver app's slot.
+L3_SLOT_DMA_OFF         equ 0x100000       ; 1 MiB into the slot
+L3_SLOT_DMA_MAX         equ 0x40000        ; 256 KiB (covers virtio vq+RX/TX = 0x34000)
+L3_SLOT_DMA_PTE0        equ (L3_SLOT_DMA_OFF / 0x1000)   ; first PTE index within the slot
+L3_SLOT_DMA_PAGES       equ (L3_SLOT_DMA_MAX / 0x1000)   ; 64 pages
+%if (L3_SLOT_DMA_OFF + L3_SLOT_DMA_MAX) > L3_HANDLE_TABLE_OFF
+%error "driver DMA window overlaps the handle table"
+%endif
+%if L3_SLOT_DMA_OFF < 0x10000
+%error "driver DMA window too low - could alias a driver code blob"
+%endif
 
 ; Handle kinds. 0 marks a free slot in the table; allocations always use
 ; a non-zero kind so "free" is unambiguous.

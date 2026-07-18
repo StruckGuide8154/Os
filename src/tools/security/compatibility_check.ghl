@@ -40,9 +40,9 @@ fn security_compat_is_known_service(service_id) {
     return 0;
 }
 
-fn security_compat_is_known_capability(capability) {
-    if capability >= APP_CAP_IDENTITY {
-        if capability <= APP_CAP_POLICY_READ {
+fn security_compat_is_known_capability(cap_id) {
+    if cap_id >= APP_CAP_IDENTITY {
+        if cap_id <= APP_CAP_POLICY_READ {
             return 1;
         }
     }
@@ -70,25 +70,25 @@ fn security_compat_capability_allowed(requested_capability, granted_capability) 
     return 0;
 }
 
-fn security_compat_service_matches_capability(service_id, capability) {
+fn security_compat_service_matches_capability(service_id, cap_id) {
     if service_id == SERVICE_IDENTITY {
-        if capability == APP_CAP_IDENTITY { return 1; }
+        if cap_id == APP_CAP_IDENTITY { return 1; }
     }
     if service_id == SERVICE_FILES {
-        if capability == APP_CAP_FILE_READ { return 1; }
-        if capability == APP_CAP_FILE_WRITE { return 1; }
+        if cap_id == APP_CAP_FILE_READ { return 1; }
+        if cap_id == APP_CAP_FILE_WRITE { return 1; }
     }
     if service_id == SERVICE_NETWORK {
-        if capability == APP_CAP_NETWORK { return 1; }
+        if cap_id == APP_CAP_NETWORK { return 1; }
     }
     if service_id == SERVICE_WINDOW {
-        if capability == APP_CAP_WINDOW { return 1; }
+        if cap_id == APP_CAP_WINDOW { return 1; }
     }
     if service_id == SERVICE_MEDIA {
-        if capability == APP_CAP_MEDIA { return 1; }
+        if cap_id == APP_CAP_MEDIA { return 1; }
     }
     if service_id == SERVICE_POLICY {
-        if capability == APP_CAP_POLICY_READ { return 1; }
+        if cap_id == APP_CAP_POLICY_READ { return 1; }
     }
     return 0;
 }

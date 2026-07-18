@@ -1,0 +1,159 @@
+# ============================================================================
+# GritHL GUI v2 - layout.ghl
+# Cached / measured layout: compute layout once, reuse until invalidated.
+#
+# v1 has no layout pass - apps compute pixel positions by hand every frame by
+# advancing a cursor-y through UI_* constants. v2 keeps a measured size and
+# an arranged rect on every retained node and only recomputes them when the
+# node's layout epoch is older than the tree's epoch. A static panel is
+# measured and arranged exactly once for its whole lifetime.
+#
+# Layout model: a simple box model - each node is a leaf (intrinsic size from
+# content) or a stack (vertical/horizontal) that sums children plus gaps and
+# applies padding. That covers the desktop's panels, rows, toolbars and lists
+# without a full constraint solver, and it is cheap enough that even a full
+# relayout is a single linear walk.
+# ============================================================================
+
+use core
+
+# Node struct offsets (the retained node; see retained.ghl for the rest).
+const N_KIND    = 0      # NK_* node kind
+const N_X       = 8      # arranged absolute x
+const N_Y       = 16
+const N_W       = 24     # arranged width
+const N_H       = 32
+const N_MW      = 40     # measured (intrinsic) width
+const N_MH      = 48     # measured (intrinsic) height
+const N_FLAGS   = 56
+const N_PAD     = 64     # padding (all sides)
+const N_GAP     = 72     # gap between children
+const N_CHILD   = 80     # first child ptr (0 = none)
+const N_NEXT    = 88     # next sibling ptr (0 = none)
+const N_EPOCH   = 96     # layout epoch this node was last solved at
+const N_INTRIN_W = 104   # leaf intrinsic width  (text width, icon size)
+const N_INTRIN_H = 112   # leaf intrinsic height
+const N_SIZE    = 128    # bytes per node
+
+# Node kinds relevant to layout.
+const NK_LEAF   = 0      # uses intrinsic size
+const NK_VSTACK = 1      # stacks children top-to-bottom
+const NK_HSTACK = 2      # stacks children left-to-right
+const NK_FIXED  = 3      # uses N_W/N_H as given (windows, the root)
+
+# Flags.
+const NF_GROW   = 1      # leaf/stack expands to fill the cross axis
+
+# The tree-wide layout epoch. Bump it to force a relayout of everything that
+# is read this frame; nodes whose own epoch already matches are skipped.
+const LAYOUT_EPOCH = 0x00BFCFE0
+
+fn layout_bump() {
+    sq(LAYOUT_EPOCH, lq(LAYOUT_EPOCH) + 1);
+}
+
+fn layout_epoch() {
+    return lq(LAYOUT_EPOCH);
+}
+
+# --- Measure pass: bottom-up intrinsic sizes, memoized per node. -----------
+fn measure(node) {
+    if node == 0 { return; }
+    let kind = lq(node + N_KIND);
+    let pad  = lq(node + N_PAD);
+    let gap  = lq(node + N_GAP);
+
+    if kind == NK_LEAF {
+        sq(node + N_MW, lq(node + N_INTRIN_W) + pad * 2);
+        sq(node + N_MH, lq(node + N_INTRIN_H) + pad * 2);
+        return;
+    }
+    if kind == NK_FIXED {
+        sq(node + N_MW, lq(node + N_W));
+        sq(node + N_MH, lq(node + N_H));
+        # still measure children so a later arrange can place them
+        let c = lq(node + N_CHILD);
+        while c != 0 { measure(c); c = lq(c + N_NEXT); }
+        return;
+    }
+
+    # Stacks: main axis sums, cross axis takes the max.
+    let main = 0;
+    let cross = 0;
+    let count = 0;
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        measure(c);
+        let cw = lq(c + N_MW);
+        let ch = lq(c + N_MH);
+        if kind == NK_VSTACK {
+            main = main + ch;
+            if cw > cross { cross = cw; }
+        } else {
+            main = main + cw;
+            if ch > cross { cross = ch; }
+        }
+        count = count + 1;
+        c = lq(c + N_NEXT);
+    }
+    if count > 1 { main = main + gap * (count - 1); }
+    if kind == NK_VSTACK {
+        sq(node + N_MW, cross + pad * 2);
+        sq(node + N_MH, main + pad * 2);
+    } else {
+        sq(node + N_MW, main + pad * 2);
+        sq(node + N_MH, cross + pad * 2);
+    }
+}
+
+# --- Arrange pass: top-down absolute placement into (x,y,w,h). -------------
+# Skips any subtree whose epoch already matches the tree epoch (it has not
+# changed since it was last solved).
+fn arrange(node, x, y, w, h) {
+    if node == 0 { return; }
+    let epoch = lq(LAYOUT_EPOCH);
+    sq(node + N_X, x); sq(node + N_Y, y);
+    sq(node + N_W, w); sq(node + N_H, h);
+
+    if lq(node + N_EPOCH) == epoch {
+        # Clean subtree at the same box - nothing moved.
+        return;
+    }
+    sq(node + N_EPOCH, epoch);
+
+    let kind = lq(node + N_KIND);
+    if kind == NK_LEAF { return; }
+
+    let pad = lq(node + N_PAD);
+    let gap = lq(node + N_GAP);
+    let cx = x + pad;
+    let cy = y + pad;
+    let inner_w = w - pad * 2;
+    let inner_h = h - pad * 2;
+
+    let c = lq(node + N_CHILD);
+    while c != 0 {
+        let cw = lq(c + N_MW);
+        let ch = lq(c + N_MH);
+        if kind == NK_VSTACK {
+            let use_w = cw;
+            if (lq(c + N_FLAGS) & NF_GROW) != 0 { use_w = inner_w; }
+            arrange(c, cx, cy, use_w, ch);
+            cy = cy + ch + gap;
+        } else {
+            let use_h = ch;
+            if (lq(c + N_FLAGS) & NF_GROW) != 0 { use_h = inner_h; }
+            arrange(c, cx, cy, cw, use_h);
+            cx = cx + cw + gap;
+        }
+        c = lq(c + N_NEXT);
+    }
+}
+
+# Solve a subtree: measure once, then arrange into a target box. Call after
+# layout_bump(); repeated calls with no bump are almost free (arrange early-
+# outs on the epoch check).
+fn layout_solve(root, x, y, w, h) {
+    measure(root);
+    arrange(root, x, y, w, h);
+}

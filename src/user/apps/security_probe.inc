@@ -186,6 +186,8 @@ sec_probe_foreign_close:
     pop rax
     ret
 
+section .appdata
 szSecurityProbeTitle db "Security Probe", 0
 szLeakMark db "LEAKMARK"
 secWriteName db "SECPROBE", "BIN"
+section .text

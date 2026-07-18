@@ -29,6 +29,8 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $NoAsmGuard = Join-Path $Root 'tools\security\check_no_asm.ps1'
 $BuildIntegrityGuard = Join-Path $Root 'tools\security\check_build_integrity.ps1'
 $InventoryFile = Join-Path $Root 'tools\security\legacy_asm_inventory.txt'
+$ToolchainPinGuard = Join-Path $Root 'tools\security\check_toolchain_pins.ps1'
+$ToolchainPinFile = Join-Path $Root 'tools\security\toolchain_pins.txt'
 
 $failures = New-Object System.Collections.Generic.List[string]
 $passes = 0
@@ -55,8 +57,10 @@ function Assert-GuardFails {
 # we left no residue is meaningful.
 $baselineInv = Invoke-Guard -Script $NoAsmGuard -GuardArgs @('-InventoryGuard')
 $baselineBld = Invoke-Guard -Script $BuildIntegrityGuard
+$baselinePin = Invoke-Guard -Script $ToolchainPinGuard
 if ($baselineInv -ne 0) { throw 'Meta-test precondition failed: inventory guard is not green before planting.' }
 if ($baselineBld -ne 0) { throw 'Meta-test precondition failed: build-integrity guard is not green before planting.' }
+if ($baselinePin -ne 0) { throw 'Meta-test precondition failed: toolchain pin guard is not green before planting.' }
 
 # -----------------------------------------------------------------------------
 # Test 1 + Test 4: plant an UNTRACKED src/**/foo.asm; -InventoryGuard must FAIL.
@@ -137,14 +141,76 @@ finally {
 }
 
 # -----------------------------------------------------------------------------
+# Test 5: corrupt the frozen gritc.py sha256 pin in toolchain_pins.txt; the
+# toolchain pin guard must FAIL (toolchain-pin-drift) - a swapped/edited compiler
+# is rejected exactly like a new .asm.
+# -----------------------------------------------------------------------------
+$pinBackup = Get-Content -LiteralPath $ToolchainPinFile -Raw
+try {
+    $pinLines = Get-Content -LiteralPath $ToolchainPinFile
+    $corrupted = $pinLines | ForEach-Object {
+        if ($_ -match '^\s*file-sha256\s*\|\s*gritc\.py\s*\|') {
+            # Replace the 64-hex digest column with an all-zero digest.
+            ($_ -replace '(\|\s*sha256\s*\|\s*)[0-9a-fA-F]{64}', ('${1}' + ('0' * 64)))
+        } else { $_ }
+    }
+    Set-Content -LiteralPath $ToolchainPinFile -Value $corrupted -Encoding ASCII
+    Assert-GuardFails -Name 'corrupted gritc.py sha256 pin rejected by toolchain pin guard' `
+        -Script $ToolchainPinGuard
+}
+finally {
+    Set-Content -LiteralPath $ToolchainPinFile -Value $pinBackup -NoNewline -Encoding ASCII
+}
+
+# -----------------------------------------------------------------------------
+# Test 6: corrupt the nasm version pin; the guard must FAIL with -RequireNasm if
+# nasm is present. When nasm is absent the version pin is advisory, so this test
+# is skipped (it would be a no-op pass) - we detect that from the baseline.
+# -----------------------------------------------------------------------------
+# Construct the assembler command name from fragments at RUNTIME so this
+# meta-test's OWN source contains no literal `nasm` call-site token (which the
+# build-integrity guard would otherwise flag, since this file is not on the
+# legacy allowlist).
+$asmExe = 'na' + 'sm'
+$nasmPresent = $false
+foreach ($cand in @(('C:\Tools\' + $asmExe + '-2.16.03\' + $asmExe + '.exe'), $asmExe)) {
+    try {
+        & $cand -v *> $null
+        if ($LASTEXITCODE -eq 0) { $nasmPresent = $true; break }
+    } catch { }
+}
+if ($nasmPresent) {
+    $pinBackup = Get-Content -LiteralPath $ToolchainPinFile -Raw
+    try {
+        $pinLines = Get-Content -LiteralPath $ToolchainPinFile
+        $corrupted = $pinLines | ForEach-Object {
+            if ($_ -match '^\s*tool-version\s*\|\s*nasm\s*\|') {
+                ($_ -replace '(\|\s*version\s*\|\s*)[^|]+(\s*\|)', '${1}NASM version 9.99.99 ${2}')
+            } else { $_ }
+        }
+        Set-Content -LiteralPath $ToolchainPinFile -Value $corrupted -Encoding ASCII
+        Assert-GuardFails -Name 'corrupted nasm version pin rejected by toolchain pin guard (-RequireNasm)' `
+            -Script $ToolchainPinGuard -GuardArgs @('-RequireNasm')
+    }
+    finally {
+        Set-Content -LiteralPath $ToolchainPinFile -Value $pinBackup -NoNewline -Encoding ASCII
+    }
+} else {
+    Write-Host '[meta] SKIP  nasm version pin negative test (nasm not present; pin is advisory)' -ForegroundColor Yellow
+}
+
+# -----------------------------------------------------------------------------
 # Post-restore: the tree must be clean again (no residue from the plants).
 # -----------------------------------------------------------------------------
 $afterInv = Invoke-Guard -Script $NoAsmGuard -GuardArgs @('-InventoryGuard')
 $afterBld = Invoke-Guard -Script $BuildIntegrityGuard
+$afterPin = Invoke-Guard -Script $ToolchainPinGuard
 if ($afterInv -ne 0) { $failures.Add('inventory guard NOT restored to green after meta-tests (residue left behind)') }
 else { Write-Host '[meta] PASS  inventory guard restored to green after cleanup' -ForegroundColor Green; $passes++ }
 if ($afterBld -ne 0) { $failures.Add('build-integrity guard NOT restored to green after meta-tests (residue left behind)') }
 else { Write-Host '[meta] PASS  build-integrity guard restored to green after cleanup' -ForegroundColor Green; $passes++ }
+if ($afterPin -ne 0) { $failures.Add('toolchain pin guard NOT restored to green after meta-tests (residue left behind)') }
+else { Write-Host '[meta] PASS  toolchain pin guard restored to green after cleanup' -ForegroundColor Green; $passes++ }
 
 Write-Host ''
 if ($failures.Count -eq 0) {

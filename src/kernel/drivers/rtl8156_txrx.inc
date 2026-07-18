@@ -96,6 +96,14 @@ rtl8156_net_tx_frame:
     push rsi
     push rdi
     push r8
+    ; SECURITY (GSEC net): bound the caller length before the rep movsb below,
+    ; which copies ecx bytes into the fixed RTL8156_TX_BUF_ADDR+8 DMA buffer.
+    ; Without this an oversized length overruns into the adjacent scratch region
+    ; (guard-page PoC confirmed). Defence in depth alongside net_nic_tx_frame.
+    cmp ecx, NET_ETH_FRAME_MAX
+    ja .reject
+    cmp ecx, NET_ETH_FRAME_MIN
+    jb .reject
     cmp byte [rtl8156_active], 1
     je .active
     call rtl8156_init
@@ -111,6 +119,14 @@ rtl8156_net_tx_frame:
     call rtl8156_tx_frame
     mov eax, 1
     jmp .done
+.reject:
+%ifndef RELEASE_BUILD
+    ; Debug builds surface a rejected TX length loudly instead of copying it.
+    push rsi
+    mov rsi, ser_tx_len_reject_8156
+    call debug_print
+    pop rsi
+%endif
 .fail:
     xor eax, eax
 .done:
@@ -133,10 +149,12 @@ rtl8156_rx_once:
     push rdx
     push rsi
     push rdi
+    push r8
     call rtl8156_arm_rx
     call xhci_poll_event
     test eax, eax
     jz .done
+    mov r8d, edx                  ; preserve Transfer Event residual length
     mov ecx, ebx
     shr ecx, 10
     and ecx, 0x3F
@@ -153,8 +171,10 @@ rtl8156_rx_once:
     call usb_hid_requeue_slot1_one
     jmp .done
 .nic_event:
+    mov edx, r8d
     call rtl8156_consume_event
 .done:
+    pop r8
     pop rdi
     pop rsi
     pop rdx

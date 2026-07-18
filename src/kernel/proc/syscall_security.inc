@@ -132,6 +132,37 @@ sc_record_strike:
     movzx ecx, r15b
     cmp ecx, MAX_WINDOWS
     jae .srs_ret                        ; defensive: never index past the array
+    ; Launch-ordering guard (security_todo.md §12 refinement): a window is
+    ; drawable the instant wm_create_window_ex returns, but the launcher applies
+    ; its capability manifest one step later (kernel_apply_app_manifest). A draw
+    ; callback dispatched in that gap is correctly denied at the CAP_CORE floor
+    ; (blank frame) but must NOT count as a security strike, or the app is killed
+    ; for the kernel's own launch race (observed: Settings on debug / Notepad on
+    ; release lost the race and hit SC_STRIKE_LIMIT). Once the slot is sandboxed
+    ; every over-reach strikes normally, so this does not weaken probing/fuzzing
+    ; detection - it only ignores rejects before the sandbox exists.
+    ;
+    ; The gate is the PER-SLOT slot_sandboxed[slot] byte, NOT window[slot].
+    ; WF_MANIFEST_OK: that window flag is cleared by SYS_WM_CLOSE on the slot's own
+    ; window, so keying off it let a still-running tenant make itself permanently
+    ; strike-immune with one ordinary syscall. slot_sandboxed is set at manifest
+    ; apply, reset only at (re)allocation of the window slot, and is untouched by
+    ; window lifecycle. See docs/security/finding-strike-immunity-via-self-close.md.
+    lea rax, [rel slot_sandboxed]
+    cmp byte [rax + rcx], 0
+    jne .srs_sandboxed
+    ; Slot not yet sandboxed: a callback (typically the first draw) over-reached
+    ; in the launch gap before the manifest was applied. Ignore the strike, but
+    ; in debug builds stamp it so the dump correlates a blank/white window with a
+    ; pre-sandbox reject. a0 = slot, a1 = slot_sandboxed byte (0 here).
+%ifndef RELEASE_BUILD
+    push r10
+    movzx r10, byte [rax + rcx]
+    DBG_EVT6 EVT_NP_STRIKE_GAP, r15, r15, r10, 0, 0
+    pop r10
+%endif
+    ret
+.srs_sandboxed:
     lea rdx, [rel slot_sc_strikes]
     movzx eax, word [rdx + rcx*2]
     inc eax

@@ -1,0 +1,91 @@
+/* ============================================================
+   Grit — Wallpapers
+   Clean 3D-depth desktop backgrounds. Pure CSS (layered radial /
+   conic gradients), GPU-cheap, no images, no feTurbulence, crisp
+   at any resolution. The look: a softly lit, gently curved dark
+   surface with quiet warmth — depth without neon.
+
+   The KERNEL ships these as prerendered depth fields played back
+   through the delta-frame format (assets/depth-format) so animated
+   variants cost almost nothing to store or composite. These CSS
+   versions are the static design-time stand-ins.
+
+   Apply: class="grit-wall grit-wall-depth" on a full-bleed element.
+   Pair with [data-theme] for light.
+   ============================================================ */
+
+.grit-wall {
+  background-color: var(--surface-desktop);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* 1 — DEPTH: the signature. A soft volumetric top-light on a gently
+   curved surface, faint warm gold pooling low, quiet vignette. Reads
+   as real 3D depth, calm and premium. */
+.grit-wall-depth {
+  background-color: #0C0E11;
+  background-image:
+    radial-gradient(135% 100% at 50% -20%, rgba(232, 222, 205, 0.10), rgba(232,222,205,0) 46%),
+    radial-gradient(90% 70% at 50% 118%, rgba(201, 162, 106, 0.10), rgba(201,162,106,0) 58%),
+    radial-gradient(120% 120% at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,0.42) 100%),
+    linear-gradient(177deg, #15181D 0%, #0E1014 52%, #0A0C0F 100%);
+}
+
+/* 2 — DUNE: warmer layered depth, like soft-lit terrain ridges.
+   Good for lockscreen / hero. */
+.grit-wall-dune {
+  background-color: #0D0E10;
+  background-image:
+    radial-gradient(70% 55% at 22% 18%, rgba(216, 180, 126, 0.12), transparent 60%),
+    radial-gradient(80% 60% at 84% 30%, rgba(150, 134, 110, 0.09), transparent 62%),
+    radial-gradient(95% 80% at 60% 112%, rgba(201, 162, 106, 0.12), transparent 58%),
+    radial-gradient(130% 120% at 50% 45%, rgba(0,0,0,0) 52%, rgba(0,0,0,0.40) 100%),
+    linear-gradient(170deg, #16161A 0%, #0E0F12 70%);
+}
+
+/* 3 — STUDIO: a single soft overhead spotlight on near-neutral
+   charcoal. Calm and content-friendly. */
+.grit-wall-studio {
+  background-color: #0E0F12;
+  background-image:
+    radial-gradient(80% 60% at 50% -6%, rgba(236, 237, 239, 0.08), transparent 55%),
+    radial-gradient(120% 120% at 50% 40%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.38) 100%),
+    linear-gradient(180deg, #141519, #0D0E11);
+}
+
+/* 4 — MONO: near-flat OLED-calm with one low warm pool. Lightest
+   to render, maximum focus for content-heavy work. */
+.grit-wall-mono {
+  background-color: #0A0B0D;
+  background-image:
+    radial-gradient(90% 70% at 50% 120%, rgba(201, 162, 106, 0.07), transparent 55%),
+    linear-gradient(180deg, #101216, #0A0B0D);
+}
+
+/* ---- Light theme: warm paper depth ---- */
+[data-theme="light"] .grit-wall-depth {
+  background-color: #E7E4DD;
+  background-image:
+    radial-gradient(135% 100% at 50% -20%, rgba(255, 255, 255, 0.55), transparent 46%),
+    radial-gradient(90% 70% at 50% 120%, rgba(154, 118, 55, 0.10), transparent 58%),
+    radial-gradient(120% 120% at 50% 50%, rgba(60,52,38,0) 58%, rgba(60,52,38,0.10) 100%),
+    linear-gradient(177deg, #F3F0E8 0%, #E9E5DC 100%);
+}
+[data-theme="light"] .grit-wall-dune {
+  background-color: #EAE6DD;
+  background-image:
+    radial-gradient(70% 55% at 22% 18%, rgba(255,255,255,0.5), transparent 60%),
+    radial-gradient(95% 80% at 60% 112%, rgba(154, 118, 55, 0.12), transparent 58%),
+    linear-gradient(170deg, #F4F1E9, #E6E1D6);
+}
+[data-theme="light"] .grit-wall-studio {
+  background-color: #ECE9E1;
+  background-image:
+    radial-gradient(80% 60% at 50% -6%, rgba(255,255,255,0.6), transparent 55%),
+    linear-gradient(180deg, #F3F0E9, #E7E3DA);
+}
+[data-theme="light"] .grit-wall-mono {
+  background-color: #EFEDE6;
+  background-image: linear-gradient(180deg, #F4F2EC, #E9E6DD);
+}

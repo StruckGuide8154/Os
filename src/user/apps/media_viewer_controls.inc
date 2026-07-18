@@ -222,9 +222,11 @@ nx_media_format_mmss:
 
 ; Scratch text buffers for the time label. Single-tenant - the WM draws
 ; windows sequentially so two players don't overlap their formatting.
+section .appdata
 nx_media_time_cur: times 8 db 0
 nx_media_time_dur: times 8 db 0
 sz_media_time_sep: db " / ", 0
+section .text
 
 ; nx_media_draw_nba_controls
 ;   Inputs:

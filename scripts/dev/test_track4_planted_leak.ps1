@@ -257,7 +257,7 @@ try {
         Write-Host '[track4-planted] Tier 1 FAIL: missing symbols' -ForegroundColor Red
         foreach ($s in $symbolMissing) { Write-Host "  - $s" -ForegroundColor Red }
     } else {
-        Write-Host '[track4-planted] Tier 1 PASS: all 7 anti-elevation symbols present in binary.' -ForegroundColor Green
+        Write-Host "[track4-planted] Tier 1 PASS: all $($RequiredSymbols.Count) anti-elevation symbols present in compiled sources." -ForegroundColor Green
         Write-Host '  Confirmed: nx_volatile_scrub_secrets, nx_mem_key, nx_mem_key_ensure,' -ForegroundColor Gray
         Write-Host '             nx_volatile_wipe_halt, nx_volatile_panic_scrub,' -ForegroundColor Gray
         Write-Host '             nk_pt_window_begin, slot_cap_hmac' -ForegroundColor Gray
@@ -398,6 +398,25 @@ try {
     }
 
     # ------------------------------------------------------------------
+    # Tier 4 - Execute the real planted 128-bit stale-MAC rejection vectors
+    # ------------------------------------------------------------------
+    Write-Host ''
+    Write-Host '--- Tier 4: Planted stale-cap MAC rejection vectors ---' -ForegroundColor Cyan
+    $evalScript = Join-Path $Root 'scripts\test\eval_invariants.py'
+    $evalOutput = & python $evalScript 2>&1
+    $evalExit = $LASTEXITCODE
+    $plantedLines = @($evalOutput | Where-Object { $_ -match 'INV-PLANTED-CAP-HMAC-REJECTED' })
+    if ($evalExit -ne 0 -or $plantedLines.Count -eq 0 -or -not ($plantedLines -match 'expect reject\s+\[ok\]')) {
+        $overall = $false
+        $fails.Add('Tier 4: planted 128-bit cap-mask MAC rejection vectors did not execute cleanly.')
+        $evalOutput | Out-Host
+        Write-Host '[track4-planted] Tier 4 FAIL: stale planted MAC rejection was not proven.' -ForegroundColor Red
+    } else {
+        $plantedLines | Out-Host
+        Write-Host '[track4-planted] Tier 4 PASS: stale and lane-corrupted 128-bit cap MACs reject.' -ForegroundColor Green
+    }
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     Write-Host ''
@@ -413,6 +432,7 @@ try {
         Write-Host '  (3) Heterogeneous syscall numbering (per-launch permutation)' -ForegroundColor Gray
         Write-Host '  (5) CPI tags bind live VA + per-boot canary' -ForegroundColor Gray
         Write-Host '  (6) Cap-mask HMAC re-keyed with fresh canary each boot' -ForegroundColor Gray
+        Write-Host '      and stale/lane-corrupted 128-bit planted MACs reject dynamically' -ForegroundColor Gray
         Write-Host ''
         Write-Host ' NOT tested here (covered by other test scripts):' -ForegroundColor DarkGray
         Write-Host '  (4) ASLR slide re-draw - tested by boot randomisation' -ForegroundColor DarkGray

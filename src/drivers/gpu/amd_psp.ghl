@@ -1,0 +1,676 @@
+# ============================================================================
+# amd_psp.ghl - PSP firmware-load compartment (gpu-fwload), Track-8 ring-3.
+#
+# Compile: --target driver  (forces --forbid-asm + --deny-unsafe; no unsafe
+# cap, no privileged intrinsic; reaches hardware ONLY via SC_DRVHOST_* broker
+# syscalls). See docs/gpu-driver/TODO.md §3 and §M3.
+#
+# WHAT THIS IS (milestone M3 of the ladder, transliterated from the prior 780M
+# asm in docs/gpu-driver/reference-780M-asm/ - NOT resurrected from it):
+#   * The gpu-fwload SECURITY COMPARTMENT (TODO.md §3): its OWN driver_id with
+#     a minimal grant set - the MP0 SMN proxy window + ONE DMA staging buffer
+#     for firmware bytes. If this compartment is fully code-exec compromised it
+#     can hand attacker firmware to the PSP and corrupt its own staging buffer
+#     and NOTHING ELSE: it cannot drive GFX/DCN, cannot see VRAM, cannot map
+#     GMC/GART, cannot reach the kernel. That isolation IS the deliverable.
+#   * PSP GPCOM ring bring-up: bootloader/SOS liveness probe -> ring create
+#     (C2PMSG_69/70/71/64) -> SETUP_TMR -> LOAD_IP_FW for each signed blob,
+#     each waited on the in-staging fence. (psp_v13_0.c / psp_v14_0.c +
+#     amdgpu_psp.c::psp_ring_cmd_submit / psp_prep_tmr_cmd_buf.)
+#
+# THE M3 FIX (the rung that stalled before):
+#   The prior asm hardcoded an MP0 SMN segment from Linux headers
+#   (MP0_BASE_SMN = 0x00016000) and it "didn't match observed behaviour" on
+#   Strix Point - reads returned stale bus data. Per TODO.md §1 the correct
+#   source is the GPU's OWN IP-discovery table (HWID_MP0), NOT a header
+#   constant. This compartment therefore derives the MP0 base at run time from
+#   the discovery table (psp_resolve_mp0 below); the Linux constant is kept
+#   ONLY as a labelled, last-resort fallback so a hardware photo can tell
+#   "discovery failed" apart from "wrong MP0 window".
+#
+# HONESTY (TODO.md §6 reality check): NOTHING here can be claimed working
+#   without real AMD silicon. Every PSP register offset, the exact C2PMSG
+#   handshake bits, the firmware-header parse, and the broker DMA-staging ABI
+#   are transliterated/assumed and marked "NEEDS HW" where they are. Code-
+#   complete != working. This is "ported, pending HW verify".
+#
+# THREAT MODEL: code-exec here buys nothing toward the kernel or the other GPU
+#   compartments. Every MP0 register touch is a brokered SMN proxy access
+#   bounds-checked against the single granted MP0 window; the firmware bytes
+#   live in one brokered DMA buffer the broker minted - this compartment cannot
+#   widen either grant by asking.
+# ============================================================================
+
+app "gpu_fwload" { stack = 8192; }
+capability mmio;
+capability dma;
+
+# ---------------------------------------------------------------------------
+# Broker syscall ABI (mirror of rtl8156.ghl / amdgpu.ghl; see driver_host.ghl).
+# We keep ONE coherent SC_DRVHOST_* numbering across all driver-host processes.
+# ---------------------------------------------------------------------------
+const SC_DRVHOST_REGISTER     = 232
+const SC_DRVHOST_GRANT_MMIO   = 233
+const SC_DRVHOST_GRANT_DMA    = 234   # (len) -> phys_base  (broker mints buffer)
+const SC_DRVHOST_MMIO_READ32  = 240
+const SC_DRVHOST_MMIO_WRITE32 = 241
+const SC_DRVHOST_DMA_MAP      = 242   # (phys_base) -> ring3_va
+const SC_TICKS                = 18
+
+const DRV_OK = 0
+
+# Capability classes (driver_host.ghl DRV_CAP_*).
+const CAP_MMIO  = 1
+const CAP_DMA   = 4
+const CAP_RESET = 32   # device reset / firmware load (threshold-gated per broker)
+
+# ---------------------------------------------------------------------------
+# NBIO SMN indirect-access pair (amd_smn.asm) - byte offsets within BAR0.
+# Same proxy the verified amdgpu.ghl plumbing uses: write32(BAR0+0x38, addr)
+# latches the SMN target; read/write BAR0+0x3C transfers the data dword. The
+# proxy is the only fabric path to MP0 on APUs (MP0 is NOT in BAR0).
+# ---------------------------------------------------------------------------
+const SMN_INDEX2 = 0x38
+const SMN_DATA2  = 0x3C
+
+# ---------------------------------------------------------------------------
+# MP0 / PSP C2PMSG register *dword indices* (psp_v13_0.c / psp_v14_0.c +
+# mp_*_offset.h). The absolute SMN address of each register is
+# (mp0_base + index*4); mp0_base is RESOLVED FROM IP-DISCOVERY at run time
+# (the M3 fix), never hardcoded. These dword indices are the stable part;
+# the base is the part that moved between generations.
+#
+# NEEDS HW: the exact index map differs slightly per psp_v1x; these are the
+# v13/v14 GPCOM-era indices used on Phoenix/Strix. Confirm against the bound
+# IP version before trusting on silicon.
+# ---------------------------------------------------------------------------
+const MP0_C2PMSG_33   = 33    # bootloader status / cmd (SOS load handshake)
+const MP0_C2PMSG_35   = 35    # bootloader arg
+const MP0_C2PMSG_58   = 58    # SOS version (sos_version) - a version-shaped value
+const MP0_C2PMSG_64   = 64    # GPCOM control / ring mailbox + ready bit31
+const MP0_C2PMSG_67   = 67    # GPCOM ring write pointer (in dwords)
+const MP0_C2PMSG_69   = 69    # ring base lo
+const MP0_C2PMSG_70   = 70    # ring base hi
+const MP0_C2PMSG_71   = 71    # ring size (bytes)
+const MP0_C2PMSG_81   = 81    # solution_status (SOS alive when non-zero)
+const MP0_C2PMSG_103  = 103   # boot status
+
+# C2PMSG_64 handshake bits (psp_v1x_is_sos_alive / ring ready).
+const PSP_C2P64_READY_MASK  = 0x80000000   # bit31 = TrustOS/ring ready
+const PSP_C2P64_READY_VALUE = 0x80000000
+const PSP_C2P64_OK_MASK     = 0x8000FFFF   # bit31 set + low16 == 0 == success
+const PSP_C2P64_OK_VALUE    = 0x80000000
+
+# GPCOM ring control words (amdgpu_psp.inc).
+const PSP_RING_TYPE_KM   = 2
+const PSP_GFX_FLAG_RESPONSE = 0x80000000
+
+# PSP timeouts are PIT-tick based - never spin a raw counter (real HW vs QEMU
+# diverge ~5000x). Healthy PSP acks within a few hundred ms.
+const PSP_TIMEOUT_TICKS = 1000
+
+# ---------------------------------------------------------------------------
+# IP-discovery (amd_ip_disc.asm) - we run a MINIMAL, MP0-only scan over the
+# brokered FB window so this compartment is SELF-CONTAINED: it does not depend
+# on the plumbing compartment (amdgpu.ghl) handing it a base over IPC. (If the
+# PnP controller later supplies the discovered MP0 base directly, prefer that
+# and skip the scan; psp_init takes mp0_hint for exactly that path.)
+# ---------------------------------------------------------------------------
+const SIG_BIN_HEADER  = 0x44504924   # "$IPD" little-endian
+const SIG_IP_DISC     = 0x4D435049   # "IPCM" little-endian
+const IPDISC_SCAN_BYTES  = 0x00400000   # 4 MiB scan window
+const IPDISC_SCAN_STRIDE = 4
+const HWID_MP0  = 14
+
+# Labelled last-resort MP0 SMN base. This is the value that DID NOT WORK on
+# Strix in the prior asm attempt - we keep it ONLY so a hardware photo can
+# distinguish "discovery failed" from "discovery gave a base that also fails".
+# Do NOT treat a result derived from this as trustworthy.
+const MP0_BASE_SMN_FALLBACK = 0x00016000
+
+# ---------------------------------------------------------------------------
+# psp_gfx_cmd_resp / rb_frame / payload offsets (amdgpu_psp.inc -> mirrored
+# here so this compartment owns its own copy; values from psp_gfx_if.h).
+# ---------------------------------------------------------------------------
+const PSP_GFX_CMD_RESP_SIZE = 1024
+const PSP_GFX_RB_FRAME_SIZE = 64
+const PSP_GFX_CMD_BUF_VERSION = 1
+
+const PSP_GFX_CMD_SETUP_TMR  = 0x00000005
+const PSP_GFX_CMD_LOAD_IP_FW = 0x00000006
+
+# Firmware type IDs for LOAD_IP_FW (psp_gfx_if.h; upstream values).
+const PSP_FW_TYPE_CP_ME  = 1
+const PSP_FW_TYPE_CP_PFP = 2
+const PSP_FW_TYPE_CP_MEC = 4
+const PSP_FW_TYPE_RLC_G  = 8
+
+# struct psp_gfx_cmd_resp offsets.
+const PSP_CMD_BUF_SIZE        = 0
+const PSP_CMD_BUF_VERSION_OFF = 4
+const PSP_CMD_ID              = 8
+const PSP_CMD_PAYLOAD         = 28
+const PSP_CMD_RESP            = 864
+const PSP_CMD_RESP_STATUS     = 864    # PSP_CMD_RESP + 0
+const PSP_CMD_RESP_FW_ADDR_LO = 872    # PSP_CMD_RESP + 8
+const PSP_CMD_RESP_FW_ADDR_HI = 876    # PSP_CMD_RESP + 12
+
+# SETUP_TMR payload (psp_gfx_cmd_setup_tmr).
+const PSP_TMR_BUF_ADDR_LO = 28    # PSP_CMD_PAYLOAD + 0
+const PSP_TMR_BUF_ADDR_HI = 32
+const PSP_TMR_BUF_SIZE    = 36
+const PSP_TMR_FLAGS       = 40
+const PSP_TMR_SYS_ADDR_LO = 44
+const PSP_TMR_SYS_ADDR_HI = 48
+
+# LOAD_IP_FW payload (psp_gfx_cmd_load_ip_fw).
+const PSP_IP_FW_ADDR_LO = 28    # PSP_CMD_PAYLOAD + 0
+const PSP_IP_FW_ADDR_HI = 32
+const PSP_IP_FW_SIZE    = 36
+const PSP_IP_FW_TYPE    = 40
+
+# struct psp_gfx_rb_frame offsets.
+const PSP_FRAME_CMD_ADDR_LO   = 0
+const PSP_FRAME_CMD_ADDR_HI   = 4
+const PSP_FRAME_CMD_SIZE      = 8
+const PSP_FRAME_FENCE_ADDR_LO = 12
+const PSP_FRAME_FENCE_ADDR_HI = 16
+const PSP_FRAME_FENCE_VALUE   = 20
+const PSP_FRAME_VMID          = 32
+
+# ---------------------------------------------------------------------------
+# common_firmware_header (amdgpu_ucode.h::struct common_firmware_header). The
+# AMD-signed blob is loaded BY ITS HEADER, never by hardcoded layout (TODO.md
+# §1/§5). We read ucode_size_bytes to bound the LOAD_IP_FW size; the PSP
+# itself parses+verifies the signed body, so we DO NOT strip/rewrite the blob.
+#   u32 size_bytes;      @0  total header+payload size
+#   u32 header_size_bytes;@4
+#   u16 header_version_major;@8
+#   u16 header_version_minor;@10
+#   ...
+#   u32 ucode_version;   @0x10 (varies)
+#   u32 ucode_size_bytes;@0x14 (size of the ucode the PSP consumes)
+# NEEDS HW / NEEDS HEADER-PIN: exact offsets vary by header version; treat the
+# whole staged file size as the authoritative LOAD size and use the header
+# only to sanity-check (size_bytes <= staged length). Pin a linux-firmware tag
+# (TODO.md §5) before relying on field offsets.
+# ---------------------------------------------------------------------------
+const CWH_SIZE_BYTES = 0
+
+# ---------------------------------------------------------------------------
+# DMA staging buffer layout (the ONE DMA window this compartment is granted).
+# The broker mints a coherent buffer; the PSP reads firmware from it by
+# device-physical address (we program ADDR_LO/HI from dma_phys, NOT a VA).
+#   [0 .. CMD)        psp_gfx_cmd_resp command buffer (1 KiB)
+#   [CMD .. RING)     GPCOM ring buffer
+#   [RING .. FENCE)   fence dword page
+#   [FENCE .. END)    firmware staging area (one blob at a time)
+# A blob larger than the staging area is rejected (fail-closed), never
+# truncated - the PSP must see the whole signed image.
+# ---------------------------------------------------------------------------
+const OFF_CMD     = 0
+const CMD_SIZE    = 0x1000        # 4 KiB (>= 1 KiB cmd_resp)
+const OFF_RING    = 0x1000
+const RING_SIZE   = 0x1000        # 4 KiB GPCOM ring
+const OFF_FENCE   = 0x2000
+const FENCE_SIZE  = 0x1000
+const OFF_TMR     = 0x3000        # TMR scratch the PSP protects
+const TMR_SIZE    = 0x400000      # 4 MiB TMR
+const OFF_STAGING = 0x403000      # firmware staging starts after TMR
+const STAGING_SIZE = 0x400000     # 4 MiB max per blob
+const DMA_TOTAL   = 0x803000      # total window the broker mints
+
+# ---------------------------------------------------------------------------
+# Compartment-private state (ring-3 local; MMU-confined; outside any writable
+# slot the broker exposes - a compromised compartment cannot widen its grants).
+# ---------------------------------------------------------------------------
+state {
+    self_id:    4;
+    bar0_base:  8;     # brokered BAR0 register window (for the SMN proxy)
+    fb_base:    8;     # brokered FB scan window (MP0-only IP-discovery)
+    dma_phys:   8;     # device-physical base of the staging buffer
+    dma_va:     8;     # ring-3 VA the broker mapped the staging buffer to
+
+    mp0_base:   4;     # RESOLVED MP0 SMN base (the M3 fix; 0 = unresolved)
+    mp0_from_discovery: 4;   # 1 = from IP-disc, 0 = fallback used (untrusted)
+
+    # PSP liveness diag (so a HW photo can localise a failure).
+    psp_sos_version:     4;
+    psp_solution_status: 4;
+    psp_boot_status:     4;
+    psp_c2p64_raw:       4;
+    psp_c2p67_raw:       4;
+    psp_ring_state:      4;
+    psp_tmr_status:      4;
+    psp_last_fence:      4;
+    psp_last_resp:       4;
+    psp_substep:         4;
+
+    # Per-blob accept tracking (LOAD_IP_FW response status; 0 == accepted).
+    fw_loaded_mask: 4;    # bitset of PSP_FW_TYPE_* successfully accepted
+    fw_last_ack:    4;    # PSP response status of the last LOAD_IP_FW
+    fw_last_type:   4;
+    fw_last_size:   4;
+}
+
+# ---------------------------------------------------------------------------
+# Brokered BAR0 byte access (for the INDEX2/DATA2 SMN proxy pair).
+# ---------------------------------------------------------------------------
+fn bar_rd_b(byte_off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&bar0_base) + byte_off);
+}
+fn bar_wr_b(byte_off, val) {
+    return syscall(SC_DRVHOST_MMIO_WRITE32, lq(&bar0_base) + byte_off, val);
+}
+
+# ---------------------------------------------------------------------------
+# NBIO SMN proxy (amd_smn.asm). Re-latch INDEX2 on every transaction
+# (bring-up is single-threaded; no locking).
+# ---------------------------------------------------------------------------
+fn smn_r32(smn_addr) {
+    bar_wr_b(SMN_INDEX2, smn_addr);
+    return bar_rd_b(SMN_DATA2);
+}
+fn smn_w32(smn_addr, val) {
+    bar_wr_b(SMN_INDEX2, smn_addr);
+    bar_wr_b(SMN_DATA2, val);
+    return 0;
+}
+
+# Absolute SMN address of an MP0 C2PMSG register: mp0_base + index*4.
+fn mp0_reg(idx) {
+    return ld(&mp0_base) + (idx << 2);
+}
+fn mp0_rd(idx) { return smn_r32(mp0_reg(idx)); }
+fn mp0_wr(idx, val) { smn_w32(mp0_reg(idx), val); return 0; }
+
+# ---------------------------------------------------------------------------
+# Framebuffer reads for the MP0-only IP-discovery scan, via the brokered FB
+# window. Only the broker read32 ABI is used; unaligned u32/u16/u8 are
+# synthesized from aligned reads (the table fields are not all 4-aligned).
+# (Same primitives as amdgpu.ghl - copied so this compartment is standalone.)
+#   PERF: the scan is up to 1M brokered read32 syscalls - bring-up path only.
+# ---------------------------------------------------------------------------
+fn fb_rd32a(off) {
+    return syscall(SC_DRVHOST_MMIO_READ32, lq(&fb_base) + off);
+}
+fn fb_rd32u(off) {
+    let a = off & 0xFFFFFFFC;
+    let s = (off & 3) << 3;
+    let lo = fb_rd32a(a);
+    if s == 0 { return lo; }
+    let hi = fb_rd32a(a + 4);
+    return ((lo >> s) | (hi << (32 - s))) & 0xFFFFFFFF;
+}
+fn fb_rd16(off) { return fb_rd32u(off) & 0xFFFF; }
+fn fb_rd8(off)  { return fb_rd32u(off) & 0xFF; }
+
+# Walk one die's ip_v4 records, looking ONLY for HWID_MP0; store its first SMN
+# base into mp0_base. Returns 1 if MP0 found. (ip_v4: hw_id u16 @0,
+# num_base_address u8 @3, base_address[0] u32 @10; rec size = 10 + 4*nba.)
+fn ipd_find_mp0(ip0, num_ips) {
+    let p = ip0;
+    let n = num_ips;
+    while n != 0 {
+        let hw_id = fb_rd16(p);
+        let nba   = fb_rd8(p + 3);
+        if hw_id == HWID_MP0 {
+            if nba != 0 {
+                sd(&mp0_base, fb_rd32u(p + 10));
+                sd(&mp0_from_discovery, 1);
+                return 1;
+            }
+        }
+        p = p + 10 + (nba << 2);
+        n = n - 1;
+    }
+    return 0;
+}
+
+# Scan the FB for $IPD, validate via the IPCM sub-signature, walk the first die
+# for MP0. Returns 1 on MP0 resolved from discovery, 0 if not located.
+# (Faithful subset of amd_ip_disc.asm; first-die-only, as most APUs are 1 die.)
+fn ip_disc_find_mp0() {
+    if lq(&fb_base) == 0 { return 0; }
+    let off = 0;
+    while off < IPDISC_SCAN_BYTES {
+        if fb_rd32a(off) == SIG_BIN_HEADER {
+            let tbl = off - 12;          # table start = sig_off - 12
+            if tbl >= 0 {
+                let tlo = fb_rd16(tbl + 0);
+                if tlo != 0 {
+                    if fb_rd32u(tbl + tlo) == SIG_IP_DISC {
+                        let ipd = tbl + tlo;
+                        let die = ipd + 12;
+                        let num_ips = fb_rd16(die + 2);
+                        if num_ips != 0 {
+                            if ipd_find_mp0(die + 4, num_ips) == 1 { return 1; }
+                        }
+                    }
+                }
+            }
+        }
+        off = off + IPDISC_SCAN_STRIDE;
+    }
+    return 0;
+}
+
+# THE M3 FIX. Resolve the MP0 SMN base. Order of preference:
+#   1. PnP/plumbing-supplied hint (already-discovered base) - most trusted.
+#   2. Our own IP-discovery scan (HWID_MP0) - self-contained, trusted.
+#   3. Labelled Linux-header fallback - UNTRUSTED, only so a HW photo can tell
+#      "discovery failed" from "discovery's base also fails". mp0_from_discovery
+#      is left 0 in this case; callers MUST treat any result as suspect.
+# Returns 1 if a base from a TRUSTED source was set, else 0.
+fn psp_resolve_mp0(mp0_hint) {
+    sd(&mp0_base, 0);
+    sd(&mp0_from_discovery, 0);
+    if mp0_hint != 0 {
+        sd(&mp0_base, mp0_hint);
+        sd(&mp0_from_discovery, 1);
+        return 1;
+    }
+    if ip_disc_find_mp0() == 1 { return 1; }
+    # Fallback - explicitly untrusted.
+    sd(&mp0_base, MP0_BASE_SMN_FALLBACK);
+    sd(&mp0_from_discovery, 0);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Staging-buffer writes (into the brokered DMA VA). The PSP reads these by
+# device-physical address; we write via the mapped VA but program the PSP with
+# dma_phys + offset. sd writes a dword; the buffer is the only memory this
+# compartment can DMA from.
+# ---------------------------------------------------------------------------
+fn stg_wr(off, val) { sd(lq(&dma_va) + off, val); return 0; }
+fn stg_rd(off)      { return ld(lq(&dma_va) + off); }
+
+# Zero a dword-aligned span of the staging buffer.
+fn stg_zero(off, nbytes) {
+    let i = 0;
+    while i < nbytes {
+        sd(lq(&dma_va) + off + i, 0);
+        i = i + 4;
+    }
+    return 0;
+}
+
+# Build the common psp_gfx_cmd_resp header at OFF_CMD.
+fn psp_zero_cmd() {
+    stg_zero(OFF_CMD, PSP_GFX_CMD_RESP_SIZE);
+    stg_wr(OFF_CMD + PSP_CMD_BUF_SIZE, PSP_GFX_CMD_RESP_SIZE);
+    stg_wr(OFF_CMD + PSP_CMD_BUF_VERSION_OFF, PSP_GFX_CMD_BUF_VERSION);
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# PSP liveness probe (psp_v1x_is_sos_alive + bootloader status snapshot).
+# SOS alive == C2PMSG_81 (solution_status) != 0 in Linux. We snapshot the
+# bootloader mailbox + SOS version too so a hardware photo can distinguish
+# "not ready" from "wrong MP0 SMN window" (the historic failure mode).
+# Returns 1 if SOS appears alive, else 0.
+# ---------------------------------------------------------------------------
+fn psp_probe_sos() {
+    sd(&psp_sos_version,     mp0_rd(MP0_C2PMSG_58));
+    sd(&psp_boot_status,     mp0_rd(MP0_C2PMSG_103));
+    let sol = mp0_rd(MP0_C2PMSG_81);
+    sd(&psp_solution_status, sol);
+    if sol == 0 { return 0; }
+    if sol == 0xFFFFFFFF { return 0; }   # open bus / denied-grant pattern
+    return 1;
+}
+
+# Poll C2PMSG_64 until (raw & mask) == value, PIT-tick bounded. Returns 1 hit.
+fn psp_wait_c2p64(mask, value) {
+    let deadline = syscall(SC_TICKS) + PSP_TIMEOUT_TICKS;
+    while syscall(SC_TICKS) < deadline {
+        let r = mp0_rd(MP0_C2PMSG_64);
+        sd(&psp_c2p64_raw, r);
+        if (r & mask) == value { return 1; }
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Create the KM/GPCOM ring (psp_v1x_ring_create). Program ring base (phys) +
+# size into C2PMSG_69/70/71, then kick C2PMSG_64 with the ring type, and wait
+# for the ready/ok handshake. Returns 1 on ring created.
+# ---------------------------------------------------------------------------
+fn psp_ring_create() {
+    # Wait for TrustOS ready (bit31) before issuing ring-create.
+    if psp_wait_c2p64(PSP_C2P64_READY_MASK, PSP_C2P64_READY_VALUE) == 0 {
+        return 0;
+    }
+    sd(&psp_substep, 3);
+
+    let ring_phys = lq(&dma_phys) + OFF_RING;
+    mp0_wr(MP0_C2PMSG_69, ring_phys & 0xFFFFFFFF);
+    mp0_wr(MP0_C2PMSG_70, (ring_phys >> 32) & 0xFFFFFFFF);
+    mp0_wr(MP0_C2PMSG_71, RING_SIZE);
+    mp0_wr(MP0_C2PMSG_64, PSP_RING_TYPE_KM << 16);
+    sd(&psp_substep, 4);
+
+    if psp_wait_c2p64(PSP_C2P64_OK_MASK, PSP_C2P64_OK_VALUE) == 0 {
+        return 0;
+    }
+    sd(&psp_ring_state, 1);
+    sd(&psp_substep, 5);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Submit the command buffer at OFF_CMD through the GPCOM ring and wait on the
+# in-staging fence (amdgpu_psp.c::psp_ring_cmd_submit). The frame points the
+# PSP at the cmd buffer (phys) + a fence the PSP bumps when done. Returns 1 on
+# fence reached; the caller reads RESP_STATUS for accept/reject.
+# ---------------------------------------------------------------------------
+fn psp_submit_cmd() {
+    let cmd_phys   = lq(&dma_phys) + OFF_CMD;
+    let fence_phys = lq(&dma_phys) + OFF_FENCE;
+
+    # Current write pointer (in dwords) from C2PMSG_67.
+    let wptr = mp0_rd(MP0_C2PMSG_67);
+    sd(&psp_c2p67_raw, wptr);
+    let frame_off = OFF_RING + ((wptr & ((RING_SIZE >> 2) - 1)) << 2);
+
+    # Clear + fill one 64-byte rb frame in the ring.
+    stg_zero(frame_off, PSP_GFX_RB_FRAME_SIZE);
+    stg_wr(frame_off + PSP_FRAME_CMD_ADDR_LO, cmd_phys & 0xFFFFFFFF);
+    stg_wr(frame_off + PSP_FRAME_CMD_ADDR_HI, (cmd_phys >> 32) & 0xFFFFFFFF);
+    stg_wr(frame_off + PSP_FRAME_CMD_SIZE, PSP_GFX_CMD_RESP_SIZE);
+    stg_wr(frame_off + PSP_FRAME_FENCE_ADDR_LO, fence_phys & 0xFFFFFFFF);
+    stg_wr(frame_off + PSP_FRAME_FENCE_ADDR_HI, (fence_phys >> 32) & 0xFFFFFFFF);
+
+    let fence_val = ld(&psp_last_fence) + 1;
+    sd(&psp_last_fence, fence_val);
+    stg_wr(frame_off + PSP_FRAME_FENCE_VALUE, fence_val);
+    stg_wr(frame_off + PSP_FRAME_VMID, 0);
+
+    # Advance the write pointer (in dwords) and ring.
+    let new_wptr = (wptr + (PSP_GFX_RB_FRAME_SIZE >> 2)) & ((RING_SIZE >> 2) - 1);
+    mp0_wr(MP0_C2PMSG_67, new_wptr);
+
+    # Wait for the fence dword (at OFF_FENCE) to reach fence_val.
+    let deadline = syscall(SC_TICKS) + PSP_TIMEOUT_TICKS;
+    while syscall(SC_TICKS) < deadline {
+        if stg_rd(OFF_FENCE) == fence_val {
+            sd(&psp_last_resp, stg_rd(OFF_CMD + PSP_CMD_RESP_STATUS));
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# SETUP_TMR: hand the PSP a GPU-visible system-memory range it protects/uses
+# for later LOAD_IP_FW (psp_prep_tmr_cmd_buf). The TMR lives in our own DMA
+# window (OFF_TMR) - a compromised compartment cannot point the TMR at memory
+# it was not granted (the broker DMA-contains dma_phys+OFF_TMR). Returns 1 on
+# accept (RESP_STATUS == 0).
+# ---------------------------------------------------------------------------
+fn psp_setup_tmr() {
+    let tmr_phys = lq(&dma_phys) + OFF_TMR;
+    psp_zero_cmd();
+    stg_wr(OFF_CMD + PSP_CMD_ID, PSP_GFX_CMD_SETUP_TMR);
+    stg_wr(OFF_CMD + PSP_TMR_BUF_ADDR_LO, tmr_phys & 0xFFFFFFFF);
+    stg_wr(OFF_CMD + PSP_TMR_BUF_ADDR_HI, (tmr_phys >> 32) & 0xFFFFFFFF);
+    stg_wr(OFF_CMD + PSP_TMR_BUF_SIZE, TMR_SIZE);
+    stg_wr(OFF_CMD + PSP_TMR_FLAGS, 2);          # virt_phy_addr
+    stg_wr(OFF_CMD + PSP_TMR_SYS_ADDR_LO, tmr_phys & 0xFFFFFFFF);
+    stg_wr(OFF_CMD + PSP_TMR_SYS_ADDR_HI, (tmr_phys >> 32) & 0xFFFFFFFF);
+
+    if psp_submit_cmd() == 0 { return 0; }
+    let st = stg_rd(OFF_CMD + PSP_CMD_RESP_STATUS);
+    sd(&psp_tmr_status, st);
+    if st != 0 { return 0; }
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# psp_init - bring the PSP GPCOM ring up to the point where it can accept
+# LOAD_IP_FW. mp0_hint: 0 = self-discover the MP0 base, else the PnP-supplied
+# discovered base. Returns 1 on PSP ready (ring + TMR), 0 on any failure with
+# psp_substep recording where it stopped.
+# ---------------------------------------------------------------------------
+fn psp_init(mp0_hint) {
+    sd(&psp_substep, 0);
+
+    # THE M3 FIX: derive MP0 from discovery (or hint), not a header constant.
+    psp_resolve_mp0(mp0_hint);
+    if ld(&mp0_base) == 0 { return 0; }
+    sd(&psp_substep, 1);
+
+    # SOS must be alive (ABL starts SOS on APUs; we ride the GPCOM path).
+    if psp_probe_sos() == 0 { return 0; }
+    sd(&psp_substep, 2);
+
+    # Clear ring + fence + cmd staging.
+    stg_zero(OFF_RING, RING_SIZE);
+    stg_zero(OFF_FENCE, FENCE_SIZE);
+    psp_zero_cmd();
+    sd(&psp_last_fence, 0);
+
+    if psp_ring_create() == 0 { return 0; }
+    if psp_setup_tmr() == 0 { return 0; }
+
+    sd(&psp_substep, 6);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# common_firmware_header sanity check. The PSP verifies the signature itself;
+# we only confirm the header's declared size fits the staged bytes (never
+# strip/rewrite). Returns the size to submit (the staged length is
+# authoritative; header size is a sanity floor). 0 = reject.
+# ---------------------------------------------------------------------------
+fn fw_header_check(staged_len) {
+    if staged_len == 0 { return 0; }
+    if staged_len > STAGING_SIZE { return 0; }   # too large - fail-closed
+    let hdr_size = stg_rd(OFF_STAGING + CWH_SIZE_BYTES);
+    # The header's size_bytes should not exceed what we actually staged. If it
+    # does, the file is short/corrupt - reject rather than hand a partial image.
+    if hdr_size != 0 {
+        if hdr_size > staged_len { return 0; }
+    }
+    return staged_len;
+}
+
+# ---------------------------------------------------------------------------
+# Load ONE signed firmware blob. The caller has already copied the raw signed
+# linux-firmware bytes into the staging area (OFF_STAGING) and passes the
+# length + the PSP_FW_TYPE_* id. We build LOAD_IP_FW pointing at the staging
+# PHYS address, submit through the ring, and check the PSP accept (RESP==0).
+# Returns 1 on accept, 0 on reject/timeout. fw_loaded_mask records accepts.
+#
+# NOTE: file I/O is intentionally NOT here - this compartment is granted MP0 +
+# the DMA buffer ONLY, not FS access. The PnP/loader hands firmware bytes into
+# the staging buffer over a brokered copy; keeping FS out preserves the blast-
+# radius bound (a compromised fwload cannot read the filesystem).
+# ---------------------------------------------------------------------------
+fn psp_load_fw(fw_type, staged_len) {
+    sd(&fw_last_type, fw_type);
+    sd(&fw_last_size, staged_len);
+
+    let sz = fw_header_check(staged_len);
+    if sz == 0 { return 0; }
+
+    let fw_phys = lq(&dma_phys) + OFF_STAGING;
+    psp_zero_cmd();
+    stg_wr(OFF_CMD + PSP_CMD_ID, PSP_GFX_CMD_LOAD_IP_FW);
+    stg_wr(OFF_CMD + PSP_IP_FW_ADDR_LO, fw_phys & 0xFFFFFFFF);
+    stg_wr(OFF_CMD + PSP_IP_FW_ADDR_HI, (fw_phys >> 32) & 0xFFFFFFFF);
+    stg_wr(OFF_CMD + PSP_IP_FW_SIZE, sz);
+    stg_wr(OFF_CMD + PSP_IP_FW_TYPE, fw_type);
+
+    if psp_submit_cmd() == 0 { return 0; }
+
+    let ack = stg_rd(OFF_CMD + PSP_CMD_RESP_STATUS);
+    sd(&fw_last_ack, ack);
+    if ack != 0 { return 0; }                    # PSP rejected the blob
+
+    sd(&fw_loaded_mask, ld(&fw_loaded_mask) | fw_type);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Compartment init: register our OWN driver_id with the broker, take the
+# minimal grant set (MP0 SMN proxy window via BAR0 + the staging DMA buffer +
+# a read-only FB window for MP0 discovery), and bring the PSP ring up.
+#
+# COMPARTMENT GRANT SET (TODO.md §3 "gpu-fwload"):
+#   * BAR0 register window  - needed for the NBIO SMN proxy that reaches MP0.
+#       (The MP0 registers are SMN-only; the proxy lives in BAR0[0x38/0x3C].
+#        NEEDS DESIGN REVIEW: granting all of BAR0 is broader than ideal - a
+#        tighter broker would expose a dedicated "SMN-proxy to MP0 segment
+#        only" primitive so fwload cannot reach GC/DCN MMIO through BAR0. Marked
+#        as an over-grant to close before HW.)
+#   * FB window (read-only) - MP0-only IP-discovery scan.
+#   * ONE DMA staging buffer - firmware bytes + ring + cmd + TMR.
+# It is granted NOTHING toward GFX/DCN/VRAM/GMC. If compromised, blast radius =
+# "load firmware + scribble its own staging buffer", exactly per the spec.
+# ---------------------------------------------------------------------------
+fn fwload_init(bar0_phys, fb_phys, mp0_hint) {
+    let id = syscall(SC_DRVHOST_REGISTER, CAP_MMIO | CAP_DMA | CAP_RESET, 0, 0);
+    sd(&self_id, id);
+
+    sq(&bar0_base, bar0_phys);
+    syscall(SC_DRVHOST_GRANT_MMIO, bar0_phys, 0x100000);   # 1 MiB BAR0
+
+    sq(&fb_base, fb_phys);
+    if fb_phys != 0 {
+        syscall(SC_DRVHOST_GRANT_MMIO, fb_phys, IPDISC_SCAN_BYTES);
+    }
+
+    # Broker mints the coherent staging buffer + maps it in. The PSP reaches it
+    # by dma_phys; we fill it by dma_va. This is the ONLY DMA authority held.
+    let phys = syscall(SC_DRVHOST_GRANT_DMA, DMA_TOTAL);
+    sq(&dma_phys, phys);
+    sq(&dma_va, syscall(SC_DRVHOST_DMA_MAP, phys));
+
+    sd(&fw_loaded_mask, 0);
+
+    # Bring the PSP up to accept-firmware readiness.
+    return psp_init(mp0_hint);
+}
+
+fn main() {
+    # TODO(M0): bar0_phys / fb_phys / mp0_hint come from the gpu-pnp controller
+    # via the signed match-table bind, NOT as literals. Strix provisional values
+    # for QEMU bring-up only; mp0_hint=0 forces self-discovery of the MP0 base.
+    let bar0_phys = 0xFA10000000;     # reference-780M-asm: Strix BAR0
+    let fb_phys   = 0;                # PnP supplies the GOP FB base
+    let mp0_hint  = 0;                # 0 => self-discover (the M3 fix path)
+
+    if fwload_init(bar0_phys, fb_phys, mp0_hint) == 0 {
+        # PSP not ready - leave diag state for a HW photo; do not spin-fault.
+        return 1;
+    }
+
+    # PSP ready. The PnP/loader stages each signed blob into OFF_STAGING and
+    # calls psp_load_fw(type, len). In a standalone run there is nothing to
+    # load yet; idle so the compartment stays alive for IPC-driven loads.
+    # (No spin-fault: NO-FREEZE invariant - loop, never wedge.)
+    while 1 { }
+    return DRV_OK;
+}

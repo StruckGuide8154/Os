@@ -28,11 +28,58 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 COMPILER_DIR = os.path.join(ROOT, 'src', 'user', 'grithl', 'compiler')
-MODULE = os.path.join(ROOT, 'src', 'tools', 'security', 'invariant_check.ghl')
+LIB_DIR = os.path.join(ROOT, 'src', 'user', 'grithl', 'lib')
+COMPILER = os.path.join(COMPILER_DIR, 'gritc.py')
+# The real invariant module. A meta-test may point the evaluator at a PLANTED
+# copy (with e.g. a new authority bit or a wrong constant) via the
+# GHL_INVARIANT_MODULE env var to prove the proof/translation-validation catch
+# the drift; production runs always use the real source.
+MODULE = os.environ.get(
+    'GHL_INVARIANT_MODULE',
+    os.path.join(ROOT, 'src', 'tools', 'security', 'invariant_check.ghl'))
 INVARIANT_DIR = os.path.join(ROOT, 'tests', 'security', 'invariants')
 VECTOR_DIR = os.path.join(ROOT, 'tests', 'security', 'invariants', 'vectors')
-AUTH_SPACE = tuple(range(128))
+
+# AUTH_SPACE is the bounded authority/domain enumeration space. Its WIDTH is
+# discovered dynamically from the AUTH_* bits declared in invariant_check.ghl
+# (see discover_auth_width / set_auth_space) so that introducing a new authority
+# bit automatically widens every exhaustive proof - the proof can never silently
+# fall behind the policy it derives from. The module-level default below is a
+# placeholder; main()/the helpers call set_auth_space() after loading the real
+# module to bind it to the real bit-width.
+AUTH_BITS = 7
+AUTH_SPACE = tuple(range(1 << AUTH_BITS))
 BOOL_SPACE = (0, 1)
+
+
+def discover_auth_width(mod):
+    """Derive the authority bit-width from the AUTH_* constants of the real
+    GHL invariant module. The width is `1 + position of the highest AUTH_* bit`,
+    so the enumeration space (0 .. 2**width - 1) always covers every declared
+    authority bit AND every combination below it. Adding `const AUTH_NEW = 128;`
+    to invariant_check.ghl automatically grows the space to 8 bits."""
+    auth_consts = {n: v for n, v in mod.consts.items() if n.startswith('AUTH_')}
+    if not auth_consts:
+        raise EvalError("no AUTH_* constants found in %s; cannot derive the "
+                        "authority bit-width" % MODULE)
+    bad = {n: v for n, v in auth_consts.items()
+           if v <= 0 or (v & (v - 1)) != 0}
+    if bad:
+        raise EvalError("AUTH_* constants must each be a single non-zero bit; "
+                        "offending: %s" % ', '.join(
+                            "%s=%d" % (n, v) for n, v in sorted(bad.items())))
+    highest = max(auth_consts.values())
+    return highest.bit_length()  # e.g. 64 -> 7, 128 -> 8
+
+
+def set_auth_space(mod):
+    """Bind the global AUTH_SPACE/AUTH_BITS to the real module's bit-width.
+    Called before exhaustive_specs() builds its generators (which close over the
+    global AUTH_SPACE name), so the spec table inherits the dynamic width."""
+    global AUTH_BITS, AUTH_SPACE
+    AUTH_BITS = discover_auth_width(mod)
+    AUTH_SPACE = tuple(range(1 << AUTH_BITS))
+    return AUTH_BITS
 
 sys.path.insert(0, COMPILER_DIR)
 import gritc  # noqa: E402  (the production GHL compiler - source of truth)
@@ -276,12 +323,46 @@ def _same_domain_or_not_signing(signer_domain, measured_domain, signs_measuremen
     return 1 if signs_measurement == 0 or signer_domain == measured_domain else 0
 
 
-def _planted_cap_hmac(dump_canary, live_canary, slot, mask, planted_tag, accepted):
-    fold = ((mask >> 8) & 0xFF) ^ (mask & 0xFF)
-    live_tag = (live_canary ^ slot ^ fold ^ 0x5C) & 0xFF
+_U64 = (1 << 64) - 1
+_CAPMAC_SM_A = 0x9E3779B97F4A7C15
+_CAPMAC_SM_B = 0xC2B2AE3D27D4EB4F
+_CAPMAC_C1 = 0xBF58476D1CE4E5B9
+_CAPMAC_C2 = 0x94D049BB133111EB
+_CAPMAC_G0 = 0xD1B54A32D192ED03
+_CAPMAC_G1 = 0xA0761D6478BD642F
+
+
+def _cap_mask_mac_lane(canary, slot, mask, gamma):
+    base = (canary ^ (((slot & 0xFF) * _CAPMAC_SM_A) & _U64) ^
+            (((mask & 0xFFFF) * _CAPMAC_SM_B) & _U64) ^ 0x5C) & _U64
+    x = (base ^ gamma) & _U64
+    x = ((x ^ (x >> 30)) * _CAPMAC_C1) & _U64
+    x = ((x ^ (x >> 27)) * _CAPMAC_C2) & _U64
+    return (x ^ (x >> 31)) & _U64
+
+
+def _cap_mask_mac(canary, slot, mask):
+    return (_cap_mask_mac_lane(canary, slot, mask, _CAPMAC_G0),
+            _cap_mask_mac_lane(canary, slot, mask, _CAPMAC_G1))
+
+
+def _planted_cap_hmac(dump_canary, live_canary, slot, mask,
+                      planted_lane0, planted_lane1, accepted):
+    live_lane0, live_lane1 = _cap_mask_mac(live_canary, slot, mask)
     if accepted == 0:
         return 1
-    return 1 if planted_tag == live_tag else 0
+    return 1 if (planted_lane0 == live_lane0 and
+                 planted_lane1 == live_lane1) else 0
+
+
+def _cap_mac_candidates(dump_canary, live_canary, slot, mask):
+    """Small, high-signal 128-bit bound: genuine replay, legitimate live MAC,
+    and independent corruption of either lane. This covers the two-lane AND
+    predicate without attempting an intractable 2**128 enumeration."""
+    dump0, dump1 = _cap_mask_mac(dump_canary, slot, mask)
+    live0, live1 = _cap_mask_mac(live_canary, slot, mask)
+    return ((dump0, dump1), (live0, live1),
+            (live0 ^ 1, live1), (live0, live1 ^ 1))
 
 
 def exhaustive_specs(mod):
@@ -430,12 +511,13 @@ def exhaustive_specs(mod):
         },
         'INV-PLANTED-CAP-HMAC-REJECTED': {
             'predicate': 'inv_planted_cap_hmac_rejected',
-            'cases': ((dump_c, live_c, slot, mask, tag, accepted)
+            'cases': ((dump_c, live_c, slot, mask, lane0, lane1, accepted)
                       for dump_c in (0x00, 0x11, 0x7F)
                       for live_c in (0x11, 0x22, 0x7F)
                       for slot in (0, 3, 7)
                       for mask in (0x0001, 0x0801, 0xFFFF)
-                      for tag in AUTH_SPACE
+                      for lane0, lane1 in _cap_mac_candidates(
+                          dump_c, live_c, slot, mask)
                       for accepted in BOOL_SPACE),
             'expect': lambda args: _planted_cap_hmac(*args),
         },
@@ -543,6 +625,7 @@ def run_vectors(mod):
 
 def run_exhaustive(mod):
     try:
+        set_auth_space(mod)
         invariants = load_invariants()
         specs = exhaustive_specs(mod)
     except EvalError as e:
@@ -600,18 +683,203 @@ def run_exhaustive(mod):
         return 1
 
     print("[prove] all %d invariant(s) exhaustively checked over bounded "
-          "7-bit state spaces (%d predicate evaluation(s))"
-          % (len(invariants), checked_total))
+          "%d-bit authority state spaces (%d predicate evaluation(s)); "
+          "bit-width derived from the AUTH_* constants of invariant_check.ghl"
+          % (len(invariants), AUTH_BITS, checked_total))
+    return 0
+
+
+def _emit_invariant_asm(out_path):
+    """Compile invariant_check.ghl with the PRODUCTION compiler to assembly -
+    the same `gritc.py ... --forbid-asm --deny-unsafe` invocation the Track-3
+    runner already uses for the trusted enforcement path. Returns the emitted
+    asm text. Raises EvalError on any compile failure."""
+    import subprocess
+    cmd = [sys.executable, COMPILER, MODULE, '-o', out_path,
+           '-L', LIB_DIR, '--embed', '--target', 'kernel',
+           '--forbid-asm', '--deny-unsafe']
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True)
+    if proc.returncode != 0:
+        raise EvalError("invariant_check.ghl failed to compile for translation "
+                        "validation:\n%s" % proc.stdout)
+    with open(out_path, 'r', encoding='utf-8') as fh:
+        return fh.read()
+
+
+# Immediate operands (decimal) emitted in an x86-64 instruction, e.g.
+# `mov rcx, 4`, `and rax, 8`, `cmp rsi, 64`. The bit constants the model proves
+# about are carried into the binary as these immediates.
+_IMM_RE = __import__('re').compile(r'\b(?:mov|and|or|xor|cmp|test|add|sub)\b'
+                                   r'[^;]*?,\s*(\d+)\b')
+
+
+def _emitted_fns(asm_text):
+    """Split emitted asm into {fn_name: set(immediate ints)}. gritc emits a
+    uniform `; ===== fn <name>  <...> =====` banner before EVERY function body
+    (global FN_BEGIN/FN_END functions and plain-label private helpers alike), so
+    a function body runs from its banner to the next banner (or EOF)."""
+    import re
+    fns = {}
+    cur = None
+    banner_re = re.compile(r'^;\s*=+\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\b')
+    for line in asm_text.splitlines():
+        mb = banner_re.match(line)
+        if mb:
+            cur = mb.group(1)
+            fns.setdefault(cur, set())
+            continue
+        if cur is not None:
+            code = line.split(';', 1)[0]
+            for m in _IMM_RE.finditer(code):
+                fns[cur].add(int(m.group(1)))
+    return fns
+
+
+# The proven authority semantics, stated as FIXED literals INDEPENDENT of the
+# module source. These are the bit values the proofs, the containment claim
+# table (docs/track3-invariant-proofs.md §1/§3) and the enforcement call sites
+# all assume: the scheduler-denied bit is AUTH_MEMORY_GRANT=1, the IPC-denied
+# bit is AUTH_MINT_IDENTITY=2, etc. Hard-coding them here (rather than re-reading
+# mod.consts) is deliberate: it makes this an INDEPENDENT oracle, so a source
+# const that silently changes value (which would otherwise still "prove" a
+# different, weaker property) is caught as a mismatch against the emitted code.
+TV_EXPECTED = {
+    'inv_scheduler_no_memory_grant':        [1],    # AUTH_MEMORY_GRANT
+    'inv_ipc_no_identity_forge':            [2],    # AUTH_MINT_IDENTITY
+    'inv_driver_no_dma_mint':               [4],    # AUTH_DMA_MAP
+    'inv_pt_no_persist_without_threshold':  [8],    # AUTH_PERSIST
+    # Exact 128-bit cap-mask MAC constants mirrored from syscall_secure.ghl.
+    'cap_mask_mac_lane': [
+        92, 255, 65535,
+        11400714819323198485,  # CAPMAC_SM_A
+        14029467366897019727,  # CAPMAC_SM_B
+        13787848793156543929,  # CAPMAC_C1
+        10723151780598845931,  # CAPMAC_C2
+    ],
+    'inv_planted_cap_hmac_rejected': [
+        15111065706836454659,  # CAPMAC_G0
+        11562461410679940143,  # CAPMAC_G1
+    ],
+}
+
+
+def translation_validation_bindings(mod):
+    """Each entry binds a proven predicate to the authority constant(s) it MUST
+    exercise, as FIXED literals (the documented model semantics), and ALSO
+    cross-checks that the module's own const of that name still equals the fixed
+    literal. The translation-validation step then asserts that exact value is an
+    emitted immediate in the compiled function body. Two independent oracles
+    (the fixed literal here and the gritc-emitted immediate) must agree, so a
+    consistently-changed source const is still caught. This is NOT a full
+    refinement proof of control flow; it is a mechanical authority-constant
+    binding between the proven model and the emitted artifact."""
+    c = mod.consts
+    name_for_value = {
+        1: 'AUTH_MEMORY_GRANT', 2: 'AUTH_MINT_IDENTITY',
+        4: 'AUTH_DMA_MAP', 8: 'AUTH_PERSIST',
+        92: 'KDOM_CAP_MASK', 255: 'CAPMAC_SLOT_MASK',
+        65535: 'CAPMAC_MASK_MASK',
+        11400714819323198485: 'CAPMAC_SM_A',
+        14029467366897019727: 'CAPMAC_SM_B',
+        13787848793156543929: 'CAPMAC_C1',
+        10723151780598845931: 'CAPMAC_C2',
+        15111065706836454659: 'CAPMAC_G0',
+        11562461410679940143: 'CAPMAC_G1',
+    }
+    out = []
+    for fn, vals in TV_EXPECTED.items():
+        const_names = [name_for_value[v] for v in vals]
+        out.append((fn, vals, const_names))
+    # The const-vs-literal cross-check itself is performed in
+    # run_translation_validation (it needs to record each result as a check).
+    return out, c
+
+
+def run_translation_validation(mod):
+    """Translation-validation pass (model <-> emitted code).
+
+    Closes the model<->code gap for the authority constants: the exhaustive
+    proofs interpret the GHL predicate source, while the trusted path COMPILES
+    that same source. Here we compile it with the production gritc and confirm
+    the proven authority-bit constants are exactly the immediates emitted into
+    the artifact, so the proof binds to the compiled bits and not just the
+    parse. Honesty: this validates the authority CONSTANTS only - it is a
+    bounded mechanical translation check, not a seL4-style refinement proof of
+    the whole control flow."""
+    import tempfile
+    set_auth_space(mod)
+    bindings, consts = translation_validation_bindings(mod)
+    out_dir = tempfile.mkdtemp(prefix='ghl-tv-')
+    out_path = os.path.join(out_dir, 'invariant_check.asm')
+    try:
+        asm = _emit_invariant_asm(out_path)
+    except EvalError as e:
+        sys.stderr.write("[tv] %s\n" % e)
+        return 2
+    finally:
+        try:
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+            os.rmdir(out_dir)
+        except OSError:
+            pass
+
+    fns = _emitted_fns(asm)
+    failures = []
+    checked = 0
+    for fn, required, const_names in bindings:
+        if fn not in fns:
+            failures.append("predicate fn '%s' was not emitted by gritc "
+                            "(missing function body in the artifact)" % fn)
+            continue
+        emitted = fns[fn]
+        for val, nm in zip(required, const_names):
+            checked += 1
+            # Oracle 1: the module's own named const must still equal the fixed
+            # documented literal (catches a consistently-renamed/revalued const).
+            src_val = consts.get(nm)
+            src_ok = (src_val == val)
+            # Oracle 2: that fixed literal must be an immediate emitted by gritc
+            # into this function body (binds the proof to the compiled bits).
+            emit_ok = val in emitted
+            ok = src_ok and emit_ok
+            print("[tv]   %-38s %-18s expect %-4d src=%-4s emitted [%s]"
+                  % (fn, nm, val,
+                     str(src_val), 'ok' if ok else 'MISMATCH'))
+            if not src_ok:
+                failures.append("%s: source const %s=%s != documented proven "
+                                "value %d (model drift)" % (fn, nm, src_val, val))
+            if not emit_ok:
+                failures.append("%s: proven authority value %d (%s) is NOT an "
+                                "emitted immediate (emitted=%s) - model/code drift"
+                                % (fn, val, nm, sorted(emitted)))
+
+    if failures:
+        sys.stderr.write("[tv] FAIL - %d problem(s):\n" % len(failures))
+        for f in failures:
+            sys.stderr.write("  - %s\n" % f)
+        return 1
+    print("[tv] translation-validation passed: %d security-model constant(s) across "
+          "%d predicate(s) match between the proven model and the gritc-emitted "
+          "artifact (bounded constant-binding check, not a full refinement proof)"
+          % (checked, len(bindings)))
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exhaustive', action='store_true',
-                    help='prove current invariants over bounded 7-bit spaces')
+                    help='prove current invariants over the bounded authority '
+                         'space (bit-width derived from invariant_check.ghl)')
+    ap.add_argument('--translation-validation', action='store_true',
+                    help='compile invariant_check.ghl with gritc and check the '
+                         'proven authority constants match the emitted immediates')
     args = ap.parse_args()
 
     mod = Module(MODULE)
+    if args.translation_validation:
+        return run_translation_validation(mod)
     if args.exhaustive:
         return run_exhaustive(mod)
     return run_vectors(mod)

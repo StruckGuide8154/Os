@@ -51,7 +51,9 @@ str hdr_srv  = "DHCP server";
 str hdr_dns  = "DNS server";
 str hdr_hop  = "Next hop";
 
-str link_8156 = "RTL8156 (USB 2.5G)";
+str link_virtio = "VirtIO Network (ring-3)";
+str link_8156   = "RTL8156 (USB 2.5G)";
+str link_8139   = "RTL8139 (emulated)";
 str link_none = "(none)";
 str dash      = "-";
 str dot       = ".";
@@ -446,7 +448,10 @@ fn draw(win) {
 }
 
 fn link_text() {
-    if net_info(NI_ACTIVE) == 1 { return &link_8156; }
+    let driver = net_info(NI_DRIVER);
+    if driver == NET_NIC_VIRTIO  { return &link_virtio; }
+    if driver == NET_NIC_RTL8156 { return &link_8156; }
+    if driver == NET_NIC_RTL8139 { return &link_8139; }
     return &link_none;
 }
 

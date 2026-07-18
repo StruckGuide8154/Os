@@ -48,6 +48,10 @@ global syscall_count;
 global kernel_canary;
 global slot_sc_budget;
 global slot_gui_budget;
+global sc_wd_last_num;
+global sc_wd_last_a0;
+global sc_wd_last_a1;
+global sc_wd_repeat;
 
 # Monotonic syscall counter.
 data syscall_count: 1 x 8 = 0;
@@ -86,9 +90,15 @@ data slot_cap_mask_hi: MAX_WINDOWS x 1 = 0;
 # Per-slot capability-cache authenticator paralleling slot_cap_mask[]. Seeded at
 # boot by slot_cap_hmac_init once kernel_canary holds its final value. Exported
 # so the Track 4 volatile scrub (ram_volatile.ghl) can zero it on teardown.
+#
+# WIDENED from a single byte to a 128-bit (16-byte) MAC per slot (finding: an
+# 8-bit authenticator has only 256 values, so a repeatable corrupt-and-retry
+# primitive can forge a matching pair). The two 64-bit lanes are computed by
+# cap_mask_store / slot_cap_hmac_init and re-checked by cap_mask_verify. Stride
+# is CAP_HMAC_BYTES (16); keep in lockstep with syscall_secure.ghl.
 global slot_cap_hmac;
-align 8;
-data slot_cap_hmac: MAX_WINDOWS x 1 = 0;
+align 16;
+data slot_cap_hmac: MAX_WINDOWS * 16 x 1 = 0;
 
 # Capability-transition audit ring. cap_audit_head = monotonic event counter;
 # (head & idx mask) selects the next record. Records are CAP_AUDIT_ENT_SIZE bytes.
@@ -111,6 +121,19 @@ data slot_gui_budget: MAX_WINDOWS x 2 = SC_GUI_BUDGET_PER_TICK;
 align 16;
 data slot_sc_strikes: MAX_WINDOWS x 2 = 0;
 
+# Per-slot "sandbox is live" flag, the subject of the §12 strike engine. Set to 1
+# by kernel_apply_app_manifest once a slot's capability decision (its manifest, or
+# the CAP_CORE default-deny floor) has been made; reset to 0 at window allocation
+# (wm_create_window_ex) so the launch gap - window drawable, manifest not yet
+# applied - suppresses strikes for the kernel's own launch-ordering race. This is
+# deliberately a PER-SLOT byte, NOT window[slot].WF_MANIFEST_OK: a tenant can clear
+# that window flag via SYS_WM_CLOSE on its own window while staying live, which
+# made strike accounting permanently bypassable (strike-immunity). slot_sandboxed
+# lives with the slot and is untouched by window lifecycle, so a self-close cannot
+# disable the kill switch. See docs/security/finding-strike-immunity-via-self-close.md.
+align 16;
+data slot_sandboxed: MAX_WINDOWS x 1 = 0;
+
 # Always-on per-syscall trace ring + per-slot histogram (kernel BSS, outside the
 # ring-3 arena). ring: last N records/slot; head: u16 event counter/slot; hist:
 # saturating u16 counters keyed by syscall number, fuelling the anomaly scanner.
@@ -120,3 +143,19 @@ align 16;
 data sc_trace_head: MAX_WINDOWS x 2 = 0;
 align 16;
 data sc_trace_hist: MAX_WINDOWS * SC_TRACE_HIST_SLOTS x 2 = 0;
+
+# No-progress / spin watchdog state (one entry per slot). The dispatcher records
+# each slot's last-issued syscall signature (number + arg0 + arg1); when the same
+# signature repeats SC_PROGRESS_LIMIT times in a row - a slot wedged in a tight,
+# non-advancing syscall loop (e.g. SYS_FS_ENTRY(0) always returning handle 0) -
+# it emits a structured serial diagnostic instead of spinning quietly, then
+# re-arms the counter. Debug-only consumer; BSS-zero is a benign initial state
+# (the very first call of each kind just starts the count).
+align 16;
+data sc_wd_last_num: MAX_WINDOWS x 8 = 0;
+align 16;
+data sc_wd_last_a0: MAX_WINDOWS x 8 = 0;
+align 16;
+data sc_wd_last_a1: MAX_WINDOWS x 8 = 0;
+align 16;
+data sc_wd_repeat: MAX_WINDOWS x 4 = 0;

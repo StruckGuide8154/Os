@@ -1,5 +1,5 @@
 # Boot the already-built UEFI image headless, capture serial, and check for the
-# late boot markers (CPU:/CACHE:/MEMCAP: + the M12K*F! main-loop heartbeat).
+# stable late boot markers (CPU:/CACHE:/MEMCAP: + L4/X3 main-loop entry).
 # Retries past the known intermittent early-boot CANARY panic (~1-in-3, PIT-IRQ
 # race in the boot_anim/fat16 phase - pre-existing). Behavior-parity gate for the
 # GHLK de-shim work: a clean boot must still reach these markers.
@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = 'Continue'
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $SerialHost = '127.0.0.1'; $SerialPort = 5555
-$Markers = @('CPU:', 'CACHE:', 'MEMCAP:')
-$RegexMarkers = @('M12K*F!')
+$Markers = @('CPU:', 'CACHE:', 'MEMCAP:', '[L4]', 'X3=')
+$RegexMarkers = @()
 
 function Stop-Qemu {
     try {

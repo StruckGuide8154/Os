@@ -33,10 +33,19 @@ global net_ipv4_tx_proto;
 global ipv4_tx_build;
 global net_rx_frame;
 global net_ipv4_rx_packet;
+global net_ping_l2_tick;
 
 const MASK32 = 0xFFFFFFFF;
 const NET_IP_PROTO_TCP = 6;
 const NET_IP_PROTO_UDP = 17;
+const NET_IP_PROTO_ICMP = 1;
+const NET_NIC_VIRTIO = 3;
+
+const PING_IDLE = 0;
+const PING_ARP = 1;
+const PING_REPLY = 2;
+const PING_IDENT = 0xBEEF;
+const PING_TIMEOUT_TICKS = 200;
 
 # --- IP module state (was ip.asm .bss). ---
 align 16;
@@ -46,6 +55,14 @@ data net_ipv4_payload_ptr: 1 x 8 = 0;
 data net_ipv4_payload_len: 1 x 4 = 0;
 data net_ipv4_dst_ip:      1 x 4 = 0;
 data net_ipv4_proto:       1 x 4 = 0;
+data net_ping_l2_packet:    16 x 1;
+data net_ping_l2_target:    1 x 4 = 0;
+data net_ping_l2_seq:       1 x 4 = 0;
+data net_ping_l2_state:     1 x 1 = 0;
+data net_ping_l2_reply:     1 x 1 = 0;
+data net_ping_l2_start_tick: 1 x 8 = 0;
+data net_ping_l2_reply_tick: 1 x 8 = 0;
+data net_ping_l2_deadline:   1 x 8 = 0;
 
 fn ip_htonl32(v) {
     let a = (v >> 24) & 0xFF;
@@ -60,6 +77,108 @@ fn ip_htonl32(v) {
 fn ip_store_be16(addr, v) {
     sb(addr,     (v >> 8) & 0xFF);
     sb(addr + 1, v & 0xFF);
+}
+
+# System-V-local checksum helper. The exported net_checksum keeps the legacy
+# rdi/ecx ABI for assembly NIC/TCP callers, which cannot be called as a normal
+# two-argument GHL expression (argument two would otherwise arrive in rsi).
+fn ip_checksum(buf, count) {
+    let sum = 0;
+    let p = buf;
+    let n = count;
+    while n >= 2 {
+        sum = sum + ((lb(p) << 8) | lb(p + 1));
+        p = p + 2;
+        n = n - 2;
+    }
+    sum = (sum & 0xFFFF) + ((sum >> 16) & 0xFFFF);
+    sum = (sum & 0xFFFF) + ((sum >> 16) & 0xFFFF);
+    let c = (sum ^ 0xFFFF) & 0xFFFF;
+    return ((c >> 8) | ((c << 8) & 0xFF00)) & 0xFFFF;
+}
+
+# Send the ICMP echo after the generic ARP cache has resolved the next hop.
+fn net_ping_l2_send() {
+    let i = 0;
+    while i < 16 { sb(&net_ping_l2_packet + i, 0); i = i + 1; }
+    sb(&net_ping_l2_packet, 8);                 # echo request
+    ip_store_be16(&net_ping_l2_packet + 4, PING_IDENT);
+    ip_store_be16(&net_ping_l2_packet + 6, lw(&net_ping_l2_seq) & 0xFFFF);
+    let ck = ip_checksum(&net_ping_l2_packet, 16) & 0xFFFF;
+    # net_checksum returns the byte-swapped value used by the existing IP path.
+    sb(&net_ping_l2_packet + 2, ck & 0xFF);
+    sb(&net_ping_l2_packet + 3, (ck >> 8) & 0xFF);
+    let mac = net_arp_resolved_mac_ptr();
+    if ipv4_tx_build(&net_ping_l2_packet, 16, lw(&net_ping_l2_target), mac, NET_IP_PROTO_ICMP) == 0 {
+        return 0;
+    }
+    sb(&net_ping_l2_reply, 0);
+    sb(&net_ping_l2_state, PING_REPLY);
+    sq(&net_ping_l2_start_tick, lq(&tick_count));
+    sq(&net_ping_l2_deadline, lq(&tick_count) + PING_TIMEOUT_TICKS);
+    return 1;
+}
+
+# NIC-independent, non-blocking ping state machine used by the VirtIO backend.
+# Returns RTT microseconds (>0), 0 pending, -1 failure, or -2 busy target.
+fn net_ping_l2_tick(edi target) preserves(rbx, rcx, rdx, rsi, rdi) {
+    if net_info(10) != NET_NIC_VIRTIO { sb(&net_ping_l2_state, PING_IDLE); return -1; }
+    if net_info(1) != 1 { sb(&net_ping_l2_state, PING_IDLE); return -1; }
+    let st = lb(&net_ping_l2_state);
+    if st != PING_IDLE {
+        if (lw(&net_ping_l2_target) & MASK32) != (target & MASK32) { return -2; }
+    }
+    if st == PING_REPLY {
+        if lb(&net_ping_l2_reply) == 1 {
+            let ticks = lq(&net_ping_l2_reply_tick) - lq(&net_ping_l2_start_tick);
+            sb(&net_ping_l2_state, PING_IDLE);
+            if ticks == 0 { return 1; }
+            return ticks * 10000;               # PIT is 100 Hz
+        }
+        if lq(&tick_count) >= lq(&net_ping_l2_deadline) {
+            sb(&net_ping_l2_state, PING_IDLE); return -1;
+        }
+        return 0;
+    }
+    if st == PING_IDLE {
+        sw(&net_ping_l2_target, target & MASK32);
+        sw(&net_ping_l2_seq, (lw(&net_ping_l2_seq) + 1) & 0xFFFF);
+        sb(&net_ping_l2_state, PING_ARP);
+        sq(&net_ping_l2_deadline, lq(&tick_count) + PING_TIMEOUT_TICKS);
+    }
+    let hop = net_info(6);                      # next hop
+    if hop == 0 { hop = net_info(3); }          # router
+    if hop == 0 { hop = target & MASK32; }
+    if net_arp_resolve_ipv4_try(hop) == 0 {
+        if lq(&tick_count) >= lq(&net_ping_l2_deadline) {
+            sb(&net_ping_l2_state, PING_IDLE); return -1;
+        }
+        return 0;
+    }
+    if net_ping_l2_send() == 0 { sb(&net_ping_l2_state, PING_IDLE); return -1; }
+    return 0;
+}
+
+# Consume only the echo reply belonging to the current generic ping.
+fn net_ping_l2_rx_ipv4(pkt, len) {
+    if lb(&net_ping_l2_state) != PING_REPLY { return 0; }
+    if len < 28 { return 0; }
+    let ihl = (lb(pkt) & 0x0F) << 2;
+    if ihl < 20 { return 0; }
+    if ihl + 8 > len { return 0; }
+    let icmp = pkt + ihl;
+    if lb(icmp) != 0 { return 0; }               # echo reply
+    if lb(icmp + 1) != 0 { return 0; }
+    let ident = (lb(icmp + 4) << 8) | lb(icmp + 5);
+    if ident != PING_IDENT { return 0; }
+    let seq = (lb(icmp + 6) << 8) | lb(icmp + 7);
+    if seq != (lw(&net_ping_l2_seq) & 0xFFFF) { return 0; }
+    let src = ip_htonl32(lw(pkt + 12) & MASK32);
+    if src != (lw(&net_ping_l2_target) & MASK32) { return 0; }
+    sb(&driver_manager_info + 2, lb(pkt + 8));   # NET_NIC_INFO_LAST_TTL
+    sq(&net_ping_l2_reply_tick, lq(&tick_count));
+    sb(&net_ping_l2_reply, 1);
+    return 1;
 }
 
 # ---------------------------------------------------------------------------
@@ -123,7 +242,7 @@ fn ipv4_tx_build(payload, len, dst, dmac, proto) {
     # Header checksum over the 20-byte IPv4 header. net_checksum returns the
     # network-order 16-bit sum in AX; store it low-byte-first (sb), matching
     # `mov [+24], ax`.
-    let ck = net_checksum(&net_ipv4_frame + 14, 20) & 0xFFFF;
+    let ck = ip_checksum(&net_ipv4_frame + 14, 20) & 0xFFFF;
     sb(&net_ipv4_frame + 24, ck & 0xFF);
     sb(&net_ipv4_frame + 25, (ck >> 8) & 0xFF);
 
@@ -152,6 +271,7 @@ fn ipv4_tx_build(payload, len, dst, dmac, proto) {
 # net_tcp_rx_ipv4 reads (rdi,ecx); ecx==rcx is the 4th System-V arg register, so
 # it is called as f(ptr, 0, 0, len) to land len in ecx (rsi/rdx ignored).
 fn net_rx_frame(rdi frame, ecx len) preserves(rbx, rsi) {
+    if net_dhcp_l2_rx_frame(frame, len) != 0 { return 1; }
     if net_arp_rx_frame(frame, len) != 0 { return 1; }
     if len < 34 { return 0; }
     # ethertype IPv4 at +12 (wire 0x08,0x00).
@@ -169,10 +289,29 @@ fn net_ipv4_rx_packet(pkt, len) {
     if len < 20 { return 0; }
     # version nibble must be 4.
     if (lb(pkt) & 0xF0) != 0x40 { return 0; }
+    let ihl = (lb(pkt) & 0x0F) << 2;
+    if ihl < 20 { return 0; }
+    if ihl > len { return 0; }
+    let total = (lb(pkt + 2) << 8) | lb(pkt + 3);
+    if total < ihl { return 0; }
+    if total > len { return 0; }
+    # Permit an unfragmented packet with or without DF; reject the reserved
+    # flag, MF, and every non-zero fragment offset (there is no reassembler).
+    let frag = (lb(pkt + 6) << 8) | lb(pkt + 7);
+    if (frag & 0xBFFF) != 0 { return 0; }
+    if ip_checksum(pkt, ihl) != 0 { return 0; }
+    let dst = (lb(pkt + 16) << 24) | (lb(pkt + 17) << 16)
+            | (lb(pkt + 18) << 8) | lb(pkt + 19);
+    let local = net_info(2) & MASK32;
+    if local == 0 { return 0; }
+    if dst != local {
+        if dst != 0xFFFFFFFF { return 0; }       # limited broadcast
+    }
     let proto = lb(pkt + 9);
     # net_tcp_rx_ipv4 (asm) reads rdi+ecx -> positional (pkt,_,_,len) lands len
     # in ecx. net_udp_rx_ipv4 (udp.ghl) is plain System-V (pkt,len).
-    if proto == NET_IP_PROTO_TCP { return net_tcp_rx_ipv4(pkt, 0, 0, len); }
-    if proto == NET_IP_PROTO_UDP { return net_udp_rx_ipv4(pkt, len); }
+    if proto == NET_IP_PROTO_TCP { return net_tcp_rx_ipv4(pkt, 0, 0, total); }
+    if proto == NET_IP_PROTO_UDP { return net_udp_rx_ipv4(pkt, total); }
+    if proto == NET_IP_PROTO_ICMP { return net_ping_l2_rx_ipv4(pkt, total); }
     return 0;
 }

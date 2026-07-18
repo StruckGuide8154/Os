@@ -98,13 +98,23 @@ fn fg_do_flood(dst, w, h, argb) {
     while i < total { sw(dst + i * 4, argb); i = i + 1; }
 }
 
+# Upper bound on <feMergeNode> children composited per feMerge. Each node runs
+# one full (w*h) pixel pass, so an attacker-supplied SVG with thousands of merge
+# nodes over a large filter region would otherwise multiply render work without
+# limit (CWE-400 uncontrolled resource consumption). A real feMerge stacks a
+# handful of layers; 64 is far past any legitimate use. Excess nodes are
+# ignored, so the frame still renders instead of starving the UI thread.
+const FG_MERGE_NODE_MAX = 64
+
 # feMerge: stack each <feMergeNode in=""> source-over into a zeroed dst.
 fn fg_do_merge(node, idx, dst, w, h, prior) {
     let total = w * h;
     let i = 0;
     while i < total { sw(dst + i * 4, 0); i = i + 1; }
     let child = xml_first_child(node);
+    let merged = 0;
     while child >= 0 {
+        if merged >= FG_MERGE_NODE_MAX { return 0; }
         if svg_tag_is(child, "feMergeNode", 11) == 1 {
             let il = fg_read_attr(child, "in", 2);
             let in_id = fg_resolve_input(il, idx);
@@ -116,9 +126,11 @@ fn fg_do_merge(node, idx, dst, w, h, prior) {
                     k = k + 1;
                 }
             }
+            merged = merged + 1;
         }
         child = xml_next_sibling(child);
     }
+    return 0;
 }
 
 # Separable-channel blend of one src/dst pair under FG_BLEND_*.

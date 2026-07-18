@@ -80,7 +80,7 @@ handle_alloc:
     mov r10b, al                     ; r10b = requested kind
     ; --- per-slot quota gate: count live entries, deny once at cap ---
     call handle_slot_id_from_base    ; r11d = slot id (RDI = slot base)
-    movzx r11d, byte [rel slot_handle_quota + r11]   ; r11d = quota
+    movzx r11d, byte [abs slot_handle_quota + r11]   ; r11d = quota
     test r11d, r11d                  ; 0 = unset -> default (full capacity)
     jnz .ha_have_quota
     mov r11d, HANDLE_DEFAULT_QUOTA
@@ -330,7 +330,7 @@ handle_set_quota:
     jbe .hsq_clamped
     mov eax, HANDLE_TABLE_CAP
 .hsq_clamped:
-    mov byte [rel slot_handle_quota + rdi], al
+    mov byte [abs slot_handle_quota + rdi], al
 .hsq_done:
     ret
 

@@ -111,11 +111,22 @@ data-at-rest). They are not yet split into their own track docs.
       requires `kernel_idtable`.
 - [x] Add capability gates for port I/O operations. DONE - `inb`/`outb`/`inw`/
       `outw`/`ind`/`outd` require `kernel_io` (boot path: `boot_io`).
-- [ ] Add capability gates for MMIO operations.
+- [x] Add capability gates for MMIO operations. DONE (2026-07-17) - under
+      `--target driver`, every constant broker MMIO syscall requires an explicit
+      `capability mmio;`; dynamic syscall numbers are rejected fail-closed.
 - [x] Add capability gates for page-table mutation. DONE - `write_cr3` /
       `invlpg` require `kernel_pgtable`.
-- [ ] Add capability gates for DMA mapping.
-- [ ] Add capability gates for device reset and firmware load.
+- [x] Add capability gates for DMA mapping. DONE (2026-07-17) - broker DMA
+      allocation/mapping requires `capability dma;`, and the MMIO DMA-pointer
+      programming operation requires both `mmio` and `dma`. Signed policy and
+      broker window checks remain the independent runtime authority.
+- [x] Add capability gates for device reset and firmware load. DONE
+      (2026-07-17) - under `--target driver`, the reserved broker rows 264
+      (device reset) / 265 (firmware load) require explicit `capability reset;`
+      / `capability fwload;`. The classes are split on purpose (firmware
+      persists past a reboot; `DRV_CAP_RESET` never subsumes `DRV_CAP_FWLOAD`).
+      Proven by `driver_target_{reset,fwload}_cap_forbidden.ghl` (the adjacent
+      class must not satisfy the gate) + `driver_target_reset_fwload_ok.ghl`.
 - [ ] Add capability gates for clock, timer, and monotonic-counter reads.
 - [ ] Add target-specific intrinsic allowlists for boot, kernel, hypervisor,
       driver, app, tool, and recovery targets.

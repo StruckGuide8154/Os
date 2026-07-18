@@ -5,7 +5,7 @@ $Constants = Join-Path $Root 'src\include\constants.inc'
 $BootMemory = Join-Path $Root 'src\include\boot_memory.inc'
 $L3Runtime = Join-Path $Root 'src\include\l3_runtime.inc'
 $WindowLayout = Join-Path $Root 'src\include\window_layout.inc'
-$Syscall = Join-Path $Root 'src\kernel\proc\syscall.asm'
+$Syscall = Join-Path $Root 'src\kernel\proc\syscall_support.inc'
 $Registry = Join-Path $Root 'docs\invariant-registry.md'
 
 function Assert-Text {
@@ -29,9 +29,9 @@ Assert-Text $L3Runtime 'L3_RT_APP_BASE\s+equ\s+72' 'L3_RT_APP_BASE offset change
 Assert-Text $L3Runtime 'L3_RT_SLOT\s+equ\s+120' 'L3_RT_SLOT offset changed.'
 Assert-Text $L3Runtime 'L3_RT_SIZE\s+equ\s+128' 'L3_RT_SIZE changed.'
 
-Assert-Text $Syscall 'SYSCALL_ENTRY syscall_entry\.sc_fs_mkdir,\s+1,' 'Public syscall range changed without registry update.'
+Assert-Text $Syscall 'SYSCALL_ENTRY syscall_entry\.sc_wm_list,\s+2,' 'Public syscall range changed without registry update.'
 Assert-Text $Syscall 'syscall_table_count equ \(syscall_table_end - syscall_table\) / SYSCALL_ENTRY_SIZE' 'Syscall table count must be derived from table size.'
-Assert-Text $Registry 'Current public syscall numbers are `0\.\.27`' 'Registry must document current syscall range.'
+Assert-Text $Registry 'Current public syscall numbers are `0\.\.80`' 'Registry must document current syscall range.'
 Assert-Text $WindowLayout 'WIN_OFF_FLAGS\s+equ\s+40' 'Window flags offset changed.'
 Assert-Text $WindowLayout 'WIN_OFF_TITLE\s+equ\s+48' 'Window title offset changed.'
 Assert-Text $WindowLayout 'WIN_OFF_CLICKFN\s+equ\s+128' 'Window click callback offset changed.'

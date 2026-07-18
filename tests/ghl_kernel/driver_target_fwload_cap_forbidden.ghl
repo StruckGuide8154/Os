@@ -1,0 +1,12 @@
+# Negative Track-8 compiler gate: a driver cannot name the firmware-load broker
+# syscall unless it declares the fwload authority class. `reset` must NOT
+# subsume it - firmware load persists past a reboot and is strictly more
+# dangerous than a transient device reset.
+
+app "driver_target_fwload_cap_forbidden" { stack = 4096; }
+capability reset;   # reset authority must not satisfy the fwload gate
+const SC_DRVHOST_FW_LOAD = 265;
+
+fn main() {
+    return syscall(SC_DRVHOST_FW_LOAD, 0x200000, 4096);
+}

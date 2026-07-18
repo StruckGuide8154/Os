@@ -69,6 +69,15 @@ rtl8156_find_bulk_eps:
     ; chip's burst attempts are dropped and IN tokens return zero bytes
     ; forever.
     movzx eax, byte [rsi + rdx]           ; EP desc length (usually 7)
+    ; SECURITY (GSEC G1): only peek the SS Endpoint Companion when the full
+    ; 6-byte companion lies within the device-declared wTotalLength (ecx).
+    ; Otherwise a truncated descriptor list makes this peek read stale control-
+    ; buffer bytes past the declared total and latch them as bMaxBurst.
+    mov r9d, edx
+    add r9d, eax
+    add r9d, 6
+    cmp r9d, ecx
+    ja .next
     mov r8, rsi
     add r8, rdx
     add r8, rax                           ; next descriptor
@@ -90,6 +99,12 @@ rtl8156_find_bulk_eps:
 .out_mps:
     mov [rtl8156_bulk_out_mps], ax
     movzx eax, byte [rsi + rdx]
+    ; SECURITY (GSEC G1): same SS-companion bound as the IN-endpoint peek above.
+    mov r9d, edx
+    add r9d, eax
+    add r9d, 6
+    cmp r9d, ecx
+    ja .next
     mov r8, rsi
     add r8, rdx
     add r8, rax

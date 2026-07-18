@@ -1,65 +1,54 @@
 # ============================================================================
-# battery.ghl - ACPI EC Battery driver, as a Track-8 ring-3 driver-host
-# process.  Compile: --target driver  (forces --forbid-asm + --deny-unsafe;
-# the module declares NO unsafe cap and uses NO privileged intrinsic - it
-# reaches the EC ONLY through the in-kernel driver_host broker; see
+# battery.ghl - ACPI EC Battery driver, Track-8 ring-3 driver-host process.
+# Compile: --target driver  (forces --forbid-asm + --deny-unsafe; the module
+# declares NO unsafe cap and uses NO privileged intrinsic - it reaches the EC
+# ONLY through the in-kernel driver_host broker; see
 # docs/architecture-userspace-drivers.md guarantees G1-G4 and the Track 8
-# design in docs/track8-userspace-drivers-todo.md).
+# ladder in docs/track8-userspace-drivers-todo.md).
+#
+# EXECUTION MODEL (mirrors virtio_net.ghl, Stage-4b tick-callback):
+#   * main()         - the ONE-SHOT probe entry. The device manager
+#                      (driver_loader.ghl) has already installed this blob into
+#                      its own headless slot, registered the driver with the
+#                      broker, and granted the EC port pair 0x62/0x66 BEFORE
+#                      this runs (Fork-B ordering). main() probes the EC
+#                      register layout, publishes the first reading, sets
+#                      `ready`, and RETURNS - it never loops.
+#   * battery_tick() - the bounded periodic entry. The kernel main loop's
+#                      battery service invokes it (via the broker tick guard)
+#                      about once a second; each call performs at most one EC
+#                      register sweep and returns. No-freeze by construction.
 #
 # WHY ONE DRIVER IS ENOUGH
 #   The ACPI Embedded Controller interface (EC port I/O: 0x62 data, 0x66
 #   command/status) is a fixed ACPI standard. Every laptop-class EC exposes
 #   this port pair. The register MAP inside the EC is vendor-specific; we probe
-#   layouts A/B/C/D as in the original battery.asm (Acer Nitro / ITE8xxx
-#   families) and extend via the D signature check to cover all known Acer
-#   variants. Unlisted machines fall back to "AC/unknown%" rather than crashing.
-#
-# SOURCE LOGIC
-#   Ported from src/kernel/drivers/battery.asm.  All in/out instructions are
-#   replaced by drvhost_pio_read8/write8 broker syscalls (SC_DRVHOST_PIO_*).
-#   The ring-3 copy-of-state (battery_state, battery_percent) is maintained
-#   in module-local `state` fields; no kernel memory is written.
+#   layouts D/A/B/C as in the retired battery.asm (Acer Nitro / ITE8xxx
+#   families). Unlisted machines (and QEMU, which has no EC) fall back to
+#   "AC/100%" rather than crashing; an absent EC is detected fast (status
+#   0xFF = open bus, the same all-ones a denied broker access returns).
 #
 # THREAT MODEL (what code-exec in THIS driver buys an attacker): nothing toward
-# the kernel. The driver holds only two PIO ports (0x62 and 0x66), gated by
-# the broker's signed per-driver grant table. A compromised battery driver can
-# read/write those two EC ports and scribble its own ring-3 heap - it cannot
-# reach kernel memory, MMIO, DMA, or any port outside {0x62, 0x66}.
+# the kernel. The driver holds only the PIO capability class with a grant over
+# ports {0x62..0x66}. A compromised battery driver can read/write those EC
+# ports and scribble its own ring-3 slot - it cannot reach kernel memory,
+# MMIO, DMA, IRQs, or any port outside the grant.
 # ============================================================================
 
-app "battery_ec" { stack = 4096; }
+app "battery" { stack = 4096; }
 
 # ---------------------------------------------------------------------------
-# driver_host broker syscall ABI  (SC_DRVHOST_* family, Track 8 Rung 1).
-# Numbers 232-243 match the existing ABI declared in hda.ghl / driver_host.ghl.
-# PIO syscalls are NEW - assigned from unused slots 236 / 244 / 245:
-#   SC_DRVHOST_GRANT_PIO   = 236  (lo, hi) -> rc   port range authorization
-#   SC_DRVHOST_PIO_READ8   = 244  (port)   -> byte  broker-checked inb
-#   SC_DRVHOST_PIO_WRITE8  = 245  (port, val) -> rc broker-checked outb
-# These must be wired into the syscall dispatcher alongside 232-243 when the
-# broker dispatch path is extended for this driver (same as HDA Rung 3 wire-up).
+# driver_host broker syscall ABI (SC_DRVHOST_* family; identity numbering in a
+# driver slot). Caller identity is the slot derived by syscall entry - the
+# broker NEVER accepts a driver_id from ring 3.
 # ---------------------------------------------------------------------------
-const SC_DRVHOST_REGISTER     = 232   # (req_caps, policy_caps, code_hash) -> driver_id
-const SC_DRVHOST_GRANT_MMIO   = 233   # unused by this driver; listed for completeness
-const SC_DRVHOST_GRANT_DMA    = 234   # unused
-const SC_DRVHOST_GRANT_IRQ    = 235   # unused
-const SC_DRVHOST_GRANT_PIO    = 236   # (lo, hi) -> rc  ** new PIO family **
-const SC_DRVHOST_MMIO_READ32  = 240   # unused
-const SC_DRVHOST_MMIO_WRITE32 = 241   # unused
-const SC_DRVHOST_DMA_MAP      = 242   # unused
-const SC_DRVHOST_IRQ_WAIT     = 243   # unused
-const SC_DRVHOST_PIO_READ8    = 244   # (port) -> byte  ** new **
-const SC_DRVHOST_PIO_WRITE8   = 245   # (port, val) -> rc  ** new **
-const SC_TICKS                = 18    # millisecond tick source
+const SC_DRVHOST_PIO_READ8  = 244   # (port) -> byte (0xFF on deny/absent)
+const SC_DRVHOST_PIO_WRITE8 = 245   # (port, val) -> rc
 
 const DRV_OK = 0
 
-# Capability classes (mirror driver_host.ghl DRV_CAP_*).
-# This driver requests ONLY CAP_PIO - no MMIO, no DMA, no IRQ.
-const CAP_PIO  = 2
-
 # ---------------------------------------------------------------------------
-# EC hardware constants (mirrors battery.asm).
+# EC hardware constants (mirrors the retired battery.asm).
 # ---------------------------------------------------------------------------
 const EC_DATA     = 0x62     # EC data register port
 const EC_CMD      = 0x66     # EC command/status port
@@ -90,7 +79,7 @@ const EC_REG_D_SIG1_VAL  = 0x41
 const EC_REG_D_SIG2      = 0x04
 const EC_REG_D_SIG2_VAL  = 0x06
 
-# battery_state values (exported to IPC / status syscall).
+# battery_state values (published to the kernel-side status cells).
 const BAT_STATE_UNKNOWN   = 0
 const BAT_STATE_AC        = 1
 const BAT_STATE_DISCHARGE = 2
@@ -103,44 +92,46 @@ const EC_LAYOUT_B    = 2
 const EC_LAYOUT_C    = 3
 const EC_LAYOUT_D    = 4
 
-# Poll throttle: ~3 s at 100 Hz main-loop rate (matches battery.asm).
-const POLL_PERIOD = 300
-
-# EC wait spin limits (bounded, never infinite).
-const EC_SPIN_MAX = 100000
+# EC wait spin limit. Each spin is one broker syscall, so this is deliberately
+# far below the retired .asm's inline 500000: a real EC clears IBF in
+# microseconds, and an ABSENT EC is detected before ever spinning (status 0xFF
+# fast-fail below), so this bound is only reached on a wedged-but-present EC.
+const EC_SPIN_MAX = 20000
 
 # ---------------------------------------------------------------------------
-# Driver-private state (ring-3 local; MMU-confined).
+# Driver-private state (ring-3 local; MMU-confined). The device manager reads
+# ready/ec_ok/bat_state/bat_pct back through the slot handoff after each call.
 # ---------------------------------------------------------------------------
 state {
-    self_id:      4;   # driver_id from the broker
+    ready:        4;   # 1 once the one-shot probe finished (loader binds on it)
+    ec_ok:        4;   # 1 = EC responded during probe (tick does work)
     bat_state:    4;   # BAT_STATE_*
     bat_pct:      4;   # 0-100
     bat_layout:   4;   # EC_LAYOUT_*
     bat_design:   4;   # layout C: design capacity (mWh/10, 16-bit range)
-    ec_ok:        4;   # 1 = EC responded during probe
-    poll_ctr:     4;   # throttle counter
 }
 
 # ---------------------------------------------------------------------------
-# Brokered EC port access - the ONLY way we touch hardware.
+# Brokered EC port access - the ONLY way we touch hardware. Identity is derived
+# by the kernel from our slot; a denied port returns 0xFF like an open bus.
 # ---------------------------------------------------------------------------
 fn ec_read_port(port) {
-    return syscall(SC_DRVHOST_PIO_READ8, lw(&self_id), port);
+    return syscall(SC_DRVHOST_PIO_READ8, port);
 }
 
 fn ec_write_port(port, val) {
-    return syscall(SC_DRVHOST_PIO_WRITE8, lw(&self_id), port, val);
+    return syscall(SC_DRVHOST_PIO_WRITE8, port, val);
 }
 
 # ---------------------------------------------------------------------------
 # wait_ibf - wait until EC input buffer is NOT full (we can send).
-# Returns 1 = ready, 0 = timed out.
+# Returns 1 = ready, 0 = timed out / absent.
 # ---------------------------------------------------------------------------
 fn wait_ibf() {
     let spins = 0;
     while spins < EC_SPIN_MAX {
         let s = ec_read_port(EC_CMD);
+        if s == 0xFF { return 0; }           # open bus / denied -> absent
         if (s & EC_IBF) == 0 { return 1; }
         spins = spins + 1;
     }
@@ -148,11 +139,12 @@ fn wait_ibf() {
 }
 
 # wait_obf - wait until EC output buffer IS full (data ready).
-# Returns 1 = data ready, 0 = timed out.
+# Returns 1 = data ready, 0 = timed out / absent.
 fn wait_obf() {
     let spins = 0;
     while spins < EC_SPIN_MAX {
         let s = ec_read_port(EC_CMD);
+        if s == 0xFF { return 0; }           # open bus / denied -> absent
         if (s & EC_OBF) != 0 { return 1; }
         spins = spins + 1;
     }
@@ -161,13 +153,10 @@ fn wait_obf() {
 
 # ---------------------------------------------------------------------------
 # ec_read_reg - EC "read register" protocol:
-#   1. wait IBF=0
-#   2. write EC_READ_CMD to cmd port
-#   3. wait IBF=0
-#   4. write register address to data port
-#   5. wait OBF=1
+#   1. wait IBF=0   2. write EC_READ_CMD to cmd port   3. wait IBF=0
+#   4. write register address to data port             5. wait OBF=1
 #   6. read data from data port
-# Returns byte value on success, 0x1FF (> 0xFF) on timeout.
+# Returns byte value on success, 0x1FF (> 0xFF) on timeout/absent.
 # ---------------------------------------------------------------------------
 fn ec_read_reg(reg) {
     if wait_ibf() == 0 { return 0x1FF; }
@@ -184,6 +173,13 @@ fn ec_read_reg(reg) {
 # positives from the "value in 0-100?" checks the other layouts rely on.
 # ---------------------------------------------------------------------------
 fn probe_layout() {
+    # --- EC presence fast-check: an absent EC (QEMU, desktop boards) reads
+    # 0xFF on the status port; bail before any protocol spin. ---
+    if ec_read_port(EC_CMD) == 0xFF {
+        sw(&bat_layout, EC_LAYOUT_NONE);
+        return EC_LAYOUT_NONE;
+    }
+
     # --- Layout D: two signature bytes must match exactly ---
     let v = ec_read_reg(EC_REG_D_SIG1);
     if v != 0x1FF {
@@ -194,7 +190,7 @@ fn probe_layout() {
                     let ac = ec_read_reg(EC_REG_D_AC);
                     if ac != 0x1FF {
                         if ac <= 1 {
-                            sd(&bat_layout, EC_LAYOUT_D);
+                            sw(&bat_layout, EC_LAYOUT_D);
                             return EC_LAYOUT_D;
                         }
                     }
@@ -207,7 +203,7 @@ fn probe_layout() {
     let cap_a = ec_read_reg(EC_REG_A_BAT_CAP);
     if cap_a != 0x1FF {
         if cap_a <= 100 {
-            sd(&bat_layout, EC_LAYOUT_A);
+            sw(&bat_layout, EC_LAYOUT_A);
             return EC_LAYOUT_A;
         }
     }
@@ -216,7 +212,7 @@ fn probe_layout() {
     let cap_b = ec_read_reg(EC_REG_B_BAT_CAP);
     if cap_b != 0x1FF {
         if cap_b <= 100 {
-            sd(&bat_layout, EC_LAYOUT_B);
+            sw(&bat_layout, EC_LAYOUT_B);
             return EC_LAYOUT_B;
         }
     }
@@ -229,22 +225,21 @@ fn probe_layout() {
             let des = (des_hi & 255) * 256 + (des_lo & 255);
             if des >= 10 {
                 if des <= 64999 {
-                    sd(&bat_design, des);
-                    sd(&bat_layout, EC_LAYOUT_C);
+                    sw(&bat_design, des);
+                    sw(&bat_layout, EC_LAYOUT_C);
                     return EC_LAYOUT_C;
                 }
             }
         }
     }
 
-    sd(&bat_layout, EC_LAYOUT_NONE);
+    sw(&bat_layout, EC_LAYOUT_NONE);
     return EC_LAYOUT_NONE;
 }
 
 # ---------------------------------------------------------------------------
-# Helpers: determine_state(ac_byte, flags_byte) -> BAT_STATE_*
-# ac_byte  bit0=1 means AC present.
-# flags_byte bit1=1 means charging.
+# determine_state(ac_byte, flags_byte) -> BAT_STATE_*
+# ac_byte bit0=1 means AC present; flags_byte bit1=1 means charging.
 # ---------------------------------------------------------------------------
 fn determine_state(ac_byte, flags_byte) {
     if (ac_byte & 1) == 0 { return BAT_STATE_DISCHARGE; }
@@ -253,21 +248,17 @@ fn determine_state(ac_byte, flags_byte) {
 }
 
 # ---------------------------------------------------------------------------
-# do_read - read all EC registers and update bat_state / bat_pct.
+# do_read - one bounded EC register sweep; update bat_state / bat_pct.
 # ---------------------------------------------------------------------------
 fn do_read() {
-    let layout = ld(&bat_layout);
+    let layout = lw(&bat_layout);
 
     if layout == EC_LAYOUT_D {
         let ac = ec_read_reg(EC_REG_D_AC);
         if ac == 0x1FF { return 0; }
-        sd(&bat_pct, 100);
-        if (ac & 1) != 0 {
-            sd(&bat_state, BAT_STATE_AC);
-        }
-        if (ac & 1) == 0 {
-            sd(&bat_state, BAT_STATE_DISCHARGE);
-        }
+        sw(&bat_pct, 100);
+        if (ac & 1) != 0 { sw(&bat_state, BAT_STATE_AC); }
+        if (ac & 1) == 0 { sw(&bat_state, BAT_STATE_DISCHARGE); }
         return 0;
     }
 
@@ -277,10 +268,10 @@ fn do_read() {
         let cap = ec_read_reg(EC_REG_A_BAT_CAP);
         if cap == 0x1FF { return 0; }
         if cap > 100 { cap = 100; }
-        sd(&bat_pct, cap);
+        sw(&bat_pct, cap);
         let flags = ec_read_reg(EC_REG_A_BAT_FLAGS);
         if flags == 0x1FF { return 0; }
-        sd(&bat_state, determine_state(ac, flags));
+        sw(&bat_state, determine_state(ac, flags));
         return 0;
     }
 
@@ -290,10 +281,10 @@ fn do_read() {
         let cap = ec_read_reg(EC_REG_B_BAT_CAP);
         if cap == 0x1FF { return 0; }
         if cap > 100 { cap = 100; }
-        sd(&bat_pct, cap);
+        sw(&bat_pct, cap);
         let flags = ec_read_reg(EC_REG_B_BAT_FLAGS);
         if flags == 0x1FF { return 0; }
-        sd(&bat_state, determine_state(ac, flags));
+        sw(&bat_state, determine_state(ac, flags));
         return 0;
     }
 
@@ -305,16 +296,16 @@ fn do_read() {
         let rem_hi = ec_read_reg(EC_REG_C_REM_HI);
         if rem_hi == 0x1FF { return 0; }
         let rem = (rem_hi & 255) * 256 + (rem_lo & 255);
-        let des = ld(&bat_design);
+        let des = lw(&bat_design);
         let pct = 0;
         if des > 0 {
             pct = rem * 100 / des;
             if pct > 100 { pct = 100; }
         }
-        sd(&bat_pct, pct);
+        sw(&bat_pct, pct);
         let flags = ec_read_reg(EC_REG_C_STATUS);
         if flags == 0x1FF { return 0; }
-        sd(&bat_state, determine_state(ac, flags));
+        sw(&bat_state, determine_state(ac, flags));
         return 0;
     }
 
@@ -323,65 +314,38 @@ fn do_read() {
 }
 
 # ---------------------------------------------------------------------------
-# battery_init - register with the broker, grant ports, probe the EC.
+# battery_tick - the bounded periodic entry the kernel battery service invokes
+# (~1 Hz through the broker tick guard). One EC sweep, then return.
 # ---------------------------------------------------------------------------
-fn battery_init() {
-    # Initialize state.
-    sd(&bat_state,  BAT_STATE_UNKNOWN);
-    sd(&bat_pct,    0);
-    sd(&bat_layout, EC_LAYOUT_NONE);
-    sd(&bat_design, 0);
-    sd(&ec_ok,      0);
-    sd(&poll_ctr,   0);
+fn battery_tick() {
+    if lw(&ec_ok) == 0 { return 0; }
+    do_read();
+    return 0;
+}
 
-    # Register with the broker; request only PIO.
-    let id = syscall(SC_DRVHOST_REGISTER, CAP_PIO, 0, 0);
-    sd(&self_id, id);
+# ---------------------------------------------------------------------------
+# main - the ONE-SHOT probe entry (Fork-B ordering: registration + the PIO
+# grant already happened in the device manager before this runs). Probes the
+# EC, publishes the first reading, sets `ready`, returns. Never loops.
+# ---------------------------------------------------------------------------
+fn main() {
+    sw(&bat_state,  BAT_STATE_UNKNOWN);
+    sw(&bat_pct,    0);
+    sw(&bat_layout, EC_LAYOUT_NONE);
+    sw(&bat_design, 0);
+    sw(&ec_ok,      0);
 
-    # Grant: ports 0x62 and 0x66 (lo=0x62, hi=0x66 covers both with 0x63-0x65
-    # as an acceptable over-grant; alternatively grant each separately).
-    syscall(SC_DRVHOST_GRANT_PIO, id, EC_DATA, EC_CMD);
-
-    # Probe the EC. Safe default = AC/100% if it does not respond.
     let layout = probe_layout();
     if layout == EC_LAYOUT_NONE {
-        sd(&bat_state, BAT_STATE_AC);
-        sd(&bat_pct,   100);
+        # EC absent / unlisted map: publish the safe desktop default.
+        sw(&bat_state, BAT_STATE_AC);
+        sw(&bat_pct,   100);
+        sw(&ready, 1);
         return 0;
     }
 
-    sd(&ec_ok, 1);
+    sw(&ec_ok, 1);
     do_read();
-    return 0;
-}
-
-# ---------------------------------------------------------------------------
-# battery_poll - throttled poll; call from the driver's event loop.
-# Returns 0 always; updates bat_state / bat_pct in place.
-# ---------------------------------------------------------------------------
-fn battery_poll() {
-    if ld(&ec_ok) == 0 { return 0; }
-    let c = ld(&poll_ctr) + 1;
-    sd(&poll_ctr, c);
-    if c < POLL_PERIOD { return 0; }
-    sd(&poll_ctr, 0);
-    do_read();
-    return 0;
-}
-
-# ---------------------------------------------------------------------------
-# main - driver entry point. Initialize, then spin polling indefinitely.
-# In a real wired-up driver the kernel would signal events; for now we
-# poll at POLL_PERIOD cadence using SC_TICKS, mirroring the battery.asm model.
-# ---------------------------------------------------------------------------
-fn main() {
-    battery_init();
-    while 1 {
-        let t0 = syscall(SC_TICKS);
-        battery_poll();
-        # Sleep ~10 ms between spins so we don't burn the core busy-waiting.
-        let deadline = t0 + 10;
-        while syscall(SC_TICKS) < deadline { }
-    }
+    sw(&ready, 1);
     return 0;
 }

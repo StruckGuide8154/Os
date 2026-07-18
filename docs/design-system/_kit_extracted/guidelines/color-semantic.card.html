@@ -1,0 +1,26 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic — status" subtitle="Success, warning, error, info + soft fills" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 18px 20px; }
+  .row { display: flex; gap: 12px; }
+  .col { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+  .sw { height: 56px; border-radius: var(--r-md); display: flex; align-items: flex-end; padding: 8px; }
+  .soft { height: 26px; border-radius: var(--r-sm); display: flex; align-items: center; padding: 0 10px; }
+  .name { font: var(--fw-semibold) var(--fs-xs)/1 var(--font-ui); color: #15110A; }
+  .hex { font: var(--fw-regular) 10px/1 var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="col"><div class="sw" style="background:var(--grit-success);"><span class="name">Success</span></div><div class="soft" style="background:var(--grit-success-soft);"><span class="hex" style="color:var(--grit-success);">#6FB894</span></div></div>
+  <div class="col"><div class="sw" style="background:var(--grit-warning);"><span class="name">Warning</span></div><div class="soft" style="background:var(--grit-warning-soft);"><span class="hex" style="color:var(--grit-warning);">#D6A444</span></div></div>
+  <div class="col"><div class="sw" style="background:var(--grit-error);"><span class="name">Error</span></div><div class="soft" style="background:var(--grit-error-soft);"><span class="hex" style="color:var(--grit-error);">#CF6F66</span></div></div>
+  <div class="col"><div class="sw" style="background:var(--accent);"><span class="name">Accent</span></div><div class="soft" style="background:var(--accent-fill);"><span class="hex" style="color:var(--text-accent);">14% tint</span></div></div>
+</div>
+</body>
+</html>

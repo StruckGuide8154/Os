@@ -148,6 +148,27 @@ section .text
 ; Idempotent per core.
 global tss_init_for_core
 tss_init_for_core:
+    ; ---- Fail-closed core-index bound (defense-in-depth) --------------------
+    ; EDI selects this AP's slot in ap_tss_pool / ap_rsp0_stacks / ap_ist_stacks
+    ; (all sized for SMP_MAX_CORES slots) AND its 16-byte TSS descriptor in the
+    ; GDT: gdt64_tss_ap (gdt.asm:106) has exactly (SMP_MAX_CORES-1) AP slots, for
+    ; core indices 1..SMP_MAX_CORES-1, placed at GDT offset 0x30 + core*16.
+    ; The sole current caller (apic.asm ap_long_mode_init) already derives a
+    ; DENSE index bounded by smp_target_cores <= SMP_MAX_CORES, so it is clean.
+    ; But this routine is `global`: a future caller passing a raw (sparse) APIC
+    ; id -- APIC ids are NOT contiguous 0..N-1 on real hardware -- or an uncapped
+    ; CPU count would drive the descriptor write `mov [rdi+0/8],0` (rdi =
+    ; GDTbase + 0x30 + edi*16) up to ~KiB past the GDT, corrupting adjacent
+    ; descriptors/boot structures, plus overflow the three AP pools. Reject any
+    ; index outside [1, SMP_MAX_CORES-1] without touching a single byte of state.
+    ; The validated quantity IS the quantity used (register EDI, single-threaded
+    ; per core, never reloaded from memory) -> TOCTOU-free. Checked before any
+    ; push so the reject path is a bare `ret` with the stack untouched.
+    cmp edi, 1
+    jb .tss_core_reject
+    cmp edi, SMP_MAX_CORES
+    jae .tss_core_reject
+
     push rax
     push rbx
     push rcx
@@ -248,4 +269,6 @@ tss_init_for_core:
     pop rcx
     pop rbx
     pop rax
+.tss_core_reject:
+    ; Out-of-range core index: no TSS/GDT/pool state was touched. Fail-closed.
     ret

@@ -21,7 +21,6 @@ acpi_ec
 acpi_pci
 amd_display
 ata
-battery
 display
 driver_debug
 fbperf

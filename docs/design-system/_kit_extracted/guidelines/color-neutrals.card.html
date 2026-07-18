@@ -1,0 +1,26 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Neutrals — surface ramp" subtitle="Void → window → panel → input → raised" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html, body { margin: 0; }
+  body { background: var(--surface-window); font-family: var(--font-ui); padding: 18px 20px; }
+  .row { display: flex; gap: 12px; }
+  .sw { flex: 1; height: 92px; border-radius: var(--r-md); border: 1px solid var(--border); display: flex; flex-direction: column; justify-content: flex-end; padding: 10px; }
+  .name { font: var(--fw-semibold) var(--fs-xs)/1.2 var(--font-ui); color: var(--text-heading); }
+  .hex { font: var(--fw-regular) 10px/1.2 var(--font-mono); color: var(--text-muted); margin-top: 3px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="sw" style="background: var(--grit-void);"><span class="name">Void</span><span class="hex">#0E1013</span></div>
+  <div class="sw" style="background: var(--grit-bg);"><span class="name">App</span><span class="hex">#131519</span></div>
+  <div class="sw" style="background: var(--grit-surface-1);"><span class="name">Window</span><span class="hex">#181A1F</span></div>
+  <div class="sw" style="background: var(--grit-surface-2);"><span class="name">Panel</span><span class="hex">#1E2127</span></div>
+  <div class="sw" style="background: var(--grit-surface-3);"><span class="name">Input</span><span class="hex">#262A31</span></div>
+  <div class="sw" style="background: var(--grit-surface-4);"><span class="name">Active</span><span class="hex">#30343D</span></div>
+</div>
+</body>
+</html>

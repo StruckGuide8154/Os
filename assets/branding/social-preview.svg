@@ -1,0 +1,41 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="metal1" x1="0%" y1="0%" x2="0%" y2="100%">
+<stop offset="0%" stop-color="#2a2d34"/><stop offset="50%" stop-color="#141518"/><stop offset="100%" stop-color="#000000"/>
+</linearGradient>
+<linearGradient id="metal2" x1="100%" y1="0%" x2="0%" y2="100%">
+<stop offset="0%" stop-color="#434855"/><stop offset="40%" stop-color="#1c1e24"/><stop offset="100%" stop-color="#000000"/>
+</linearGradient>
+<linearGradient id="hl" x1="0%" y1="50%" x2="100%" y2="50%">
+<stop offset="0%" stop-color="#ffffff" stop-opacity="0"/><stop offset="50%" stop-color="#ffffff" stop-opacity="0.15"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+</linearGradient>
+<linearGradient id="steel" x1="0%" y1="0%" x2="0%" y2="100%">
+<stop offset="0%" stop-color="#ffffff"/><stop offset="48%" stop-color="#d4d7db"/><stop offset="52%" stop-color="#b7bbc1"/><stop offset="100%" stop-color="#8a9099"/>
+</linearGradient>
+<radialGradient id="texthaze" cx="50%" cy="50%" r="50%">
+<stop offset="0%" stop-color="#000000" stop-opacity="0.6"/><stop offset="70%" stop-color="#000000" stop-opacity="0.18"/><stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+</radialGradient>
+<radialGradient id="spot" cx="50%" cy="28%" r="62%">
+<stop offset="0%" stop-color="#ffffff" stop-opacity="0.10"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+</radialGradient>
+<filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="20"/></filter>
+</defs>
+
+<g transform="translate(0,-40) scale(0.66667)">
+  <rect width="1920" height="1080" fill="#050505"/>
+  <path d="M 0 0 L 1920 0 L 1920 400 C 1400 700, 1000 200, 500 500 C 200 680, 0 400, 0 400 Z" fill="url(#metal1)"/>
+  <path d="M 0 200 C 400 600, 900 100, 1500 600 C 1800 850, 1920 600, 1920 600 L 1920 1080 L 0 1080 Z" fill="url(#metal2)"/>
+  <path d="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900 L 2000 1200 L -100 1200 Z" fill="url(#metal1)"/>
+  <path d="M 0 200 C 400 600, 900 100, 1500 600 C 1800 850, 1920 600, 1920 600" fill="none" stroke="url(#hl)" stroke-width="4"/>
+  <path d="M -100 500 C 300 900, 800 400, 1400 900 C 1700 1150, 2000 900, 2000 900" fill="none" stroke="url(#hl)" stroke-width="6"/>
+</g>
+
+<rect width="1280" height="640" fill="url(#spot)"/>
+<ellipse cx="640" cy="312" rx="440" ry="216" fill="url(#texthaze)" filter="url(#soft)"/>
+
+<text x="640" y="360" text-anchor="middle" font-family="'Consolas','DejaVu Sans Mono',monospace" font-size="118" font-weight="500" letter-spacing="2" fill="#000000" fill-opacity="0.65">grit_</text>
+<text x="642" y="344" text-anchor="middle" font-family="'Consolas','DejaVu Sans Mono',monospace" font-size="118" font-weight="500" letter-spacing="2" fill="url(#steel)">grit<tspan fill="#aeb3ba">_</tspan></text>
+
+<line x1="500" y1="392" x2="780" y2="392" stroke="#ffffff" stroke-width="1" stroke-opacity="0.18"/>
+<text x="640" y="430" text-anchor="middle" font-family="'Consolas','DejaVu Sans Mono',monospace" font-size="23" letter-spacing="6" fill="#9298a1">UEFI GRAPHICAL DESKTOP</text>
+</svg>

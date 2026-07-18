@@ -87,7 +87,7 @@ function Remove-NxhLineNoise {
 $root = Get-RepoRoot
 $findings = New-Object System.Collections.Generic.List[object]
 
-$ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'build', 'dist', 'deprecated', '__pycache__', 'worktrees')
+$ignoredPrefixes = @('.git', '.claude', 'sandbox_shadow', 'build', 'dist', 'deprecated', 'docs/gpu-driver/reference-780M-asm', '__pycache__', 'worktrees')
 
 # GHL trusted-path source roots (.ghl lives here). Mirrors check_no_asm.ps1.
 $trustedNxhPrefixes = @(
@@ -124,6 +124,9 @@ $documentedIntrinsics = New-Object 'System.Collections.Generic.HashSet[string]' 
     'cli','sti','hlt','swapgs','sysretq','iretq','ud2','ret_naked',
     'lfence','mfence','sfence','pause','wbinvd','nop','smap_open','smap_close',
     'rdtsc','rdrand','read_cr0','read_cr2','read_cr3','read_cr4',
+    # str_sel = STR (store TR selector); documented/reviewed Track-5 VMX
+    # guest-capture primitive (gritc.py _NULLARY_INTRINSICS).
+    'str_sel',
     'read_rsp','pop_val','read_flags'
 ) | ForEach-Object { [void]$documentedIntrinsics.Add($_) }
 

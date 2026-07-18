@@ -109,7 +109,10 @@ $legacyBuildScripts = @(
 # build step; everything else must treat build/ghl as output, never source.
 $legacyAggregators = @(
     'src/kernel/kernel_build.asm',
-    'src/user/apps.asm'
+    'src/user/apps.asm',
+    # Dedicated signed driver-package linker wrapper. Like kernel_build.asm it
+    # only aggregates gritc output into the flat image; the .ghl remains source.
+    'src/drivers/driver_blob.asm'
 )
 
 # The full legacy quarantine: build scripts + aggregators. Files here are exempt
@@ -126,6 +129,7 @@ $files = Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object
         FullName  = $_.FullName
         RepoPath  = $repoPath
         Extension = $_.Extension.ToLowerInvariant()
+        Length    = $_.Length
     }
 } | Where-Object {
     -not (Test-UnderPrefix -Path $_.RepoPath -Prefixes $ignoredPrefixes)
@@ -153,7 +157,12 @@ $deprecatedRefPattern = [regex]'(?i)(%include\s+"[^"]*deprecated/|(?:^|[\s"''(/\
 
 # Build/orchestration script extensions for the new-arch include/nasm rule.
 $buildScriptExts = @('.ps1', '.py')
-$binaryExts = @('.png', '.jpg', '.jpeg', '.gif', '.bin', '.efi', '.img', '.pyc', '.ico', '.bmp', '.svg', '.nba', '.ttf', '.woff')
+$binaryExts = @('.png', '.jpg', '.jpeg', '.gif', '.bin', '.efi', '.img', '.pyc', '.ico', '.bmp', '.svg', '.nba', '.ttf', '.woff',
+                '.zip', '.7z', '.gz', '.xz', '.zst', '.tar', '.iso', '.raw', '.lst', '.pdf', '.exe', '.dll', '.pt', '.pth', '.onnx')
+# No legitimate build/orchestration script is anywhere near this large; without
+# a cap, Get-Content materializes any big unlisted binary (e.g. a dataset zip
+# dropped in the tree) as a UTF-16 string array — hundreds of MB per guard run.
+$maxScanBytes = 4MB
 
 foreach ($file in $files) {
     $isLegacyAllow      = Test-UnderPrefix -Path $file.RepoPath -Prefixes $legacyAllowlist
@@ -161,6 +170,7 @@ foreach ($file in $files) {
     $isDeprecatedSelf   = Test-UnderPrefix -Path $file.RepoPath -Prefixes @('deprecated')
 
     if ($file.Extension -in $binaryExts) { continue }
+    if ($file.Length -gt $maxScanBytes) { continue }
 
     $lines = $null
     try { $lines = Get-Content -LiteralPath $file.FullName -ErrorAction Stop } catch { continue }

@@ -46,7 +46,7 @@ Assert-Exists 'tests\svg\svg_render_smoke.baseline.txt' 'SVG visual regression b
 Assert-Match 'tests\svg\svg_render_smoke.baseline.txt' 'expected-marker: \[ghll\] svg2 render pass' 'SVG baseline must name the runtime pass marker.'
 
 Write-Host '[xml-svg] Checking XML syscall table stability...' -ForegroundColor Yellow
-$syscall = Read-All 'src\kernel\proc\syscall.asm'
+$syscall = Read-All 'src\kernel\proc\syscall_support.inc'
 $xmlEntries = [regex]::Matches($syscall, 'SYSCALL_ENTRY syscall_entry\.sc_(xml|draw|fill|blend)_[^,\r\n]+')
 $names = @($xmlEntries | ForEach-Object { $_.Value -replace '^SYSCALL_ENTRY syscall_entry\.', '' })
 $expected = @(

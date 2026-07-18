@@ -9,6 +9,7 @@ ser_r8156_ping_fail db "[R8156 PING FAIL]", 10, 0
 ser_link_wait_8156 db "[R8156 LINK WAIT]", 10, 0
 ser_link_up_8156 db "[R8156 LINK UP]", 10, 0
 ser_link_timeout_8156 db "[R8156 LINK TIMEOUT]", 10, 0
+ser_tx_len_reject_8156 db "[R8156 TX LEN REJECT]", 10, 0
 ser_phy_tag db "PHY:", 0
 ser_mac_tag db "MAC:", 0
 ser_oob_tag db "OOB:", 0

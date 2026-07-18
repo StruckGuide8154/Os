@@ -54,8 +54,8 @@ slot_syscall_allow: times (MAX_WINDOWS * SC_ALLOW_BYTES) db 0xFF
 ; --- Heterogeneous syscall numbering per slot (security_todo.md §12) ---------
 ; Per-slot INVERSE permutation of the syscall table, in KERNEL BSS OUTSIDE the
 ; ring-3 arena (parallel to slot_cap_mask[]/slot_syscall_allow[]/l3_slot_key[]),
-; so a slot's own memory-write bug can't rewrite its mapping. One byte per
-; syscall number per slot:
+; so a slot's own memory-write bug can't rewrite its mapping. One word per
+; syscall number per slot (the table now exceeds 256 rows):
 ;   sc_slot_perm_inv[slot*syscall_table_count + app_visible] = real_table_row
 ; The dispatcher applies this on entry to recover the real row from the number
 ; the app issued. The matching FORWARD permutation (real_row -> app_visible) is
@@ -68,14 +68,14 @@ slot_syscall_allow: times (MAX_WINDOWS * SC_ALLOW_BYTES) db 0xFF
 ; generated. After generation it is 1. This makes a never-dispatched slot, and
 ; the whole default (non-ENABLE_SYSCALL_PERM) build, behave exactly as today.
 align 16
-sc_slot_perm_inv:   times (MAX_WINDOWS * syscall_table_count) db 0
+sc_slot_perm_inv:   times (MAX_WINDOWS * syscall_table_count) dw 0
 ; The FORWARD permutation (real_row -> app_visible), persisted alongside the
 ; inverse so the loader (l3_copy_app_blob_to_slot -> sc_slot_perm_apply_blob)
 ; can rewrite each app's compiled SYS_* immediates from the raw row to this
 ; slot's app-visible number. The dispatcher uses only the inverse; this row is
 ; the loader's lookup. Slot 0 is identity (see sc_slot_perm_generate).
 align 16
-sc_slot_perm_fwd:   times (MAX_WINDOWS * syscall_table_count) db 0
+sc_slot_perm_fwd:   times (MAX_WINDOWS * syscall_table_count) dw 0
 align 16
 sc_slot_perm_ready: times MAX_WINDOWS db 0
 ; Per-slot COMMIT flag (security_todo.md §12). Set ONLY by sc_slot_perm_apply_blob

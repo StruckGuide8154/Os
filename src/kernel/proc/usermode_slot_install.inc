@@ -41,11 +41,14 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     ; manifest/stack/handle re-init below ??? they re-populate this range. The
     ; user-stack guard page (L3_SLOT_USER_STACK_GUARD_OFF) is non-present, so
     ; wipe the ranges below and above it separately ??? touching it would #PF.
+    ; Recycled slots may still have W^X code pages marked X+!W; open the monitor
+    ; window so CR0.WP does not turn this legitimate scrub into a ring-0 #PF.
     push rdi
     push rcx
     push rax
     xor eax, eax
     cld
+    call nk_pt_window_begin
     mov rdi, r8
     mov rcx, L3_SLOT_USER_STACK_GUARD_OFF / 8
     USER_ACCESS_BEGIN
@@ -56,12 +59,13 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     USER_ACCESS_BEGIN
     rep stosq
     USER_ACCESS_END
+    call nk_pt_window_end
     pop rax
     pop rcx
     pop rdi
     mov rdi, rax
     mov eax, r9d
-    add rdi, [rel l3_slot_code_slide + rax*8]   ; copy destination = slot_base + slide
+    add rdi, [abs l3_slot_code_slide + rax*8]   ; copy destination = slot_base + slide
     mov rsi, [rel app_blob_base_v]
     mov rcx, [rel app_blob_size_v]
     ; Available copy window shrinks by the slide. Clamp against PLACE_CAP (the
@@ -69,7 +73,7 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     ; non-present guard page or into the user stack, even at the maximum slide.
     mov rdx, L3_APP_BLOB_PLACE_CAP
     mov eax, r9d
-    sub rdx, [rel l3_slot_code_slide + rax*8]
+    sub rdx, [abs l3_slot_code_slide + rax*8]
     cmp rcx, rdx
     jbe .copy_len_ok
     mov rcx, rdx
@@ -97,7 +101,7 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     push r11
     mov r10, r8                          ; slot base
     mov eax, r9d
-    add r10, [rel l3_slot_code_slide + rax*8]   ; r10 = copy dest (slot base + slide)
+    add r10, [abs l3_slot_code_slide + rax*8]   ; r10 = copy dest (slot base + slide)
     lea rbx, [rel app_syscall_fixups_start]
     lea r11, [rel app_syscall_fixups_end]
     xor edx, edx                         ; record counter
@@ -145,23 +149,30 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     mov rax, L3_SLOT_MAGIC
     mov ecx, r9d
     mov [l3_slot_live + rcx*8], rax
-    ; Install a default v1 W^X manifest spanning the legitimate code window
-    ; [L3_APP_CODE_OFF, L3_SHADOW_WIN_OFF). Without this, l3_apply_wx_policy
-    ; would force the whole slot W+NX and *no* user code could execute ???
-    ; legacy GritHL apps (which never call SYS_WX_INSTALL_MANIFEST) would
-    ; page-fault on the first instruction of their drawfn. Apps that want a
-    ; tighter range (e.g. excluding their .data tail) can still override via
-    ; SYS_WX_INSTALL_MANIFEST at runtime.
-    ; Zero this slot's W^X manifest. Per the spec in boot_memory.inc, manifest
-    ; version 0 means "legacy permissive" ??? blob pages stay W+X, only the
-    ; stack region is forced W+NX. Apps that want strict W^X opt in via
-    ; SYS_WX_INSTALL_MANIFEST. The actual permissive vs strict semantics
-    ; live in l3_apply_wx_policy below.
-    xor eax, eax
+    mov qword [l3_slot_blob_kind + rcx*8], 0
+    mov rax, [rel app_blob_size_v]
+    mov [l3_slot_blob_size + rcx*8], rax
+    ; Install this slot's W^X manifest (Codex review finding 2). Every GritHL app
+    ; gets a default v1 manifest naming its code window; l3_apply_wx_policy marks
+    ; that window X+!W and every other slot page (writable data tail, stack,
+    ; handle table) W+NX. No app page is ever both writable and executable, even
+    ; for an app that never calls SYS_WX_INSTALL_MANIFEST. The old v0 "legacy
+    ; permissive" path (blob pages left W+X) is gone -- a missing/invalid manifest
+    ; now fails CLOSED to whole-slot W+NX in l3_apply_wx_policy. Apps can still
+    ; override with a tighter range via SYS_WX_INSTALL_MANIFEST at runtime.
+    ; The blob was copied to slot offset `slide` (page-aligned) above, so the
+    ; app's executable code+rodata occupies [slide, slide + code_size) and its
+    ; writable data tail occupies [slide + code_size, slide + blob_size).
+    ; code_size = app_blob_code_size_v = app_blob_code_end - app_blob_start, the
+    ; page-aligned `.appdata` boundary. Both ends are page-aligned (slide and the
+    ; split are page multiples), so l3_apply_wx_policy can mark whole pages.
     mov ecx, r9d
-    mov [l3_wx_manifest_ver + rcx*8], rax
-    mov [l3_wx_code_start + rcx*8], rax
+    mov rdx, [abs l3_slot_code_slide + rcx*8]   ; rdx = slide = code window start
+    mov rax, rdx
+    add rax, [rel app_blob_code_size_v]         ; rax = slide + code_size = window end
+    mov [l3_wx_code_start + rcx*8], rdx
     mov [l3_wx_code_end + rcx*8], rax
+    mov qword [l3_wx_manifest_ver + rcx*8], 1
     ; Invalidate the code-range integrity baseline (security_todo.md ??12): the
     ; new tenant's code differs from the recycled slot's, so l3_apply_wx_policy
     ; must re-capture the hash on the next valid-manifest activation. Clearing
@@ -208,6 +219,121 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     pop rcx
     ret
 
+; l3_copy_driver_blob_to_slot / l3_copy_driver_blob2_to_slot - install a
+; dedicated raw-syscall driver blob (Track 8; one blob section per driver
+; package, see src/drivers/driver_blob.asm).
+; EDI = slot, RAX = unmodified slot base on success or 0 on invalid bounds.
+; The copy is constrained below L3_SLOT_DMA_OFF, leaving the fixed DMA window
+; writable+NX. Unlike GUI apps, these slots intentionally keep syscall
+; permutation uncommitted so the broker's stable u32 syscall ABI is identity.
+; %1 = function name, %2 = blob start label, %3 = blob end label,
+; %4 = blob code-end label, %5 = blob kind stored in l3_slot_blob_kind
+; (1 = .driverblob / virtio-net, 2 = .driverblob2 / battery; the kind selects
+; the matching done-trampoline offset and translate source range).
+%macro DRIVER_BLOB_INSTALL_FN 5
+FN_BEGIN %1, 0, 0, FN_RET_SCALAR
+    push rcx
+    push rdi
+    push rsi
+    push r8
+    push r9
+    mov r9d, edi
+    cmp r9d, MAX_WINDOWS
+    jae .driver_copy_fail
+    mov rcx, %3 - %2
+    test rcx, rcx
+    jz .driver_copy_fail
+    cmp rcx, L3_SLOT_DMA_OFF
+    jae .driver_copy_fail
+    mov rax, %4 - %2
+    test rax, rax
+    jz .driver_copy_fail
+    cmp rax, rcx
+    ja .driver_copy_fail
+%ifdef ENABLE_SYSCALL_PERM
+    lea rax, [rel sc_slot_perm_committed]
+    mov byte [rax + r9], 0
+%endif
+    mov byte [l3_code_hash_valid + r9], 0
+    mov edi, r9d
+    call l3_randomize_driver_slide
+    mov edi, r9d
+    call l3_slot_base
+    mov r8, rax
+
+    ; Recycle-safe whole-slot scrub, split around the non-present stack guard.
+    push rax
+    xor eax, eax
+    cld
+    call nk_pt_window_begin
+    mov rdi, r8
+    mov rcx, L3_SLOT_USER_STACK_GUARD_OFF / 8
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+    lea rdi, [r8 + L3_SLOT_USER_STACK_GUARD_OFF + 0x1000]
+    mov rcx, (APP_SLOT_SIZE - L3_SLOT_USER_STACK_GUARD_OFF - 0x1000) / 8
+    USER_ACCESS_BEGIN
+    rep stosq
+    USER_ACCESS_END
+    call nk_pt_window_end
+    pop rax
+
+    mov rdi, r8
+    add rdi, [abs l3_slot_code_slide + r9*8]
+    lea rsi, [rel %2]
+    mov rcx, %3 - %2
+    ; Defense in depth against arithmetic/layout drift after the random draw.
+    mov rdx, L3_SLOT_DMA_OFF
+    sub rdx, [abs l3_slot_code_slide + r9*8]
+    cmp rcx, rdx
+    ja .driver_copy_fail_after_wipe
+    cld
+    USER_ACCESS_BEGIN
+    rep movsb
+    USER_ACCESS_END
+
+    mov ecx, r9d
+    mov rax, L3_SLOT_MAGIC
+    mov [l3_slot_live + rcx*8], rax
+    mov qword [l3_slot_blob_kind + rcx*8], %5
+    mov qword [l3_slot_blob_size + rcx*8], %3 - %2
+    mov rdx, [abs l3_slot_code_slide + rcx*8]
+    mov rax, rdx
+    add rax, %4 - %2
+    mov [l3_wx_code_start + rcx*8], rdx
+    mov [l3_wx_code_end + rcx*8], rax
+    mov qword [l3_wx_manifest_ver + rcx*8], 1
+    mov byte [l3_code_hash_valid + rcx], 0
+    mov edi, r9d
+    call l3_randomize_user_stack_top
+    mov edi, r9d
+    call l3_derive_slot_key
+    mov rdi, r8
+    call handle_table_clear
+    mov rax, r8
+    jmp .driver_copy_done
+
+.driver_copy_fail_after_wipe:
+    mov ecx, r9d
+    xor eax, eax
+    mov [l3_slot_live + rcx*8], rax
+    mov [l3_slot_blob_kind + rcx*8], rax
+    mov [l3_slot_blob_size + rcx*8], rax
+.driver_copy_fail:
+    xor eax, eax
+.driver_copy_done:
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rcx
+    ret
+%endmacro
+
+DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob_to_slot,  driver_blob_start,  driver_blob_end,  driver_blob_code_end,  1
+DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob2_to_slot, driver2_blob_start, driver2_blob_end, driver2_blob_code_end, 2
+
 ; l3_release_slot - retire per-launch state for a closed app slot.
 ; EDI = slot. This is the lifecycle counterpart to l3_copy_app_blob_to_slot:
 ; it clears kernel-owned per-slot metadata and scrubs the user arena. The
@@ -233,6 +359,10 @@ FN_BEGIN l3_release_slot, 1, 0, FN_RET_VOID
     mov rdi, rax
     xor eax, eax
     cld
+    ; W^X leaves executable slot pages read-only. Slot teardown is allowed to
+    ; scrub those pages, so bracket only the bulk wipe with the monitor WP-off
+    ; window and keep SMAP open only for the actual user-page stores.
+    call nk_pt_window_begin
     mov rcx, L3_SLOT_USER_STACK_GUARD_OFF / 8
     USER_ACCESS_BEGIN
     rep stosq
@@ -246,16 +376,19 @@ FN_BEGIN l3_release_slot, 1, 0, FN_RET_VOID
     USER_ACCESS_BEGIN
     rep stosq
     USER_ACCESS_END
+    call nk_pt_window_end
 
 .release_clear_meta:
     mov ecx, r8d
     xor eax, eax
     mov [l3_slot_live + rcx*8], rax
+    mov [l3_slot_blob_kind + rcx*8], rax
+    mov [l3_slot_blob_size + rcx*8], rax
     mov [l3_wx_manifest_ver + rcx*8], rax
     mov [l3_wx_code_start + rcx*8], rax
     mov [l3_wx_code_end + rcx*8], rax
-    mov [rel l3_slot_ustack_off + rcx*8], rax
-    mov [rel l3_slot_code_slide + rcx*8], rax
+    mov [abs l3_slot_ustack_off + rcx*8], rax
+    mov [abs l3_slot_code_slide + rcx*8], rax
     mov [l3_code_hash + rcx*8], rax
     mov byte [l3_code_hash_valid + rcx], 0
     mov [l3_slot_key + rcx*8], rax

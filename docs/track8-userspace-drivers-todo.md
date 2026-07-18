@@ -47,14 +47,37 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       as a `user` app). Tests: `tests/ghl_kernel/driver_target_{ok,no_io,no_mmio}.ghl`
       in `scripts/test/test_gritc_security.ps1`. Mirrors the
       `user_privileged_forbidden.ghl` gate for `--target user`.
-- [ ] Wire the broker entry points into the syscall dispatcher (a `SC_DRVHOST_*`
-      family, default-deny in the slot allow bitmap; only driver slots get them).
-- [ ] MMIO/DMA capability gates in `gritc` (the open `[ ]` items under "P0: GHL
-      Compiler Security": "capability gates for MMIO operations" / "for DMA
-      mapping" / "for device reset and firmware load") - these ARE the G1
-      substrate; land them here.
-- [ ] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
-      broker (a driver_id can only reach windows in its granted table).
+- [x] Wire the broker entry points into the syscall dispatcher. **DONE
+      2026-07-17:** fixed sparse rows `232..265`, `CAP_DRIVER`, caller-slot-
+      derived identity, kernel-owned policy rows, linked broker, bounded/SMAP-
+      bracketed ring submission, fail-closed control-plane rows, verified
+      driver-slot creation, concrete grants, DMA mapping, IRQ events, and
+      device-manager provisioning.
+- [x] MMIO/DMA/reset/fwload capability gates in `gritc`: **MMIO + DMA LANDED
+      2026-07-17; RESET + FWLOAD LANDED 2026-07-17 (same day).** `--target
+      driver` requires explicit `capability mmio;` / `capability dma;` for the
+      corresponding broker syscall families, requires both for DMA pointer
+      programming through MMIO, and rejects dynamic syscall numbers so the
+      check cannot be hidden. Device reset (row 264) requires `capability
+      reset;` and firmware load (row 265) requires `capability fwload;` -
+      deliberately split classes (`DRV_CAP_RESET`/`DRV_CAP_FWLOAD`), since
+      loaded firmware persists past a reboot, so neither subsumes the other;
+      both rows are reserved-only (control-plane denied) until the dispatcher
+      wires them. Compiler declarations do not mint authority: signed policy +
+      broker window grants still decide at runtime. Fixtures:
+      `driver_target_{mmio,dma,reset,fwload}_cap_forbidden.ghl` +
+      `driver_target_reset_fwload_ok.ghl` + the dynamic-syscall reject, all in
+      `test_gritc_security.ps1`.
+- [x] Track 3 invariant extension: `INV-DRIVER-NO-DMA-MINT` re-proven against the
+      broker (a driver_id can only reach windows in its granted table). **DONE
+      2026-07-17:** `scripts/test/eval_drvhost_dma_mint.py` interprets the REAL
+      `driver_host.ghl` (production lexer/parser, emitted-code integer
+      semantics, adversarial kernel-primitive stubs) - 98,259 checks across 6
+      properties (containment soundness, grant gate/no-partial-mint, signed
+      DMA ceiling, pointer-programming no-mint incl. sibling windows,
+      cross-grant controller gate, map-own-base-only), plus a planted-broken-
+      broker selftest; wired into `test_ghl_security_guards.ps1`. Proof table:
+      `docs/track3-invariant-proofs.md` §1b.
 
 ## Rung 2 - First migration: `battery` / `acpi_ec`  **[DRIVER LANDED 2026-06-14]**
 
@@ -65,16 +88,24 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
       NEVER raw `inb/outb`. Compiles broker-only under `--target driver` (no
       `unsafe`, no privileged intrinsic - G1 holds); asserted in
       `test_ghl_security_guards.ps1` + `test_gritc_security.ps1`.
-- [ ] Wire `SC_DRVHOST_*` into the dispatcher (shared Rung-1 item) - until then
-      the .asm stays live and is NOT deleted (same gate as the HDA driver).
-- [ ] Delete `battery.asm` (and `acpi_ec.asm` if subsumed) + its
-      `driver_inventory.txt` line (the shrink) - GATED on the dispatcher wiring.
-- [ ] QEMU phase: battery status still reads correctly, sourced from ring 3.
+- [x] Complete the shared Rung-1 runtime path (driver slot + concrete PIO
+      grant). **DONE 2026-07-17:** the signed kind-2 battery package is installed
+      in slot 10, receives only ports `0x62..0x66`, runs its one-shot probe, and
+      publishes bounded periodic status through the driver callback path.
+- [x] Delete `battery.asm` + its `driver_inventory.txt` line (the shrink).
+      `acpi_ec.asm` remains only for EC dump/thermal APIs not subsumed here.
+- [~] QEMU phase: UEFI smoke boot is green with the ring-3 package installed and
+      the absent-EC fallback remains live; hardware/firmware with a real EC is
+      still required to assert a changing taskbar percentage end to end.
 
   Canonical `SC_DRVHOST_*` ABI (one numbering across all driver-host processes):
   232 REGISTER, 233 GRANT_MMIO, 234 GRANT_DMA, 235 GRANT_IRQ, 236 GRANT_PIO,
   240 MMIO_READ32, 241 MMIO_WRITE32, 242 DMA_MAP, 243 IRQ_WAIT, 244 PIO_READ8,
-  245 PIO_WRITE8, 246 RING_ESTABLISH, 247 RING_SUBMIT.
+  245 PIO_WRITE8, 246 RING_ESTABLISH, 247 RING_SUBMIT, 248 PCI_CFG_READ32,
+  249 GRANT_MMIO_FOR, 250-253 MMIO_RD8/16/32/64, 254-257 MMIO_WR8/16/32/64,
+  258 MMIO_WR_DMAPTR, 259-262 PIO_RD/WR16/32, 263 NET_RX,
+  264 DEVICE_RESET (reserved, `capability reset;`),
+  265 FW_LOAD (reserved, `capability fwload;`).
 
 ## Rung 2.5 - HDA audio CLASS driver  **[DESIGN + DRIVER LANDED 2026-06-14]**
 
@@ -117,13 +148,38 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
 
 ## Rung 4 - Quarantine-and-restart + negative tests (G4 + the proof)
 
-- [ ] Fault-budget accounting per driver; over-budget → quarantine (stop
-      delivering IRQs/grants), restart via a separate recovery path.
-- [ ] **Per-stage negative test**: compromise a driver (forge a request for a
-      window outside its grant) and prove the broker refuses + the kernel's
-      authority is unreachable - the concrete proof the chain cannot progress.
-- [ ] Quarantine-restart test: kill a driver mid-operation, prove the system
-      stays live and the driver comes back.
+- [x] Fault-budget accounting per driver; over-budget → quarantine (stop
+      delivering IRQs/grants), restart via a separate recovery path. Rejected
+      data-plane results and ring-3 driver exceptions charge the same broker
+      budget; recovery replays policy-derived grants instead of stale grants.
+- [x] **Per-stage negative test**: `eval_drvhost_quarantine.py` forges a write
+      exactly outside the granted window, proves `DRV_ERR_GRANT`, proves no raw
+      MMIO event occurred, drives eight faults to quarantine, and proves revoked
+      authority remains unreachable. Its planted-accounting-break selftest must
+      also fail the proof.
+- [~] Quarantine-restart test: the executable host proof covers quarantine,
+      revocation, separate restart, and no stale-grant resurrection; UEFI smoke
+      covers the integrated exception/recovery wiring. A boot probe that kills a
+      live device driver mid-operation is still outstanding.
+
+## Rung 4.5 - Stable class ABI + scale foundation
+
+- [x] Common v1 opaque class handle: registry entry, class kind, negotiated ABI
+      version, authoritative owner, and 31-bit restart generation. Every field
+      is revalidated against kernel-owned rows; sign-bit and generation-wrap
+      inputs fail closed, and duplicate live owner/class publication is denied.
+- [x] Fixed-capacity 64-endpoint registry supports multiple devices of the same
+      class without new syscalls or raw function-pointer publication. Quarantine
+      revokes all endpoints before recovery; health-checked republish mints a
+      fresh generation.
+- [x] First live `net.l2` endpoint: the ring-3 VirtIO backend publishes MTU and
+      feature metadata only after ready/DMA/IRQ/MAC setup succeeds, and TX
+      resolves the generation-safe handle before using the driver.
+- [x] Executable proof + planted-bug selftest (`eval_drvclass_handles.py`) covers
+      field forgery, metadata bounds, quarantine, restart, stale handles, fresh
+      republish, and generation exhaustion.
+- [ ] Define typed common message/event headers and move the remaining legacy
+      NIC ops consumers fully onto the opaque class endpoint.
 
 ## Rung 5 - Input + display (latency-critical, last)
 
@@ -142,4 +198,24 @@ ungranted memory (broker, runtime), **G4** crash ≠ wedge (quarantine/restart).
 - [ ] Every driver→hardware access is brokered, bounds-checked, default-deny (G3).
 - [ ] A compromised/crashed driver is contained + restartable, proven by the
       per-stage negative + quarantine tests (G4).
+
+## Path to 10/10 (security-first; speed maximized under that)
+
+Self-rating now: **security 7 / speed 6**. The keystone: G1/G2 gates + the HDA
+class driver landed and a new in-kernel driver is impossible, but most drivers still
+run in-kernel until the migration ladder finishes.
+
+- [~] **(sec→10)** Driver syscall foundation is linked and default-deny; finish
+      verified driver slots, device-manager grants, DMA mapping, and IRQ events.
+- [ ] **(sec→10)** Finish the ladder: battery/acpi_ec → rtl8156 → i2c_hid/xhci/
+      usb_hid/display to ring-3; delete each `.asm` + its inventory line.
+- [ ] **(sec→10)** Rung 4: fault-budget quarantine-and-restart + the per-stage
+      negative test (forged out-of-grant request refused, kernel authority unreachable).
+- [x] **(sec→10)** Re-prove `INV-DRIVER-NO-DMA-MINT` (Track 3) against the broker.
+      (eval_drvhost_dma_mint.py, 98,259 checks + selftest - see Rung 1.)
+- [ ] **Verify:** an independent agent re-rates this track **security 10**.
+- **(speed→max under sec 10)** Validate-once batched descriptor rings (TX = one
+      submit/frame, RX = walk in ring-3, no per-frame syscall) keep the hot path fast;
+      gate TX/RX throughput within budget of the in-kernel baseline. Target speed **8**
+      (the ring-3 broker crossing has irreducible but amortizable cost).
 </content>

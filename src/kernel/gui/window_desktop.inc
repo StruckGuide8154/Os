@@ -3,16 +3,21 @@ FN_BEGIN wm_draw_desktop, 0, 0, FN_RET_VOID
     push rbx
     push r12
 
-    ; 1. Desktop background
+    ; 1. Desktop background. (No longer bails when the wallpaper AP render is in
+    ; flight: the render now targets its own per-core raster slot, so the BSP can
+    ; keep compositing icons + windows over the current background while the new
+    ; wallpaper rasterizes. wm_draw_desktop_background itself just polls + leaves
+    ; the prior background in place until the new cache is ready.)
     call wm_draw_desktop_background
-    cmp byte [wallpaper_render_active], 0
-    jne .draw_done
 
-    ; 1b. Desktop icons (between background and windows so apps cover them)
+    ; 1b. Desktop icons (between background and windows so apps cover them).
+    ; Drawn by the in-kernel asm shell (desktop.asm). The wm_draw_shell_window
+    ; helper below remains for a future ring-3 WF_SHELL desktop, but is a no-op
+    ; today (no WF_SHELL window is mounted).
     call desktop_draw_icons
 
     ; 2. Draw non-focused windows first, then focused
-    ; Pass 1: non-focused
+    ; Pass 1: non-focused (the WF_SHELL window is drawn above, never here)
     mov rbx, WINDOW_POOL_ADDR
     xor r12d, r12d
 .draw_nf:
@@ -23,6 +28,8 @@ FN_BEGIN wm_draw_desktop, 0, 0, FN_RET_VOID
     test qword [rbx + WIN_OFF_FLAGS], WF_VISIBLE
     jz .next_nf
     test qword [rbx + WIN_OFF_FLAGS], WF_MINIMIZED
+    jnz .next_nf
+    test qword [rbx + WIN_OFF_FLAGS], WF_SHELL
     jnz .next_nf
     test qword [rbx + WIN_OFF_FLAGS], WF_FOCUSED
     jnz .next_nf
@@ -55,6 +62,38 @@ FN_BEGIN wm_draw_desktop, 0, 0, FN_RET_VOID
 
 .draw_done:
     FN_END wm_draw_desktop
+    pop r12
+    pop rbx
+    ret
+
+; Draw the single ring-3 desktop-shell window (WF_SHELL), if one is mounted.
+; Called from wm_draw_desktop after the background and before the app-window
+; passes so the shell is the bottom (desktop) layer. No-op until gshell launches.
+wm_draw_shell_window:
+    push rbx
+    push r12
+    mov rbx, WINDOW_POOL_ADDR
+    xor r12d, r12d
+.wds_loop:
+    cmp r12d, MAX_WINDOWS
+    je .wds_done
+    mov rax, [rbx + WIN_OFF_FLAGS]
+    test rax, WF_ACTIVE
+    jz .wds_next
+    test rax, WF_VISIBLE
+    jz .wds_next
+    test rax, WF_MINIMIZED
+    jnz .wds_next
+    test rax, WF_SHELL
+    jz .wds_next
+    mov rdi, r12
+    call wm_draw_window
+    jmp .wds_done
+.wds_next:
+    add rbx, WINDOW_STRUCT_SIZE
+    inc r12d
+    jmp .wds_loop
+.wds_done:
     pop r12
     pop rbx
     ret
@@ -140,17 +179,34 @@ FN_BEGIN wm_draw_desktop_background, 0, 0, FN_RET_VOID
     mov qword [wallpaper_render_pack + 24], 0
 
     mov byte [wallpaper_render_active], 1
+    ; The wallpaper raster is a one-time, latency-insensitive background job.
+    ; Submit it ANY-CORE (WQ_TARGET_ANY) rather than pinned to the wallpaper
+    ; process's home_core: a pinned job is eligible for exactly ONE AP
+    ; (smp_worker_loop only claims target==CS_CORE_IDX), so it was hostage to that
+    ; single AP waking on the apic_wake_workers IPI in the narrow sti();hlt()
+    ; window and being healthy. Under release timing that wake races (debug serial
+    ; latency hid it), so the job could sit PENDING - wallpaper_render_active stays
+    ; pinned and the cache never validates: long freeze + blank desktop. Any-core
+    ; lets whichever of the idle APs is sweeping grab it immediately. We still bill
+    ; the cycles to the wallpaper process via the proc arg. call_app_l3 applies the
+    ; slot isolation on whatever core runs it (under app_callback_lock), so the
+    ; target core is irrelevant to correctness.
     mov edi, [wallpaper_process_id]
     test edi, edi
     jle .render_unavailable
-    mov esi, 5                         ; WQ_JOB_WALLPAPER (wq_job_table[5], workqueue.ghl)
-    xor edx, edx
-    xor r8d, r8d                       ; low priority background work
-    call process_submit_job
+    mov r8d, edi                       ; arg5 = proc to bill (wallpaper PID)
+    mov edi, 5                         ; arg1 = jobid WQ_JOB_WALLPAPER (wq_job_table[5])
+    xor esi, esi                       ; arg2 = arg (unused)
+    xor edx, edx                       ; arg3 = priority (low, background work)
+    mov ecx, -1                        ; arg4 = WQ_TARGET_ANY
+    call workqueue_submit_to
     cmp eax, -1
     je .render_unavailable
     mov [wallpaper_render_handle], eax
     mov byte [wallpaper_render_state], 1
+    mov rax, [tick_count]                   ; arm the isolation watchdog
+    add rax, WALLPAPER_RENDER_MAX_TICKS
+    mov [wallpaper_render_deadline], rax
     mov byte [scene_dirty], 1
     jmp .done
 
@@ -193,11 +249,40 @@ FN_BEGIN wm_poll_wallpaper_render, 0, 0, FN_RET_VOID
     mov edi, [wallpaper_render_handle]
     call workqueue_done
     test eax, eax
-    jz .poll_done
+    jz .poll_pending
     mov edi, [wallpaper_render_handle]
     call workqueue_reap
     mov byte [wallpaper_render_state], 0
     mov byte [scene_dirty], 1
+    jmp .poll_done
+
+.poll_pending:
+    ; Render still running. Bump the isolation watchdog; a render that never
+    ; completes must not pin wallpaper_render_active (which gates the compositor,
+    ; the taskbar/menu draw, AND every app click/draw callback). Past the budget,
+    ; ABANDON it: clear the gate so the whole UI resumes, and revert to the solid
+    ; desktop so the wedged render is not immediately resubmitted and re-stuck.
+    ; The runaway AP job is left to the per-slot strike/deadman engine to reclaim.
+    mov rax, [tick_count]
+    cmp rax, [wallpaper_render_deadline]
+    jb .poll_done
+    mov byte [wallpaper_render_active], 0
+    mov byte [wallpaper_render_state], 0
+    mov byte [wallpaper_selected], 0        ; back to solid desktop
+    mov byte [wallpaper_cache_valid], 0
+    mov byte [wallpaper_cache_valid_by_theme + 0], 0
+    mov byte [wallpaper_cache_valid_by_theme + 1], 0
+    mov byte [wallpaper_cache_valid_by_theme + 2], 0
+    mov qword [wallpaper_render_deadline], 0
+    mov byte [scene_dirty], 1
+%ifdef ENABLE_DEBUG_SERIAL
+    SER 'W'
+    SER 'P'
+    SER 'A'
+    SER 'B'
+    SER 13
+    SER 10
+%endif
 .poll_done:
     FN_END wm_poll_wallpaper_render
     ret
