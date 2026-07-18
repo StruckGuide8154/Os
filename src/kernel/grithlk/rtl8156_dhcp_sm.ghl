@@ -238,7 +238,7 @@ fn rtl8156_dhcp_pump() preserves(all) {
     # set the dhcp_* slots but never promote the lease (guest_ip/next_hop stay "-")
     # and the transaction would hit its deadline and FAIL despite a valid OFFER/ACK.
     let got = rtl8156_bulk_in_nonblocking(RTL8156_RX_BUF_ADDR, 0, 0, 4096);
-    if got != 0 {
+    if got >= 24 {
         let rxlen = lw(RTL8156_RX_BUF_ADDR) & RX_LEN_MASK;
         # SECURITY (GSEC G1 - device-reported length OOB): rxlen is fully device-
         # controlled (masked to 0x7FFF => up to 32767) but only RTL8156_RX_DMA_LEN
@@ -247,10 +247,14 @@ fn rtl8156_dhcp_pump() preserves(all) {
         # the SAME upper clamp rtl8156_consume_event does, or handle_frame walks the
         # IP/TCP/DNS parsers up to ~28 KiB past the buffer into adjacent kernel DMA.
         # Reject fail-closed: a real Ethernet frame is <= RTL8156_RX_MAX_FRAME.
-        if rxlen >= 32 {                     # 18 + 14 minimum
-            if rxlen <= RTL8156_RX_MAX_FRAME {
-                let flen = rxlen - 4;        # drop the 4-byte Realtek RX CRC tail
-                call rtl8156_handle_frame(rdi: RTL8156_RX_BUF_ADDR + 24, rcx: flen);
+        if rxlen <= RTL8156_RX_MAX_FRAME {
+            if rxlen >= 32 {                 # 18 + 14 minimum
+                if rxlen <= got - 24 {
+                    if rxlen <= 1526 {       # NET_ETH_FRAME_MAX(1522) + CRC
+                        let flen = rxlen - 4; # drop the 4-byte Realtek RX CRC tail
+                        call rtl8156_handle_frame(rdi: RTL8156_RX_BUF_ADDR + 24, rcx: flen);
+                    }
+                }
             }
         }
     }

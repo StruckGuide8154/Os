@@ -149,10 +149,12 @@ rtl8156_rx_once:
     push rdx
     push rsi
     push rdi
+    push r8
     call rtl8156_arm_rx
     call xhci_poll_event
     test eax, eax
     jz .done
+    mov r8d, edx                  ; preserve Transfer Event residual length
     mov ecx, ebx
     shr ecx, 10
     and ecx, 0x3F
@@ -169,8 +171,10 @@ rtl8156_rx_once:
     call usb_hid_requeue_slot1_one
     jmp .done
 .nic_event:
+    mov edx, r8d
     call rtl8156_consume_event
 .done:
+    pop r8
     pop rdi
     pop rsi
     pop rdx

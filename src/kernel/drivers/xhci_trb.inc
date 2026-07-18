@@ -208,10 +208,30 @@ xhci_configure_endpoint:
     mov r13d, esi                 ; Max packet size
     mov r14d, edx                 ; Interval
 
+    ; This routine is a second trust boundary: callers must never be able to
+    ; turn an invalid USB endpoint into an out-of-range DCI/context pointer.
+    cmp r12d, 1
+    jb .cfg_fail
+    cmp r12d, 15
+    ja .cfg_fail
+
     ; EP DCI (Device Context Index) for IN endpoint = EP_num * 2 + 1
     mov eax, r12d
     shl eax, 1
     inc eax
+
+    ; Endpoint context starts at (DCI + 1) * stride in the 4 KiB input
+    ; context.  Independently prove that a complete context fits before any
+    ; device-controlled index is stored or used.
+    movzx ecx, byte [xhci_ctx_stride]
+    test ecx, ecx
+    jz .cfg_fail
+    mov edx, eax
+    inc edx
+    imul edx, ecx
+    add edx, ecx
+    cmp edx, 4096
+    ja .cfg_fail
     mov [xhci_int_ep_dci], al
 
     ; --- Build Input Context ---

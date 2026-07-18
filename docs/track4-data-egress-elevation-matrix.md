@@ -142,12 +142,15 @@ each artifact's row above is defeated by ≥2 independent barriers.
   when presented in any context B. This closes the *formal* half of "leak ≠
   elevation" for the three diversification pivots; the planted-leak *boot* test
   below remains the empirical complement.
-- **Dynamic proof DONE (2026-06-09).** The two dynamic test scripts now live at
+- **Dynamic proof DONE (2026-06-09; strengthened and reverified 2026-07-17).**
+  The two dynamic test scripts now live at
   `scripts/dev/test_track4_planted_leak.ps1` (planted-leak negative test -
-  three tiers: symbol audit, two-boot ephemerality proof, structural barrier
-  argument) and `scripts/dev/test_track4_pmemsave.ps1` (QEMU `pmemsave`
-  pre/post-wipe dump grep). Both carry the mandatory QEMU TCG caveat: software
-  barriers only; TME/SME Part C requires real silicon or KVM+SEV.
+  four tiers: symbol audit, two-boot ephemerality proof, structural barrier
+  argument, and execution of the real planted 128-bit stale/lane-corrupted
+  cap-MAC rejection vectors) and `scripts/dev/test_track4_pmemsave.ps1` (QEMU
+  `pmemsave` pre/post-wipe dump grep with a mandatory runtime-only positive
+  control). Both carry the mandatory QEMU TCG caveat: software barriers only;
+  TME/SME Part C requires real silicon or KVM+SEV.
 - **Barrier (9) KPTI is default-off** (triple-faults until the trampoline moves
   below 2 MiB). The SMEP/SMAP leg is live; the KPTI leg is not a barrier you can
   rely on today.

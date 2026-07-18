@@ -38,6 +38,20 @@ FN_BEGIN app_blob_init, 0, 0, FN_RET_SCALAR
     jnz .have_arena_size
     mov rcx, MAX_WINDOWS * APP_SLOT_SIZE
 .have_arena_size:
+    ; Clamp the firmware/boot-supplied arena size to the provisioned span
+    ; (GSEC 2026-07-18, root cause of dispatch-core F1). l3_app_arena_size_v is
+    ; the sole bound SC_SLOT_FROM_RIP uses to derive the syscall slot id; the
+    ; runtime record pool and the kernel syscall-stack region are each sized for
+    ; exactly MAX_WINDOWS slots. A VBE_INFO arena larger than
+    ; MAX_WINDOWS*APP_SLOT_SIZE would let a user RIP high in the (over-reported)
+    ; arena derive slot >= MAX_WINDOWS -> ring-0 OOB write in the dispatcher.
+    ; Cap here so no consumer of l3_app_arena_size_v can exceed the provisioned
+    ; slot count; the dispatcher keeps its own ceiling as defence in depth.
+    mov rax, MAX_WINDOWS * APP_SLOT_SIZE
+    cmp rcx, rax
+    jbe .arena_size_ok
+    mov rcx, rax
+.arena_size_ok:
     mov [rel l3_app_arena_size_v], rcx
     pop rcx
     pop rax

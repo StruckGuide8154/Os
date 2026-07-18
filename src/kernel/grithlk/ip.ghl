@@ -289,11 +289,29 @@ fn net_ipv4_rx_packet(pkt, len) {
     if len < 20 { return 0; }
     # version nibble must be 4.
     if (lb(pkt) & 0xF0) != 0x40 { return 0; }
+    let ihl = (lb(pkt) & 0x0F) << 2;
+    if ihl < 20 { return 0; }
+    if ihl > len { return 0; }
+    let total = (lb(pkt + 2) << 8) | lb(pkt + 3);
+    if total < ihl { return 0; }
+    if total > len { return 0; }
+    # Permit an unfragmented packet with or without DF; reject the reserved
+    # flag, MF, and every non-zero fragment offset (there is no reassembler).
+    let frag = (lb(pkt + 6) << 8) | lb(pkt + 7);
+    if (frag & 0xBFFF) != 0 { return 0; }
+    if ip_checksum(pkt, ihl) != 0 { return 0; }
+    let dst = (lb(pkt + 16) << 24) | (lb(pkt + 17) << 16)
+            | (lb(pkt + 18) << 8) | lb(pkt + 19);
+    let local = net_info(2) & MASK32;
+    if local == 0 { return 0; }
+    if dst != local {
+        if dst != 0xFFFFFFFF { return 0; }       # limited broadcast
+    }
     let proto = lb(pkt + 9);
     # net_tcp_rx_ipv4 (asm) reads rdi+ecx -> positional (pkt,_,_,len) lands len
     # in ecx. net_udp_rx_ipv4 (udp.ghl) is plain System-V (pkt,len).
-    if proto == NET_IP_PROTO_TCP { return net_tcp_rx_ipv4(pkt, 0, 0, len); }
-    if proto == NET_IP_PROTO_UDP { return net_udp_rx_ipv4(pkt, len); }
-    if proto == NET_IP_PROTO_ICMP { return net_ping_l2_rx_ipv4(pkt, len); }
+    if proto == NET_IP_PROTO_TCP { return net_tcp_rx_ipv4(pkt, 0, 0, total); }
+    if proto == NET_IP_PROTO_UDP { return net_udp_rx_ipv4(pkt, total); }
+    if proto == NET_IP_PROTO_ICMP { return net_ping_l2_rx_ipv4(pkt, total); }
     return 0;
 }

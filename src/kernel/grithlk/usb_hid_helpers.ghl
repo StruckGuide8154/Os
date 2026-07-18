@@ -262,7 +262,24 @@ fn usb_find_endpoint(rax result)
                     let attr = lb(base + off + 3) & 0x03;        # transfer type
                     if attr == USB_EP_INTERRUPT {
                         let epaddr = lb(base + off + 2);         # bEndpointAddress
+                        # USB endpoint addresses reserve bits 6:4 and only
+                        # endpoint numbers 1..15 are valid for a non-control
+                        # interrupt endpoint.  Checking bit 7 alone allowed
+                        # 0xFF to become DCI 255 in the xHCI layer.
+                        let epnum = epaddr & 0x0F;
                         if (epaddr & 0x80) != 0 {                # direction IN?
+                            if (epaddr & 0x70) != 0 {
+                                result = 0;
+                                return 0;
+                            }
+                            if epnum < 1 {
+                                result = 0;
+                                return 0;
+                            }
+                            if epnum > 15 {
+                                result = 0;
+                                return 0;
+                            }
                             # Found the interrupt-IN endpoint.
                             sb(&usb_ep_addr, epaddr);
                             # wMaxPacketSize (LE word), bits 10:0; 0 -> 8 fallback.

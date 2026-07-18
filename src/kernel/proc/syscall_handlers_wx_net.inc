@@ -580,6 +580,11 @@
     jz .sc_drvhost_denied
     mov rdi, rax
     call drvhost_mmio_write32
+    mov rsi, rax
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    mov rdi, rax
+    call drvhost_charge_result
     mov [rsp + ALL_RAX], rax
     jmp .done
 
@@ -606,6 +611,11 @@
     jz .sc_drvhost_denied
     mov rdi, rax
     call drvhost_pio_write8
+    mov rsi, rax
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    mov rdi, rax
+    call drvhost_charge_result
     mov [rsp + ALL_RAX], rax
     jmp .done
 
@@ -658,6 +668,11 @@
     USER_ACCESS_BEGIN
     call drvhost_ring_submit
     USER_ACCESS_END
+    mov rsi, rax
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    mov rdi, rax
+    call drvhost_charge_result
     add rsp, 16
     mov [rsp + ALL_RAX], rax
     jmp .done
@@ -681,6 +696,11 @@
     jz .sc_drvhost_denied
     mov rdi, rax
     call %2
+    mov rsi, rax
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    mov rdi, rax
+    call drvhost_charge_result
     mov [rsp + ALL_RAX], rax
     jmp .done
 %endmacro
@@ -727,6 +747,11 @@ DRVHOST_WR2 .sc_drvhost_pio_wr32,  drvhost_pio_wr32
     mov rdx, [rsp + 8]
     mov rcx, [rsp + 0]
     call drvhost_mmio_write_dma_ptr
+    mov rsi, rax
+    movzx edi, r15b
+    call drvhost_id_for_slot
+    mov rdi, rax
+    call drvhost_charge_result
     add rsp, 24
     mov [rsp + ALL_RAX], rax
     jmp .done

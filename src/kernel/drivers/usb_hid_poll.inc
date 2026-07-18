@@ -53,6 +53,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     call xhci_poll_event
     test eax, eax
     jz .ret        ; No more events
+    mov r9d, edx   ; preserve Transfer Event residual for NIC dispatch
 
     ; Event found! EAX=Code, EBX=Type/Slot, ECX=TRB Pointer (or DW0)
     ; Check if it's a Transfer Event (Type 32)
@@ -107,7 +108,8 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     movzx r8d, byte [rtl8156_slot_id]
     cmp edx, r8d
     jne .not_nic_event
-    ; EAX/EBX/ECX still hold the popped event from xhci_poll_event.
+    ; Restore the residual length alongside EAX/EBX/ECX for the NIC consumer.
+    mov edx, r9d
     call rtl8156_consume_event
     jmp .loop
 .not_nic_event:

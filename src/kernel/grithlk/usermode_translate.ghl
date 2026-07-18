@@ -46,6 +46,8 @@ extern app_blob_start;
 extern app_blob_end;
 extern driver_blob_start;
 extern driver_blob_end;
+extern driver2_blob_start;
+extern driver2_blob_end;
 
 # Live per-slot runtime state (defined in usermode_storage.inc / _decls.inc).
 extern l3_app_arena_base_v;   # dq - base VA of the 2 MiB-slot app arena
@@ -54,7 +56,7 @@ extern app_blob_base_v;       # dq - live APPS.BIN base VA
 extern app_blob_end_v;        # dq - live APPS.BIN end VA
 extern app_blob_size_v;       # dq - live blob byte length
 extern l3_slot_code_slide;    # dq[MAX_WINDOWS] - per-slot code slide (KASLR-ish)
-extern l3_slot_blob_kind;     # dq[MAX_WINDOWS] - 0 app, 1 dedicated driver
+extern l3_slot_blob_kind;     # dq[MAX_WINDOWS] - 0 app, 1/2 dedicated driver blob
 extern l3_slot_blob_size;     # dq[MAX_WINDOWS] - exact live copied blob span
 
 extern ser_print_hex64;       # (rdi value) -> serial hex, debug only
@@ -129,6 +131,25 @@ fn l3_translate_target(rdi target, rsi app_base) {
                 return l3_xlate_blob_fail(target, app_base);
             }
             let off = target - &driver_blob_start;
+            return off + app_base + lq(&l3_slot_code_slide + slot * 8);
+        }
+    }
+
+    # --- Case 0b: target inside driver package 2 (battery). Same discipline;
+    # only a slot installed with blob kind 2 may translate this source range.
+    if target >= &driver2_blob_start {
+        if target < &driver2_blob_end {
+            let arena = lq(&l3_app_arena_base_v);
+            if app_base < arena { return l3_xlate_blob_fail(target, app_base); }
+            let rel = app_base - arena;
+            if (rel & SLOT_MASK) != 0 { return l3_xlate_blob_fail(target, app_base); }
+            if rel >= lq(&l3_app_arena_size_v) { return l3_xlate_blob_fail(target, app_base); }
+            let slot = rel >> 21;
+            if slot >= MAX_WINDOWS { return l3_xlate_blob_fail(target, app_base); }
+            if lq(&l3_slot_blob_kind + slot * 8) != 2 {
+                return l3_xlate_blob_fail(target, app_base);
+            }
+            let off = target - &driver2_blob_start;
             return off + app_base + lq(&l3_slot_code_slide + slot * 8);
         }
     }

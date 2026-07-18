@@ -94,8 +94,16 @@ global drvhost_pio_wr32;
 # --- descriptor rings (fast path) ------------------------------------------
 global drvhost_ring_establish;
 global drvhost_ring_submit;
+# --- stable device-class ABI (kernel-owned, generation-safe handles) --------
+global drvclass_publish;
+global drvclass_publish_net_l2;
+global drvclass_resolve;
+global drvclass_revoke;
+global drvclass_net_l2_mtu;
+global drvclass_net_l2_features;
 # --- containment (G4) -------------------------------------------------------
 global drvhost_fault;
+global drvhost_charge_result;
 global drvhost_quarantine;
 global drvhost_restart;
 global drvhost_irq_deliver;
@@ -148,6 +156,30 @@ const DRV_ERR_GRANT = 3;        # no granted window contains the access
 const DRV_ERR_FULL  = 4;        # a table is full
 const DRV_ERR_STATE = 5;        # driver quarantined / dead
 
+# Common class-handle ABI v1.  Handles are positive 63-bit opaque values:
+#   bits  0..7   registry entry + 1 (zero is never a handle)
+#   bits  8..15  class kind
+#   bits 16..23  negotiated ABI version
+#   bits 24..31  authoritative driver id
+#   bits 32..62  restart generation
+# Every field is revalidated against kernel-owned rows on resolve.  The packed
+# generation makes a handle from a quarantined/restarted instance permanently
+# stale; restart fails closed before the 31-bit generation could wrap.
+const DRVCLASS_ABI_V1       = 1;
+const DRVCLASS_NET_L2       = 1;
+const DRVCLASS_BLOCK        = 2;
+const DRVCLASS_AUDIO_PCM    = 3;
+const DRVCLASS_INPUT        = 4;
+const DRVCLASS_DISPLAY      = 5;
+const DRVCLASS_WLAN_RADIO   = 6;
+const DRVCLASS_KIND_MAX     = 6;
+const DRVCLASS_MAX          = 64;
+const DRVCLASS_GEN_MAX      = 0x7FFFFFFF;
+const DRVCLASS_NET_F_CSUM   = 1;
+const DRVCLASS_NET_F_VLAN   = 2;
+const DRVCLASS_NET_F_SG     = 4;
+const DRVCLASS_NET_F_ALL    = 7;
+
 # --- driver process table ---------------------------------------------------
 data drv_state:   16 x 4;       # DRV_ST_*
 data drv_caps_req: 16 x 4;      # mask the driver asked for
@@ -156,6 +188,16 @@ data drv_policy:  16 x 4;       # policy-granted mask (from the signed manifest)
 data drv_code_hash: 16 x 8;     # bound identity (component_id tie-in)
 data drv_faults:  16 x 4;       # running fault count
 data drv_restarts: 16 x 4;      # restart generation
+
+# Stable class registry.  A zero owner is a free row.  Publication is a trusted
+# device-manager operation performed only after the class health check passes.
+# No function pointer or raw address crosses this boundary.
+data drvclass_owner:      64 x 4;
+data drvclass_kind:       64 x 4;
+data drvclass_version:    64 x 4;
+data drvclass_generation: 64 x 4;
+data drvclass_flags:      64 x 4;
+data drvclass_mtu:        64 x 4;  # net.l2 only; zero for other classes
 
 # Kernel-owned admission policy, indexed by the authoritative ring-3 slot.
 # Only the verified package/device-manager control plane installs these rows;
@@ -356,6 +398,10 @@ fn drvhost_revoke_resources(id) {
     # signed loader (so a contained instance cannot silently keep being called).
     sq(&drv_tick_entry + id * 8, 0);
     sw(&drv_tick_busy + id * 4, 0);
+    # Class endpoints are authority too.  Remove them before recovery so no
+    # consumer can resolve a half-restarted device; the loader republishes only
+    # after its class-specific health check succeeds.
+    drvclass_revoke(id);
     return DRV_OK;
 }
 
@@ -1139,6 +1185,118 @@ fn drvhost_ring_submit(id, desc_base, count) {
 }
 
 # ---------------------------------------------------------------------------
+# Stable device-class registry.  This is the common foundation used by class
+# brokers; it deliberately carries no callable address.  Hot paths resolve one
+# handle using fixed-index table reads, then submit bounded descriptor batches.
+# ---------------------------------------------------------------------------
+fn drvclass_handle(entry, id, kind, version, generation) {
+    return (generation << 32) | (id << 24) | (version << 16)
+           | (kind << 8) | (entry + 1);
+}
+
+fn drvclass_publish(id, kind, abi_min, abi_max, flags) {
+    if drv_is_running(id) == 0 { return 0; }
+    if kind < 1 { return 0; }
+    if kind > DRVCLASS_KIND_MAX { return 0; }
+    if abi_min < 1 { return 0; }
+    if abi_min > abi_max { return 0; }
+    if abi_min > DRVCLASS_ABI_V1 { return 0; }
+    if abi_max < DRVCLASS_ABI_V1 { return 0; }
+    let generation = lw(&drv_restarts + id * 4) + 1;
+    if generation > DRVCLASS_GEN_MAX { return 0; }
+
+    # A live owner/class pair may publish only once. Recovery revokes first and
+    # can then publish a fresh generation; rejecting an in-place refresh avoids
+    # mixed metadata under a concurrent resolver. Many distinct drivers of the
+    # same class still coexist in separate rows.
+    let i = 0;
+    let free = DRVCLASS_MAX;
+    while i < DRVCLASS_MAX {
+        let owner = lw(&drvclass_owner + i * 4);
+        if owner == 0 {
+            if free == DRVCLASS_MAX { free = i; }
+        } else {
+            if owner == id {
+                if lw(&drvclass_kind + i * 4) == kind { return 0; }
+            }
+        }
+        i = i + 1;
+    }
+    if free >= DRVCLASS_MAX { return 0; }
+    sw(&drvclass_kind + free * 4, kind);
+    sw(&drvclass_version + free * 4, DRVCLASS_ABI_V1);
+    sw(&drvclass_generation + free * 4, generation);
+    sw(&drvclass_flags + free * 4, flags);
+    sw(&drvclass_mtu + free * 4, 0);
+    # Owner is the publication commit word and is written last.
+    sw(&drvclass_owner + free * 4, id);
+    return drvclass_handle(free, id, kind, DRVCLASS_ABI_V1, generation);
+}
+
+fn drvclass_resolve(handle, required_kind, required_version) {
+    if handle == 0 { return 0; }
+    # Bit 63 must remain clear so handles never become negative under GHL's
+    # signed comparisons, and bits above the 31-bit generation are forbidden.
+    if (handle >> 63) != 0 { return 0; }
+    let encoded = handle & 0xFF;
+    if encoded == 0 { return 0; }
+    let entry = encoded - 1;
+    if entry >= DRVCLASS_MAX { return 0; }
+    let kind = (handle >> 8) & 0xFF;
+    let version = (handle >> 16) & 0xFF;
+    let id = (handle >> 24) & 0xFF;
+    let generation = (handle >> 32) & DRVCLASS_GEN_MAX;
+    if kind != required_kind { return 0; }
+    if version != required_version { return 0; }
+    if drv_is_running(id) == 0 { return 0; }
+    if lw(&drvclass_owner + entry * 4) != id { return 0; }
+    if lw(&drvclass_kind + entry * 4) != kind { return 0; }
+    if lw(&drvclass_version + entry * 4) != version { return 0; }
+    if lw(&drvclass_generation + entry * 4) != generation { return 0; }
+    if generation != lw(&drv_restarts + id * 4) + 1 { return 0; }
+    return id;
+}
+
+fn drvclass_revoke(id) {
+    if drv_valid_id(id) == 0 { return DRV_ERR_NODRV; }
+    let i = 0;
+    while i < DRVCLASS_MAX {
+        if lw(&drvclass_owner + i * 4) == id {
+            # Owner is cleared first so a concurrent resolver fails closed.
+            sw(&drvclass_owner + i * 4, 0);
+            sw(&drvclass_kind + i * 4, 0);
+            sw(&drvclass_version + i * 4, 0);
+            sw(&drvclass_generation + i * 4, 0);
+            sw(&drvclass_flags + i * 4, 0);
+            sw(&drvclass_mtu + i * 4, 0);
+        }
+        i = i + 1;
+    }
+    return DRV_OK;
+}
+
+fn drvclass_publish_net_l2(id, abi_min, abi_max, mtu, features) {
+    if mtu < 576 { return 0; }
+    if mtu > 9216 { return 0; }
+    if (features & DRVCLASS_NET_F_ALL) != features { return 0; }
+    let handle = drvclass_publish(id, DRVCLASS_NET_L2, abi_min, abi_max, features);
+    if handle == 0 { return 0; }
+    let entry = (handle & 0xFF) - 1;
+    sw(&drvclass_mtu + entry * 4, mtu);
+    return handle;
+}
+
+fn drvclass_net_l2_mtu(handle) {
+    if drvclass_resolve(handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1) == 0 { return 0; }
+    return lw(&drvclass_mtu + ((handle & 0xFF) - 1) * 4);
+}
+
+fn drvclass_net_l2_features(handle) {
+    if drvclass_resolve(handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1) == 0 { return 0; }
+    return lw(&drvclass_flags + ((handle & 0xFF) - 1) * 4);
+}
+
+# ---------------------------------------------------------------------------
 # Containment (G4). A driver that faults too often is quarantined: its state
 # flips to QUARANTINE, so drv_is_running() is false everywhere - all subsequent
 # grants, brokered accesses, and IRQ deliveries to it are refused fail-closed.
@@ -1151,6 +1309,16 @@ fn drvhost_fault(id) {
     sw(&drv_faults + id * 4, f);
     if f >= FAULT_BUDGET { return drvhost_quarantine(id); }
     return DRV_OK;
+}
+
+# Syscall-boundary fault accounting. Broker helpers stay pure enough for the
+# control plane and invariant evaluator; driver-facing wrappers pass every
+# non-zero data-plane result through here. Eight rejected forged requests thus
+# revoke grants/IRQs and quarantine the caller, while successful operations do
+# not consume budget. The original error is preserved for the caller.
+fn drvhost_charge_result(id, rc) {
+    if rc != DRV_OK { drvhost_fault(id); }
+    return rc;
 }
 
 fn drvhost_quarantine(id) {
@@ -1172,6 +1340,9 @@ fn drvhost_restart(id) {
     if st != DRV_ST_QUARANTINE {
         if st != DRV_ST_DEAD { return DRV_ERR_STATE; }
     }
+    # Never let a packed class-handle generation wrap and revalidate ancient
+    # authority.  A device that somehow restarts 2^31-1 times remains offline.
+    if lw(&drv_restarts + id * 4) >= DRVCLASS_GEN_MAX - 1 { return DRV_ERR_STATE; }
     if drvhost_ring_lock(id) == 0 { return DRV_ERR_STATE; }
     let rc = drvhost_revoke_resources(id);
     if rc != DRV_OK {

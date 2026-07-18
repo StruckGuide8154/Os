@@ -229,6 +229,14 @@ Write-Host '  compile (driver) src\drivers\net\virtio_net.ghl' -ForegroundColor 
     --embed --target driver --safety-manifest $DriverSafety
 if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED ring-3 driver compile' -ForegroundColor Red; exit 1 }
 
+$BatteryDriverOut = Join-Path $Root 'build\ghl\battery.asm'
+$BatteryDriverSafety = Join-Path $Root 'build\ghl\driver-safety\battery.safety.json'
+Write-Host '  compile (driver) src\drivers\acpi_ec\battery.ghl' -ForegroundColor Yellow
+& python $DriverGritc (Join-Path $Root 'src\drivers\acpi_ec\battery.ghl') `
+    -o $BatteryDriverOut -L (Join-Path $Root 'src\user\grithl\lib') `
+    --embed --target driver --safety-manifest $BatteryDriverSafety
+if ($LASTEXITCODE -ne 0) { Write-Host '  FAILED battery ring-3 driver compile' -ForegroundColor Red; exit 1 }
+
 # 0b2. Compile GritHLK kernel modules -> build/ghl/*.asm (%include'd by
 # kernel_build.asm). These use gritc.py's kernel emit mode (--target kernel):
 # plain NASM, bare labels, direct in-unit calls, no app-blob framing. Currently

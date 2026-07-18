@@ -13,6 +13,25 @@
 ;   memory but the two arena-bound globals - so it is safe to use while still
 ;   on the user stack, before any trusted kernel stack exists. Clobbers only
 ;   the named register and EFLAGS.
+;
+;   MEMORY-SAFETY CEILING (GSEC 2026-07-18, F1 S1): the result indexes
+;   l3_runtime[slot] (sized MAX_WINDOWS*L3_RT_SIZE, usermode_storage.inc) and
+;   selects the kernel syscall stack base+(slot+1)*STRIDE (region sized
+;   MAX_WINDOWS*L3_SYSCALL_STACK_STRIDE, usermode_paging.inc) - both writes with
+;   attacker-controlled context BEFORE any bound below could reject. slot<count
+;   held only via `off < l3_app_arena_size_v`, and that size is ingested UNCLAMPED
+;   from firmware (VBE_APP_ARENA_SIZE_OFF, usermode_entry.inc:36): a firmware/boot
+;   handoff reporting an arena larger than MAX_WINDOWS*APP_SLOT_SIZE drives slot
+;   >= MAX_WINDOWS => ring-0 OOB write-what-where past l3_runtime + OOB kernel
+;   stack switch. We add a fail-closed `cmp slot,MAX_WINDOWS/jae ->0` ceiling
+;   (mirrors enter_usermode's clamp) so the dispatcher is self-protecting
+;   regardless of l3_app_arena_size_v; slot 0 is the reserved/provisioned slot,
+;   so mapping an over-range RIP there is memory-safe and fail-closed. The
+;   ingestion site is clamped too (defence in depth). `shr 21` divides by
+;   APP_SLOT_SIZE; the static-assert below pins that coupling.
+%if APP_SLOT_SIZE != (1 << 21)
+  %error "SC_SLOT_FROM_RIP shr 21 assumes APP_SLOT_SIZE == 2 MiB (1<<21)"
+%endif
 %macro SC_SLOT_FROM_RIP 1
     mov %1, rcx
     sub %1, [rel l3_app_arena_base_v]
@@ -20,6 +39,8 @@
     cmp %1, [rel l3_app_arena_size_v]
     jae %%sc_slot_zero
     shr %1, 21
+    cmp %1, MAX_WINDOWS                   ; defensive ceiling: never index past
+    jae %%sc_slot_zero                    ; the MAX_WINDOWS-sized runtime/stack pools
     jmp %%sc_slot_done
 %%sc_slot_zero:
     xor %1, %1
@@ -339,6 +360,18 @@
     ; not the app-visible one. The trace ring (appended pre-dispatch) keeps the
     ; app-visible value, which is the number the app actually issued.
     mov [rsp + ALL_RAX], rax
+    ; Defensive re-bound (GSEC 2026-07-18, F2 S1): the pre-permutation bound
+    ; (cmp rax,syscall_table_count above) proved the APP-VISIBLE number in range,
+    ; but the value now driving the table index is sc_slot_perm_inv[...], plain
+    ; kernel data. sc_slot_perm_generate builds it as a bijection on
+    ; [0,syscall_table_count) (inv[fwd[i]]=i), so it is in range under normal
+    ; operation - but the cap mask a few lines down is HMAC-authenticated for
+    ; exactly the "a kernel-write bug flips a bit" threat, and a flipped inv[]
+    ; entry >= count would be far worse: OOB syscall_table read -> dispatch
+    ; through an arbitrary qword as a handler pointer (ring-0 control-flow
+    ; hijack). One compare closes that asymmetry; fail-closed to .sc_invalid.
+    cmp rax, syscall_table_count
+    jae .sc_invalid
 %endif
 %ifdef ENABLE_DEBUG_SERIAL
     ; DEBUG (click callback diagnosis): while a WM click callback is active,

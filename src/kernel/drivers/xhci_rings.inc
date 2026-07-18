@@ -316,7 +316,8 @@ xhci_submit_cmd:
 
 ; ============================================================================
 ; xhci_poll_event - Check event ring for one event
-; Returns: EAX = completion code (0 if no event), EBX = dword3, ECX = dword0
+; Returns: EAX = completion code (0 if no event), EBX = dword3, ECX = dword0,
+;          EDX = Transfer Event residual length (DW2 bits 23:0; zero otherwise)
 ; ============================================================================
 global xhci_poll_event
 xhci_poll_event:
@@ -379,6 +380,18 @@ xhci_poll_event:
     mov ecx, [rsi + 0]            ; DWord 0 (TRB pointer low or slot-specific)
     mov ebx, [rsi + 12]           ; DWord 3 (type, slot ID, etc.)
 
+    ; Preserve the Transfer Event residual length instead of discarding it.
+    ; Consumers use queued_length-residual as the only trustworthy byte count.
+    ; Other event types give EDX=0 because their DW2 low bits have other meaning.
+    xor edx, edx
+    mov r8d, ebx
+    shr r8d, 10
+    and r8d, 0x3F
+    cmp r8d, 32
+    jne .residual_done
+    mov edx, [rsi + 8]
+    and edx, 0x00FFFFFF
+.residual_done:
     ; Completion code from DWord 2, bits 31:24
     mov eax, [rsi + 8]
     shr eax, 24                   ; Completion code
@@ -417,6 +430,7 @@ xhci_poll_event:
     xor eax, eax
     xor ebx, ebx
     xor ecx, ecx
+    xor edx, edx
 
 .evt_ret:
     mov dword [rel xhci_evt_lock], 0   ; release

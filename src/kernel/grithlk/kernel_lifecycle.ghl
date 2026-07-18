@@ -475,6 +475,7 @@ fn kmain() {
     nx_atrest_selftest();             # Track 4 Part B item 2: round-trip the at-rest cipher under the live key (fail-soft)
     nx_atrest_ext_selftest();         # Track 4 Part B items 5/6/8: scrub-scratch / poison-fill / fingerprint de-correlation (fail-soft)
     nx_mem_key_rekey_selftest();      # Track 4 Part B item 7: forward-secure rolling re-key (fail-soft, leaves one legit rotation)
+    nx_track4_pmemsave_sentinel_seed(); # Track 4 pmemsave positive control: runtime-only marker in the scrubbed secret region
     nx_track4_selftest_report();      # surface the Part B self-test results on COM1 (debug builds): [T4ST a=1 x=1 r=1]
     boot_mark(78, 52);                # "N4" Track-4 nx self-tests done
     bootlog2(TAG_K, D0 + 4);          # K4: descriptors/canary/cap HMAC ready

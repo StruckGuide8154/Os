@@ -196,13 +196,13 @@ State globals:
 `ata_drive_sel`
 - Current ATA drive-selection state.
 
-### `src/kernel/drivers/battery.asm`
+### `src/kernel/grithlk/driver_loader.ghl` (battery bridge)
 
 `battery_init`
-- Initializes battery polling state.
+- Installs and probes the ring-3 battery driver with its narrow EC PIO grant.
 
 `battery_poll`
-- Polls battery/AC state.
+- Publishes the latest ring-3 battery/AC snapshot and recovers quarantine.
 
 State globals:
 - `battery_state`

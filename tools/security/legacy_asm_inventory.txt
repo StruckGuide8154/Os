@@ -111,7 +111,6 @@ src/kernel/drivers/acpi_ec.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/acpi_pci.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/amd_display.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/ata.asm | kernel-drivers | medium | legacy | TBD
-src/kernel/drivers/battery.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display.asm | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display_blend.inc | kernel-drivers | medium | legacy | TBD
 src/kernel/drivers/display_core.inc | kernel-drivers | medium | legacy | TBD

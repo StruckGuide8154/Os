@@ -256,8 +256,15 @@ This is the existing blocker for every current ring-3 driver and must land first
 
 ### Stage 1: class ABI foundation
 
-- Specify common handle, message, event, ring, version, and generation layouts.
-- Implement a class registry and one `net.l2` broker.
+- [x] Specify and implement the common opaque handle, ABI-version, class-kind,
+  owner, and restart-generation layout. Resolution authenticates every packed
+  field against kernel-owned registry rows and live broker state; duplicate
+  live owner/class publication is rejected.
+- [~] Implement a class registry and one `net.l2` broker. The fixed-capacity
+  multi-device registry, health-gated `net.l2` publication, MTU/feature
+  metadata, quarantine revocation, and generation-safe TX resolution are live.
+  Typed message/event layouts and moving the remaining legacy NIC ops consumers
+  fully onto the handle API remain.
 - Adapt RTL8139 or RTL8156 as the first end-to-end dynamic backend while keeping the
   existing IP stack unchanged.
 - Test failover, duplicate registration, malformed descriptors, driver death, and
@@ -318,12 +325,21 @@ Foundation landed:
   remain denied until the device-manager control plane provisions them safely.
 - `net_driver.inc` defines the common version, handle, message, descriptor,
   `net.l2`, and `wlan.radio` ABI constants.
+- `driver_host.ghl` implements the runtime class registry and positive 63-bit
+  opaque handles. Restart generation is checked both in the packed handle and
+  the live driver row; generation exhaustion fails closed instead of wrapping.
+- The VirtIO ring-3 backend publishes `net.l2` only after its health check,
+  DMA/IRQ setup, and MAC read succeed. TX resolves the handle and enforces its
+  published MTU before crossing into the driver.
+- `eval_drvclass_handles.py` proves packed-field forgery rejection, bounded
+  metadata, quarantine revocation, stale-handle rejection after restart, fresh
+  republish, and fail-closed generation exhaustion. Its planted-bug selftest
+  demonstrates that the proof catches stale-handle revalidation.
 - `test_driver_framework.ps1` permanently guards these properties in full verify.
 
 Still required before an external driver can operate hardware end to end:
 
-- verified driver-slot creation and `ART_DRIVER` policy installation;
-- concrete device-resource provisioning by the device manager;
-- broker-owned DMA allocation/mapping and IRQ event delivery;
-- runtime class registry/broker, beginning with `net.l2`;
+- external-package-backed driver-slot creation and full `ART_DRIVER` admission;
+- typed class messages/events and conversion of remaining legacy NIC consumers
+  to opaque `net.l2` handles;
 - package storage, matching, review UI, update, revocation, and recovery lifecycle.

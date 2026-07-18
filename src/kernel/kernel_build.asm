@@ -313,7 +313,6 @@ section .text
 section .text
 %include "src/kernel/drivers/hid_parser.asm"
 section .text
-%include "src/kernel/drivers/battery.asm"
 
 ; --- Filesystem ---
 ; Zero-asm GritHLK FAT16 driver (replaces fat16.asm + fat16_init/io/dirops/nav

@@ -219,12 +219,19 @@ FN_BEGIN l3_copy_app_blob_to_slot, 0, 0, FN_RET_SCALAR
     pop rcx
     ret
 
-; l3_copy_driver_blob_to_slot - install the dedicated raw-syscall driver blob.
+; l3_copy_driver_blob_to_slot / l3_copy_driver_blob2_to_slot - install a
+; dedicated raw-syscall driver blob (Track 8; one blob section per driver
+; package, see src/drivers/driver_blob.asm).
 ; EDI = slot, RAX = unmodified slot base on success or 0 on invalid bounds.
 ; The copy is constrained below L3_SLOT_DMA_OFF, leaving the fixed DMA window
-; writable+NX. Unlike GUI apps, this slot intentionally keeps syscall
+; writable+NX. Unlike GUI apps, these slots intentionally keep syscall
 ; permutation uncommitted so the broker's stable u32 syscall ABI is identity.
-FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
+; %1 = function name, %2 = blob start label, %3 = blob end label,
+; %4 = blob code-end label, %5 = blob kind stored in l3_slot_blob_kind
+; (1 = .driverblob / virtio-net, 2 = .driverblob2 / battery; the kind selects
+; the matching done-trampoline offset and translate source range).
+%macro DRIVER_BLOB_INSTALL_FN 5
+FN_BEGIN %1, 0, 0, FN_RET_SCALAR
     push rcx
     push rdi
     push rsi
@@ -233,12 +240,12 @@ FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
     mov r9d, edi
     cmp r9d, MAX_WINDOWS
     jae .driver_copy_fail
-    mov rcx, driver_blob_end - driver_blob_start
+    mov rcx, %3 - %2
     test rcx, rcx
     jz .driver_copy_fail
     cmp rcx, L3_SLOT_DMA_OFF
     jae .driver_copy_fail
-    mov rax, driver_blob_code_end - driver_blob_start
+    mov rax, %4 - %2
     test rax, rax
     jz .driver_copy_fail
     cmp rax, rcx
@@ -274,8 +281,8 @@ FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
 
     mov rdi, r8
     add rdi, [abs l3_slot_code_slide + r9*8]
-    lea rsi, [rel driver_blob_start]
-    mov rcx, driver_blob_end - driver_blob_start
+    lea rsi, [rel %2]
+    mov rcx, %3 - %2
     ; Defense in depth against arithmetic/layout drift after the random draw.
     mov rdx, L3_SLOT_DMA_OFF
     sub rdx, [abs l3_slot_code_slide + r9*8]
@@ -289,11 +296,11 @@ FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
     mov ecx, r9d
     mov rax, L3_SLOT_MAGIC
     mov [l3_slot_live + rcx*8], rax
-    mov qword [l3_slot_blob_kind + rcx*8], 1
-    mov qword [l3_slot_blob_size + rcx*8], driver_blob_end - driver_blob_start
+    mov qword [l3_slot_blob_kind + rcx*8], %5
+    mov qword [l3_slot_blob_size + rcx*8], %3 - %2
     mov rdx, [abs l3_slot_code_slide + rcx*8]
     mov rax, rdx
-    add rax, driver_blob_code_end - driver_blob_start
+    add rax, %4 - %2
     mov [l3_wx_code_start + rcx*8], rdx
     mov [l3_wx_code_end + rcx*8], rax
     mov qword [l3_wx_manifest_ver + rcx*8], 1
@@ -322,6 +329,10 @@ FN_BEGIN l3_copy_driver_blob_to_slot, 0, 0, FN_RET_SCALAR
     pop rdi
     pop rcx
     ret
+%endmacro
+
+DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob_to_slot,  driver_blob_start,  driver_blob_end,  driver_blob_code_end,  1
+DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob2_to_slot, driver2_blob_start, driver2_blob_end, driver2_blob_code_end, 2
 
 ; l3_release_slot - retire per-launch state for a closed app slot.
 ; EDI = slot. This is the lifecycle counterpart to l3_copy_app_blob_to_slot:

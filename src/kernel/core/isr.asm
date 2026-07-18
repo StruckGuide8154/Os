@@ -490,6 +490,19 @@ FN_DECL isr_common_stub, 0, 0, FN_RET_SCALAR
     xor eax, eax
 .exc_ring3_slot_ready:
     lock dec dword [rel nested_exc_count]
+    ; Track-8 G4: a faulting dedicated driver callback consumes that driver's
+    ; broker fault budget before the normal callback unwind. Ordinary app blobs
+    ; (kind 0) keep their existing strike path. At the budget threshold the
+    ; broker quarantines and revokes grants/IRQ/DMA before control returns to
+    ; the main loop, so a crashed driver cannot retain hardware authority.
+    cmp qword [abs l3_slot_blob_kind + rax*8], 0
+    je .exc_r3_fault_charged
+    push rax
+    lea edi, [eax + 1]
+    extern drvhost_fault
+    call drvhost_fault
+    pop rax
+.exc_r3_fault_charged:
     push rax                 ; call_app_l3_return expects the app slot at [rsp].
     extern call_app_l3_return
     extern l3_return_guard

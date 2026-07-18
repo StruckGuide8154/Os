@@ -3120,7 +3120,10 @@ def compile_unit(decls,app_prefix,embed=False,kernel=False,src=None,target="user
     # rodata/state bytes.
     if target=="driver":
         out.append("align 4096")
-        out.append("driver_blob_code_end:")
+        # Per-app boundary label so MULTIPLE driver packages can be framed into
+        # one kernel image (Track 8 migration ladder): each blob section aliases
+        # its own `driverN_blob_code_end equ <app>_driver_code_end`.
+        out.append(f"{app_prefix}_driver_code_end:")
     # Strings: emit as inert bytes in standalone .rodata. In the embedded app
     # blob they are still data objects: some apps intentionally mutate string
     # storage as scratch buffers, and even read-only literals must not force a

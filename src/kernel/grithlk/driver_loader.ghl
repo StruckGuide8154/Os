@@ -41,21 +41,29 @@ unsafe implicit_extern;  # &app_hl_virtio_net_* / &driver_blob_start labels
 global driver_manager_init;
 global driver_manager_tick;
 global driver_manager_service;
+global driver_manager_recover;
 global driver_manager_tx_frame;
 global driver_manager_poll_rx;
 global driver_manager_bound;
+global driver_manager_net_handle;
 global driver_manager_mac;
 global driver_manager_info;
 global driver_manager_stage;
+global battery_init;
+global battery_poll;
+global battery_state;
+global battery_percent;
 
 # --- kernel/broker/slot primitives the control plane leans on ----------------
 extern l3_slot_base;              # (slot) -> arena VA base of the slot
 extern l3_copy_driver_blob_to_slot; # (slot) -> installs dedicated driver blob
+extern l3_copy_driver_blob2_to_slot;
 extern l3_slot_code_slide;        # per-slot code slide array (qword each)
 extern l3_wx_code_end;            # per-slot executable end offset
 extern cap_mask_store;            # (slot, mask) -> set the slot's syscall cap mask
 extern call_app_l3_driver;        # (slot, blob_entry_va) -> run ring-3 fn, return
 extern driver_blob_start;         # driver layout anchor
+extern driver2_blob_start;        # battery driver layout anchor
 
 extern drvhost_policy_install;    # (slot, caps, code_hash, dma_cap)
 extern drvhost_register;          # (id, requested, policy_grant, code_hash)
@@ -67,6 +75,11 @@ extern drvhost_register_tick;     # (id, entry_va)
 extern drvhost_grant_irq;          # (id, vector)
 extern drvhost_tick_begin;        # (id) -> entry VA to run this event, or 0
 extern drvhost_tick_end;          # (id)
+extern drvhost_state;
+extern drvhost_restart;
+extern drvclass_publish_net_l2;
+extern drvclass_resolve;
+extern drvclass_net_l2_mtu;
 extern ioapic_set_irq;             # (gsi, vector, dest apic id, flags)
 extern workqueue_submit;           # fixed job-id submission (BSP only)
 extern workqueue_done;
@@ -94,11 +107,19 @@ extern app_hl_virtio_net_tx_result;
 extern app_hl_virtio_net_mac0;
 extern app_hl_virtio_net_mac1;
 
+# --- ring-3 ACPI-EC battery driver's entries + published state ---------------
+extern app_hl_battery_main;
+extern app_hl_battery_battery_tick;
+extern app_hl_battery_ready;
+extern app_hl_battery_bat_state;
+extern app_hl_battery_bat_pct;
+
 # --- constants ---------------------------------------------------------------
 # Driver slot: the top arena slot, reserved as a headless (WF_ACTIVE, no
 # WF_VISIBLE) window-pool entry so the WM's free-slot scan skips it. MAX_WINDOWS
 # is 12 (a NASM equ GHL cannot import), so the top slot is 11.
 const DRIVER_SLOT   = 11;
+const BATTERY_SLOT  = 10;
 
 const WINDOW_POOL_ADDR   = 0x2410000;
 const WINDOW_STRUCT_SIZE = 256;
@@ -115,6 +136,11 @@ const DRV_CAP_MMIO = 1;
 const DRV_CAP_PIO  = 2;
 const DRV_CAP_DMA  = 4;
 const DRV_CAP_IRQ  = 8;
+const DRV_ST_RUNNING = 2;
+const DRV_ST_QUARANTINE = 3;
+const DRV_ST_DEAD = 4;
+const DRVCLASS_ABI_V1 = 1;
+const DRVCLASS_NET_L2 = 1;
 
 # VirtIO-net modern PCI identity + transport + DMA budget (mirror virtio_net.ghl).
 const PCI_VENDOR_VIRTIO   = 0x1AF4;
@@ -152,11 +178,15 @@ data dl_irq_gsi:     1 x 4;
 data dl_io_base:     1 x 4;
 data dl_transport:   1 x 4;
 data driver_manager_bound: 1 x 4;   # 1 once a driver is probed + bound
+data driver_manager_net_handle: 1 x 8; # opaque generation-safe net.l2 endpoint
 data driver_manager_job: 1 x 4 = 0xFFFFFFFF;
 data driver_manager_call_busy: 1 x 4;
 data driver_manager_mac: 6 x 1;
 data driver_manager_info: 28 x 1;
 data driver_manager_stage: 1 x 4;
+data battery_state: 1 x 1 = 0;       # stable kernel-facing UI snapshot
+data battery_percent: 1 x 1 = 0;
+data battery_driver_bound: 1 x 4;
 data dl_msg_bind: 13 x 1 = [91,86,78,69,84,32,66,73,78,68,93,10,0];
 data dl_msg_fail: 13 x 1 = [91,86,78,69,84,32,70,65,73,76,93,32,0];
 
@@ -272,6 +302,85 @@ fn slot_field(slot, field) {
            + (field - &driver_blob_start);
 }
 
+fn battery_slot_field(field) {
+    return l3_slot_base(BATTERY_SLOT)
+           + lq(&l3_slot_code_slide + BATTERY_SLOT * 8)
+           + (field - &driver2_blob_start);
+}
+
+fn battery_publish() {
+    smap_open();
+    let st = lb(battery_slot_field(&app_hl_battery_bat_state));
+    let pct = lb(battery_slot_field(&app_hl_battery_bat_pct));
+    smap_close();
+    if pct > 100 { pct = 100; }
+    sb(&battery_state, st);
+    sb(&battery_percent, pct);
+    return 0;
+}
+
+# Install/probe the PIO-only EC package before first use. The signed policy is
+# deliberately narrower than the encompassing CAP_DRIVER syscall class: only
+# ports 0x62..0x66 are granted and no DMA/MMIO/IRQ authority exists.
+fn battery_init() {
+    sb(&battery_state, 0);
+    sb(&battery_percent, 0);
+    sw(&battery_driver_bound, 0);
+    reserve_driver_window(BATTERY_SLOT);
+    if l3_copy_driver_blob2_to_slot(BATTERY_SLOT) == 0 {
+        sb(&battery_state, 1); sb(&battery_percent, 100); return 0;
+    }
+    cap_mask_store(BATTERY_SLOT, CAP_CORE | CAP_DRIVER);
+    let id = BATTERY_SLOT + 1;
+    drvhost_policy_install(BATTERY_SLOT, DRV_CAP_PIO, 0, 0);
+    drvhost_register(id, DRV_CAP_PIO, DRV_CAP_PIO, 0);
+    if drvhost_grant_pio(id, 0x62, 0x66) != 0 {
+        sb(&battery_state, 1); sb(&battery_percent, 100); return 0;
+    }
+    smap_open();
+    sw(battery_slot_field(&app_hl_battery_ready), 0);
+    smap_close();
+    call_app_l3_driver(BATTERY_SLOT, &app_hl_battery_main);
+    smap_open();
+    let ready = lw(battery_slot_field(&app_hl_battery_ready));
+    smap_close();
+    if ready != 1 { sb(&battery_state, 1); sb(&battery_percent, 100); return 0; }
+    drvhost_register_tick(id, &app_hl_battery_battery_tick);
+    sw(&battery_driver_bound, 1);
+    battery_publish();
+    return 1;
+}
+
+fn battery_recover() {
+    let id = BATTERY_SLOT + 1;
+    let st = drvhost_state(id);
+    if st != DRV_ST_QUARANTINE {
+        if st != DRV_ST_DEAD { return 0; }
+    }
+    if drvhost_restart(id) != 0 { return 0; }
+    if drvhost_grant_pio(id, 0x62, 0x66) != 0 { return 0; }
+    smap_open(); sw(battery_slot_field(&app_hl_battery_ready), 0); smap_close();
+    call_app_l3_driver(BATTERY_SLOT, &app_hl_battery_main);
+    smap_open(); let ready = lw(battery_slot_field(&app_hl_battery_ready)); smap_close();
+    if ready != 1 { return 0; }
+    drvhost_register_tick(id, &app_hl_battery_battery_tick);
+    sw(&battery_driver_bound, 1);
+    battery_publish();
+    return 1;
+}
+
+fn battery_poll() {
+    if lw(&battery_driver_bound) == 0 { return 0; }
+    let id = BATTERY_SLOT + 1;
+    if drvhost_state(id) != DRV_ST_RUNNING { return battery_recover(); }
+    let entry = drvhost_tick_begin(id);
+    if entry == 0 { return 0; }
+    call_app_l3_driver(BATTERY_SLOT, entry);
+    drvhost_tick_end(id);
+    battery_publish();
+    return 1;
+}
+
 # ---------------------------------------------------------------------------
 # Reserve the headless driver slot in the window pool: WF_ACTIVE (so the WM's
 # free-slot scan skips it) but no WF_VISIBLE (invisible to draw / hit-test /
@@ -285,6 +394,62 @@ fn reserve_driver_window(slot) {
     return 0;
 }
 
+# Reconstruct the complete policy-derived data plane for a newly registered or
+# restarted VirtIO driver. Keeping this in one helper also makes initial bind
+# and recovery mechanically identical: neither path can accidentally omit a
+# grant, handoff field, callback registration, or readiness check.
+fn driver_manager_bind_authority(id, transport) {
+    let slot = DRIVER_SLOT;
+    if transport == TRANSPORT_MODERN {
+        drvhost_grant_mmio(id, lq(&dl_common_cfg), 0x1000);
+        drvhost_grant_mmio(id, lq(&dl_notify_base), 0x4000);
+        drvhost_grant_mmio(id, lq(&dl_isr_cfg), 0x1000);
+        if lq(&dl_device_cfg) != 0 { drvhost_grant_mmio(id, lq(&dl_device_cfg), 0x1000); }
+    } else {
+        drvhost_grant_pio(id, lw(&dl_io_base), lw(&dl_io_base) + 0x1F);
+    }
+    let dma_phys = l3_slot_base(slot) + 0x100000;
+    if drvhost_dma_adopt(id, dma_phys, DMA_TOTAL) != 0 { return 0; }
+    if lq(&l3_wx_code_end + slot * 8) > 0x100000 { return 0; }
+    let dma_va = drvhost_dma_map(id, dma_phys);
+    if dma_va == 0 { return 0; }
+    smap_open();
+    sw(slot_field(slot, &app_hl_virtio_net_transport), transport);
+    sq(slot_field(slot, &app_hl_virtio_net_common_cfg), lq(&dl_common_cfg));
+    sq(slot_field(slot, &app_hl_virtio_net_notify_base), lq(&dl_notify_base));
+    sw(slot_field(slot, &app_hl_virtio_net_notify_mult), lw(&dl_notify_mult));
+    sq(slot_field(slot, &app_hl_virtio_net_device_cfg), lq(&dl_device_cfg));
+    sq(slot_field(slot, &app_hl_virtio_net_isr_cfg), lq(&dl_isr_cfg));
+    sw(slot_field(slot, &app_hl_virtio_net_io_base), lw(&dl_io_base));
+    sq(slot_field(slot, &app_hl_virtio_net_dma_phys), dma_phys);
+    sq(slot_field(slot, &app_hl_virtio_net_dma_va), dma_va);
+    sw(slot_field(slot, &app_hl_virtio_net_ready), 0);
+    smap_close();
+    call_app_l3_driver(slot, &app_hl_virtio_net_main);
+    smap_open();
+    let ready = lw(slot_field(slot, &app_hl_virtio_net_ready));
+    smap_close();
+    if ready != 1 { return 0; }
+    drvhost_register_tick(id, &app_hl_virtio_net_virtio_tick);
+    drvhost_grant_irq(id, DRIVER_IRQ_VECTOR);
+    ioapic_set_irq(lw(&dl_irq_gsi), DRIVER_IRQ_VECTOR, 0, IOAPIC_LEVEL_LOW);
+    smap_open();
+    let m0 = lw(slot_field(slot, &app_hl_virtio_net_mac0));
+    let m1 = lw(slot_field(slot, &app_hl_virtio_net_mac1));
+    smap_close();
+    sw(&driver_manager_mac, m0);
+    sw(&driver_manager_mac + 4, m1);
+    # Publish only after the driver health check, DMA setup, IRQ route, and MAC
+    # read all succeeded. Consumers receive an opaque generation-safe endpoint,
+    # never this driver's entry points or shared-memory addresses.
+    let class_handle = drvclass_publish_net_l2(id, DRVCLASS_ABI_V1,
+                                                DRVCLASS_ABI_V1, 1500, 0);
+    if class_handle == 0 { return 0; }
+    sq(&driver_manager_net_handle, class_handle);
+    sw(&driver_manager_bound, 1);
+    return 1;
+}
+
 # ---------------------------------------------------------------------------
 # driver_manager_init - enumerate, match, probe, and bind the virtio-net driver.
 # Called once during device bring-up (before kernel lockdown). Returns 1 if a
@@ -293,6 +458,8 @@ fn reserve_driver_window(slot) {
 # unclaimed and the system otherwise unaffected.
 # ---------------------------------------------------------------------------
 fn driver_manager_init() {
+    sw(&driver_manager_bound, 0);
+    sq(&driver_manager_net_handle, 0);
     sw(&driver_manager_stage, 1);
     let dev = find_virtio_net();
     if dev < 0 { return dl_fail(1); }
@@ -328,65 +495,7 @@ fn driver_manager_init() {
     # windows BEFORE the driver runs. dma_cap bounds the driver's self-service DMA.
     drvhost_policy_install(slot, caps, 0, DMA_TOTAL);
     drvhost_register(id, caps, caps, 0);
-    if transport == TRANSPORT_MODERN {
-        drvhost_grant_mmio(id, lq(&dl_common_cfg), 0x1000);
-        drvhost_grant_mmio(id, lq(&dl_notify_base), 0x4000);
-        drvhost_grant_mmio(id, lq(&dl_isr_cfg), 0x1000);
-        if lq(&dl_device_cfg) != 0 { drvhost_grant_mmio(id, lq(&dl_device_cfg), 0x1000); }
-    } else {
-        drvhost_grant_pio(id, lw(&dl_io_base), lw(&dl_io_base) + 0x1F);
-    }
-
-    # Establish the coherent window before entering ring 3. This avoids
-    # mutating the active slot's PTEs from inside its first syscall return path;
-    # allocation, grant accounting, and mapping remain broker-enforced.
-    # The top slot's fixed DMA subrange is pre-reserved with the app arena and
-    # identity-mapped below 4 GiB, so it is already coherent device memory and
-    # cannot fail from late physical fragmentation.
-    let dma_phys = l3_slot_base(slot) + 0x100000;
-    if drvhost_dma_adopt(id, dma_phys, DMA_TOTAL) != 0 { return dl_fail(0x44); }
-    if lq(&l3_wx_code_end + slot * 8) > 0x100000 { return dl_fail(0x43); }
-    let dma_va = drvhost_dma_map(id, dma_phys);
-    if dma_va == 0 { return dl_fail(0x42); }
-
-    # Write the resolved transport + MMIO bases into the driver's state{} handoff.
-    smap_open();
-    sw(slot_field(slot, &app_hl_virtio_net_transport), transport);
-    sq(slot_field(slot, &app_hl_virtio_net_common_cfg), lq(&dl_common_cfg));
-    sq(slot_field(slot, &app_hl_virtio_net_notify_base), lq(&dl_notify_base));
-    sw(slot_field(slot, &app_hl_virtio_net_notify_mult), lw(&dl_notify_mult));
-    sq(slot_field(slot, &app_hl_virtio_net_device_cfg), lq(&dl_device_cfg));
-    sq(slot_field(slot, &app_hl_virtio_net_isr_cfg), lq(&dl_isr_cfg));
-    sw(slot_field(slot, &app_hl_virtio_net_io_base), lw(&dl_io_base));
-    sq(slot_field(slot, &app_hl_virtio_net_dma_phys), dma_phys);
-    sq(slot_field(slot, &app_hl_virtio_net_dma_va), dma_va);
-    sw(slot_field(slot, &app_hl_virtio_net_ready), 0);
-    smap_close();
-
-    # PROBE: run the one-shot driver main() in its own windowless slot.
-    call_app_l3_driver(slot, &app_hl_virtio_net_main);
-
-    # BIND only on a fully successful probe (driver set ready == 1).
-    smap_open();
-    let ready = lw(slot_field(slot, &app_hl_virtio_net_ready));
-    smap_close();
-    if ready != 1 { return dl_fail(5); }
-
-    # Register the RX-drain callback; the tick dispatcher invokes it per event.
-    drvhost_register_tick(id, &app_hl_virtio_net_virtio_tick);
-    drvhost_grant_irq(id, DRIVER_IRQ_VECTOR);
-    # Conventional PCI INTx is level-triggered, active-low. Route it to CPU0 so
-    # the ISR->main-loop handoff preserves the workqueue's BSP-producer rule.
-    ioapic_set_irq(lw(&dl_irq_gsi), DRIVER_IRQ_VECTOR, 0, IOAPIC_LEVEL_LOW);
-    # Publish the link identity only after probe+bind. net_nic_select observes
-    # driver_manager_bound last, so it cannot select a half-initialised backend.
-    smap_open();
-    let m0 = lw(slot_field(slot, &app_hl_virtio_net_mac0));
-    let m1 = lw(slot_field(slot, &app_hl_virtio_net_mac1));
-    smap_close();
-    sw(&driver_manager_mac, m0);
-    sw(&driver_manager_mac + 4, m1);
-    sw(&driver_manager_bound, 1);
+    if driver_manager_bind_authority(id, transport) == 0 { return dl_fail(5); }
     sw(&driver_manager_stage, 6);
     serial_puts(&dl_msg_bind);
     net_dhcp_l2_start();
@@ -412,12 +521,36 @@ fn driver_manager_tick() {
     return 1;
 }
 
+# Recovery authority lives only here in the trusted device manager. Restart
+# clears the old generation and all grants; this path reconstructs authority
+# from the already-resolved device record, remaps the fixed coherent window,
+# reruns the one-shot probe, and publishes BOUND only after ready==1.
+fn driver_manager_recover() {
+    let id = DRIVER_SLOT + 1;
+    let st = drvhost_state(id);
+    if st != DRV_ST_QUARANTINE {
+        if st != DRV_ST_DEAD { return 0; }
+    }
+    sw(&driver_manager_bound, 0);
+    sq(&driver_manager_net_handle, 0);
+    if drvhost_restart(id) != 0 { return 0; }
+    return driver_manager_bind_authority(id, lw(&dl_transport));
+}
+
 # BSP-side IRQ/workqueue bridge. Reaps the prior fire-and-forget job before
 # submitting another, so an interrupt storm cannot consume all 32 queue slots.
 # `irq_event=0` is the documented low-frequency no-IRQ fallback and runs one
 # bounded drain inline only when no AP job is outstanding.
 fn driver_manager_service(irq_event) {
-    if lw(&driver_manager_bound) == 0 { return 0; }
+    if lw(&driver_manager_bound) == 0 {
+        let st = drvhost_state(DRIVER_SLOT + 1);
+        if st == DRV_ST_QUARANTINE { return driver_manager_recover(); }
+        if st == DRV_ST_DEAD { return driver_manager_recover(); }
+        return 0;
+    }
+    if drvhost_state(DRIVER_SLOT + 1) != DRV_ST_RUNNING {
+        return driver_manager_recover();
+    }
     let h = lw(&driver_manager_job);
     if h != WQ_INVALID {
         if workqueue_done(h) == 0 { return 0; }
@@ -438,8 +571,10 @@ fn driver_manager_service(irq_event) {
 fn driver_manager_tx_frame(rdi frame, ecx len)
         preserves(rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15) {
     if lw(&driver_manager_bound) == 0 { return 0; }
+    let class_handle = lq(&driver_manager_net_handle);
+    if drvclass_resolve(class_handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1) == 0 { return 0; }
     if len < 14 { return 0; }
-    if len > 1514 { return 0; }
+    if len > drvclass_net_l2_mtu(class_handle) + 14 { return 0; }
     if atomic_xchg(&driver_manager_call_busy, 1) != 0 { return 0; }
     let slot = DRIVER_SLOT;
     smap_open();

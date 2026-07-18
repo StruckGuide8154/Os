@@ -272,11 +272,12 @@ fn net_dns_tick(host) {
 # address into net_dns_result_ip for the next tick to pick up. Returns 1 when a
 # datagram was consumed as our answer, 0 otherwise.
 #   payload = UDP payload pointer, srcport/dstport = on-wire (little-endian into
-#   a reg) port bytes, len = payload length.
+#   a reg) port bytes, len = payload length, srcip = IPv4 source address.
 # ---------------------------------------------------------------------------
-fn net_dns_rx_udp(payload, srcport, dstport, len) {
+fn net_dns_rx_udp(payload, srcport, dstport, len, srcip) {
     if lb(&net_dns_waiting) != 1 { return 0; }
     dnsdbg(114);                                              # 'r' (a UDP frame while waiting)
+    if (srcip & 0xFFFFFFFF) != (lw(&net_dns_server_ip) & 0xFFFFFFFF) { return 0; }
     if (srcport & 0xFFFF) != DNS_DST_PORT_NET { dnsdbg(112); return 0; }   # 'p' src port
     if (dstport & 0xFFFF) != DNS_SRC_PORT_NET { dnsdbg(113); return 0; }   # 'q' dst port
     let plen = len & 0xFFFFFFFF;

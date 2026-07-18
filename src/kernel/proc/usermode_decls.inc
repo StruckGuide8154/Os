@@ -25,6 +25,10 @@ extern driver_blob_start
 extern driver_blob_code_end
 extern driver_blob_end
 extern driver_blob_done_trampoline
+extern driver2_blob_start
+extern driver2_blob_code_end
+extern driver2_blob_end
+extern driver2_blob_done_trampoline
 extern handle_table_clear
 extern kernel_canary
 ; Nested-kernel monitor (nk_monitor.asm): every page-table write below is

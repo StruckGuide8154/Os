@@ -514,12 +514,17 @@ Audit and make each a tested barrier.
       is the named, bounded residual, not an unbounded gap._
 - [x] A planted-leak negative test proves a fully-reversed dump still cannot
       elevate on a fresh boot - the exfiltration→elevation matrix holds (Part D).
-      _Implemented: `scripts/dev/test_track4_planted_leak.ps1` (2026-06-09)._
+      _Implemented: `scripts/dev/test_track4_planted_leak.ps1`; reverified
+      2026-07-17 across two fresh boots, with the real planted 128-bit cap-MAC
+      stale-replay and independent lane-corruption rejection vectors executed
+      as Tier 4._
 - [x] The irreducible plaintext residual is named precisely in STATUS.md and
       proven bounded by the `pmemsave` test, with no claim exceeding it.
       _STATUS.md §9 + the Part A HARD LIMIT + `fme_memory_encryption_check.ghl`
       header caveat #3 name it; `test_track4_pmemsave.ps1` enumerates the residuals
-      it does NOT claim absent (.text, firmware, page tables)._
+      it does NOT claim absent (.text, firmware, page tables). Reverified
+      2026-07-17 with a fail-closed runtime-only positive control: sentinel absent
+      from KERNEL.BIN, present once in the pre-wipe dump, absent post-wipe._
 
 ## Follow-up: legacy v0 app blobs are W+X (security review finding)
 

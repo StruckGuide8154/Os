@@ -5,7 +5,7 @@ authoritative for what** and does not get tripped up by the sprawl. If two docs
 disagree, the authority rules below win. Keep this file current when you add or
 retire a doc.
 
-_Last reconciled: 2026-06-04._
+_Last reconciled: 2026-07-17._
 
 ---
 
@@ -92,8 +92,8 @@ They are complementary, not duplicates: the tracks build the architecture; the
 | `track1-repo-enforcement-todo.md` | repo enforcement (no new .asm/.inc, presubmits, CI) | **DONE / green** |
 | `track2-signed-everything-todo.md` | signed-artifact envelope + threshold | **software complete / HW-blocked** - envelope reader, real Ed25519 threshold signatures, boot/update/kernel/class call sites, persistent floors, device binding, reject matrix, fuzzing, and independent Worker A software verification are green. Full zero-TODO closure is blocked on the real NVMe/USB `blk_write_sectors` backend for cross-reboot floor persistence on those boot media. |
 | `track3-sel4-validity-todo.md` | seL4-style authority invariants | **COMPLETE / CLOSED / independently verified 2026-06-28** - 21 invariants `proven` (4,576,644 evaluations), translation validation, planted-drift meta-tests, and P3 mapping done: authority bitmasks derived from real signed policy (`derive_authority.py`, 208 checks in the runner); proofs + containment claim table in `track3-invariant-proofs.md` |
-| `track4-ram-secure-erasure-todo.md` | RAM-only/volatile + secure-erasure + HW FME (TME/SME) + leak≠elevation | Part A landed; Part B partial; Part C detect-only; Part D matrix audited |
-| `track4-data-egress-elevation-matrix.md` | Part D leak≠elevation matrix: artifact × barrier, with code citations | **static audit DONE**; planted-leak negative test still `[ ]` |
+| `track4-ram-secure-erasure-todo.md` | RAM-only/volatile + secure-erasure + HW FME (TME/SME) + leak≠elevation | **Software verification complete**: planted-leak + fail-closed `pmemsave` positive-control tests green; full whitening remains FME-hardware-gated |
+| `track4-data-egress-elevation-matrix.md` | Part D leak≠elevation matrix: artifact × barrier, with code citations | **Static + dynamic audit DONE**: two-boot replay test and planted 128-bit stale-MAC rejection vectors green |
 | `track5-hypervisor-monitor-todo.md` | **all-vendor hardware** monitor tier - the two irreducible-hardware guarantees only (G1 privilege-below-ring-0 to make the floor un-disableable; G2 IOMMU device-DMA), abstracted across Intel VT-x/VT-d, AMD SVM/AMD-Vi, ARM EL2/SMMUv3, RISC-V H-ext/IOMMU behind one `mon_hal` | **new, design only**; opportunistic; hardens Track 6 |
 | `track6-compartmentalized-monitor-todo.md` | the **software "-1" monitor** decomposed into mutually-isolated single-authority compartments (PT/KEY/HASH/CAP/DMA/LOAD-MON) so one compromise ≠ total compromise; the non-hardware half of the final goal, TCG-verifiable | **new, design only**; the realizable core; Track 5 makes it un-disableable |
 | `track8-userspace-drivers-todo.md` | the Kill-Chain keystone: **drivers as ring-3 default-deny sandbox processes** behind the in-kernel **driver-host broker** (`src/kernel/grithlk/driver_host.ghl`); design in `architecture-userspace-drivers.md` | **Rung 0+1 LANDED 2026-06-14**: design doc, broker framework (compiles `--target kernel --forbid-asm`), and **G2 enforcement** (`tools/security/driver_inventory.txt` freeze + `scripts/test/test_userspace_drivers.ps1`, wired into the entry point with a negative self-test) make a NEW in-kernel driver impossible. Next: Rung 1 G1 `--target driver` compiler gate + Rung 2 battery/acpi_ec migration |
@@ -217,10 +217,14 @@ Build: monolithic `nasm -f bin` on `src/kernel/kernel_build.asm` via
   `docs/track3-invariant-proofs.md` (read its honesty statement before
   claiming anything). Extensions follow its maintenance section without
   reopening the track.
-- **Track 4**: Part A volatile landed; Part C TME/SME detection scaffold done;
-  Part D exfil→elevation matrix audited (`track4-data-egress-elevation-matrix.md`). Next:
-  the Part D **planted-leak negative test** + the `pmemsave` RAM-dump grep (the
-  dynamic proofs that turn the audit into a demonstration).
+- **Track 4**: the software-verifiable RAM-erasure work is complete. Part D's
+  exfil→elevation matrix is backed by a two-fresh-boot replay test plus real
+  128-bit stale/lane-corrupted cap-MAC rejection vectors. The `pmemsave` test
+  now fails closed unless its runtime-only sentinel is absent from the immutable
+  image, present before wipe, and absent after wipe. Remaining closure is the
+  explicitly bounded hardware leg: software whitening cannot protect against a
+  full one-shot DRAM dump while its mask co-resides in DRAM, so full protection
+  still requires FME-capable TME/SME hardware and real-silicon validation.
 - **Kill-Chain Defense**: biggest lift is moving drivers out of the kernel into
   user-space sandboxed processes - everything else in that section builds on it.
   **STARTED (Track 8, 2026-06-14)**: see `track8-userspace-drivers-todo.md` +

@@ -241,6 +241,17 @@ spi_hid_get_report_desc:
     cmp byte [spi_rdesc_buf + 0], SPI_SYNC_DEV
     jne .rdesc_fail
 
+    ; The wire header is device-controlled too.  Do not parse descriptor bytes
+    ; beyond the packet length the device returned, and reject an over-claim
+    ; beyond the transfer we requested even though the backing buffer is large
+    ; enough.  A valid descriptor response is exactly header + advertised HID
+    ; report-descriptor bytes.
+    movzx eax, word [spi_rdesc_buf + 2]
+    movzx ecx, word [spi_report_desc_len]
+    add ecx, SPI_RX_HDR
+    cmp eax, ecx
+    jne .rdesc_fail
+
     ; Parse: descriptor starts at offset 4
     lea rsi, [spi_rdesc_buf + 4]
     movzx ecx, word [spi_report_desc_len]

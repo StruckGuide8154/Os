@@ -33,6 +33,8 @@ $netCore = Read-RepoFile 'src\user\grithl\lib\core.ghl'
 $netApp = Read-RepoFile 'src\user\grithl\apps\ping.ghl'
 $netNic = Read-RepoFile 'src\kernel\net\nic.asm'
 $netHandlers = Read-RepoFile 'src\kernel\proc\syscall_handlers_wx_net.inc'
+$driverLoader = Read-RepoFile 'src\kernel\grithlk\driver_loader.ghl'
+$isr = Read-RepoFile 'src\kernel\core\isr.asm'
 
 Assert-Match $caps 'CAP_DRIVER\s+equ\s+0x2000' 'CAP_DRIVER is missing or renumbered.'
 Assert-Match $caps 'MANIFEST_DRIVER_BASE\s+equ\s+CAP_CORE\s*\|\s*CAP_DRIVER' 'Driver base manifest is missing.'
@@ -70,11 +72,16 @@ Assert-Match $compiler 'getattr\(cg,"target","user"\)=="driver"[\s\S]{0,100}mov 
 Assert-Match $driverBlob '\[section \.driverblob follows=\.appdata align=4096\]' 'Driver package is not isolated in its own contiguous section.'
 Assert-Match $driverBlob 'driver_blob_done_trampoline:[\s\S]{0,100}mov eax, 10[\s\S]{0,50}syscall' 'Driver package lacks a raw app-done return trampoline.'
 Assert-Match $driverBlob 'driver_blob_end - driver_blob_start\) >= L3_SLOT_DMA_OFF[\s\S]*%error "ring-3 driver blob reaches the fixed DMA VA window"' 'Driver package lacks a build-time DMA-overlap size assertion.'
-Assert-Match $slotInstall 'FN_BEGIN l3_copy_driver_blob_to_slot[\s\S]*cmp rcx, L3_SLOT_DMA_OFF[\s\S]*l3_slot_blob_kind[\s\S]*l3_wx_code_end' 'Dedicated driver install does not bound the blob below DMA and publish W^X metadata.'
+Assert-Match $slotInstall 'DRIVER_BLOB_INSTALL_FN[\s\S]*cmp rcx, L3_SLOT_DMA_OFF[\s\S]*l3_slot_blob_kind[\s\S]*l3_wx_code_end[\s\S]*DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob_to_slot' 'Dedicated driver install does not bound the blob below DMA and publish W^X metadata.'
 Assert-Match $slotInstall 'l3_copy_driver_blob_to_slot[\s\S]*sc_slot_perm_committed[\s\S]*mov byte \[rax \+ r9\], 0' 'Driver install does not force identity syscall dispatch.'
 Assert-Match $translate 'target >= &driver_blob_start[\s\S]*l3_slot_blob_kind[\s\S]*target - &driver_blob_start' 'Canonical driver entries are not kind-gated and translated into the live slot.'
 Assert-Match $callbacks 'l3_slot_blob_kind[\s\S]*driver_blob_done_trampoline' 'Callback return does not select the driver-local app-done trampoline.'
 Assert-Match $kernelBuild '%include\s+"src/drivers/driver_blob\.asm"' 'Kernel image does not embed the dedicated signed driver package.'
+Assert-Match $driverBlob 'driver2_blob_start:[\s\S]*%include "build/ghl/battery\.asm"[\s\S]*driver2_blob_end:' 'Battery is not framed as a second dedicated driver package.'
+Assert-NoMatch $driverBlob '\[section \.driverblob2' 'Battery package escaped the single W^X-safe driverblob section.'
+Assert-Match $slotInstall 'DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob2_to_slot[^\r\n]*driver2_blob_code_end, 2' 'Battery package has no kind-2 slot installer.'
+Assert-Match $driverLoader 'fn\s+battery_init[\s\S]*drvhost_policy_install\(BATTERY_SLOT,\s*DRV_CAP_PIO[\s\S]*drvhost_grant_pio\(id,\s*0x62,\s*0x66\)[\s\S]*call_app_l3_driver\(BATTERY_SLOT,\s*&app_hl_battery_main\)' 'Battery is not provisioned as a PIO-only ring-3 process.'
+Assert-NoMatch $kernelBuild 'src/kernel/drivers/battery\.asm' 'Retired in-kernel battery driver is still linked.'
 
 # Driver-host rows extend the syscall table past 255. Ordinary app syscall
 # permutations therefore need u16 cells; u8 cells alias rows 256+ onto 0..7.
@@ -129,5 +136,26 @@ Assert-Match $table 'sc_drvhost_irq_wait[^\r\n]*CAP_DRIVER' 'IRQ_WAIT(243) is st
 Assert-Match $handlers 'call\s+drvhost_dma_alloc' 'DMA alloc handler does not reach the broker allocator.'
 Assert-Match $handlers 'call\s+drvhost_dma_map' 'DMA map handler does not reach the broker.'
 Assert-Match $handlers 'call\s+drvhost_irq_take[\s\S]{0,400}hlt' 'IRQ_WAIT is not a bounded yielding wait on the pending word.'
+
+# G4 executable proof: forged out-of-grant request cannot reach raw hardware;
+# repeated abuse quarantines/revokes; recovery is separate and grantless.
+$g4Eval = Join-Path $Root 'scripts\test\eval_drvhost_quarantine.py'
+& python $g4Eval
+if ($LASTEXITCODE -ne 0) { throw 'Track-8 G4 quarantine/restart proof failed.' }
+& python $g4Eval --selftest
+if ($LASTEXITCODE -ne 0) { throw 'Track-8 G4 planted-broken-broker selftest failed.' }
+$classEval = Join-Path $Root 'scripts\test\eval_drvclass_handles.py'
+& python $classEval
+if ($LASTEXITCODE -ne 0) { throw 'Track-8 class-handle proof failed.' }
+& python $classEval --selftest
+if ($LASTEXITCODE -ne 0) { throw 'Track-8 planted stale-handle selftest failed.' }
+Assert-Match $handlers 'call\s+drvhost_charge_result' 'Rejected driver syscalls are not charged to the fault budget.'
+Assert-Match $isr 'l3_slot_blob_kind[\s\S]{0,300}call\s+drvhost_fault' 'A crashing ring-3 driver is not charged by the exception unwind.'
+Assert-Match $driverLoader 'fn\s+driver_manager_recover[\s\S]*drvhost_restart\(id\)[\s\S]*driver_manager_bind_authority' 'VirtIO quarantine recovery is not a separate policy-derived loader path.'
+Assert-Match $driverLoader 'fn\s+battery_recover[\s\S]*drvhost_restart\(id\)[\s\S]*drvhost_grant_pio\(id,\s*0x62,\s*0x66\)' 'Battery quarantine recovery does not reconstruct its narrow PIO grant.'
+Assert-Match $broker 'fn\s+drvclass_resolve[\s\S]*drvclass_generation[\s\S]*drv_restarts' 'Class handles are not resolved against kernel-owned generation state.'
+Assert-Match $broker 'fn\s+drvhost_revoke_resources[\s\S]*drvclass_revoke\(id\)' 'Quarantine does not revoke published class endpoints.'
+Assert-Match $driverLoader 'drvclass_publish_net_l2\(id,[\s\S]{0,200}1500, 0\)[\s\S]{0,200}driver_manager_bound' 'net.l2 is not health-gated before publication.'
+Assert-Match $driverLoader 'fn\s+driver_manager_tx_frame[\s\S]*drvclass_resolve\(class_handle, DRVCLASS_NET_L2, DRVCLASS_ABI_V1\)' 'net.l2 TX does not validate its generation-safe class handle.'
 
 Write-Host '[driver-framework] PASS' -ForegroundColor Green

@@ -572,6 +572,10 @@ fn l3_install_app_done_trampoline(slot) {
         let driver_tramp_off = (&driver_blob_done_trampoline) - (&driver_blob_start);
         return base + slide + driver_tramp_off;
     }
+    if lq(&l3_slot_blob_kind + slot * 8) == 2 {
+        let driver2_tramp_off = (&driver2_blob_done_trampoline) - (&driver2_blob_start);
+        return base + slide + driver2_tramp_off;
+    }
     let tramp_off = (&app_l3_done_trampoline) - (&app_blob_start);
     return base + slide + tramp_off;
 }
