@@ -1,0 +1,12 @@
+# INV-SAFESTACK-RETURN-NO-FOREIGN-WRITE vectors —
+# predicate inv_safestack_return_unwritable(writer_id, canonical_writer_id, targets_return_slot).
+invariant=INV-SAFESTACK-RETURN-NO-FOREIGN-WRITE
+predicate=inv_safestack_return_unwritable
+# canonical push/ret path writing a return slot -> admitted
+case=accept | 1, 1, 1
+# a write that does not target a return slot is out of scope -> vacuously admitted
+case=accept | 5, 1, 0
+# THE overwrite-primitive violation: a foreign writer aimed at a return slot
+case=reject | 5, 1, 1
+# another foreign writer identity aimed at a return slot
+case=reject | 0, 1, 1

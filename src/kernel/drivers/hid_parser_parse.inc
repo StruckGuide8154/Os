@@ -489,6 +489,19 @@ hid_parse_report_desc_v2:
     cmp al, 0x06
     jne .parse_fail
 
+    ; Absolute coordinates are scaled by (logical_max-logical_min). Reject a
+    ; non-positive range at descriptor admission so no report can reach idiv
+    ; with zero or -1 (including the INT_MIN/-1 #DE case).
+    cmp byte [hid_parsed_is_absolute], 1
+    jne .range_ok
+    mov eax, [hid_parsed_x_logical_max]
+    cmp eax, [hid_parsed_x_logical_min]
+    jle .parse_fail
+    mov eax, [hid_parsed_y_logical_max]
+    cmp eax, [hid_parsed_y_logical_min]
+    jle .parse_fail
+.range_ok:
+
     mov eax, 1
     jmp .parse_ret
 
@@ -512,4 +525,4 @@ hid_parse_report_desc_v2:
     ret
 
 ; ============================================================================
-; hid_extract_field - Extract a field value from a HID report
+; hid_extract_field - Extract a field value from a HID report

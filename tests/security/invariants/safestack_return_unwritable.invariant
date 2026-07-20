@@ -1,0 +1,12 @@
+# Track 11 L2: a write to a protected-stack return slot is admitted only from the
+# canonical push/ret write path. SafeStack removes the return-address overwrite
+# PRIMITIVE (no foreign writer can reach the slot) rather than detecting a
+# corrupted return after the fact. The theorem is constant in the foreign writer
+# identity: only the canonical writer is admitted for a return slot.
+invariant=INV-SAFESTACK-RETURN-NO-FOREIGN-WRITE
+title=Only the canonical push/ret path may write a protected-stack return slot
+statement=A write targeting a protected-stack return slot is admitted iff the writer identity is the canonical push/ret path; every other writer identity is rejected, quantified over all writer identities. Writes that do not target a return slot are outside scope and vacuously admitted.
+compromised=An unsafe-stack overflow or attacker store aimed at a return slot
+denied_authority=Any non-canonical write to a protected-stack return address
+predicate=inv_safestack_return_unwritable
+status=proven

@@ -1,0 +1,10 @@
+# INV-CFI-NO-MIDFUNCTION-ENTRY vectors —
+# predicate inv_cfi_no_offset_entry(target_offset).
+invariant=INV-CFI-NO-MIDFUNCTION-ENTRY
+predicate=inv_cfi_no_offset_entry
+# offset 0 = the function entry -> admitted
+case=accept | 0
+# THE gadget-entry violation: a mid-function landing
+case=reject | 1
+# a deeper mid-function offset
+case=reject | 63

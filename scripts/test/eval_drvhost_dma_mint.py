@@ -517,16 +517,17 @@ def p4_pointer_no_mint(prog):
     cap_irq = C(prog, 'DRV_CAP_IRQ')
     for caps1 in (cap_mmio | cap_dma, cap_mmio, cap_dma, 0):
         u = Unit(prog)
-        d1 = install_driver(u, 0, caps1 if caps1 else cap_irq, 0x2000)
+        d1 = install_driver(u, 11, caps1 if caps1 else cap_irq, 0x2000)
         d2 = install_driver(u, 1, cap_mmio | cap_dma, 0x2000)
         u.poke('drv_caps_eff', d1, 4, caps1)   # exact adversarial mask
-        u.call('drvhost_grant_mmio', [d1, 0x1000, 0x10])   # ERR_CAP w/o MMIO
+        u.call('drvhost_grant_mmio', [d1, 0x1000, 0x100])  # ERR_CAP w/o MMIO
         u.call('drvhost_grant_mmio', [d2, 0x9000, 0x10])
         p1 = u.call('drvhost_dma_alloc', [d1, 0x1000])     # 0 w/o DMA cap
         p2 = u.call('drvhost_dma_alloc', [d2, 0x1000])
         if p2 == 0:
             raise Violation("P4 bench: sibling allocation refused")
-        for addr in (0x0FFC, 0x1000, 0x1008, 0x100C, 0x100D, 0x1010, 0x9000):
+        for addr in (0x0FFC, 0x1000, 0x1020, 0x1028, 0x1030,
+                     0x1038, 0x10FC, 0x9000):
             for width in (0, 1, 2, 4, 8, 16):
                 for dma_addr in (p1, (p1 + 0xFFF) if p1 else 1,
                                  p2, p2 + 0x800, 0x666000, 0):
@@ -537,10 +538,10 @@ def p4_pointer_no_mint(prog):
                     wrote = [e for e in u.raw_log
                              if e[0] in ('drvhost_raw_mmio_wr64',
                                          'drvhost_raw_mmio_write32')]
-                    window_ok = 0x1000 <= addr and addr + width <= 0x1010
+                    register_ok = addr in (0x1020, 0x1028, 0x1030)
                     own_dma = p1 != 0 and p1 <= dma_addr < p1 + 0x1000
                     allowed = ((caps1 & cap_mmio) and (caps1 & cap_dma)
-                               and width in (4, 8) and window_ok and own_dma)
+                               and width == 8 and register_ok and own_dma)
                     if (rc == C(prog, 'DRV_OK')) != bool(allowed):
                         raise Violation(
                             "P4: write_dma_ptr caps=0x%x addr=0x%x width=%d "
@@ -552,6 +553,37 @@ def p4_pointer_no_mint(prog):
                     if rc == C(prog, 'DRV_OK'):
                         if not wrote or wrote[0][1][1] != dma_addr:
                             raise Violation("P4: accepted write not observed as issued")
+    return checks
+
+
+def p7_generic_writes_cannot_bypass_pointer_gate(prog):
+    """P7: every generic MMIO width refuses an access overlapping any of the
+    three protected VirtIO queue-address registers; ordinary registers remain
+    writable through the same grant."""
+    u = Unit(prog)
+    caps = C(prog, 'DRV_CAP_MMIO') | C(prog, 'DRV_CAP_DMA')
+    drv = install_driver(u, 11, caps, 0x1000)
+    if u.call('drvhost_grant_mmio', [drv, 0x1000, 0x100]) != C(prog, 'DRV_OK'):
+        raise Violation('P7 bench: MMIO grant refused')
+    if u.peek('drv_virtio_common', drv, 8) != 0x1000:
+        raise Violation('P7 bench: common_cfg protection was not latched')
+    checks = 0
+    writers = ((1, 'drvhost_mmio_wr8'), (2, 'drvhost_mmio_wr16'),
+               (4, 'drvhost_mmio_write32'), (8, 'drvhost_mmio_wr64'))
+    for width, fn in writers:
+        for addr in (0x101F, 0x1020, 0x1021, 0x1028, 0x1030,
+                     0x1037, 0x1038, 0x1050):
+            u.raw_log = []
+            rc = u.call(fn, [drv, addr, 0x666000])
+            checks += 1
+            end = addr + width
+            overlaps = addr < 0x1038 and end > 0x1020
+            allowed = not overlaps and end <= 0x1100
+            if (rc == C(prog, 'DRV_OK')) != allowed:
+                raise Violation('P7: %s addr=0x%x width=%d rc=%d overlaps=%s'
+                                % (fn, addr, width, rc, overlaps))
+            if rc != C(prog, 'DRV_OK') and u.raw_log:
+                raise Violation('P7: refused generic write reached hardware')
     return checks
 
 
@@ -624,6 +656,7 @@ PROOFS = [
     ('P4 pointer programming no-mint', p4_pointer_no_mint),
     ('P5 cross-grant controller gate', p5_cross_grant_gate),
     ('P6 map own base only', p6_map_own_base_only),
+    ('P7 generic pointer bypass closed', p7_generic_writes_cannot_bypass_pointer_gate),
 ]
 
 # Planted mutations for --selftest: each drops one enforcement clause the
@@ -639,6 +672,9 @@ MUTATIONS = [
     ('pointer-value containment dropped from write_dma_ptr',
      '    if drvhost_dma_contained(id, dma_addr, 1) == 0 { return DRV_ERR_GRANT; }',
      '    if 0 == 1 { return DRV_ERR_GRANT; }'),
+    ('generic pointer-register guard dropped',
+     '    if drv_mmio_overlaps_dma_ptr(id, addr, 4) != 0 { return DRV_ERR_GRANT; }',
+     '    if 0 != 0 { return DRV_ERR_GRANT; }'),
 ]
 
 

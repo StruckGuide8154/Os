@@ -1,0 +1,10 @@
+# Track 11 L4: a forward target must be a function entry (offset 0), never a
+# mid-function offset. Landing mid-function is the JOP/ROP gadget-entry primitive
+# coarse IBT permits; a sound emitter admits only the entry.
+invariant=INV-CFI-NO-MIDFUNCTION-ENTRY
+title=A forward target is a function entry, never a mid-function offset
+statement=An indirect forward target is admitted iff its byte offset into the target function is zero (the entry); every non-zero offset is rejected, quantified over the whole modeled offset span.
+compromised=A corrupted code pointer aimed at a mid-function gadget
+denied_authority=Any forward transfer to a non-entry (mid-function) offset
+predicate=inv_cfi_no_offset_entry
+status=proven

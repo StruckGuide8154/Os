@@ -41,6 +41,9 @@ global inv_syscall_perm_per_launch;
 global inv_planted_cap_hmac_rejected;
 global inv_no_rollback;
 global inv_floor_ratchet_monotonic;
+global inv_cfi_forward_target_in_set;
+global inv_cfi_no_offset_entry;
+global inv_safestack_return_unwritable;
 
 # Authority bits. One bit per mintable authority in the model.
 const AUTH_MEMORY_GRANT = 1;       # map/grant memory to another domain
@@ -368,6 +371,71 @@ fn inv_no_rollback(artifact_version, floor_version, admitted) {
 # makes NO-ROLLBACK durable across a power cycle.
 fn inv_floor_ratchet_monotonic(old_floor, new_floor) {
     if new_floor >= old_floor {
+        return 1;
+    }
+    return 0;
+}
+
+# --- Track 11 (structural CFI + memory-safety-by-construction) invariants -----
+#
+# The L4 "CFI-as-a-checked-theorem" modeling layer (see
+# docs/track11-structural-cfi-memsafety-todo.md). These make the structural
+# forward-edge, mid-function, and backward-edge (SafeStack) claims
+# machine-checkable on the SAME vehicle as the Track-3/6 invariants, BEFORE the
+# L1/L2 codegen exists: they bound what a *sound* emitter is allowed to admit, so
+# a later call-graph/table edit that would admit an off-set indirect transfer or
+# a foreign write to a return slot is caught by the exhaustive proof. This is the
+# model, not the runtime enforcement (L1 tables / L2 SafeStack emission remain
+# not-started) - exactly as Track 6 C3 landed `proven` while C0/C1 stayed design.
+
+# Bounded modeling spaces (NOT AUTH_* bits, so they do not widen the authority
+# enumeration used by the Track-3/6 proofs). Small, high-signal ranges that still
+# cover every equal/unequal and member/non-member combination.
+const CFI_TYPEID_COUNT = 8;    # distinct call-site/target type signatures modeled
+const CFI_OFFSET_SPAN  = 64;   # byte offsets into a function (0 = the entry)
+const CFI_WRITER_COUNT = 8;    # distinct write-path identities modeled
+
+# CFI-FORWARD-TARGET-IN-SET (L1): an indirect forward transfer is admitted only
+# when the resolved target's type signature equals the call site's signature AND
+# the target is a member of that type's call table (`target in table[typeid]`).
+# A forged target with a foreign typeid, OR a same-typeid target that is not in
+# the table, is rejected. This is the fine-grained forward edge that beats PAC
+# (no "any pointer signed with this modifier") and CET-IBT (no "any ENDBR"):
+# BOTH the type match and table membership are required.
+fn inv_cfi_forward_target_in_set(site_typeid, target_typeid, target_in_table) {
+    if site_typeid == target_typeid {
+        if target_in_table != 0 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# CFI-NO-MIDFUNCTION-ENTRY (L1): a forward target must be a function ENTRY
+# (offset 0), never a mid-function offset. Landing mid-function is the JOP/ROP
+# gadget-entry primitive coarse IBT permits; a sound emitter admits only offset
+# 0. The runner quantifies over the whole offset span to prove every non-zero
+# offset is rejected.
+fn inv_cfi_no_offset_entry(target_offset) {
+    if target_offset == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+# SAFESTACK-RETURN-NO-FOREIGN-WRITE (L2): a write that targets a protected-stack
+# return slot is admitted ONLY from the canonical push/ret write path. Any other
+# writer identity (an unsafe-stack overflow, an attacker-controlled store) is
+# rejected - SafeStack removes the return-address overwrite PRIMITIVE rather than
+# detecting a corrupted return after the fact. Writes that do not target a return
+# slot are outside this theorem's scope and vacuously admitted. The runner
+# quantifies over every writer identity to prove only the canonical one is
+# admitted for a return slot.
+fn inv_safestack_return_unwritable(writer_id, canonical_writer_id, targets_return_slot) {
+    if targets_return_slot == 0 {
+        return 1;
+    }
+    if writer_id == canonical_writer_id {
         return 1;
     }
     return 0;

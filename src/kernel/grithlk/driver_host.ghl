@@ -145,6 +145,7 @@ const DRV_ST_DEAD       = 4;    # terminated, awaiting restart
 # Fixed-capacity tables (entry 0 is the "no driver" sentinel, never used).
 const DRV_MAX        = 16;      # max concurrent driver processes
 const MMIO_GRANT_MAX = 32;      # {driver, base, end} MMIO windows
+const VIRTIO_DRIVER_ID = 12;    # driver_loader.DRIVER_SLOT (11) + 1
 const PIO_GRANT_MAX  = 32;      # {driver, port_base, port_end} port ranges
 const IRQ_MAX        = 64;      # vector -> owning driver routing
 const FAULT_BUDGET   = 8;       # faults before automatic quarantine
@@ -248,6 +249,7 @@ data mg_drv:   32 x 4;
 data mg_base:  32 x 8;
 data mg_end:   32 x 8;          # pre-computed base+len (hot path = 2 compares)
 data mg_count: 1 x 4;
+data drv_virtio_common: 16 x 8;
 
 # --- PIO grant table --------------------------------------------------------
 data pg_drv:   32 x 4;
@@ -327,6 +329,7 @@ fn drvhost_revoke_resources(id) {
         md = md + 1;
     }
     sw(&mg_count, mkeep);
+    sq(&drv_virtio_common + id * 8, 0);
 
     let pn = lw(&pg_count);
     let ps = 0;
@@ -509,6 +512,14 @@ fn drvhost_grant_mmio(id, base, len) {
     sq(&mg_base + n * 8, base);
     sq(&mg_end  + n * 8, end);
     sw(&mg_count, n + 1);
+    # The signed loader grants the dedicated VirtIO slot's common_cfg first.
+    # Latch that first sufficiently large window before ring 3 runs; later
+    # notify/ISR/device grants cannot replace it.
+    if id == VIRTIO_DRIVER_ID {
+        if lq(&drv_virtio_common + id * 8) == 0 {
+            if len >= 56 { sq(&drv_virtio_common + id * 8, base); }
+        }
+    }
     return DRV_OK;
 }
 
@@ -564,6 +575,19 @@ fn drv_mmio_contained(id, addr, len) {
     return 0;
 }
 
+fn drv_mmio_overlaps_dma_ptr(id, addr, len) {
+    let base = lq(&drv_virtio_common + id * 8);
+    if base == 0 { return 0; }
+    let end = addr + len;
+    if end < addr { return 1; }
+    let ptr_lo = base + 32;
+    let ptr_hi = base + 56;
+    if addr < ptr_hi {
+        if end > ptr_lo { return 1; }
+    }
+    return 0;
+}
+
 # ---------------------------------------------------------------------------
 # Brokered MMIO. The driver passes an absolute device address; the broker
 # proves it lies inside one of THAT driver's granted windows, then performs the
@@ -584,6 +608,7 @@ fn drvhost_mmio_read32(id, addr) {
 fn drvhost_mmio_write32(id, addr, val) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if drv_mmio_contained(id, addr, 4) == 0 { return DRV_ERR_GRANT; }
+    if drv_mmio_overlaps_dma_ptr(id, addr, 4) != 0 { return DRV_ERR_GRANT; }
     drvhost_raw_mmio_write32(addr, val);
     return DRV_OK;
 }
@@ -623,18 +648,21 @@ fn drvhost_mmio_rd64(id, addr) {
 fn drvhost_mmio_wr8(id, addr, val) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if drv_mmio_contained(id, addr, 1) == 0 { return DRV_ERR_GRANT; }
+    if drv_mmio_overlaps_dma_ptr(id, addr, 1) != 0 { return DRV_ERR_GRANT; }
     drvhost_raw_mmio_wr8(addr, val & 255);
     return DRV_OK;
 }
 fn drvhost_mmio_wr16(id, addr, val) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if drv_mmio_contained(id, addr, 2) == 0 { return DRV_ERR_GRANT; }
+    if drv_mmio_overlaps_dma_ptr(id, addr, 2) != 0 { return DRV_ERR_GRANT; }
     drvhost_raw_mmio_wr16(addr, val & 0xFFFF);
     return DRV_OK;
 }
 fn drvhost_mmio_wr64(id, addr, val) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if drv_mmio_contained(id, addr, 8) == 0 { return DRV_ERR_GRANT; }
+    if drv_mmio_overlaps_dma_ptr(id, addr, 8) != 0 { return DRV_ERR_GRANT; }
     drvhost_raw_mmio_wr64(addr, val);
     return DRV_OK;
 }
@@ -654,14 +682,18 @@ fn drvhost_mmio_wr64(id, addr, val) {
 fn drvhost_mmio_write_dma_ptr(id, addr, dma_addr, width) {
     if drv_has_cap(id, DRV_CAP_MMIO) == 0 { return DRV_ERR_CAP; }
     if drv_has_cap(id, DRV_CAP_DMA) == 0 { return DRV_ERR_CAP; }
-    if width != 4 {
-        if width != 8 { return DRV_ERR_GRANT; }
-    }
+    if width != 8 { return DRV_ERR_GRANT; }
     if drv_mmio_contained(id, addr, width) == 0 { return DRV_ERR_GRANT; }
+    let common = lq(&drv_virtio_common + id * 8);
+    if common == 0 { return DRV_ERR_GRANT; }
+    if addr != common + 32 {
+        if addr != common + 40 {
+            if addr != common + 48 { return DRV_ERR_GRANT; }
+        }
+    }
     # The pointer VALUE must be a device address inside this driver's DMA grant.
     if drvhost_dma_contained(id, dma_addr, 1) == 0 { return DRV_ERR_GRANT; }
-    if width == 8 { drvhost_raw_mmio_wr64(addr, dma_addr); }
-    else { drvhost_raw_mmio_write32(addr, dma_addr); }
+    drvhost_raw_mmio_wr64(addr, dma_addr);
     return DRV_OK;
 }
 

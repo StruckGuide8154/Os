@@ -1,0 +1,14 @@
+# INV-CFI-FORWARD-TARGET-IN-SET vectors —
+# predicate inv_cfi_forward_target_in_set(site_typeid, target_typeid, target_in_table).
+invariant=INV-CFI-FORWARD-TARGET-IN-SET
+predicate=inv_cfi_forward_target_in_set
+# type matches AND target is in that type's table -> admitted
+case=accept | 3, 3, 1
+# type 0 matches and target in table
+case=accept | 0, 0, 1
+# THE forged-target violation: target's signature is foreign to the call site
+case=reject | 3, 5, 1
+# same typeid but target is NOT a member of the table (forged same-type pointer)
+case=reject | 3, 3, 0
+# foreign typeid AND not in table
+case=reject | 7, 2, 0
