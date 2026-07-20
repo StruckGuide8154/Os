@@ -162,6 +162,10 @@ const VIRTIO_CAP_COMMON = 1;
 const VIRTIO_CAP_NOTIFY = 2;
 const VIRTIO_CAP_ISR    = 3;
 const VIRTIO_CAP_DEVICE = 4;
+const VIRTIO_COMMON_MIN_LEN = 56;
+const VIRTIO_NOTIFY_MIN_LEN = 2;
+const VIRTIO_ISR_MIN_LEN    = 1;
+const VIRTIO_DEVICE_MIN_LEN = 6;
 const DRIVER_IRQ_VECTOR = 52;
 const WQ_JOB_DRIVER     = 7;
 const WQ_PRIO_HIGH      = 2;
@@ -170,10 +174,15 @@ const IOAPIC_LEVEL_LOW  = 0xA000;
 
 # --- resolved device state (single supported NIC for now) --------------------
 data dl_common_cfg:  1 x 8;
+data dl_common_len:  1 x 4;
 data dl_notify_base: 1 x 8;
+data dl_notify_len:  1 x 4;
 data dl_notify_mult: 1 x 4;
 data dl_device_cfg:  1 x 8;
+data dl_device_len:  1 x 4;
 data dl_isr_cfg:     1 x 8;
+data dl_isr_len:     1 x 4;
+data dl_bar_size:    1 x 8;
 data dl_irq_gsi:     1 x 4;
 data dl_io_base:     1 x 4;
 data dl_transport:   1 x 4;
@@ -225,13 +234,74 @@ fn pci_rd16(bus, dev, func, reg) {
 # Resolve a 64-bit-capable BAR's base address (low 4 bits masked; +high dword if
 # the BAR is 64-bit, type bits == 0x4).
 fn pci_bar_base(bus, dev, func, bar) {
+    if bar < 0 { return 0; }
+    if bar > 5 { return 0; }
+    if bar > 0 {
+        let prev = pci_rd(bus, dev, func, 0x10 + (bar - 1) * 4);
+        if (prev & 0x6) == 0x4 { return 0; }     # high half is not a BAR
+    }
     let lo = pci_rd(bus, dev, func, 0x10 + bar * 4);
+    if (lo & 1) != 0 { return 0; }
+    if (lo & 0x6) == 0x4 {
+        if bar == 5 { return 0; }
+    }
     let base = lo & 0xFFFFFFF0;
     if (lo & 0x6) == 0x4 {
         let hi = pci_rd(bus, dev, func, 0x10 + bar * 4 + 4);
         base = base | (hi << 32);
     }
     return base;
+}
+
+# Security gate for bus-mastering ring-3 devices. There is no live IOMMU
+# implementation in this checkout, so the only truthful result is fail-closed.
+fn virtio_dma_isolation_active() { return 0; }
+
+# Called only while PCI memory decode is disabled. Probe the PCI-defined BAR
+# aperture, restore the original BAR, and prove [offset, offset+len) fits.
+fn pci_mem_bar_window(bus, dev, func, bar, offset, len) {
+    sq(&dl_bar_size, 0);
+    if bar < 0 { return 0; }
+    if bar > 5 { return 0; }
+    if bar > 0 {
+        let prev = pci_rd(bus, dev, func, 0x10 + (bar - 1) * 4);
+        if (prev & 0x6) == 0x4 { return 0; }
+    }
+    if len == 0 { return 0; }
+    let reg = 0x10 + bar * 4;
+    let lo = pci_rd(bus, dev, func, reg);
+    if (lo & 1) != 0 { return 0; }
+    let is64 = 0;
+    if (lo & 0x6) == 0x4 { is64 = 1; }
+    if is64 == 1 {
+        if bar == 5 { return 0; }
+    }
+    let hi = 0;
+    if is64 == 1 { hi = pci_rd(bus, dev, func, reg + 4); }
+    pci_wr(bus, dev, func, reg, 0xFFFFFFFF);
+    if is64 == 1 { pci_wr(bus, dev, func, reg + 4, 0xFFFFFFFF); }
+    let mask_lo = pci_rd(bus, dev, func, reg) & 0xFFFFFFF0;
+    let mask_hi = 0;
+    if is64 == 1 { mask_hi = pci_rd(bus, dev, func, reg + 4); }
+    pci_wr(bus, dev, func, reg, lo);
+    if is64 == 1 { pci_wr(bus, dev, func, reg + 4, hi); }
+    let mask = mask_lo;
+    if is64 == 1 { mask = mask | (mask_hi << 32); }
+    if mask == 0 { return 0; }
+    let size = 0 - mask;
+    if is64 == 0 { size = size & 0xFFFFFFFF; }
+    if size == 0 { return 0; }
+    let end = offset + len;
+    if end < offset { return 0; }
+    if end > size { return 0; }
+    let base = pci_bar_base(bus, dev, func, bar);
+    if base == 0 { return 0; }
+    let abs = base + offset;
+    if abs < base { return 0; }
+    let abs_end = abs + len;
+    if abs_end < abs { return 0; }
+    sq(&dl_bar_size, size);
+    return 1;
 }
 fn pci_io_bar_base(bus, dev, func, bar) {
     return pci_rd(bus, dev, func, 0x10 + bar * 4) & 0xFFFFFFFC;
@@ -247,26 +317,64 @@ fn resolve_virtio_caps(bus, dev, func) {
     sq(&dl_device_cfg, 0);
     sq(&dl_isr_cfg, 0);
     sw(&dl_notify_mult, 0);
+    sw(&dl_common_len, 0);
+    sw(&dl_notify_len, 0);
+    sw(&dl_device_len, 0);
+    sw(&dl_isr_len, 0);
     if (pci_rd16(bus, dev, func, 0x06) & PCI_STATUS_CAPS) == 0 { return 0; }
-    let cap = pci_rd8(bus, dev, func, PCI_CAP_PTR_REG) & 0xFC;
+    let capraw = pci_rd8(bus, dev, func, PCI_CAP_PTR_REG);
+    if (capraw & 3) != 0 { return 0; }
+    let cap = capraw & 0xFC;
     let guard = 0;
     while cap != 0 {
-        if guard > 48 { cap = 0; }                       # bounded walk (fail-safe)
+        if guard > 48 { return 0; }
         else {
+            if cap < 0x40 { return 0; }
+            if cap > 0xF0 { return 0; }
             let vndr = pci_rd8(bus, dev, func, cap);
-            let nxt  = pci_rd8(bus, dev, func, cap + 1) & 0xFC;
+            let nxtraw = pci_rd8(bus, dev, func, cap + 1);
+            if (nxtraw & 3) != 0 { return 0; }
+            let nxt = nxtraw & 0xFC;
+            if nxt != 0 {
+                if nxt < 0x40 { return 0; }
+                if nxt > 0xFC { return 0; }
+            }
             if vndr == PCI_CAP_VNDR_VIRTIO {
+                let caplen = pci_rd8(bus, dev, func, cap + 2);
+                if caplen < 16 { return 0; }
+                let capend = cap + caplen;
+                if capend < cap { return 0; }
+                if capend > 0x100 { return 0; }
                 let ctype = pci_rd8(bus, dev, func, cap + 3);
                 let bar   = pci_rd8(bus, dev, func, cap + 4) & 0xFF;
                 let off   = pci_rd(bus, dev, func, cap + 8);
-                let abs   = pci_bar_base(bus, dev, func, bar) + off;
-                if ctype == VIRTIO_CAP_COMMON { sq(&dl_common_cfg, abs); }
+                let winlen = pci_rd(bus, dev, func, cap + 12);
+                if pci_mem_bar_window(bus, dev, func, bar, off, winlen) == 0 { return 0; }
+                let base = pci_bar_base(bus, dev, func, bar);
+                let abs = base + off;
+                if abs < base { return 0; }
+                if ctype == VIRTIO_CAP_COMMON {
+                    if winlen < VIRTIO_COMMON_MIN_LEN { return 0; }
+                    sq(&dl_common_cfg, abs);
+                    sw(&dl_common_len, winlen);
+                }
                 if ctype == VIRTIO_CAP_NOTIFY {
+                    if caplen < 20 { return 0; }
+                    if winlen < VIRTIO_NOTIFY_MIN_LEN { return 0; }
                     sq(&dl_notify_base, abs);
+                    sw(&dl_notify_len, winlen);
                     sw(&dl_notify_mult, pci_rd(bus, dev, func, cap + 16));
                 }
-                if ctype == VIRTIO_CAP_ISR { sq(&dl_isr_cfg, abs); }
-                if ctype == VIRTIO_CAP_DEVICE { sq(&dl_device_cfg, abs); }
+                if ctype == VIRTIO_CAP_ISR {
+                    if winlen < VIRTIO_ISR_MIN_LEN { return 0; }
+                    sq(&dl_isr_cfg, abs);
+                    sw(&dl_isr_len, winlen);
+                }
+                if ctype == VIRTIO_CAP_DEVICE {
+                    if winlen < VIRTIO_DEVICE_MIN_LEN { return 0; }
+                    sq(&dl_device_cfg, abs);
+                    sw(&dl_device_len, winlen);
+                }
             }
             cap = nxt;
             guard = guard + 1;
@@ -274,6 +382,7 @@ fn resolve_virtio_caps(bus, dev, func) {
     }
     if lq(&dl_common_cfg) == 0 { return 0; }
     if lq(&dl_isr_cfg) == 0 { return 0; }
+    if lq(&dl_notify_base) == 0 { return 0; }
     return 1;
 }
 
@@ -401,10 +510,12 @@ fn reserve_driver_window(slot) {
 fn driver_manager_bind_authority(id, transport) {
     let slot = DRIVER_SLOT;
     if transport == TRANSPORT_MODERN {
-        drvhost_grant_mmio(id, lq(&dl_common_cfg), 0x1000);
-        drvhost_grant_mmio(id, lq(&dl_notify_base), 0x4000);
-        drvhost_grant_mmio(id, lq(&dl_isr_cfg), 0x1000);
-        if lq(&dl_device_cfg) != 0 { drvhost_grant_mmio(id, lq(&dl_device_cfg), 0x1000); }
+        if drvhost_grant_mmio(id, lq(&dl_common_cfg), lw(&dl_common_len)) != 0 { return 0; }
+        if drvhost_grant_mmio(id, lq(&dl_notify_base), lw(&dl_notify_len)) != 0 { return 0; }
+        if drvhost_grant_mmio(id, lq(&dl_isr_cfg), lw(&dl_isr_len)) != 0 { return 0; }
+        if lq(&dl_device_cfg) != 0 {
+            if drvhost_grant_mmio(id, lq(&dl_device_cfg), lw(&dl_device_len)) != 0 { return 0; }
+        }
     } else {
         drvhost_grant_pio(id, lw(&dl_io_base), lw(&dl_io_base) + 0x1F);
     }
@@ -465,9 +576,11 @@ fn driver_manager_init() {
     if dev < 0 { return dl_fail(1); }
 
     let did = (pci_rd(0, dev, 0, 0) >> 16) & 0xFFFF;
-    # Enable memory/I/O space + bus mastering (control-plane only).
+    # Quiesce the function before consuming device-supplied capabilities or
+    # probing BAR apertures. A rejected function remains unable to DMA.
     let cmd = pci_rd16(0, dev, 0, PCI_CMD_REG);
-    pci_wr(0, dev, 0, PCI_CMD_REG, cmd | PCI_CMD_IO | PCI_CMD_MEM | PCI_CMD_BUSMSTR);
+    pci_wr(0, dev, 0, PCI_CMD_REG,
+           cmd & (0xFFFF - PCI_CMD_IO - PCI_CMD_MEM - PCI_CMD_BUSMSTR));
 
     let transport = TRANSPORT_MODERN;
     if resolve_virtio_caps(0, dev, 0) == 0 {
@@ -478,6 +591,19 @@ fn driver_manager_init() {
         transport = TRANSPORT_LEGACY;
     }
     sw(&dl_transport, transport);
+
+    # Split-ring descriptor addresses are controlled by the ring-3 driver and
+    # consumed by a bus-mastering device. CPU page tables do not constrain that
+    # DMA, and this kernel has no live per-device IOMMU domain. Fail closed:
+    # leave decode/bus-mastering disabled and do not launch the driver. This
+    # must be replaced only by a hardware-backed IOMMU-attestation predicate
+    # AND a trusted platform resource-map check proving every BAR aperture is
+    # MMIO rather than RAM; device-reported BAR sizing alone is not that trust
+    # anchor. Never replace this with a configuration toggle.
+    if virtio_dma_isolation_active() == 0 { return dl_fail(7); }
+
+    pci_wr(0, dev, 0, PCI_CMD_REG,
+           cmd | PCI_CMD_IO | PCI_CMD_MEM | PCI_CMD_BUSMSTR);
     let gsi = pci_rd8(0, dev, 0, 0x3C);
     if gsi == 0xFF { return dl_fail(3); }
     sw(&dl_irq_gsi, gsi);

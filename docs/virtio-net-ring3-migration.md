@@ -1,14 +1,35 @@
 # VirtIO-net → ring-3 driver-host migration
 
-**Status:** Complete and end-to-end verified 2026-07-14. Boot-time PCI
-enumeration, match/probe/bind, modern and transitional transports, brokered DMA,
-IRQ-to-workqueue dispatch, net.l2 RX/TX, and asynchronous DHCP are wired. Both
-QEMU transports reach `VNET BIND`, `DHCP L2 DISC`, `OFFER`, and `BOUND`.
+**Status: DEFERRED — fail-closed at bind (2026-07-20).** The migration *code*
+(boot-time PCI enumeration, match/probe/bind, modern and transitional transports,
+brokered MMIO/DMA, IRQ-to-workqueue dispatch, net.l2 RX/TX, asynchronous DHCP) is
+written and its broker-side invariants are proven, but **the driver is not
+launched on any target.** `driver_manager_init` quiesces the device (clears
+IO+MEM+BUSMASTER), validates the device-supplied VirtIO capabilities and BAR
+apertures, and then hits an unconditional fail-closed gate
+(`virtio_dma_isolation_active()` returns 0 → `dl_fail(7)`) that leaves
+bus-mastering disabled and never spawns the driver. See the security note below.
 
-The dedicated slot's pre-reserved identity-mapped DMA subrange is adopted into
-the signed broker budget during bind. RX frames are bounds-checked and copied
-under SMAP into kernel-owned scratch before parsing, avoiding both direct
-user-page parsing and DMA TOCTOU.
+> ⚠️ **Why deferred (arbitrary-DMA hazard).** A VirtIO split-ring's per-descriptor
+> `addr` fields are written by the ring-3 driver directly into the DMA-mapped ring
+> and are then dereferenced by a **bus-mastering device**. CPU page tables (the
+> driver's W+NX USER mapping) do **not** constrain that device DMA, and this
+> checkout has **no live per-device IOMMU domain**. The broker proves the vq *base*
+> pointers lie inside the driver's DMA grant (`drvhost_mmio_write_dma_ptr`,
+> `INV-DRIVER-NO-DMA-MINT`) and now also blocks writing those base registers
+> through the generic MMIO ops (`drv_mmio_overlaps_dma_ptr`) — but neither can
+> constrain the descriptor `addr` fields the device reads asynchronously. So a
+> code-exec-compromised ring-3 driver could point the device at arbitrary kernel
+> RAM. The **only** truthful mitigation without an IOMMU is to refuse to enable
+> bus-mastering, which is what the gate does. Lifting it requires a hardware-backed
+> IOMMU-attestation predicate **and** a trusted platform resource-map check proving
+> every BAR aperture is MMIO not RAM — **not** a config toggle.
+
+When (and only when) that gate is lifted, the design below applies: the dedicated
+slot's pre-reserved identity-mapped DMA subrange is adopted into the signed broker
+budget during bind, and RX frames are bounds-checked and copied under SMAP into
+kernel-owned scratch before parsing, avoiding both direct user-page parsing and
+DMA TOCTOU.
 
 **Verified 2026-07-14:**
 - Stage 1 plan ✅
@@ -309,18 +330,29 @@ already anticipates the DMA-pointer op.
   3. IRQ dispatch: `drvhost_irq_note` in the device vector stub → workqueue job →
      `drvhost_tick_begin` → `call_app_l3_driver(tick)`. Low-freq timer fallback for
      no-IRQ devices — **DONE**.
-  4. QEMU modern + transitional DHCP over the ring-3 path — **DONE**.
+  4. QEMU modern + transitional DHCP over the ring-3 path — **was demonstrated
+     once, now gated off.** Superseded by the fail-closed IOMMU gate (see Status);
+     unreachable until a real IOMMU domain exists.
 
-- **Stage 5 — validate ✅**: security guards + full UEFI build + QEMU boot with
-  `-device virtio-net-pci` (modern) and `disable-modern=on` (transitional); confirm
-  DHCP/ARP over the ring-3 path. Restore `test_virtio_net.ps1` adapted to ring-3.
+- **Stage 5 — validate (BLOCKED on IOMMU).** Broker invariants are proven
+  (`eval_drvhost_dma_mint.py`: `INV-DRIVER-NO-DMA-MINT`, incl. P4 pointer-mint and
+  P7 generic-write bypass) and the fail-closed gate is guarded
+  (`test_driver_framework.ps1`). **The prior "DHCP over the ring-3 path" bring-up
+  predates the fail-closed gate and is no longer reachable** — the driver does not
+  bus-master, so there is no end-to-end DHCP to confirm until a real IOMMU domain
+  exists. Do not re-mark this ✅ on the strength of that earlier run.
 
 ## 5. Invariants this preserves
 
 - **No ambient authority (G3):** every touch is brokered; code-exec in the driver
   gains nothing toward the kernel.
-- **DMA containment (INV-DRIVER-NO-DMA-MINT):** vq pointers programmed into the
-  device are proven inside the driver's own DMA grant before the broker writes them.
+- **DMA containment (INV-DRIVER-NO-DMA-MINT):** vq *base* pointers programmed into
+  the device are proven inside the driver's own DMA grant before the broker writes
+  them, and the base registers cannot be reached through the generic MMIO write ops
+  (`drv_mmio_overlaps_dma_ptr`). **Limit:** this does NOT cover per-descriptor
+  `addr` fields (device-dereferenced, not broker-mediated); descriptor-level DMA
+  containment requires an IOMMU — hence the fail-closed bind gate. Do not read this
+  invariant as "the device can only DMA within the grant."
 - **Shrink-only driver inventory:** untouched — this adds a ring-3 package, not an
   in-kernel driver.
 - **Quarantine/restart:** a faulting virtio_net driver is quarantined by the
