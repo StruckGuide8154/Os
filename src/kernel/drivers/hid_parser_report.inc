@@ -170,16 +170,16 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     ; Scale finger1_y to screen space same as finger0
     mov ecx, [hid_parsed_y_logical_max]
     sub ecx, [hid_parsed_y_logical_min]
-    test ecx, ecx
-    jz .no_second_finger
+    cmp ecx, 0
+    jle .no_second_finger
     sub eax, [hid_parsed_y_logical_min]
     jns .f1y_pos
     xor eax, eax
 .f1y_pos:
     imul eax, [scr_height]
     xor edx, edx
-    test ecx, ecx
-    jz .no_second_finger
+    cmp ecx, 0
+    jle .no_second_finger
     div ecx
     ; Average with finger0 Y for more stable tracking
     mov ecx, [mouse_y]
@@ -201,16 +201,16 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     ; Scale to screen X
     mov ecx, [hid_parsed_x_logical_max]
     sub ecx, [hid_parsed_x_logical_min]
-    test ecx, ecx
-    jz .no_second_finger
+    cmp ecx, 0
+    jle .no_second_finger
     sub eax, [hid_parsed_x_logical_min]
     jns .f1x_pos
     xor eax, eax
 .f1x_pos:
     imul eax, [scr_width]
     xor edx, edx
-    test ecx, ecx
-    jz .no_second_finger
+    cmp ecx, 0
+    jle .no_second_finger
     div ecx
     mov [hid_f1_x], eax         ; finger1 screen X
 
@@ -256,8 +256,8 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     imul eax, [scr_width]
     mov ecx, [hid_parsed_x_logical_max]
     sub ecx, [hid_parsed_x_logical_min]
-    test ecx, ecx
-    jz .clamp_coords
+    cmp ecx, 0
+    jle .clamp_coords
     xor edx, edx
     div ecx
     mov [mouse_x], eax
@@ -271,8 +271,8 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     imul eax, [scr_height]
     mov ecx, [hid_parsed_y_logical_max]
     sub ecx, [hid_parsed_y_logical_min]
-    test ecx, ecx
-    jz .clamp_coords
+    cmp ecx, 0
+    jle .clamp_coords
     xor edx, edx
     div ecx
     mov [mouse_y], eax
@@ -297,8 +297,8 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     mov [hid_abs_prev_x], ebx
     mov ecx, [hid_parsed_x_logical_max]
     sub ecx, [hid_parsed_x_logical_min]
-    test ecx, ecx
-    jz .abs_touchpad_y
+    cmp ecx, 0
+    jle .abs_touchpad_y
     imul eax, [scr_width]
     cdq
     idiv ecx
@@ -311,8 +311,8 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     mov [hid_abs_prev_y], ebx
     mov ecx, [hid_parsed_y_logical_max]
     sub ecx, [hid_parsed_y_logical_min]
-    test ecx, ecx
-    jz .clamp_coords
+    cmp ecx, 0
+    jle .clamp_coords
     imul eax, [scr_height]
     cdq
     idiv ecx
@@ -369,4 +369,4 @@ FN_BEGIN hid_process_touchpad_report, 0, 0, FN_RET_SCALAR
     pop rcx
     pop rbx
     ret
-
+

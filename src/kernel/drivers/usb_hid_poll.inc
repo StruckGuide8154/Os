@@ -115,19 +115,57 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 .not_nic_event:
 
     cmp byte [usb_slot2_active], 1
-    jne .is_slot1_data
+    jne .check_slot1_data
     movzx ecx, byte [usb_slot2_id]
     cmp edx, ecx
-    je .process_slot2_loop
+    jne .check_slot1_data
+    mov ecx, ebx
+    shr ecx, 16
+    and ecx, 0x1F
+    movzx edx, byte [usb_int_ep2_dci]
+    cmp ecx, edx
+    jne .loop
+    jmp .process_slot2_loop
+
+.check_slot1_data:
+    ; A Transfer Event is input only when both its Slot ID and Endpoint ID match
+    ; the interrupt-IN transfer we queued for slot 1. Unknown/control/stale
+    ; events must never reinterpret the slot-1 DMA buffer as fresh input.
+    movzx ecx, byte [usb_slot1_id]
+    cmp edx, ecx
+    jne .loop
+    mov ecx, ebx
+    shr ecx, 16
+    and ecx, 0x1F
+    movzx edx, byte [usb_int_ep1_dci]
+    cmp ecx, edx
+    jne .loop
 
 .is_slot1_data:
     ; Process Mouse Data at XHCI_MOUSE_BUF_ADDR (slot1)
     mov rsi, XHCI_MOUSE_BUF_ADDR
 
+    ; actual = queued length - Transfer Event residual. Never parse stale tail
+    ; bytes after a short packet, and reject an impossible residual.
+    movzx ecx, word [usb_ep_mps]
+    cmp ecx, XHCI_HID_REPORT_MAX
+    jbe .slot1_queued_len_ok
+    mov ecx, XHCI_HID_REPORT_MAX
+.slot1_queued_len_ok:
+    cmp r9d, ecx
+    ja .slot1_requeue
+    sub ecx, r9d
+
     ; DEBUG: snapshot first 4 report bytes + bump report counter
     push rax
+    cmp ecx, 4
+    jb .slot1_dbg_short
     mov eax, [rsi]
     mov [usb_dbg_report], eax
+    jmp .slot1_dbg_done
+.slot1_dbg_short:
+    mov dword [usb_dbg_report], 0
+.slot1_dbg_done:
     inc dword [usb_dbg_rpt]
     pop rax
 
@@ -138,31 +176,44 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     ; Skip report ID if present
     cmp byte [hid_parsed_has_report_id], 1
     jne .parsed_no_skip
+    test ecx, ecx
+    jz .slot1_requeue
     mov al, [rsi]
     cmp al, [hid_parsed_report_id]
     jne .parsed_report_id_mismatch
     inc rsi
+    dec ecx
 .parsed_no_skip:
-    movzx ecx, word [usb_ep_mps]
-    ; Fail-closed clamp on the parser extent: never walk more than a buffer's
-    ; worth regardless of the device-claimed mps (defence in depth vs the GHL mask).
-    cmp ecx, XHCI_HID_REPORT_MAX
-    jbe .parsed_len_ok
-    mov ecx, XHCI_HID_REPORT_MAX
-.parsed_len_ok:
     call hid_process_touchpad_report
     mov byte [mouse_moved], 1
     call usb_queue_mouse_read
     jmp .loop
 
 .parsed_report_id_mismatch:
+.slot1_requeue:
     call usb_queue_mouse_read
     jmp .loop
 
 .process_fixed_format:
-    ; Keyboard boot protocol: pass entire 8-byte report to parser, no mouse update
+    ; Fixed formats also use the completion-derived extent. Require every byte
+    ; that the selected protocol reads before touching the DMA buffer.
     cmp byte [usb_hid_protocol], 1
-    je .process_keyboard_report
+    jne .fixed_not_keyboard
+    cmp ecx, 8
+    jb .slot1_requeue
+    jmp .process_keyboard_report
+.fixed_not_keyboard:
+    cmp byte [usb_hid_protocol], 2
+    je .fixed_relative_extent
+    cmp byte [usb_hid_protocol], 0
+    je .fixed_relative_extent
+    cmp ecx, 5
+    jb .slot1_requeue
+    jmp .fixed_extent_ok
+.fixed_relative_extent:
+    cmp ecx, 3
+    jb .slot1_requeue
+.fixed_extent_ok:
 
     ; Update Buttons (mouse/touchpad)
     mov al, [rsi]
@@ -221,8 +272,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     call mouse_apply_sense_y
     add [mouse_y], eax
 
-    ; Scroll wheel: byte 3 present when MPS >= 4
-    movzx ecx, word [usb_ep_mps]
+    ; Scroll wheel: byte 3 must be present in this completion, not merely in MPS.
     cmp ecx, 4
     jl .no_usb_scroll
     movsx eax, byte [rsi + 3]
@@ -259,8 +309,22 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 
 .process_slot2_loop:
     ; Slot2 transfer event inline handler (routes back to .loop)
+    movzx ecx, word [usb_ep2_mps]
+    cmp ecx, XHCI_HID_REPORT_MAX
+    jbe .slot2_queued_len_ok
+    mov ecx, XHCI_HID_REPORT_MAX
+.slot2_queued_len_ok:
+    cmp r9d, ecx
+    ja .slot2_requeue_loop
+    sub ecx, r9d
     cmp byte [usb_hid_protocol2], 1
-    je .s2l_keyboard
+    jne .slot2_mouse_extent
+    cmp ecx, 8
+    jb .slot2_requeue_loop
+    jmp .s2l_keyboard
+.slot2_mouse_extent:
+    cmp ecx, 3
+    jb .slot2_requeue_loop
     ; Relative mouse: buf = XHCI_MOUSE_BUF2_ADDR
     mov rsi, XHCI_MOUSE_BUF2_ADDR
     mov al, [rsi]
@@ -299,6 +363,9 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 .s2l_keyboard:
     mov rsi, XHCI_MOUSE_BUF2_ADDR
     call usb_parse_keyboard_report
+    call usb_queue_mouse_read2
+    jmp .loop
+.slot2_requeue_loop:
     call usb_queue_mouse_read2
     jmp .loop
 
@@ -356,6 +423,7 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     call xhci_poll_event
     test eax, eax
     jz .ret2
+    mov r9d, edx
 
     ; Check event type
     mov edx, ebx
@@ -374,16 +442,37 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
     pop rax
     jne .ret2
 
+    mov edx, ebx
+    shr edx, 16
+    and edx, 0x1F
+    movzx ecx, byte [usb_int_ep2_dci]
+    cmp edx, ecx
+    jne .ret2
+
     cmp eax, 1
     je .slot2_data
     cmp eax, 13
     jne .ret2                   ; Error - ignore for now
 
 .slot2_data:
+    movzx ecx, word [usb_ep2_mps]
+    cmp ecx, XHCI_HID_REPORT_MAX
+    jbe .slot2_ret_queued_ok
+    mov ecx, XHCI_HID_REPORT_MAX
+.slot2_ret_queued_ok:
+    cmp r9d, ecx
+    ja .slot2_ret_requeue
+    sub ecx, r9d
     mov rsi, XHCI_MOUSE_BUF2_ADDR
     ; If slot2 is a keyboard, parse keyboard report
     cmp byte [usb_hid_protocol2], 1
-    je .slot2_keyboard_parse
+    jne .slot2_ret_mouse_extent
+    cmp ecx, 8
+    jb .slot2_ret_requeue
+    jmp .slot2_keyboard_parse
+.slot2_ret_mouse_extent:
+    cmp ecx, 3
+    jb .slot2_ret_requeue
     ; Process slot2 mouse data
     mov al, [rsi]
     mov [mouse_buttons], al
@@ -420,6 +509,10 @@ FN_BEGIN usb_poll_mouse, 0, 0, FN_RET_SCALAR
 
 .slot2_keyboard_parse:
     call usb_parse_keyboard_report
+    call usb_queue_mouse_read2
+    jmp .ret2
+
+.slot2_ret_requeue:
     call usb_queue_mouse_read2
 
 .ret2:
@@ -651,4 +744,4 @@ usb_queue_mouse_read2:
     movzx esi, byte [usb_int_ep2_dci]
     call xhci_ring_doorbell
     ret
-
+

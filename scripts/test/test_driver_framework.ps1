@@ -34,6 +34,8 @@ $netApp = Read-RepoFile 'src\user\grithl\apps\ping.ghl'
 $netNic = Read-RepoFile 'src\kernel\net\nic.asm'
 $netHandlers = Read-RepoFile 'src\kernel\proc\syscall_handlers_wx_net.inc'
 $driverLoader = Read-RepoFile 'src\kernel\grithlk\driver_loader.ghl'
+$usbHidPoll = Read-RepoFile 'src\kernel\drivers\usb_hid_poll.inc'
+$hidParser = Read-RepoFile 'src\kernel\drivers\hid_parser_parse.inc'
 $isr = Read-RepoFile 'src\kernel\core\isr.asm'
 
 Assert-Match $caps 'CAP_DRIVER\s+equ\s+0x2000' 'CAP_DRIVER is missing or renumbered.'
@@ -82,6 +84,23 @@ Assert-NoMatch $driverBlob '\[section \.driverblob2' 'Battery package escaped th
 Assert-Match $slotInstall 'DRIVER_BLOB_INSTALL_FN l3_copy_driver_blob2_to_slot[^\r\n]*driver2_blob_code_end, 2' 'Battery package has no kind-2 slot installer.'
 Assert-Match $driverLoader 'fn\s+battery_init[\s\S]*drvhost_policy_install\(BATTERY_SLOT,\s*DRV_CAP_PIO[\s\S]*drvhost_grant_pio\(id,\s*0x62,\s*0x66\)[\s\S]*call_app_l3_driver\(BATTERY_SLOT,\s*&app_hl_battery_main\)' 'Battery is not provisioned as a PIO-only ring-3 process.'
 Assert-NoMatch $kernelBuild 'src/kernel/drivers/battery\.asm' 'Retired in-kernel battery driver is still linked.'
+
+# Security regression: bus mastering remains disabled until a real IOMMU
+# predicate exists; hostile VirtIO capabilities are structurally and
+# aperture-checked before any MMIO grant is minted.
+Assert-Match $driverLoader 'fn\s+virtio_dma_isolation_active\(\)\s*\{\s*return\s+0;\s*\}' 'VirtIO no-IOMMU fail-closed gate is missing.'
+Assert-Match $driverLoader 'cmd\s*&\s*\(0xFFFF\s*-\s*PCI_CMD_IO\s*-\s*PCI_CMD_MEM\s*-\s*PCI_CMD_BUSMSTR\)[\s\S]*resolve_virtio_caps[\s\S]*if\s+virtio_dma_isolation_active\(\)\s*==\s*0\s*\{\s*return\s+dl_fail\(7\)' 'VirtIO device is not quiesced through capability validation and IOMMU admission.'
+Assert-Match $driverLoader 'if\s+bar\s*>\s*5\s*\{\s*return\s+0[\s\S]*if\s+\(lo\s*&\s*1\)\s*!=\s*0\s*\{\s*return\s+0' 'VirtIO BAR index/type validation is missing.'
+Assert-Match $driverLoader 'if\s+capend\s*>\s*0x100\s*\{\s*return\s+0[\s\S]*pci_mem_bar_window\(bus,\s*dev,\s*func,\s*bar,\s*off,\s*winlen\)' 'VirtIO capability extent is not checked against config space and BAR aperture.'
+Assert-NoMatch $driverLoader 'drvhost_grant_mmio\(id,[^\r\n]*0x4000' 'VirtIO loader still grants a fixed window larger than the capability aperture.'
+Assert-Match $broker 'fn\s+drv_mmio_overlaps_dma_ptr[\s\S]*fn\s+drvhost_mmio_write32[\s\S]*drv_mmio_overlaps_dma_ptr\(id,\s*addr,\s*4\)' 'Generic MMIO writes can bypass protected VirtIO DMA pointer registers.'
+
+# HID/xHCI regressions: use completion-derived extents, consume the Report-ID
+# byte from that extent, and accept events only from the queued slot+endpoint.
+Assert-Match $usbHidPoll 'cmp\s+r9d,\s*ecx\s*[\r\n]+\s*ja\s+\.slot1_requeue\s*[\r\n]+\s*sub\s+ecx,\s*r9d' 'USB HID ignores the xHCI residual transfer length.'
+Assert-Match $usbHidPoll 'inc\s+rsi\s*[\r\n]+\s*dec\s+ecx\s*[\r\n]+\.parsed_no_skip:' 'USB HID Report-ID skip does not reduce the parser extent.'
+Assert-Match $usbHidPoll 'usb_slot1_id[\s\S]{0,220}shr\s+ecx,\s*16[\s\S]{0,160}usb_int_ep1_dci[\s\S]{0,80}jne\s+\.loop' 'USB HID slot-1 input is not filtered by slot and endpoint ID.'
+Assert-Match $hidParser 'cmp\s+byte\s+\[hid_parsed_is_absolute\],\s*1[\s\S]{0,220}hid_parsed_x_logical_min[\s\S]{0,80}jle\s+\.parse_fail[\s\S]{0,180}hid_parsed_y_logical_min[\s\S]{0,80}jle\s+\.parse_fail' 'HID parser accepts a non-positive absolute logical range.'
 
 # Driver-host rows extend the syscall table past 255. Ordinary app syscall
 # permutations therefore need u16 cells; u8 cells alias rows 256+ onto 0..7.
