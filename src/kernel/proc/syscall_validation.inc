@@ -73,6 +73,29 @@ sc_validate_user_cstring:
 ;     immediately followed by '/', '\', or NUL): directory-traversal escape.
 ;     "a..b" / "..foo" are ordinary names and are allowed.
 ; Separators are both '/' (0x2F) and '\' (0x5C).
+;
+; MEMORY-SAFETY (self-bounding, TOCTOU-free): every user byte this scan reads is
+; first re-validated to lie inside the current app slot via sc_validate_user_range
+; (R15 = slot, maintained by the dispatcher) BEFORE it is dereferenced - see the
+; SPC_REQUIRE_INSLOT macro at each read site. The function therefore does NOT
+; trust that sc_validate_user_cstring ran first on an identical buffer, nor that
+; the NUL it found is still present: a concurrent same-slot writer (once per-CPU
+; CR3 lets app code run on another core - see process_placement.inc) could flip
+; that NUL after cstring passes, which would otherwise let this scan run all
+; max_len bytes and read past the slot end when ptr sits near slot_end. Each read
+; is independently bounded, so the scan is memory-safe under any concurrency.
+
+; Reject the whole scan (EAX=0) unless the single user byte at RDI lives in the
+; current app slot. rsi is dead here (max_len was copied to r11 at entry) and
+; sc_validate_user_range preserves rcx/rdx/r8/r9/r10/r11/rdi/rsi/r15, so no scan
+; state is lost across the call; only rax (the verdict) is clobbered.
+%macro SPC_REQUIRE_INSLOT 0
+    mov rsi, 1
+    call sc_validate_user_range
+    test eax, eax
+    jz .spc_reject
+%endmacro
+
 sc_validate_path_canonical:
     push rcx                                ; index
     push rdx                                ; current byte
@@ -88,6 +111,7 @@ sc_validate_path_canonical:
     cmp rcx, r11                            ; safety bound: never scan past max_len
     jae .spc_ok                             ; ran out without hitting a bad byte
     lea rdi, [r10 + rcx]
+    SPC_REQUIRE_INSLOT                          ; fail-closed if [ptr+rcx] left the slot
     USER_ACCESS_BEGIN                       ; SMAP: kernel reads a user-slot byte
     movzx edx, byte [rdi]
     USER_ACCESS_END
@@ -112,6 +136,7 @@ sc_validate_path_canonical:
     cmp r11, 2                              ; need a second byte to be a prefix
     jb .spc_not_first
     lea rdi, [r10 + 1]
+    SPC_REQUIRE_INSLOT                          ; byte1 (drive-prefix peek) must be in-slot
     USER_ACCESS_BEGIN
     movzx r8d, byte [rdi]
     USER_ACCESS_END
@@ -127,6 +152,7 @@ sc_validate_path_canonical:
     cmp rcx, r11
     jae .spc_ok                             ; lone '.' at slot/bound end -> fine
     lea rdi, [r10 + rcx]
+    SPC_REQUIRE_INSLOT                          ; lookahead byte must be in-slot too
     USER_ACCESS_BEGIN
     movzx r8d, byte [rdi]
     USER_ACCESS_END
@@ -137,6 +163,7 @@ sc_validate_path_canonical:
     cmp rcx, r11
     jae .spc_reject                         ; ".." flush against the bound -> reject
     lea rdi, [r10 + rcx]
+    SPC_REQUIRE_INSLOT                          ; lookahead byte must be in-slot too
     USER_ACCESS_BEGIN
     movzx r8d, byte [rdi]
     USER_ACCESS_END
