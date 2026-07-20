@@ -1,0 +1,10 @@
+# Track 11 L4: the forward edge of an indirect call is sound iff the target's
+# type signature matches the call site AND the target is a member of that type's
+# call table. Fine-grained (exact type-matched set), unlike coarse CET-IBT.
+invariant=INV-CFI-FORWARD-TARGET-IN-SET
+title=An indirect forward transfer's target is in its typeid call table
+statement=An indirect call is admitted iff the resolved target's type signature equals the call site's signature and the target is present in that type's call table; a foreign-typeid target or a same-typeid non-member is rejected. Both the type match and table membership are required.
+compromised=A code-pointer corruption redirecting an indirect call
+denied_authority=Any transfer to a target outside the call site's typeid table
+predicate=inv_cfi_forward_target_in_set
+status=proven

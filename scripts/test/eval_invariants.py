@@ -373,6 +373,14 @@ def exhaustive_specs(mod):
     auth_persist = mod.consts['AUTH_PERSIST']
     auth_global = mod.consts['AUTH_GLOBAL']
 
+    # Track 11 (structural CFI) modeling spaces. These are NOT AUTH_* bits, so
+    # they leave the authority enumeration width untouched; each is a small,
+    # high-signal range that still covers every equal/unequal and member/non-
+    # member combination for its predicate.
+    cfi_typeids = range(mod.consts['CFI_TYPEID_COUNT'])
+    cfi_offsets = range(mod.consts['CFI_OFFSET_SPAN'])
+    cfi_writers = range(mod.consts['CFI_WRITER_COUNT'])
+
     return {
         'INV-CAP-DERIVATION': {
             'predicate': 'inv_subset',
@@ -538,6 +546,38 @@ def exhaustive_specs(mod):
                       for old_floor in AUTH_SPACE
                       for new_floor in AUTH_SPACE),
             'expect': lambda args: 1 if args[1] >= args[0] else 0,
+        },
+        # Track 11 (structural CFI + memory-safety-by-construction) L4 modeling
+        # theorems. Proven over their bounded typeid/offset/writer spaces; they
+        # bound what a *sound* emitter may admit before the L1/L2 codegen exists.
+        # FORWARD-TARGET-IN-SET: admitted iff the target's typeid equals the call
+        # site's AND the target is a table member (both required).
+        'INV-CFI-FORWARD-TARGET-IN-SET': {
+            'predicate': 'inv_cfi_forward_target_in_set',
+            'cases': ((site, target, member)
+                      for site in cfi_typeids
+                      for target in cfi_typeids
+                      for member in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[0] == args[1] and args[2] != 0) else 0,
+        },
+        # NO-MIDFUNCTION-ENTRY: admitted iff the target offset is 0 (the entry);
+        # every non-zero offset (a mid-function gadget entry) is rejected.
+        'INV-CFI-NO-MIDFUNCTION-ENTRY': {
+            'predicate': 'inv_cfi_no_offset_entry',
+            'cases': ((offset,) for offset in cfi_offsets),
+            'expect': lambda args: 1 if args[0] == 0 else 0,
+        },
+        # SAFESTACK-RETURN-NO-FOREIGN-WRITE: a write to a return slot is admitted
+        # iff the writer is the canonical push/ret path. The expect fn is CONSTANT
+        # in a non-canonical writer for a return slot (only the canonical id is
+        # admitted); non-return-slot writes are vacuously admitted.
+        'INV-SAFESTACK-RETURN-NO-FOREIGN-WRITE': {
+            'predicate': 'inv_safestack_return_unwritable',
+            'cases': ((writer, canonical, is_return)
+                      for writer in cfi_writers
+                      for canonical in cfi_writers
+                      for is_return in BOOL_SPACE),
+            'expect': lambda args: 1 if (args[2] == 0 or args[0] == args[1]) else 0,
         },
     }
 

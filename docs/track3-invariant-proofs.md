@@ -72,11 +72,18 @@ counts are emitted by the run itself (the counts below are for `w = 7`).
 | INV-PLANTED-CAP-HMAC-REJECTED | a 128-bit cap-mask MAC recovered from one boot is accepted on a fresh boot only if both 64-bit lanes re-derive under the live canary | `inv_planted_cap_hmac_rejected` | C × C × S × M × P × B | 648 | proven |
 | INV-NO-ROLLBACK | an admitted artifact must have version >= the persisted floor | `inv_no_rollback` | A × A × B | 32,768 | proven |
 | INV-FLOOR-RATCHET-MONOTONIC | the persisted floor only ratchets forward (new >= old) | `inv_floor_ratchet_monotonic` | A × A | 16,384 | proven |
+| INV-CFI-FORWARD-TARGET-IN-SET | an indirect forward transfer accepted iff target typeid == site AND target ∈ that type's table (Track 11 L4) | `inv_cfi_forward_target_in_set` | T × T × B | 128 | proven |
+| INV-CFI-NO-MIDFUNCTION-ENTRY | a forward target accepted iff its offset is 0 (a function entry, never mid-function) (Track 11 L4) | `inv_cfi_no_offset_entry` | O | 64 | proven |
+| INV-SAFESTACK-RETURN-NO-FOREIGN-WRITE | a return-slot write accepted only from the canonical push/ret writer; CONSTANT in a foreign writer id (Track 11 L2) | `inv_safestack_return_unwritable` | W × W × B | 128 | proven |
 
-**Total: 21 invariants, 4,556,556 predicate evaluations, zero mismatches**
+**Total: 24 invariants, 4,556,876 predicate evaluations, zero mismatches**
 (verified by Worker A on 2026-06-28: +3 Track-6 compartment-isolation,
 +4 Track-4 leak/elevation replay-binding and cap-mask theorems, +2 Track-2
-anti-rollback theorems). State counts are re-derived on every run.
+anti-rollback theorems; +3 Track-11 structural-CFI/SafeStack modeling theorems
+on 2026-07-20, `T`/`O`/`W` = the bounded typeid/offset/writer spaces, NOT AUTH_*
+bits — they do not widen the authority enumeration). These three are Track-11
+invariants riding this shared runner; Track 3 itself remains closed. State counts
+are re-derived on every run.
 
 ### 1b. INV-DRIVER-NO-DMA-MINT re-proven against the real broker (Track 8)
 
