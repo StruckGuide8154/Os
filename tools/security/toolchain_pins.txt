@@ -46,7 +46,7 @@
 
 # The GHL/GritHLK compiler - the trusted-path compiler of record. Every kernel
 # module, user app, and security policy module is emitted by this exact file.
-file-sha256 | gritc.py | sha256 | 0b2ac5493e4bfb217be35128ddee43d2560d7bb133cfb8ed677ef0a25e733dcd | src/user/grithl/compiler/gritc.py
+file-sha256 | gritc.py | sha256 | 66d2077e01940d456369a1e52cd116cdc00c270c49f096b20469ae6cdcc77207 | src/user/grithl/compiler/gritc.py
 
 # The host-side Ed25519 reference + signer used by the envelope/provenance
 # machinery (write_envelope.py, the provenance signer). Pinning it makes the
