@@ -8,7 +8,7 @@
 #     python scripts/test/check_reproducible_build.py --update
 # Format: compiler | gritc.py | <sha256>   and   module | <path> | <sha256>
 # =============================================================================
-compiler | gritc.py | 0b2ac5493e4bfb217be35128ddee43d2560d7bb133cfb8ed677ef0a25e733dcd
+compiler | gritc.py | 66d2077e01940d456369a1e52cd116cdc00c270c49f096b20469ae6cdcc77207
 module | src/tools/security/signed_envelope.ghl | c1f796c3c1a7f121aceab91c6873c0b3306e77d9662d8302bc728f0b12024428
 module | src/tools/security/signed_artifact_check.ghl | 2da0c0e1993cfdfe344c29b5e8e9fc07a8a61ff821e729b6f023e7f988ee6170
 module | src/tools/security/threshold_check.ghl | a9daef1fbba4183d547ffcee8aa67e6aab0802208ace649e055463bf2cf184e5
