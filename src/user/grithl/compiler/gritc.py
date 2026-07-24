@@ -776,20 +776,39 @@ _REG_WORD = re.compile(r"\b([a-z][a-z0-9]+)\b")
 # Operands considered safe to relocate: they read no registers other than
 # rbp/rip-relative or are pure immediates. We detect by checking the operand
 # does not mention any general-purpose reg name that could be clobbered by
-# the move target. Conservative: only allow rbp, rsp, rip in operands.
-_ALLOWED_OPERAND_REGS = {"rbp","rsp","rip"}
+# the move target.
+#
+# rsp is deliberately NOT on this list. Pass A (the push/pop arg-staging
+# collapse) removes the very `push`/`pop` pairs between the staged loads, so an
+# rsp-relative source is not position-independent across the rewrite: the first
+# `push` displaces rsp, so `mov rax, [rsp+K]` at stage i>0 reads a different
+# stack word than the same text would after the pushes are deleted. Treating rsp
+# as relocatable made the "lossless" peephole silently miscompile any rsp-based
+# staging (e.g. inline `asm` that marshals spilled/stack values through
+# push/pop) - even on the kernel target at -O0, where this pass always runs. The
+# naive stack-machine emitter (gen_expr) never sources rsp, so excluding it
+# loses no real optimization; it only closes the unsound rewrite. See
+# tests/test_peephole_rsp.py.
+_ALLOWED_OPERAND_REGS = {"rbp","rip"}
 
 def _operand_safe_for_target(op, target_reg):
     # Reject if operand references the target register (would change meaning).
     if re.search(r"\b" + re.escape(target_reg) + r"\b", op):
         return False
     # Reject if operand references any register not in the allowlist (could be
-    # clobbered by an earlier move in the rewritten sequence).
+    # clobbered by an earlier move in the rewritten sequence), or the stack
+    # pointer (whose value the collapsed push/pop staging changes - see the
+    # _ALLOWED_OPERAND_REGS note).
     for m in _REG_WORD.finditer(op):
         w = m.group(1)
         # skip pure decimal numbers (already filtered by \b[a-z]) and known-safe
         if w in _ALLOWED_OPERAND_REGS: continue
         if w in ("byte","word","dword","qword","ptr","rel"): continue
+        # Stack-pointer spellings are NOT relocatable across the push/pop pairs
+        # this pass deletes: the pushes displace rsp, so an rsp-relative source
+        # reads a different slot before vs after the rewrite. Reject any width.
+        if w in ("rsp","esp","sp","spl"):
+            return False
         # any other identifier that looks like a register? Be conservative:
         # ban rax/rbx/rcx/rdx/rsi/rdi/r8..r15 - these can be clobbered.
         if w == "rax" or w == "rbx" or w == "rcx" or w == "rdx" \
