@@ -1,0 +1,28 @@
+# =============================================================================
+# .gitattributes - working-tree normalization for content-pinned files.
+#
+# WHY THIS EXISTS (Track 1, frozen-toolchain pins):
+#   tools/security/check_toolchain_pins.ps1 and scripts/test/check_reproducible_build.py
+#   pin gritc.py and ed25519_host.py by sha256 of the file AS IT SITS ON DISK, so
+#   a swapped compiler is rejected like a new .asm. Without an explicit eol rule,
+#   the bytes on disk depend on the checkout platform: the GHL-security job runs
+#   on windows-latest, where Git for Windows materializes text files with CRLF,
+#   while a Linux/macOS checkout gets LF. The same commit therefore hashed two
+#   different ways, so a pin baked on one platform failed the guard on the other
+#   (and a contributor re-baking it on their platform broke CI, and vice versa).
+#
+#   Every text file in this repo is stored LF in the index (verified: `git ls-files
+#   --eol` reports i/lf for all 915 text blobs, zero i/crlf), so pinning *.py to
+#   LF in the working tree makes the on-disk bytes equal the canonical git blob on
+#   every platform. The pins are now platform-independent, and the guard means what
+#   it says: a digest change is a real content change, never a checkout artifact.
+#
+#   This is scoped to the file class that is actually content-pinned rather than
+#   to individual paths, so a pin added for a future .py tool inherits the property
+#   instead of silently reintroducing the split. Nothing else about the working
+#   tree changes: no blob is renormalized by this file, because none of them are
+#   CRLF in the index to begin with.
+# =============================================================================
+
+# Content-pinned toolchain sources: identical bytes on every platform.
+*.py text eol=lf
