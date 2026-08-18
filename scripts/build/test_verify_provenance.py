@@ -153,5 +153,38 @@ class StatementSemanticTests(unittest.TestCase):
             vp.validate_statement(stmt)
 
 
+class CosignerPolicyTests(unittest.TestCase):
+    def test_accepts_policy_class_threshold(self):
+        kind = vp.we.ART["policy"]
+        vp.validate_cosigner_policy(kind, 2, 0x3F, vp.we.CLASS_REQUIRED_MASK[kind])
+
+    def test_rejects_zero_signature_quorum(self):
+        kind = vp.we.ART["policy"]
+        with self.assertRaisesRegex(ValueError, "class policy range"):
+            vp.validate_cosigner_policy(kind, 0, 0, 0)
+
+    def test_rejects_required_role_not_allowed(self):
+        kind = vp.we.ART["policy"]
+        required = vp.we.CLASS_REQUIRED_MASK[kind]
+        with self.assertRaisesRegex(ValueError, "must also be allowed"):
+            vp.validate_cosigner_policy(kind, 2, 0x01, required)
+
+    def test_rejects_class_required_role_removal(self):
+        kind = vp.we.ART["policy"]
+        with self.assertRaisesRegex(ValueError, "weakens"):
+            vp.validate_cosigner_policy(kind, 2, 0x3F, 0)
+
+    def test_rejects_unknown_role_bits(self):
+        kind = vp.we.ART["policy"]
+        with self.assertRaisesRegex(ValueError, "unknown roles"):
+            vp.validate_cosigner_policy(kind, 2, 0x7F, vp.we.CLASS_REQUIRED_MASK[kind])
+
+    def test_rejects_unsatisfiable_quorum(self):
+        kind = vp.we.ART["policy"]
+        required = vp.we.CLASS_REQUIRED_MASK[kind]
+        with self.assertRaisesRegex(ValueError, "cannot satisfy"):
+            vp.validate_cosigner_policy(kind, 3, required, required)
+
+
 if __name__ == "__main__":
     unittest.main()
