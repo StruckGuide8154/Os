@@ -9,6 +9,7 @@ on:
       - "scripts/build/write_envelope.py"
       - "scripts/build/ed25519_host.py"
       - "scripts/build/test_verify_provenance.py"
+      - "scripts/build/test_write_envelope.py"
       - ".github/workflows/python-ci.yml"
   pull_request:
     branches: ["master"]
@@ -18,6 +19,7 @@ on:
       - "scripts/build/write_envelope.py"
       - "scripts/build/ed25519_host.py"
       - "scripts/build/test_verify_provenance.py"
+      - "scripts/build/test_write_envelope.py"
       - ".github/workflows/python-ci.yml"
 
 permissions:
@@ -67,7 +69,10 @@ jobs:
       - name: Byte-compile Python tooling and provenance verifier
         run: |
           python -m compileall -q tools
-          python -m py_compile scripts/build/verify_provenance.py scripts/build/write_envelope.py scripts/build/ed25519_host.py scripts/build/test_verify_provenance.py
+          python -m py_compile scripts/build/verify_provenance.py scripts/build/write_envelope.py scripts/build/ed25519_host.py scripts/build/test_verify_provenance.py scripts/build/test_write_envelope.py
 
       - name: Provenance parser fail-closed regression tests
         run: python scripts/build/test_verify_provenance.py
+
+      - name: Provenance writer integrity regression tests
+        run: python scripts/build/test_write_envelope.py
