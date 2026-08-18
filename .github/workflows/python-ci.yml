@@ -39,7 +39,9 @@ jobs:
         # change CI behavior or become an unreviewed supply-chain input.
         run: python -m pip install --disable-pip-version-check --no-deps "ruff==0.16.0"
       - name: Ruff (lint)
+        # Lint is an integrity gate, not advisory output. Fail closed so a
+        # malformed or unsafe Python tooling change cannot pass merely because
+        # it still byte-compiles.
         run: ruff check tools --output-format=github
-        continue-on-error: true
       - name: Byte-compile all tools
         run: python -m compileall -q tools
