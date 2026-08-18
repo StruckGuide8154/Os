@@ -139,10 +139,16 @@ def main():
         builder_id = 'local:' + socket.gethostname()
 
     artifacts = []
+    seen_artifact_names = set()
     for a in args.artifact:
         if '=' not in a:
             sys.exit("--artifact must be NAME=PATH, got %r" % a)
         name, path = a.split('=', 1)
+        if not name.strip():
+            sys.exit("--artifact name must be non-empty")
+        if name in seen_artifact_names:
+            sys.exit("duplicate --artifact name: %s" % name)
+        seen_artifact_names.add(name)
         if not os.path.exists(path):
             sys.exit("artifact path does not exist: %s" % path)
         artifacts.append((name, path))
