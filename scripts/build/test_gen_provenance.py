@@ -49,9 +49,18 @@ def test_empty_artifact_name_fails_closed():
     assert not output_exists, "generator wrote an envelope after empty-name rejection"
 
 
+def test_artifact_name_whitespace_fails_closed():
+    for name in (" KERNEL.BIN", "KERNEL.BIN ", "\tKERNEL.BIN"):
+        proc, output_exists = run_generator(name)
+        assert proc.returncode != 0, "non-canonical artifact name unexpectedly succeeded"
+        assert "leading or trailing whitespace" in (proc.stdout + proc.stderr)
+        assert not output_exists, "generator wrote an envelope after whitespace-name rejection"
+
+
 def main():
     test_duplicate_artifact_names_fail_closed()
     test_empty_artifact_name_fails_closed()
+    test_artifact_name_whitespace_fails_closed()
     print("gen_provenance regression tests: PASS")
     return 0
 
