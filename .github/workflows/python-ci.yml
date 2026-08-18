@@ -3,10 +3,22 @@ name: Python tooling CI
 on:
   push:
     branches: ["master"]
-    paths: ["tools/**.py", ".github/workflows/python-ci.yml"]
+    paths:
+      - "tools/**.py"
+      - "scripts/build/verify_provenance.py"
+      - "scripts/build/write_envelope.py"
+      - "scripts/build/ed25519_host.py"
+      - "scripts/build/test_verify_provenance.py"
+      - ".github/workflows/python-ci.yml"
   pull_request:
     branches: ["master"]
-    paths: ["tools/**.py", ".github/workflows/python-ci.yml"]
+    paths:
+      - "tools/**.py"
+      - "scripts/build/verify_provenance.py"
+      - "scripts/build/write_envelope.py"
+      - "scripts/build/ed25519_host.py"
+      - "scripts/build/test_verify_provenance.py"
+      - ".github/workflows/python-ci.yml"
 
 permissions:
   contents: read
@@ -17,7 +29,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint & compile (Python tooling)
+    name: Lint, compile & provenance parser tests
     # Pin the runner OS generation instead of following the mutable
     # ubuntu-latest alias. The image itself still receives security updates,
     # but a future alias migration cannot silently change the CI platform.
@@ -46,10 +58,16 @@ jobs:
         env:
           PIP_NO_INPUT: "1"
         run: python -m pip install --disable-pip-version-check --no-deps --no-cache-dir --only-binary=:all: "ruff==0.16.0"
-      - name: Ruff (lint)
-        # Lint is an integrity gate, not advisory output. Fail closed so a
-        # malformed or unsafe Python tooling change cannot pass merely because
-        # it still byte-compiles.
+
+      - name: Ruff (lint tooling)
+        # Keep the existing tooling lint gate scoped to tools/ so unrelated
+        # legacy build scripts are not silently pulled into this change.
         run: ruff check tools --output-format=github
-      - name: Byte-compile all tools
-        run: python -m compileall -q tools
+
+      - name: Byte-compile Python tooling and provenance verifier
+        run: |
+          python -m compileall -q tools
+          python -m py_compile scripts/build/verify_provenance.py scripts/build/write_envelope.py scripts/build/ed25519_host.py scripts/build/test_verify_provenance.py
+
+      - name: Provenance parser fail-closed regression tests
+        run: python scripts/build/test_verify_provenance.py
