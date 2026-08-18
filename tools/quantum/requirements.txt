@@ -1,3 +1,6 @@
-qiskit>=2.4.1
-qiskit-ibm-runtime>=0.47.0
-numpy>=2.4.6
+# Security/reproducibility: keep direct quantum-tooling dependencies immutable.
+# Dependabot (.github/dependabot.yml) is responsible for proposing reviewed
+# version updates rather than allowing unreviewed future releases at install time.
+qiskit==2.4.1
+qiskit-ibm-runtime==0.47.0
+numpy==2.4.6
