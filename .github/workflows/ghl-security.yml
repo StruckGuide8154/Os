@@ -22,11 +22,13 @@ jobs:
     # consume a runner indefinitely. This is deliberately generous for the
     # current verification + provenance path while still failing closed.
     timeout-minutes: 30
-    # windows-latest: the guards are PowerShell 5.1 (Set-StrictMode / desktop
-    # PowerShell semantics) and the repo is Windows-centric. The entry point
-    # shells out to `python src/user/grithl/compiler/gritc.py`, so we also set
-    # up Python on the runner.
-    runs-on: windows-latest
+    # Pin the runner OS generation instead of following the mutable
+    # windows-latest alias. The image itself still receives security updates,
+    # but a future alias migration cannot silently change the CI platform.
+    # The guards are PowerShell 5.1 (Set-StrictMode / desktop PowerShell
+    # semantics) and the repo is Windows-centric. The entry point shells out to
+    # `python src/user/grithl/compiler/gritc.py`, so we also set up Python.
+    runs-on: windows-2025
     steps:
       - name: Checkout
         # Pin third-party Actions to immutable commits. The trailing version
