@@ -32,42 +32,102 @@ import ed25519_host           # noqa: E402
 import write_envelope as we   # noqa: E402
 
 
+FIXED_HEADER_LEN = 18
+MIN_FIELD_COUNT = 12
+MAX_FIELD_COUNT = 64
+VALID_MINIMAL_WIDTHS = (1, 2, 4)
+
+
 def parse_envelope(blob):
     """Return (statement_dict, canonical_bytes, sig_block, kind, min_cosigners,
-    allowed_mask, required_mask)."""
+    allowed_mask, required_mask).
+
+    The verifier is a trust-boundary parser, so malformed envelopes must fail
+    closed with ValueError rather than relying on Python slicing/index errors.
+    """
+    if len(blob) < FIXED_HEADER_LEN:
+        raise ValueError('envelope shorter than fixed header')
     if blob[:4] != b'GRSE':
         raise ValueError('bad magic (not a GRSE envelope)')
+
     schema, kind, domain, field_count, header_len = struct.unpack('<HHHHH', blob[4:14])
     payload_len = struct.unpack('<I', blob[14:18])[0]
+
+    if schema != 1:
+        raise ValueError('unsupported schema version %d' % schema)
+    if not MIN_FIELD_COUNT <= field_count <= MAX_FIELD_COUNT:
+        raise ValueError('field count %d outside canonical range %d..%d'
+                         % (field_count, MIN_FIELD_COUNT, MAX_FIELD_COUNT))
+    if header_len < FIXED_HEADER_LEN:
+        raise ValueError('header length %d smaller than fixed header' % header_len)
+    if header_len > len(blob):
+        raise ValueError('header length %d overruns envelope' % header_len)
+
     payload_start = header_len
     payload_end = payload_start + payload_len
     if payload_end > len(blob):
         raise ValueError('payload overruns envelope')
+
     payload = blob[payload_start:payload_end]
     canonical = blob[:payload_end]
     sig_block = blob[payload_end:]
+    if len(sig_block) % 64 != 0:
+        raise ValueError('signature block length is not a multiple of 64 bytes')
 
-    # Walk the TLV region to recover COSIGNER_ROLES (field id 10).
-    min_cosigners = we.CLASS_MIN_COUNT.get(kind, 2)
-    allowed_mask = 0x3F
-    required_mask = we.CLASS_REQUIRED_MASK.get(kind, 0)
-    off = 18
+    # Walk the TLV region to recover COSIGNER_ROLES (field id 10). Every
+    # boundary is checked against header_len so a hostile width/length cannot
+    # read into payload/signature bytes or trigger an uncaught IndexError.
+    min_cosigners = None
+    allowed_mask = None
+    required_mask = None
+    off = FIXED_HEADER_LEN
+    prev_fid = 0
 
     def read_minimal(o):
+        if o >= header_len:
+            raise ValueError('truncated minimal-width scalar')
         width = blob[o]
         o += 1
-        v = int.from_bytes(blob[o:o + width], 'little')
-        return v, o + width
+        if width not in VALID_MINIMAL_WIDTHS:
+            raise ValueError('invalid minimal-width scalar size %d' % width)
+        if o + width > header_len:
+            raise ValueError('minimal-width scalar overruns header')
+        raw = blob[o:o + width]
+        value = int.from_bytes(raw, 'little')
+        if width == 2 and value <= 0xFF:
+            raise ValueError('non-minimal 2-byte scalar encoding')
+        if width == 4 and value <= 0xFFFF:
+            raise ValueError('non-minimal 4-byte scalar encoding')
+        return value, o + width
 
     for _ in range(field_count):
         fid, off = read_minimal(off)
+        if fid <= prev_fid:
+            raise ValueError('TLV field ids are not strictly increasing')
+        prev_fid = fid
+
         vlen, off = read_minimal(off)
-        val = blob[off:off + vlen]
-        off += vlen
-        if fid == 10 and vlen == 6:
+        value_end = off + vlen
+        if value_end > header_len:
+            raise ValueError('TLV value overruns declared header')
+        val = blob[off:value_end]
+        off = value_end
+
+        if fid == 10:
+            if vlen != 6:
+                raise ValueError('COSIGNER_ROLES must be exactly 6 bytes')
             min_cosigners, allowed_mask, required_mask = struct.unpack('<HHH', val)
 
-    stmt = json.loads(payload.decode('utf-8'))
+    if off != header_len:
+        raise ValueError('TLV region length does not match declared header length')
+    if min_cosigners is None:
+        raise ValueError('missing required COSIGNER_ROLES field')
+
+    try:
+        stmt = json.loads(payload.decode('utf-8'))
+    except UnicodeDecodeError as e:
+        raise ValueError('payload is not valid UTF-8') from e
+
     return (stmt, canonical, sig_block, kind,
             min_cosigners, allowed_mask, required_mask)
 
@@ -110,7 +170,7 @@ def main():
 
     try:
         stmt, roles = verify(blob)
-    except (ValueError, KeyError, json.JSONDecodeError) as e:
+    except (ValueError, KeyError, json.JSONDecodeError, struct.error, TypeError) as e:
         print("[provenance-verify] FAIL: %s" % e)
         return 1
 
@@ -121,8 +181,15 @@ def main():
             failures.append("revision mismatch: envelope %s != expected %s"
                             % (rev, args.expect_revision))
     if args.expect_artifact:
-        embedded = {a['name']: a['sha256'] for a in stmt.get('artifacts', [])}
+        try:
+            embedded = {a['name']: a['sha256'] for a in stmt.get('artifacts', [])}
+        except (TypeError, KeyError):
+            print("[provenance-verify] FAIL: malformed artifacts list")
+            return 1
         for pair in args.expect_artifact:
+            if '=' not in pair:
+                failures.append("invalid --expect-artifact value %r (expected NAME=SHA)" % pair)
+                continue
             name, sha = pair.split('=', 1)
             if embedded.get(name) != sha:
                 failures.append("artifact %s mismatch: envelope %s != expected %s"
@@ -134,10 +201,17 @@ def main():
             print("  - %s" % f)
         return 1
 
+    try:
+        builder_id = stmt['builder']['id']
+        revision = stmt['source']['revision']
+        artifact_count = len(stmt.get('artifacts', []))
+    except (KeyError, TypeError):
+        print("[provenance-verify] FAIL: malformed provenance statement structure")
+        return 1
+
     role_names = ', '.join('%d(%s)' % (r, ed25519_host.ROLE_NAMES[r]) for r in roles)
     print("[provenance-verify] PASS: builder=%s rev=%s artifacts=%d signed-by=[%s]"
-          % (stmt['builder']['id'], stmt['source']['revision'][:12],
-             len(stmt.get('artifacts', [])), role_names))
+          % (builder_id, revision[:12], artifact_count, role_names))
     if args.do_print:
         print(json.dumps(stmt, indent=2, sort_keys=True))
     return 0
