@@ -18,7 +18,10 @@ concurrency:
 jobs:
   lint:
     name: Lint & compile (Python tooling)
-    runs-on: ubuntu-latest
+    # Pin the runner OS generation instead of following the mutable
+    # ubuntu-latest alias. The image itself still receives security updates,
+    # but a future alias migration cannot silently change the CI platform.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
