@@ -82,7 +82,7 @@ class ParseEnvelopeTests(unittest.TestCase):
         # First field id is canonically encoded as width=1,value=1. Force width=2
         # without changing the declared header; the parser must reject before use.
         blob[18] = 2
-        with self.assertRaisesRegex(ValueError, "non-minimal|overruns"):
+        with self.assertRaisesRegex(ValueError, "minimal-width|non-minimal|overruns"):
             vp.parse_envelope(bytes(blob))
 
     def test_rejects_signature_tail_not_multiple_of_64(self):
