@@ -197,12 +197,43 @@ def validate_statement(stmt):
         _require_hex(artifact.get('sha256'), 64, 'artifact %r sha256' % name)
 
 
+def validate_cosigner_policy(kind, min_cosigners, allowed_mask, required_mask):
+    """Reject threshold metadata that weakens the artifact class policy.
+
+    COSIGNER_ROLES is signed metadata, but a hostile producer must not be able
+    to authenticate its own weaker policy (for example min_cosigners=0). Keep
+    the verifier aligned with write_envelope's per-class floors and role masks.
+    """
+    if kind not in we.CLASS_MIN_COUNT or kind not in we.CLASS_REQUIRED_MASK:
+        raise ValueError('no threshold policy for artifact type %d' % kind)
+
+    role_mask = (1 << 6) - 1
+    class_min = we.CLASS_MIN_COUNT[kind]
+    class_required = we.CLASS_REQUIRED_MASK[kind]
+
+    if not class_min <= min_cosigners <= 6:
+        raise ValueError('min cosigners %d outside class policy range %d..6'
+                         % (min_cosigners, class_min))
+    if allowed_mask & ~role_mask:
+        raise ValueError('allowed cosigner mask contains unknown roles')
+    if required_mask & ~role_mask:
+        raise ValueError('required cosigner mask contains unknown roles')
+    if required_mask & ~allowed_mask:
+        raise ValueError('required cosigner roles must also be allowed')
+    if class_required & ~required_mask:
+        raise ValueError('required cosigner mask weakens the artifact class policy')
+    if bin(allowed_mask).count('1') < min_cosigners:
+        raise ValueError('allowed cosigner set cannot satisfy minimum quorum')
+
+
 def verify(blob):
     (stmt, canonical, sig_block, kind,
      min_cosigners, allowed_mask, required_mask) = parse_envelope(blob)
 
     if kind != we.ART['policy']:
         raise ValueError('provenance envelope must be artifact-type policy, got %d' % kind)
+
+    validate_cosigner_policy(kind, min_cosigners, allowed_mask, required_mask)
 
     roles = we.pick_signing_roles(min_cosigners, allowed_mask, required_mask)
     n = len(sig_block) // 64
