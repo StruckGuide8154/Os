@@ -196,7 +196,8 @@ def build_envelope(payload, kind, domain, role,
         import ed25519_host
         signature_block = b''.join(
             ed25519_host.sign(ed25519_host.dev_role_secret(r), canonical)
-            for r in sign_roles)
+            for r in sign_roles
+        )
     else:
         signature_block = bytes([0x5A] * (64 * sig_count))  # placeholder slots
 
@@ -312,22 +313,21 @@ def main():
     else:
         provenance_hash = hashlib.sha256(payload).digest()
 
-    # Policy dependency hash (default: zero bytes for non-runnable; required for runnable).
+    # Policy dependency hash. Preserve an explicitly supplied value regardless
+    # of whether the caller also enables the stricter runnable-artifact gate.
+    # The zero hash is only the compatibility placeholder when no value was
+    # supplied; --require-policy-dep turns that placeholder into a hard error
+    # for runnable artifact classes.
+    policy_dep_hash = b'\x00' * 32
     if args.policy_dep:
         with open(args.policy_dep, 'rb') as fh:
             policy_dep_hash = fh.read()
         if len(policy_dep_hash) != 32:
             sys.exit("Policy-dep file must be exactly 32 bytes")
-    elif kind in RUNNABLE_TYPES:
-        # For runnable types, zero hash is a placeholder; the caller should
-        # supply a real policy dependency hash via --policy-dep.
-        policy_dep_hash = b'\x00' * 32
 
-    if args.require_policy_dep and kind in RUNNABLE_TYPES:
-        if policy_dep_hash == b'\x00' * 32:
-            raise SystemExit('runnable artifact requires a non-zero --policy-dep hash')
-    else:
-        policy_dep_hash = b'\x00' * 32
+    if (args.require_policy_dep and kind in RUNNABLE_TYPES
+            and policy_dep_hash == b'\x00' * 32):
+        raise SystemExit('runnable artifact requires a non-zero --policy-dep hash')
 
     envelope = build_envelope(
         payload, kind, domain, role,
