@@ -54,13 +54,17 @@ jobs:
           powershell -NoProfile -File scripts/test/ci_security_summary.ps1
           exit $LASTEXITCODE
 
-      # Track 1 "Path to 10/10": emit a signed SLSA-style provenance record for
-      # the trusted-path inputs and verify it through the Track-2/7 Ed25519 root.
-      # This runs the real gen->sign->verify path in CI (no nasm/full image link
-      # required: it stamps the pinned toolchain manifests, which always exist on
-      # a clean checkout). A full release build calls gen_provenance.py with the
-      # real KERNEL.BIN/APPS.BIN artifacts the same way.
-      - name: Signed CI provenance (SLSA-style, Track-2/7 Ed25519 root)
+      # Track 1 provenance path self-test. The current Ed25519 role secrets are
+      # DEVELOPMENT keys deterministically derived from public constants in
+      # scripts/build/ed25519_host.py. They are intentionally forgeable and are
+      # suitable only for exercising the envelope/sign/verify machinery.
+      #
+      # Do NOT upload or publish the resulting PROVENANCE.ENV as an attestation:
+      # a third party could create an indistinguishable envelope with the same
+      # public DEV keys. Publication must remain disabled until signing is moved
+      # to non-exportable production/HSM-held keys and the kernel trust root is
+      # re-baked accordingly.
+      - name: DEV-key provenance sign/verify self-test (not an attestation)
         shell: powershell
         run: |
           $env:GRIT_BUILDER_ID = "github:$($env:GITHUB_WORKFLOW_REF)"
@@ -70,19 +74,8 @@ jobs:
             --artifact reproducible_digests.txt=tools/security/reproducible_digests.txt
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python scripts/build/verify_provenance.py PROVENANCE.ENV --expect-revision $env:GITHUB_SHA
-          exit $LASTEXITCODE
-
-      - name: Upload verified provenance attestation
-        # Never publish an attestation from a failed generation/verification
-        # path. A failed provenance check must fail closed rather than leaving
-        # an artifact that could be mistaken for a successfully verified record.
-        if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: provenance
-          path: PROVENANCE.ENV
-          if-no-files-found: error
-          # CI provenance is useful for short-lived diagnosis/review, but there
-          # is no reason to retain every per-push attestation for the platform
-          # default lifetime. Minimize exposure and storage footprint.
-          retention-days: 7
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Remove the DEV-signed envelope after the self-test so later workflow
+          # changes cannot accidentally publish it as a trusted attestation.
+          Remove-Item -LiteralPath PROVENANCE.ENV -Force
+          exit 0
