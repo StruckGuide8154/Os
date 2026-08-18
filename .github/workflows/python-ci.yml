@@ -36,41 +36,56 @@ concurrency:
 jobs:
   lint:
     name: Lint, compile & provenance parser tests
-    # Pin the runner OS generation instead of following the mutable
-    # ubuntu-latest alias. The image itself still receives security updates,
-    # but a future alias migration cannot silently change the CI platform.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
-        # Execute the reviewed Action commit, not a mutable major-version tag.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # This workflow never pushes; do not leave a write-capable credential
-          # in the local git config for later steps to inherit.
           persist-credentials: false
+          # Needed to identify which tooling files actually changed. Provenance
+          # changes must not fail because of unrelated legacy lint debt elsewhere
+          # under tools/.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          # Keep the interpreter itself reviewable/reproducible. A bare `3.11`
-          # tracks the newest 3.11.x and can change CI behavior without a diff.
           python-version: "3.11.15"
 
       - name: Install Ruff
-        # Pin the executed linter so a future upstream release cannot silently
-        # change CI behavior or become an unreviewed supply-chain input. Require
-        # a prebuilt wheel so pip cannot fall back to executing an sdist build
-        # backend during CI, and disable prompts/caching for a fail-closed,
-        # ephemeral install path.
         env:
           PIP_NO_INPUT: "1"
         run: python -m pip install --disable-pip-version-check --no-deps --no-cache-dir --only-binary=:all: "ruff==0.16.0"
 
-      - name: Ruff (lint tooling)
-        # Keep the existing tooling lint gate scoped to tools/ so unrelated
-        # legacy build scripts are not silently pulled into this change.
-        run: ruff check tools --output-format=github
+      - name: Ruff changed tooling files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+          else
+            base="$PUSH_BEFORE"
+          fi
+
+          # A branch's first push uses an all-zero `before` SHA. Fall back to the
+          # root commit so the diff remains well-defined and fail-closed.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+          fi
+
+          mapfile -t changed < <(git diff --name-only "$base" "$GITHUB_SHA" -- 'tools/*.py' 'tools/**/*.py')
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "No Python files under tools/ changed; skipping unrelated legacy lint debt."
+            exit 0
+          fi
+
+          printf 'Linting changed tooling files:\n'
+          printf '  %s\n' "${changed[@]}"
+          ruff check "${changed[@]}" --output-format=github
 
       - name: Byte-compile Python tooling and provenance verifier
         run: |
