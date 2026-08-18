@@ -18,22 +18,10 @@ concurrency:
 jobs:
   ghl-security:
     name: GHL-only trusted path + legacy quarantine
-    # Bound untrusted-input / toolchain hangs so a wedged verification cannot
-    # consume a runner indefinitely. This is deliberately generous for the
-    # current verification + provenance path while still failing closed.
     timeout-minutes: 30
-    # Pin the runner OS generation instead of following the mutable
-    # windows-latest alias. The image itself still receives security updates,
-    # but a future alias migration cannot silently change the CI platform.
-    # The guards are PowerShell 5.1 (Set-StrictMode / desktop PowerShell
-    # semantics) and the repo is Windows-centric. The entry point shells out to
-    # `python src/user/grithl/compiler/gritc.py`, so we also set up Python.
     runs-on: windows-2025
     steps:
       - name: Checkout
-        # Pin third-party Actions to immutable commits. The trailing version
-        # comments make Dependabot/review updates easy without trusting a
-        # mutable major tag at execution time.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -41,29 +29,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          # Pin the patch release too: `3.11` resolves to the newest available
-          # 3.11.x and would silently change an executed CI dependency.
-          python-version: "3.11.15"
+          # 3.11.15/3.11.14 are source-only on the current Actions manifest for
+          # this line; 3.11.9 is the newest 3.11 patch with a published win32-x64
+          # setup-python package, so pin the exact Windows-available interpreter.
+          python-version: "3.11.9"
 
       - name: Run GHL security verification + surface signal lines
         shell: powershell
         run: |
-          # The script is checked into the repository and runs under the
-          # workflow's existing PowerShell context. Do not disable the runner's
-          # execution-policy guardrails just to invoke it.
           powershell -NoProfile -File scripts/test/ci_security_summary.ps1
           exit $LASTEXITCODE
 
-      # Track 1 provenance path self-test. The current Ed25519 role secrets are
-      # DEVELOPMENT keys deterministically derived from public constants in
-      # scripts/build/ed25519_host.py. They are intentionally forgeable and are
-      # suitable only for exercising the envelope/sign/verify machinery.
-      #
-      # Do NOT upload or publish the resulting PROVENANCE.ENV as an attestation:
-      # a third party could create an indistinguishable envelope with the same
-      # public DEV keys. Publication must remain disabled until signing is moved
-      # to non-exportable production/HSM-held keys and the kernel trust root is
-      # re-baked accordingly.
       - name: DEV-key provenance sign/verify self-test (not an attestation)
         shell: powershell
         run: |
@@ -75,7 +51,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python scripts/build/verify_provenance.py PROVENANCE.ENV --expect-revision $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          # Remove the DEV-signed envelope after the self-test so later workflow
-          # changes cannot accidentally publish it as a trusted attestation.
           Remove-Item -LiteralPath PROVENANCE.ENV -Force
           exit 0
