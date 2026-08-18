@@ -146,6 +146,8 @@ def main():
         name, path = a.split('=', 1)
         if not name.strip():
             sys.exit("--artifact name must be non-empty")
+        if name != name.strip():
+            sys.exit("--artifact name must not contain leading or trailing whitespace: %r" % name)
         if name in seen_artifact_names:
             sys.exit("duplicate --artifact name: %s" % name)
         seen_artifact_names.add(name)
