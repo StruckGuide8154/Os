@@ -36,6 +36,28 @@ def valid_envelope(payload=b"{}"):
     return fixed + tlv_blob + payload
 
 
+def valid_statement():
+    return {
+        "schema": vp.PROVENANCE_SCHEMA,
+        "builder": {
+            "id": "github:StruckGuide8154/grit/.github/workflows/ghl-security.yml@refs/heads/master",
+            "toolchain": {
+                "gritc_sha256": "11" * 32,
+                "ed25519_host_sha256": "22" * 32,
+                "nasm_version": "2.16.03",
+            },
+        },
+        "source": {
+            "uri": "https://github.com/StruckGuide8154/grit",
+            "revision": "33" * 20,
+        },
+        "artifacts": [
+            {"name": "toolchain_pins.txt", "sha256": "44" * 32},
+            {"name": "reproducible_digests.txt", "sha256": "55" * 32},
+        ],
+    }
+
+
 class ParseEnvelopeTests(unittest.TestCase):
     def test_accepts_minimal_canonical_structure(self):
         stmt, canonical, sig_block, _, min_cosigners, allowed, required = vp.parse_envelope(valid_envelope())
@@ -84,6 +106,51 @@ class ParseEnvelopeTests(unittest.TestCase):
     def test_payload_json_must_parse(self):
         with self.assertRaises(json.JSONDecodeError):
             vp.parse_envelope(valid_envelope(payload=b"{"))
+
+
+class StatementSemanticTests(unittest.TestCase):
+    def test_accepts_canonical_statement(self):
+        vp.validate_statement(valid_statement())
+
+    def test_rejects_non_object_statement(self):
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            vp.validate_statement([])
+
+    def test_rejects_wrong_schema(self):
+        stmt = valid_statement()
+        stmt["schema"] = "grit-provenance-v0"
+        with self.assertRaisesRegex(ValueError, "schema"):
+            vp.validate_statement(stmt)
+
+    def test_rejects_empty_builder_id(self):
+        stmt = valid_statement()
+        stmt["builder"]["id"] = "   "
+        with self.assertRaisesRegex(ValueError, "builder.id"):
+            vp.validate_statement(stmt)
+
+    def test_rejects_malformed_revision(self):
+        stmt = valid_statement()
+        stmt["source"]["revision"] = "not-a-commit"
+        with self.assertRaisesRegex(ValueError, "source.revision"):
+            vp.validate_statement(stmt)
+
+    def test_rejects_malformed_toolchain_hash(self):
+        stmt = valid_statement()
+        stmt["builder"]["toolchain"]["gritc_sha256"] = "00"
+        with self.assertRaisesRegex(ValueError, "gritc_sha256"):
+            vp.validate_statement(stmt)
+
+    def test_rejects_duplicate_artifact_names(self):
+        stmt = valid_statement()
+        stmt["artifacts"].append({"name": "toolchain_pins.txt", "sha256": "66" * 32})
+        with self.assertRaisesRegex(ValueError, "duplicate artifact"):
+            vp.validate_statement(stmt)
+
+    def test_rejects_malformed_artifact_hash(self):
+        stmt = valid_statement()
+        stmt["artifacts"][0]["sha256"] = "xyz"
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            vp.validate_statement(stmt)
 
 
 if __name__ == "__main__":
