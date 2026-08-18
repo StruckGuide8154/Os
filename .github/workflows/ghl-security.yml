@@ -18,6 +18,10 @@ concurrency:
 jobs:
   ghl-security:
     name: GHL-only trusted path + legacy quarantine
+    # Bound untrusted-input / toolchain hangs so a wedged verification cannot
+    # consume a runner indefinitely. This is deliberately generous for the
+    # current verification + provenance path while still failing closed.
+    timeout-minutes: 30
     # windows-latest: the guards are PowerShell 5.1 (Set-StrictMode / desktop
     # PowerShell semantics) and the repo is Windows-centric. The entry point
     # shells out to `python src/user/grithl/compiler/gritc.py`, so we also set
@@ -68,3 +72,7 @@ jobs:
           name: provenance
           path: PROVENANCE.ENV
           if-no-files-found: ignore
+          # CI provenance is useful for short-lived diagnosis/review, but there
+          # is no reason to retain every per-push attestation for the platform
+          # default lifetime. Minimize exposure and storage footprint.
+          retention-days: 7
