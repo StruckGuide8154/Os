@@ -65,13 +65,16 @@ jobs:
           python scripts/build/verify_provenance.py PROVENANCE.ENV --expect-revision $env:GITHUB_SHA
           exit $LASTEXITCODE
 
-      - name: Upload provenance attestation
-        if: always()
+      - name: Upload verified provenance attestation
+        # Never publish an attestation from a failed generation/verification
+        # path. A failed provenance check must fail closed rather than leaving
+        # an artifact that could be mistaken for a successfully verified record.
+        if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: provenance
           path: PROVENANCE.ENV
-          if-no-files-found: ignore
+          if-no-files-found: error
           # CI provenance is useful for short-lived diagnosis/review, but there
           # is no reason to retain every per-push attestation for the platform
           # default lifetime. Minimize exposure and storage footprint.
