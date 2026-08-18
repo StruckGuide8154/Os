@@ -46,7 +46,10 @@ jobs:
       - name: Run GHL security verification + surface signal lines
         shell: powershell
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/ci_security_summary.ps1
+          # The script is checked into the repository and runs under the
+          # workflow's existing PowerShell context. Do not disable the runner's
+          # execution-policy guardrails just to invoke it.
+          powershell -NoProfile -File scripts/test/ci_security_summary.ps1
           exit $LASTEXITCODE
 
       # Track 1 "Path to 10/10": emit a signed SLSA-style provenance record for
