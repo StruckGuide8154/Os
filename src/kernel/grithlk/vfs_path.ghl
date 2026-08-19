@@ -1,0 +1,143 @@
+# ============================================================================
+# vfs_path.ghl - canonical allocation-free VFS path iterator.
+#
+# INPUT CONTRACT: `buf` is a KERNEL-OWNED snapshot of the user pathname and
+# `length` is the snapshotted byte length. This module deliberately does not
+# understand user pointers and declares no user_mem capability.
+#
+# Rather than normalize/copy paths, vfs_path_next() returns a compact descriptor
+# containing offset + length + next cursor + component kind. The resolver walks
+# those descriptors against directory capabilities. `..` is therefore a
+# STRUCTURAL operation on the namespace graph, never string concatenation.
+#
+# Repeated '/' separators are skipped. '.' and '..' are classified distinctly.
+# Embedded NUL and components >255 bytes fail closed. No symlink semantics exist
+# in VFS v1.
+# ============================================================================
+
+module "vfs_path";
+
+unsafe raw_mem; # lb() reads only from the caller-supplied kernel snapshot
+
+global vfs_path_abi_version;
+global vfs_path_is_absolute;
+global vfs_path_next;
+global vfs_path_desc_valid;
+global vfs_path_desc_kind;
+global vfs_path_desc_offset;
+global vfs_path_desc_length;
+global vfs_path_desc_next_cursor;
+
+const VFS_PATH_ABI_VERSION = 1;
+const VFS_PATH_MAX = 1024;
+const VFS_NAME_MAX = 255;
+
+const VFS_PATH_END     = 0;
+const VFS_PATH_INVALID = 0xFFFFFFFFFFFFFFFF;
+
+const VFS_COMP_NORMAL = 1;
+const VFS_COMP_DOT    = 2;
+const VFS_COMP_PARENT = 3;
+
+# Descriptor layout (u64):
+#   bits  0..15  component start offset
+#   bits 16..31  component length
+#   bits 32..47  next cursor (byte offset at/after this component)
+#   bits 48..55  component kind
+#   bits 56..63  magic 0x56 ('V')
+const VFS_PATH_DESC_MAGIC       = 0x56;
+const VFS_PATH_DESC_MAGIC_SHIFT = 56;
+const VFS_PATH_DESC_KIND_SHIFT  = 48;
+const VFS_PATH_DESC_FIELD_MASK  = 0xFFFF;
+
+fn vfs_path_abi_version() { return VFS_PATH_ABI_VERSION; }
+
+fn vfs_path_is_absolute(buf, length) {
+    if length == 0 { return 0; }
+    if length > VFS_PATH_MAX { return 0; }
+    if lb(buf) == 47 { return 1; } # '/'
+    return 0;
+}
+
+fn vfs_path_pack(kind, offset, length, next_cursor) {
+    return (VFS_PATH_DESC_MAGIC << VFS_PATH_DESC_MAGIC_SHIFT)
+         | ((kind & 0xFF) << VFS_PATH_DESC_KIND_SHIFT)
+         | ((next_cursor & VFS_PATH_DESC_FIELD_MASK) << 32)
+         | ((length & VFS_PATH_DESC_FIELD_MASK) << 16)
+         | (offset & VFS_PATH_DESC_FIELD_MASK);
+}
+
+fn vfs_path_desc_valid(desc) {
+    if desc == VFS_PATH_END { return 0; }
+    if desc == VFS_PATH_INVALID { return 0; }
+    if ((desc >> VFS_PATH_DESC_MAGIC_SHIFT) & 0xFF) != VFS_PATH_DESC_MAGIC { return 0; }
+    let kind = vfs_path_desc_kind(desc);
+    if kind < VFS_COMP_NORMAL { return 0; }
+    if kind > VFS_COMP_PARENT { return 0; }
+    let n = vfs_path_desc_length(desc);
+    if n == 0 { return 0; }
+    if n > VFS_NAME_MAX { return 0; }
+    if vfs_path_desc_offset(desc) >= VFS_PATH_MAX { return 0; }
+    if vfs_path_desc_next_cursor(desc) > VFS_PATH_MAX { return 0; }
+    return 1;
+}
+
+fn vfs_path_desc_kind(desc) {
+    return (desc >> VFS_PATH_DESC_KIND_SHIFT) & 0xFF;
+}
+fn vfs_path_desc_offset(desc) {
+    return desc & VFS_PATH_DESC_FIELD_MASK;
+}
+fn vfs_path_desc_length(desc) {
+    return (desc >> 16) & VFS_PATH_DESC_FIELD_MASK;
+}
+fn vfs_path_desc_next_cursor(desc) {
+    return (desc >> 32) & VFS_PATH_DESC_FIELD_MASK;
+}
+
+# Return:
+#   0                    -> no more components
+#   VFS_PATH_INVALID     -> malformed/bounds failure
+#   otherwise descriptor -> NORMAL / DOT / PARENT component
+#
+# `cursor` is always relative to the same immutable kernel snapshot.
+fn vfs_path_next(buf, length, cursor) {
+    if length == 0 { return VFS_PATH_INVALID; }
+    if length > VFS_PATH_MAX { return VFS_PATH_INVALID; }
+    if cursor > length { return VFS_PATH_INVALID; }
+
+    let p = cursor;
+
+    # Collapse repeated separators. Embedded NUL is not a separator and is
+    # rejected below as soon as it is encountered in a would-be component.
+    while p < length {
+        if lb(buf + p) != 47 { break; }
+        p = p + 1;
+    }
+    if p >= length { return VFS_PATH_END; }
+
+    let start = p;
+    let n = 0;
+    while p < length {
+        let ch = lb(buf + p);
+        if ch == 47 { break; }
+        if ch == 0 { return VFS_PATH_INVALID; }
+        n = n + 1;
+        if n > VFS_NAME_MAX { return VFS_PATH_INVALID; }
+        p = p + 1;
+    }
+    if n == 0 { return VFS_PATH_INVALID; }
+
+    let kind = VFS_COMP_NORMAL;
+    if n == 1 {
+        if lb(buf + start) == 46 { kind = VFS_COMP_DOT; }
+    }
+    if n == 2 {
+        if lb(buf + start) == 46 {
+            if lb(buf + start + 1) == 46 { kind = VFS_COMP_PARENT; }
+        }
+    }
+
+    # Leave p at the separator/end. The next call skips all separators once.
+    return vfs_path_pack(kind, start, n, p);
+}
