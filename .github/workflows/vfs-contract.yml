@@ -85,6 +85,16 @@ jobs:
         run: |
           $harness = @'
           bits 64
+          ; Generated GritHL functions use FN_BEGIN/FN_ARG/FN_END as metadata
+          ; wrappers. For this linkage-only harness, preserve their symbol
+          ; semantics without importing the whole kernel instrumentation layer.
+          %macro FN_BEGIN 4
+          %1:
+          %endmacro
+          %macro FN_ARG 3
+          %endmacro
+          %macro FN_END 1
+          %endmacro
           %ifmacro extern 1-*
           %unmacro extern 1-*
           %endif
