@@ -11,10 +11,11 @@
 # Buffers are `reserve` (.bss/NOBITS) so the 64 KiB FAT cache and 64 KiB file
 # buffer cost ZERO image bytes - the primitive that unblocked this port.
 #
-# SECURITY (preserved from the asm baseline):
-#   - Every ata_read_sectors result is checked; a failed/short cache fill FAILS
-#     CLOSED instead of walking stale DRAM as directory data. This is the fix
-#     for the real-HW garbage-listing (corrupt names + ~2^32 sizes).
+# SECURITY:
+#   - Every ATA read/write result that determines filesystem correctness is
+#     checked and propagated; a failed cache fill FAILS CLOSED instead of
+#     walking partial/stale DRAM as directory data.
+#   - FAT16 BAD cluster 0xFFF7 is never accepted as an ordinary data cluster.
 #   - All cluster/sector arithmetic is range-checked against fat_entries /
 #     total_sects before any read, so a crafted on-disk image cannot steer a
 #     read outside the partition.
@@ -84,6 +85,7 @@ const ATTR_ARCHIVE      = 0x20;
 const ATTR_LFN          = 0x0F;
 const DIR_FIRST_CLUS_HI = 20;
 
+const BAD_CLUSTER       = 0xFFF7;     # FAT16 bad-cluster marker, never data
 const EOC_MIN           = 0xFFF8;     # cluster >= this -> end of chain
 
 # Per-slot cwd ownership + TOCTOU snapshot (security_todo.md §5).
@@ -175,6 +177,7 @@ fn f16_canary_check() {
 # safe sentinel: cluster<2 is never valid, so a real data LBA is never 0 here.
 fn f16_cluster_lba(cluster) {
     if cluster < 2 { return 0; }
+    if cluster == BAD_CLUSTER { return 0; }
     if cluster >= EOC_MIN { return 0; }
     if cluster >= lw(&f16_fat_entries) { return 0; }
     let spc = lw(&f16_sect_per_clus);
@@ -241,6 +244,7 @@ fn f16_parse_bpb() {
     let spc = lb(b + BPB_SECT_PER_CLUS);
     if spc == 0 { return -1; }
     if spc > 128 { return -1; }
+    if (spc & (spc - 1)) != 0 { return -1; }
     sw(&f16_sect_per_clus, spc);
 
     let rsv = f16_rd_u16(b + BPB_RESERVED_SECTS);
@@ -351,16 +355,18 @@ fn fat16_get_file_size(ent) {
 
 # -------------------- file read --------------------
 # Read up to `max_bytes` of the file described by dir-entry `ent` into `dst`.
-# Returns bytes read, or -1 on a bad entry. Each cluster is staged through the
-# kernel file buffer so a final partial cluster cannot overrun the caller; the
-# FAT chain is bounded by fat_entries so a cyclic/corrupt chain terminates.
+# Returns bytes read, or -1 on metadata/device/chain failure. Each cluster is
+# staged through the kernel file buffer so a final partial cluster cannot
+# overrun the caller; the FAT chain is bounded by fat_entries so a cycle cannot
+# spin forever. A corrupt short chain is NOT silently reported as EOF.
 fn fat16_read_file(ent, dst, max_bytes) {
     let size = f16_rd_u32(ent + DIR_FILE_SIZE);
     let want = max_bytes;
     if want > size { want = size; }
+    if want == 0 { return 0; }
 
     let cluster = f16_rd_u16(ent + DIR_FIRST_CLUS_LO);
-    if cluster == 0 { return 0; }             # empty file
+    if cluster == 0 { return -1; }            # non-empty extent needs a chain
 
     let spc = lw(&f16_sect_per_clus);
     let clus_bytes = spc * SECT_BYTES;
@@ -370,19 +376,19 @@ fn fat16_read_file(ent, dst, max_bytes) {
     while guard > 0 {
         guard = guard - 1;
         let lba = f16_cluster_lba(cluster);
-        if lba == 0 { break; }
-        if ata_read_sectors(lba, &fat16_file_buf, spc) != 0 { break; }
+        if lba == 0 { return -1; }
+        if ata_read_sectors(lba, &fat16_file_buf, spc) != 0 { return -1; }
 
         let remain = want - got;
         let chunk = clus_bytes;
         if remain < chunk { chunk = remain; }
         f16_copy(dst + got, &fat16_file_buf, chunk);
         got = got + chunk;
-        if got >= want { break; }
+        if got >= want { return got; }
 
         cluster = f16_fat_next(cluster);
     }
-    return got;
+    return -1;                                # cyclic/overlong chain exhausted guard
 }
 
 fn f16_copy(dst, src, n) {
@@ -417,12 +423,13 @@ fn f16_name_copy(dst, src) {
 }
 
 # Free an entire FAT cluster chain starting at `cluster`. Bounded by
-# fat_entries so a cyclic/corrupt chain terminates.
+# fat_entries so a cyclic/corrupt chain terminates. BAD is never mutated.
 fn f16_free_chain(cluster) {
     let guard = lw(&f16_fat_entries);
     while guard > 0 {
         guard = guard - 1;
         if cluster < 2 { return 0; }
+        if cluster == BAD_CLUSTER { return 0; }
         if cluster >= EOC_MIN { return 0; }
         if cluster >= lw(&f16_fat_entries) { return 0; }
         let nxt = f16_fat_get(cluster);
@@ -432,48 +439,63 @@ fn f16_free_chain(cluster) {
     return 0;
 }
 
-# First free FAT cluster >= start, or 0 if the FAT is full.
+# First free FAT cluster at/after start, wrapping once to cluster 2. The scan is
+# bounded to the number of addressable data-cluster slots, so a full/corrupt FAT
+# cannot turn allocation into an unbounded loop.
 fn f16_find_free_cluster(start) {
-    let cl = start;
     let fe = lw(&f16_fat_entries);
-    while cl < fe {
+    if fe <= 2 { return 0; }
+    let cl = start;
+    if cl < 2 { cl = 2; }
+    if cl >= fe { cl = 2; }
+    let remaining = fe - 2;
+    while remaining > 0 {
         if f16_fat_get(cl) == 0 { return cl; }
         cl = cl + 1;
+        if cl >= fe { cl = 2; }
+        remaining = remaining - 1;
     }
     return 0;
 }
 
 # -------------------- flush --------------------
+# A metadata flush succeeds only if every required FAT copy succeeds. We still
+# attempt FAT #2 after a FAT #1 failure so redundant media has the best chance
+# of retaining one current copy, but the operation remains an explicit error.
 fn fat16_flush_fats() {
     let len = lw(&f16_fat_size);
     if len > FAT_CACHE_SECTORS { len = FAT_CACHE_SECTORS; }
-    ata_write_sectors(lw(&f16_fat_start_sect) + FAT16_PART_LBA, &fat16_fat_cache, len);
+    let rc = 0;
+    if ata_write_sectors(lw(&f16_fat_start_sect) + FAT16_PART_LBA,
+                         &fat16_fat_cache, len) != 0 { rc = -1; }
     if lw(&f16_num_fats) >= 2 {
-        ata_write_sectors(lw(&f16_fat_start_sect) + lw(&f16_fat_size) + FAT16_PART_LBA,
-                          &fat16_fat_cache, len);
+        if ata_write_sectors(lw(&f16_fat_start_sect) + lw(&f16_fat_size) + FAT16_PART_LBA,
+                             &fat16_fat_cache, len) != 0 { rc = -1; }
     }
-    return 0;
+    return rc;
 }
 
 # Write the live directory cache back to disk - root (contiguous) or the
-# current subdirectory's cluster. Returns 0 on success, -1 on a bad cwd.
+# current subdirectory's cluster. Returns 0 only if the device write succeeded.
 fn fat16_flush_current_dir() {
     let cl = lw(&f16_cur_dir_cluster);
     if cl == 0 {
         let rs = lw(&f16_root_sectors);
         if rs > ROOT_CACHE_SECTORS { return -1; }
-        ata_write_sectors(lw(&f16_root_start_sect) + FAT16_PART_LBA, &fat16_root_cache, rs);
+        if ata_write_sectors(lw(&f16_root_start_sect) + FAT16_PART_LBA,
+                             &fat16_root_cache, rs) != 0 { return -1; }
         return 0;
     }
     let lba = f16_cluster_lba(cl);
     if lba == 0 { return -1; }
-    ata_write_sectors(lba, &fat16_root_cache, lw(&f16_sect_per_clus));
+    if ata_write_sectors(lba, &fat16_root_cache,
+                         lw(&f16_sect_per_clus)) != 0 { return -1; }
     return 0;
 }
 
 # -------------------- delete --------------------
 # Delete a file or empty directory by cache entry pointer. A non-empty
-# directory is rejected. Returns 0 on success, -1 on error.
+# directory is rejected. Returns 0 on success, -1 on any required flush error.
 fn fat16_delete_entry(ent) {
     let first = lb(ent);
     if first == 0 { return -1; }
@@ -487,8 +509,8 @@ fn fat16_delete_entry(ent) {
     }
     f16_free_chain(f16_rd_u16(ent + DIR_FIRST_CLUS_LO));
     sb(ent, 0xE5);
-    fat16_flush_fats();
-    fat16_flush_current_dir();
+    if fat16_flush_fats() != 0 { return -1; }
+    if fat16_flush_current_dir() != 0 { return -1; }
     fat16_count_root_files();
     return 0;
 }
@@ -518,7 +540,7 @@ fn f16_dir_cluster_is_empty(cluster) {
 
 # -------------------- rename --------------------
 # Rename `ent` to the 11-byte 8.3 name at `name`. Rejects a duplicate name in
-# the current directory. Returns 0 on success, -1 on error.
+# the current directory. Returns 0 only if the directory flush succeeds.
 fn fat16_rename_entry(ent, name) {
     let first = lb(ent);
     if first == 0 { return -1; }
@@ -538,8 +560,7 @@ fn fat16_rename_entry(ent, name) {
         idx = idx + 1;
     }
     f16_name_copy(ent, name);
-    fat16_flush_current_dir();
-    return 0;
+    return fat16_flush_current_dir();
 }
 
 # -------------------- mkdir --------------------
@@ -600,8 +621,8 @@ fn fat16_mkdir(name) {
     f16_wr_u16(free + DIR_FIRST_CLUS_LO, cl);
     f16_wr_u32(free + DIR_FILE_SIZE, 0);
 
-    fat16_flush_fats();
-    fat16_flush_current_dir();
+    if fat16_flush_fats() != 0 { return -1; }
+    if fat16_flush_current_dir() != 0 { return -1; }
     fat16_count_root_files();
     return 0;
 }
@@ -611,6 +632,10 @@ fn fat16_mkdir(name) {
 # `count` bytes from `src`. Returns 0 on success, -1 on error. A final partial
 # cluster is padded through the kernel file buffer so the disk write never
 # overreads the caller's source.
+#
+# NOTE: overwrite is still pre-journal legacy semantics: the old chain is freed
+# before the replacement commits. VFS writable exposure remains blocked on the
+# transactional replacement/journal work tracked in vfs-fat16-migration-audit.
 fn fat16_write_file(name, src, count) {
     let p = &fat16_root_cache;
     let slot = 0;
@@ -644,8 +669,8 @@ fn fat16_write_file(name, src, count) {
 
     if count == 0 {
         f16_wr_u16(slot + DIR_FIRST_CLUS_LO, 0);
-        fat16_flush_fats();
-        fat16_flush_current_dir();
+        if fat16_flush_fats() != 0 { return -1; }
+        if fat16_flush_current_dir() != 0 { return -1; }
         f16_canary_check();
         fat16_count_root_files();
         return 0;
@@ -676,8 +701,8 @@ fn fat16_write_file(name, src, count) {
         }
         if off >= count {
             f16_fat_set(cur, 0xFFFF);
-            fat16_flush_fats();
-            fat16_flush_current_dir();
+            if fat16_flush_fats() != 0 { return -1; }
+            if fat16_flush_current_dir() != 0 { return -1; }
             f16_canary_check();
             fat16_count_root_files();
             return 0;
@@ -687,14 +712,15 @@ fn fat16_write_file(name, src, count) {
         f16_fat_set(cur, nxt);
         cur = nxt;
     }
-    return 0;
+    return -1;
 }
 
 # -------------------- nav / cwd --------------------
 # Change the current directory: reload the live root/subdir cache for `cluster`
 # (0 = root). Always stamps fat16_cache_owner = NONE so any raw (launcher/shell,
 # non-syscall) reload forces the next ring-3 FS syscall to re-materialize its
-# own cwd via fat16_switch_to. Returns 0 on success, -1 on a bad root reload.
+# own cwd via fat16_switch_to. Returns 0 on a COMPLETE reload, -1 on any partial
+# or corrupt chain/read.
 fn fat16_change_dir(cluster) {
     let rc = f16_change_dir_load(cluster);
     sw(&fat16_cache_owner, FAT16_CACHE_OWNER_NONE);
@@ -717,8 +743,9 @@ fn f16_change_dir_load(cluster) {
         return 0;
     }
 
-    # Subdirectory: clear the cache, then walk the cluster chain into it. Bounded
-    # by fat_entries (cyclic chain terminates) and truncated at the 16 KiB extent.
+    # Subdirectory: clear the cache, then walk the complete cluster chain into
+    # it. Every unexpected termination is an error. A directory larger than the
+    # bounded 16 KiB materialization window is rejected, never truncated.
     let i = 0;
     while i < ROOT_CACHE_BYTES { sb(&fat16_root_cache + i, 0); i = i + 1; }
 
@@ -729,17 +756,20 @@ fn f16_change_dir_load(cluster) {
     let spc = lw(&f16_sect_per_clus);
     let bytes = spc * SECT_BYTES;
     while guard > 0 {
-        guard = guard - 1;
-        if cl < 2 { break; }
-        if cl >= EOC_MIN { break; }
-        if cl >= lw(&f16_fat_entries) { break; }
+        if cl >= EOC_MIN { break; }            # clean chain termination
+        if cl == BAD_CLUSTER { return -1; }
+        if cl < 2 { return -1; }
+        if cl >= lw(&f16_fat_entries) { return -1; }
         let lba = f16_cluster_lba(cl);
-        if lba == 0 { break; }
-        if total + bytes > ROOT_CACHE_BYTES { break; }     # truncate, don't overrun
-        if ata_read_sectors(lba, dst + total, spc) != 0 { break; }
+        if lba == 0 { return -1; }
+        if total + bytes > ROOT_CACHE_BYTES { return -1; }
+        if ata_read_sectors(lba, dst + total, spc) != 0 { return -1; }
         total = total + bytes;
         cl = f16_fat_next(cl);
+        guard = guard - 1;
     }
+    # A cycle/overlong chain consumes the geometry-derived guard without EOC.
+    if cl < EOC_MIN { return -1; }
     f16_canary_check();
     fat16_count_root_files();
     return 0;
@@ -747,15 +777,16 @@ fn f16_change_dir_load(cluster) {
 
 # Ensure the live cache holds the calling slot's (r15) cwd. No-op when the slot
 # already owns it; otherwise reload the slot's recorded cwd cluster and claim
-# ownership. preserves(all): called as the first instruction of every FS syscall
-# handler, where r15 = the calling slot.
+# ownership ONLY after a complete successful reload. preserves(all): called as
+# the first instruction of every FS syscall handler, where r15 = calling slot.
 fn fat16_switch_to(r15 slot) preserves(all) {
     let s = slot & 0xFF;
     if s >= APP_SLOT_COUNT { s = 0; }              # out-of-range -> slot 0
     if lw(&fat16_cache_owner) == s { return 0; }   # already owns the live cache
     let cwd = f16_rd_u16(&fat16_slot_cwd + s * 2);
-    fat16_change_dir(cwd);                         # sets owner = NONE
-    sw(&fat16_cache_owner, s);                      # claim ownership for this slot
+    let rc = fat16_change_dir(cwd);                 # sets owner = NONE
+    if rc != 0 { return rc; }
+    sw(&fat16_cache_owner, s);                      # publish only trusted cache
     return 0;
 }
 
