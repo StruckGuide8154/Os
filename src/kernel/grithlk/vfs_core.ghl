@@ -1,0 +1,228 @@
+# ============================================================================
+# vfs_core.ghl - Grit VFS policy core.
+#
+# Phase 1 intentionally contains NO raw memory access, NO filesystem backend
+# calls, NO user pointers, and NO ambient authority. It is the small policy
+# kernel shared by the future VFS syscall bridge, handle layer and FAT16
+# backend adapter.
+#
+# Security invariants encoded here:
+#   * rights may only be attenuated, never widened;
+#   * read-only mounts structurally remove every mutating right;
+#   * unknown rights/flags/object types fail closed;
+#   * range/size arithmetic is validated before addition/multiplication;
+#   * path/component lengths have one canonical bound;
+#   * VFS errors are backend-independent and stable.
+#
+# Performance invariant: these helpers are scalar-only and allocation-free.
+# They are suitable for the open/handle fast path and require no crypto.
+# ============================================================================
+
+module "vfs_core";
+
+global vfs_core_abi_version;
+global vfs_rights_valid;
+global vfs_rights_subset;
+global vfs_rights_attenuate;
+global vfs_mount_allows;
+global vfs_open_flags_valid;
+global vfs_open_required_rights;
+global vfs_object_type_valid;
+global vfs_path_length_valid;
+global vfs_component_length_valid;
+global vfs_checked_add_ok;
+global vfs_checked_mul_ok;
+global vfs_range_valid;
+
+# -------------------- ABI/version --------------------
+const VFS_ABI_VERSION = 1;
+
+# -------------------- stable VFS errors --------------------
+# Keep values negative so syscall wrappers can return them directly.
+const VFS_OK            = 0;
+const VFS_EPERM         = -1;
+const VFS_ENOENT        = -2;
+const VFS_EIO           = -5;
+const VFS_EBADF         = -9;
+const VFS_EACCES        = -13;
+const VFS_EFAULT        = -14;
+const VFS_EBUSY         = -16;
+const VFS_EEXIST        = -17;
+const VFS_EXDEV         = -18;
+const VFS_ENOTDIR       = -20;
+const VFS_EISDIR        = -21;
+const VFS_EINVAL        = -22;
+const VFS_ENFILE        = -23;
+const VFS_EMFILE        = -24;
+const VFS_ENOSPC        = -28;
+const VFS_EROFS         = -30;
+const VFS_ENAMETOOLONG  = -36;
+const VFS_ENOTEMPTY     = -39;
+const VFS_EOVERFLOW     = -75;
+const VFS_ESTALE        = -116;
+
+# -------------------- object types --------------------
+const VFS_OBJ_NONE = 0;
+const VFS_OBJ_FILE = 1;
+const VFS_OBJ_DIR  = 2;
+
+# -------------------- capability rights --------------------
+# No ADMIN/ROOT/ALL bypass right exists. The full mask is only a validation
+# constant; callers still receive the intersection of parent/request/mount.
+const VFS_R_LOOKUP      = 0x0001;
+const VFS_R_READ        = 0x0002;
+const VFS_R_WRITE       = 0x0004;
+const VFS_R_STAT        = 0x0008;
+const VFS_R_ENUM        = 0x0010;
+const VFS_R_CREATE      = 0x0020;
+const VFS_R_MKDIR       = 0x0040;
+const VFS_R_DELETE      = 0x0080;
+const VFS_R_RENAME_FROM = 0x0100;
+const VFS_R_RENAME_TO   = 0x0200;
+const VFS_R_TRAVERSE    = 0x0400;
+const VFS_R_SYNC        = 0x0800;
+const VFS_R_ALL         = 0x0FFF;
+
+# Rights that remain meaningful on a read-only mount.
+const VFS_R_RO_ALLOWED = 0x041B;  # LOOKUP|READ|STAT|ENUM|TRAVERSE
+
+# All rights capable of changing persistent namespace/data state.
+const VFS_R_MUTATE = 0x0BE4;      # WRITE|CREATE|MKDIR|DELETE|RENAME_*|SYNC
+
+# -------------------- mount policy --------------------
+const VFS_M_RDONLY       = 0x0001;
+const VFS_M_NOEXEC       = 0x0002;
+const VFS_M_NOSYMLINK    = 0x0004;
+const VFS_M_VERIFIED     = 0x0008;
+const VFS_M_EPHEMERAL    = 0x0010;
+const VFS_M_NO_XDEV      = 0x0020;
+const VFS_M_ALL          = 0x003F;
+
+# -------------------- open policy --------------------
+const VFS_O_READ       = 0x0001;
+const VFS_O_WRITE      = 0x0002;
+const VFS_O_CREATE     = 0x0004;
+const VFS_O_TRUNC      = 0x0008;
+const VFS_O_DIRECTORY  = 0x0010;
+const VFS_O_NOFOLLOW   = 0x0020;
+const VFS_O_ALL        = 0x003F;
+
+# Canonical namespace bounds. Backends may impose stricter component limits
+# (FAT16 8.3 does), but they may never accept a larger VFS path/component.
+const VFS_PATH_MAX = 1024;
+const VFS_NAME_MAX = 255;
+
+fn vfs_core_abi_version() {
+    return VFS_ABI_VERSION;
+}
+
+# 1 iff every bit is a defined VFS capability right.
+fn vfs_rights_valid(rights) {
+    if (rights & VFS_R_ALL) != rights { return 0; }
+    return 1;
+}
+
+# 1 iff requested is a subset of granted. This is the core no-amplification
+# predicate used before deriving a child capability.
+fn vfs_rights_subset(granted, requested) {
+    if vfs_rights_valid(granted) == 0 { return 0; }
+    if vfs_rights_valid(requested) == 0 { return 0; }
+    if (requested & granted) != requested { return 0; }
+    return 1;
+}
+
+# Derive child rights from parent rights + caller request + immutable mount
+# policy. Invalid inputs fail closed to zero rights. There is no code path that
+# ORs authority into the result.
+fn vfs_rights_attenuate(parent, requested, mount_flags) {
+    if vfs_rights_valid(parent) == 0 { return 0; }
+    if vfs_rights_valid(requested) == 0 { return 0; }
+    if (mount_flags & VFS_M_ALL) != mount_flags { return 0; }
+
+    let out = parent & requested;
+    if (mount_flags & VFS_M_RDONLY) != 0 {
+        out = out & VFS_R_RO_ALLOWED;
+    }
+    return out;
+}
+
+# 1 iff mount policy permits all requested rights. This is separate from
+# attenuation so a caller can distinguish "request denied" from "derive the
+# maximum safe subset" without duplicating policy logic.
+fn vfs_mount_allows(mount_flags, requested) {
+    if (mount_flags & VFS_M_ALL) != mount_flags { return 0; }
+    if vfs_rights_valid(requested) == 0 { return 0; }
+    if (mount_flags & VFS_M_RDONLY) != 0 {
+        if (requested & VFS_R_MUTATE) != 0 { return 0; }
+    }
+    return 1;
+}
+
+fn vfs_open_flags_valid(flags) {
+    if (flags & VFS_O_ALL) != flags { return 0; }
+    # TRUNC without WRITE is nonsensical and must not be silently widened.
+    if (flags & VFS_O_TRUNC) != 0 {
+        if (flags & VFS_O_WRITE) == 0 { return 0; }
+    }
+    # CREATE without WRITE currently has no useful VFS-v1 meaning.
+    if (flags & VFS_O_CREATE) != 0 {
+        if (flags & VFS_O_WRITE) == 0 { return 0; }
+    }
+    return 1;
+}
+
+# Convert open intent to the minimum capability rights needed to attempt it.
+# LOOKUP is always required. Directory opens additionally require TRAVERSE and
+# ENUM so later readdir does not gain authority after open.
+fn vfs_open_required_rights(flags) {
+    if vfs_open_flags_valid(flags) == 0 { return 0; }
+    let rights = VFS_R_LOOKUP;
+    if (flags & VFS_O_READ) != 0 { rights = rights | VFS_R_READ; }
+    if (flags & VFS_O_WRITE) != 0 { rights = rights | VFS_R_WRITE; }
+    if (flags & VFS_O_CREATE) != 0 { rights = rights | VFS_R_CREATE; }
+    if (flags & VFS_O_DIRECTORY) != 0 {
+        rights = rights | VFS_R_TRAVERSE;
+        rights = rights | VFS_R_ENUM;
+    }
+    return rights;
+}
+
+fn vfs_object_type_valid(kind) {
+    if kind == VFS_OBJ_FILE { return 1; }
+    if kind == VFS_OBJ_DIR { return 1; }
+    return 0;
+}
+
+fn vfs_path_length_valid(length) {
+    if length == 0 { return 0; }
+    if length > VFS_PATH_MAX { return 0; }
+    return 1;
+}
+
+fn vfs_component_length_valid(length) {
+    if length == 0 { return 0; }
+    if length > VFS_NAME_MAX { return 0; }
+    return 1;
+}
+
+# Checked arithmetic helpers use subtraction/division before the dangerous
+# operation, avoiding reliance on wrapped machine arithmetic.
+fn vfs_checked_add_ok(a, b, limit) {
+    if a > limit { return 0; }
+    if b > limit - a { return 0; }
+    return 1;
+}
+
+fn vfs_checked_mul_ok(a, b, limit) {
+    if a == 0 { return 1; }
+    if b > limit / a { return 0; }
+    return 1;
+}
+
+# Validate [offset, offset+length) against a finite object/device extent without
+# ever forming offset+length until overflow/out-of-bounds has been excluded.
+fn vfs_range_valid(offset, length, extent) {
+    if offset > extent { return 0; }
+    if length > extent - offset { return 0; }
+    return 1;
+}
