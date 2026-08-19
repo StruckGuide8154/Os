@@ -322,6 +322,26 @@ section .text
 ; resolve for syscall.asm / the FS handlers within this single NASM TU.
 section .text
 %include "build/ghl/fat16_core.asm"
+; Capability-safe VFS foundation. Linked into the common BIOS/UEFI
+; kernel TU, but bootstrap remains disconnected from kmain for now.
+section .text
+%include "build/ghl/vfs_core.asm"
+section .text
+%include "build/ghl/vfs_lock.asm"
+section .text
+%include "build/ghl/vfs_objects.asm"
+section .text
+%include "build/ghl/vfs_open.asm"
+section .text
+%include "build/ghl/vfs_context.asm"
+section .text
+%include "build/ghl/vfs_path.asm"
+section .text
+%include "build/ghl/vfs_fat16_key.asm"
+section .text
+%include "build/ghl/vfs_fat16_meta.asm"
+section .text
+%include "build/ghl/vfs_bootstrap.asm"
 
 ; --- GUI System ---
 section .text
