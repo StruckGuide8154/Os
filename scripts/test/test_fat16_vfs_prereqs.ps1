@@ -47,10 +47,10 @@ if ($src -notmatch '(?s)fn\s+f16_change_dir_load\(cluster\).*?if\s+ata_read_sect
 if ($src -notmatch '(?s)fn\s+f16_change_dir_load\(cluster\).*?if\s+total\s*\+\s*bytes\s*>\s*ROOT_CACHE_BYTES\s*\{\s*return\s+-1;') {
     throw 'Oversized subdirectory is still truncated instead of rejected'
 }
-if ($src -notmatch '(?s)fn\s+fat16_switch_to\(r15\s+slot\).*?let\s+rc\s*=\s*fat16_change_dir\(cwd\);.*?if\s+rc\s*!=\s*0\s*\{\s*return\s+rc;\}.*?sw\(&fat16_cache_owner,\s*s\);') {
+if ($src -notmatch '(?s)fn\s+fat16_switch_to\(r15\s+slot\).*?let\s+rc\s*=\s*fat16_change_dir\(cwd\);.*?if\s+rc\s*!=\s*0\s*\{\s*return\s+rc;\s*\}.*?sw\(&fat16_cache_owner,\s*s\);') {
     throw 'Cache ownership can still publish after failed slot cwd materialization'
 }
-if ($src -notmatch '(?s)fn\s+f16_find_free_cluster\(start\).*?if\s+cl\s*>=\s*fe\s*\{\s*cl\s*=\s*2;\}.*?remaining\s*=\s*remaining\s*-\s*1;') {
+if ($src -notmatch '(?s)fn\s+f16_find_free_cluster\(start\).*?if\s+cl\s*>=\s*fe\s*\{\s*cl\s*=\s*2;\s*\}.*?remaining\s*=\s*remaining\s*-\s*1;') {
     throw 'Free-cluster search is not bounded wraparound'
 }
 if ($src -notmatch '(?s)fn\s+fat16_read_file\(ent,\s*dst,\s*max_bytes\).*?ata_read_sectors\(lba,\s*&fat16_file_buf,\s*spc\)\s*!=\s*0\s*\{\s*return\s+-1;') {
