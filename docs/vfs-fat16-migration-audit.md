@@ -100,6 +100,7 @@ VFS needs `pread`/open-file offset semantics. Re-reading from byte zero and disc
 The current BPB parser already checks the 512-byte sector size, nonzero bounded sectors-per-cluster, FAT count, root extent, FAT cache size, total sectors, and basic root/data placement. Before VFS mount accepts the volume, also prove:
 
 - sectors/cluster is a FAT-valid power of two;
+- `0xFFF7` is rejected as the FAT16 BAD-cluster marker (the legacy `< 0xFFF8` style checks currently admit it as if it were data); valid ordinary data clusters stop at `0xFFF6`;
 - every `reserved + fats * fat_size + root_sectors` arithmetic step is overflow-safe;
 - FAT capacity in entries is sufficient for the computed data-cluster geometry;
 - all FAT/root/data regions are monotonic and inside the partition/device extent;
