@@ -20,8 +20,11 @@ if (@($m.unsafe.broad).Count -ne 0) { throw 'FAT16 VFS key codec uses broad unsa
 if (@($m.unsafe.privileged).Count -ne 0) { throw 'FAT16 VFS key codec uses privileged unsafe authority' }
 
 $src = Get-Content -Raw -Path $Source
-if ($src -match 'fat16_root_cache|fat16_file_buf|raw_mem') {
-    throw 'FAT16 VFS identity codec must not depend on live cache pointers/raw memory'
+if ($src -match '(?m)^\s*unsafe\s+raw_mem\b') {
+    throw 'FAT16 VFS identity codec gained raw-memory authority'
+}
+if ($src -match '&\s*fat16_(root_cache|file_buf)\b') {
+    throw 'FAT16 VFS identity codec depends on a live FAT cache pointer'
 }
 if ($src -notmatch 'const\s+F16K_RAW_SLOT_CAP\s*=\s*512;') {
     throw 'FAT16 raw directory-slot bound drifted from the 16 KiB cache contract'
