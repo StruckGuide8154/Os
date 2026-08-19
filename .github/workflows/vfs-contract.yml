@@ -13,7 +13,6 @@ on:
       - 'docs/vfs-architecture.md'
       - 'scripts/test/test_vfs_contract.ps1'
       - 'scripts/test/test_handle_table_authority.ps1'
-      - 'scripts/test/handle_table_compile.asm'
       - '.github/workflows/vfs-contract.yml'
 
 permissions:
@@ -48,7 +47,18 @@ jobs:
         shell: pwsh
         run: |
           New-Item -Path build\test-vfs -ItemType Directory -Force | Out-Null
+          $harness = @'
+          bits 64
+          %include "constants.inc"
+          section .data
+          align 8
+          l3_app_arena_base_v: dq APP_DATA_ADDR
+          section .text
+          %include "src/kernel/proc/handle_table.inc"
+          '@
+          $harnessPath = Join-Path $env:RUNNER_TEMP 'grit-handle-table-compile.asm'
+          [System.IO.File]::WriteAllText($harnessPath, $harness, [System.Text.Encoding]::ASCII)
           nasm -f win64 -o build\test-vfs\handle_table.obj `
             -I "$PWD\src\include\" -I "$PWD\" `
-            scripts\test\handle_table_compile.asm
+            $harnessPath
           if ($LASTEXITCODE -ne 0) { throw 'handle_table.inc standalone assembly failed' }
