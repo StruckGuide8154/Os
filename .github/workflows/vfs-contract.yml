@@ -8,9 +8,12 @@ on:
     paths:
       - 'src/kernel/grithlk/vfs_core.ghl'
       - 'src/kernel/proc/handle_table.inc'
+      - 'src/include/boot_memory.inc'
+      - 'src/include/constants.inc'
       - 'docs/vfs-architecture.md'
       - 'scripts/test/test_vfs_contract.ps1'
       - 'scripts/test/test_handle_table_authority.ps1'
+      - 'scripts/test/handle_table_compile.asm'
       - '.github/workflows/vfs-contract.yml'
 
 permissions:
@@ -36,3 +39,16 @@ jobs:
       - name: Verify handle authority is kernel-owned
         shell: pwsh
         run: ./scripts/test/test_handle_table_authority.ps1
+
+      - name: Install NASM
+        shell: pwsh
+        run: choco install nasm -y --no-progress
+
+      - name: Assemble hardened handle table
+        shell: pwsh
+        run: |
+          New-Item -Path build\test-vfs -ItemType Directory -Force | Out-Null
+          nasm -f win64 -o build\test-vfs\handle_table.obj `
+            -I "$PWD\src\include\" -I "$PWD\" `
+            scripts\test\handle_table_compile.asm
+          if ($LASTEXITCODE -ne 0) { throw 'handle_table.inc standalone assembly failed' }
