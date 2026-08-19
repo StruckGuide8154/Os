@@ -1,0 +1,364 @@
+# ============================================================================
+# vfs_objects.ghl - fixed-pool VFS node/open-file object core.
+#
+# This module owns the generic kernel objects that future VFS handles reference.
+# It performs no filesystem I/O, no path parsing, no allocation, and never sees
+# a user pointer. Pools are fixed-size kernel BSS so exhaustion is explicit and
+# attacker-controlled opens cannot grow kernel memory without bound.
+#
+# SECURITY:
+#   * every object reference is a generation-tagged token, never a raw pointer;
+#   * closing/freeing bumps the generation before a slot can be reused;
+#   * file rights are fixed at allocation and have no widening setter;
+#   * a file allocation retains its node; close drops exactly that reference;
+#   * unknown token magic/kind/index/generation fails closed;
+#   * all pools have hard ceilings.
+#
+# PERFORMANCE:
+#   * lookup is O(1) array indexing;
+#   * no heap allocation, crypto, name lookup, or filesystem backend call;
+#   * hot file state is kept in parallel compact arrays.
+#
+# SMP NOTE: this phase is intentionally NOT wired into runtime syscalls yet.
+# Allocation/free synchronization lands before the first runtime VFS handle.
+# Reads of immutable rights/node identity remain naturally read-mostly.
+# ============================================================================
+
+module "vfs_objects";
+
+unsafe raw_mem;          # bounded lw/sw/lq/sq/lb/sb over module-owned pools
+unsafe implicit_extern;  # address-of module-owned reserve symbols
+
+global vfs_objects_abi_version;
+global vfs_objects_reset;
+global vfs_node_alloc;
+global vfs_node_validate;
+global vfs_node_free;
+global vfs_node_get_type;
+global vfs_node_get_size;
+global vfs_node_set_size;
+global vfs_node_get_key0;
+global vfs_node_get_key1;
+global vfs_node_get_fs_id;
+global vfs_node_get_dir_generation;
+global vfs_node_bump_dir_generation;
+global vfs_node_refcount;
+global vfs_file_alloc;
+global vfs_file_validate;
+global vfs_file_close;
+global vfs_file_require_rights;
+global vfs_file_get_node;
+global vfs_file_get_rights;
+global vfs_file_get_flags;
+global vfs_file_get_offset;
+global vfs_file_set_offset;
+global vfs_file_advance;
+
+extern vfs_rights_valid;
+extern vfs_rights_subset;
+extern vfs_object_type_valid;
+extern vfs_checked_add_ok;
+
+const VFS_OBJECTS_ABI_VERSION = 1;
+
+# Fixed ceilings. Keep powers of two so token index validation is cheap and the
+# memory budget remains obvious in review.
+const VFS_NODE_CAP = 128;
+const VFS_FILE_CAP = 128;
+
+# Token layout (u64):
+#   bits  0..15  index
+#   bits 16..39  generation (24-bit, never zero)
+#   bits 40..47  object kind
+#   bits 48..63  magic 0x5646 ("VF")
+const VFS_TOKEN_INDEX_MASK = 0xFFFF;
+const VFS_TOKEN_GEN_SHIFT  = 16;
+const VFS_TOKEN_GEN_MASK   = 0xFFFFFF;
+const VFS_TOKEN_KIND_SHIFT = 40;
+const VFS_TOKEN_KIND_MASK  = 0xFF;
+const VFS_TOKEN_MAGIC_SHIFT = 48;
+const VFS_TOKEN_MAGIC      = 0x5646;
+const VFS_TOKEN_MAGIC_MASK = 0xFFFF;
+const VFS_TOKEN_KIND_NODE  = 1;
+const VFS_TOKEN_KIND_FILE  = 2;
+
+# Generic VFS object type values. Kept in lockstep with vfs_core.ghl.
+const VFS_OBJ_FILE = 1;
+const VFS_OBJ_DIR  = 2;
+const VFS_R_ALL    = 0x0FFF;
+const U64_MAX      = 0xFFFFFFFFFFFFFFFF;
+
+# -------------------- node pool --------------------
+reserve vfs_node_active[128];             # u8
+reserve vfs_node_type[128];               # u8
+reserve vfs_node_generation[1024];        # 128 * u64 (low 24 bits used)
+reserve vfs_node_fs_id[512];               # 128 * u32
+reserve vfs_node_refs[512];                # 128 * u32
+reserve vfs_node_size[1024];               # 128 * u64
+reserve vfs_node_key0[1024];               # backend-stable opaque key word 0
+reserve vfs_node_key1[1024];               # backend-stable opaque key word 1
+reserve vfs_node_dir_generation[1024];     # namespace mutation epoch
+
+# -------------------- open-file pool --------------------
+reserve vfs_file_active[128];              # u8
+reserve vfs_file_generation[1024];         # 128 * u64 (low 24 bits used)
+reserve vfs_file_node[1024];               # generation-tagged node token
+reserve vfs_file_offset[1024];             # u64
+reserve vfs_file_rights[1024];             # immutable u64 rights mask
+reserve vfs_file_flags[512];               # immutable u32 open flags
+
+fn vfs_objects_abi_version() { return VFS_OBJECTS_ABI_VERSION; }
+
+# -------------------- token helpers --------------------
+fn vfs_token_make(index, generation, kind) {
+    let g = generation & VFS_TOKEN_GEN_MASK;
+    if g == 0 { return 0; }
+    return (VFS_TOKEN_MAGIC << VFS_TOKEN_MAGIC_SHIFT)
+         | ((kind & VFS_TOKEN_KIND_MASK) << VFS_TOKEN_KIND_SHIFT)
+         | (g << VFS_TOKEN_GEN_SHIFT)
+         | (index & VFS_TOKEN_INDEX_MASK);
+}
+
+fn vfs_token_index(token) { return token & VFS_TOKEN_INDEX_MASK; }
+fn vfs_token_generation(token) {
+    return (token >> VFS_TOKEN_GEN_SHIFT) & VFS_TOKEN_GEN_MASK;
+}
+fn vfs_token_kind(token) {
+    return (token >> VFS_TOKEN_KIND_SHIFT) & VFS_TOKEN_KIND_MASK;
+}
+fn vfs_token_shape_valid(token, kind, cap) {
+    if token == 0 { return 0; }
+    if ((token >> VFS_TOKEN_MAGIC_SHIFT) & VFS_TOKEN_MAGIC_MASK) != VFS_TOKEN_MAGIC { return 0; }
+    if vfs_token_kind(token) != kind { return 0; }
+    if vfs_token_generation(token) == 0 { return 0; }
+    if vfs_token_index(token) >= cap { return 0; }
+    return 1;
+}
+
+fn vfs_next_generation(current) {
+    let g = (current & VFS_TOKEN_GEN_MASK) + 1;
+    if g > VFS_TOKEN_GEN_MASK { g = 1; }
+    if g == 0 { g = 1; }
+    return g;
+}
+
+# Boot/reset helper. Generation is advanced rather than zeroed so calling reset
+# after a recovery event invalidates every token that existed before it.
+fn vfs_objects_reset() {
+    let i = 0;
+    while i < VFS_NODE_CAP {
+        let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
+        sq(&vfs_node_generation + i * 8, g);
+        sb(&vfs_node_active + i, 0);
+        sb(&vfs_node_type + i, 0);
+        sw(&vfs_node_fs_id + i * 4, 0);
+        sw(&vfs_node_refs + i * 4, 0);
+        sq(&vfs_node_size + i * 8, 0);
+        sq(&vfs_node_key0 + i * 8, 0);
+        sq(&vfs_node_key1 + i * 8, 0);
+        sq(&vfs_node_dir_generation + i * 8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < VFS_FILE_CAP {
+        let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
+        sq(&vfs_file_generation + i * 8, g);
+        sb(&vfs_file_active + i, 0);
+        sq(&vfs_file_node + i * 8, 0);
+        sq(&vfs_file_offset + i * 8, 0);
+        sq(&vfs_file_rights + i * 8, 0);
+        sw(&vfs_file_flags + i * 4, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# -------------------- node lifecycle --------------------
+# key0/key1 are opaque backend-stable identity words. They must never be a live
+# cache pointer. For FAT16 the adapter will encode directory identity + raw slot
+# identity here rather than fat16_root_cache addresses.
+fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
+    if vfs_object_type_valid(obj_type) == 0 { return 0; }
+    let i = 0;
+    while i < VFS_NODE_CAP {
+        if lb(&vfs_node_active + i) == 0 {
+            let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
+            sq(&vfs_node_generation + i * 8, g);
+            sw(&vfs_node_fs_id + i * 4, fs_id);
+            sw(&vfs_node_refs + i * 4, 0);
+            sb(&vfs_node_type + i, obj_type);
+            sq(&vfs_node_size + i * 8, size);
+            sq(&vfs_node_key0 + i * 8, key0);
+            sq(&vfs_node_key1 + i * 8, key1);
+            sq(&vfs_node_dir_generation + i * 8, 1);
+            # Publish active LAST so no resolver can observe a half-filled node.
+            sb(&vfs_node_active + i, 1);
+            return vfs_token_make(i, g, VFS_TOKEN_KIND_NODE);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn vfs_node_validate(token) {
+    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_NODE, VFS_NODE_CAP) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    if lb(&vfs_node_active + i) == 0 { return 0; }
+    if (lq(&vfs_node_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
+    return 1;
+}
+
+# Free only an unreferenced node. Active is cleared before mutable fields are
+# scrubbed so a racing future resolver cannot accept the object during teardown.
+fn vfs_node_free(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    if lw(&vfs_node_refs + i * 4) != 0 { return 0; }
+    sb(&vfs_node_active + i, 0);
+    let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
+    sq(&vfs_node_generation + i * 8, g);
+    sb(&vfs_node_type + i, 0);
+    sw(&vfs_node_fs_id + i * 4, 0);
+    sq(&vfs_node_size + i * 8, 0);
+    sq(&vfs_node_key0 + i * 8, 0);
+    sq(&vfs_node_key1 + i * 8, 0);
+    sq(&vfs_node_dir_generation + i * 8, 0);
+    return 1;
+}
+
+fn vfs_node_get_type(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lb(&vfs_node_type + vfs_token_index(token));
+}
+fn vfs_node_get_size(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lq(&vfs_node_size + vfs_token_index(token) * 8);
+}
+fn vfs_node_set_size(token, size) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    sq(&vfs_node_size + vfs_token_index(token) * 8, size);
+    return 1;
+}
+fn vfs_node_get_key0(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lq(&vfs_node_key0 + vfs_token_index(token) * 8);
+}
+fn vfs_node_get_key1(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lq(&vfs_node_key1 + vfs_token_index(token) * 8);
+}
+fn vfs_node_get_fs_id(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lw(&vfs_node_fs_id + vfs_token_index(token) * 4);
+}
+fn vfs_node_get_dir_generation(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lq(&vfs_node_dir_generation + vfs_token_index(token) * 8);
+}
+fn vfs_node_bump_dir_generation(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    let g = lq(&vfs_node_dir_generation + i * 8) + 1;
+    if g == 0 { g = 1; }
+    sq(&vfs_node_dir_generation + i * 8, g);
+    return g;
+}
+fn vfs_node_refcount(token) {
+    if vfs_node_validate(token) == 0 { return 0; }
+    return lw(&vfs_node_refs + vfs_token_index(token) * 4);
+}
+
+# -------------------- file lifecycle --------------------
+fn vfs_file_alloc(node_token, flags, rights) {
+    if vfs_node_validate(node_token) == 0 { return 0; }
+    if vfs_rights_valid(rights) == 0 { return 0; }
+    let i = 0;
+    while i < VFS_FILE_CAP {
+        if lb(&vfs_file_active + i) == 0 {
+            let ng = vfs_token_index(node_token);
+            let refs = lw(&vfs_node_refs + ng * 4);
+            if refs == 0xFFFFFFFF { return 0; }
+
+            let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
+            sq(&vfs_file_generation + i * 8, g);
+            sq(&vfs_file_node + i * 8, node_token);
+            sq(&vfs_file_offset + i * 8, 0);
+            # Rights + flags are assigned once, before publication. There are no
+            # widening setters anywhere in this module.
+            sq(&vfs_file_rights + i * 8, rights & VFS_R_ALL);
+            sw(&vfs_file_flags + i * 4, flags);
+            sw(&vfs_node_refs + ng * 4, refs + 1);
+            sb(&vfs_file_active + i, 1);
+            return vfs_token_make(i, g, VFS_TOKEN_KIND_FILE);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn vfs_file_validate(token) {
+    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_FILE, VFS_FILE_CAP) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    if lb(&vfs_file_active + i) == 0 { return 0; }
+    if (lq(&vfs_file_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
+    # A live file whose node has disappeared is corruption; fail closed.
+    if vfs_node_validate(lq(&vfs_file_node + i * 8)) == 0 { return 0; }
+    return 1;
+}
+
+fn vfs_file_close(token) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    let node = lq(&vfs_file_node + i * 8);
+    let ni = vfs_token_index(node);
+
+    # Stop new validation first, then invalidate generation and scrub state.
+    sb(&vfs_file_active + i, 0);
+    let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
+    sq(&vfs_file_generation + i * 8, g);
+    sq(&vfs_file_node + i * 8, 0);
+    sq(&vfs_file_offset + i * 8, 0);
+    sq(&vfs_file_rights + i * 8, 0);
+    sw(&vfs_file_flags + i * 4, 0);
+
+    let refs = lw(&vfs_node_refs + ni * 4);
+    if refs > 0 { sw(&vfs_node_refs + ni * 4, refs - 1); }
+    return 1;
+}
+
+# Required rights are a subset check against immutable file rights.
+fn vfs_file_require_rights(token, required) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_rights_valid(required) == 0 { return 0; }
+    return vfs_rights_subset(lq(&vfs_file_rights + vfs_token_index(token) * 8), required);
+}
+
+fn vfs_file_get_node(token) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    return lq(&vfs_file_node + vfs_token_index(token) * 8);
+}
+fn vfs_file_get_rights(token) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    return lq(&vfs_file_rights + vfs_token_index(token) * 8);
+}
+fn vfs_file_get_flags(token) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    return lw(&vfs_file_flags + vfs_token_index(token) * 4);
+}
+fn vfs_file_get_offset(token) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    return lq(&vfs_file_offset + vfs_token_index(token) * 8);
+}
+fn vfs_file_set_offset(token, offset) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    sq(&vfs_file_offset + vfs_token_index(token) * 8, offset);
+    return 1;
+}
+fn vfs_file_advance(token, delta) {
+    if vfs_file_validate(token) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    let old = lq(&vfs_file_offset + i * 8);
+    if vfs_checked_add_ok(old, delta, U64_MAX) == 0 { return 0; }
+    sq(&vfs_file_offset + i * 8, old + delta);
+    return 1;
+}
