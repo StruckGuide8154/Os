@@ -11,6 +11,7 @@ on:
       - 'src/kernel/grithlk/vfs_objects.ghl'
       - 'src/kernel/grithlk/vfs_context.ghl'
       - 'src/kernel/grithlk/vfs_path.ghl'
+      - 'src/kernel/grithlk/vfs_open.ghl'
       - 'src/kernel/grithlk/vfs_lock.ghl'
       - 'src/kernel/grithlk/vfs_bootstrap.ghl'
       - 'src/kernel/grithlk/vfs_fat16_key.ghl'
@@ -24,6 +25,7 @@ on:
       - 'scripts/test/test_vfs_objects_contract.ps1'
       - 'scripts/test/test_vfs_context_contract.ps1'
       - 'scripts/test/test_vfs_path_contract.ps1'
+      - 'scripts/test/test_vfs_open_contract.ps1'
       - 'scripts/test/test_vfs_lock_contract.ps1'
       - 'scripts/test/test_vfs_bootstrap_contract.ps1'
       - 'scripts/test/test_vfs_fat16_key_contract.ps1'
@@ -63,6 +65,10 @@ jobs:
       - name: Compile and verify canonical VFS path iterator
         shell: pwsh
         run: ./scripts/test/test_vfs_path_contract.ps1
+
+      - name: Compile and verify VFS open-rights firewall
+        shell: pwsh
+        run: ./scripts/test/test_vfs_open_contract.ps1
 
       - name: Compile and verify VFS no-steal locks
         shell: pwsh
@@ -138,6 +144,8 @@ jobs:
           %include "build/test-vfs/vfs_context.asm"
           section .text
           %include "build/test-vfs/vfs_path.asm"
+          section .text
+          %include "build/test-vfs/vfs_open.asm"
           section .text
           %include "build/test-vfs/vfs_lock.asm"
           section .text
