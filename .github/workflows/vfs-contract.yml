@@ -12,6 +12,7 @@ on:
       - 'src/kernel/grithlk/vfs_context.ghl'
       - 'src/kernel/grithlk/vfs_path.ghl'
       - 'src/kernel/grithlk/vfs_lock.ghl'
+      - 'src/kernel/grithlk/vfs_bootstrap.ghl'
       - 'src/kernel/grithlk/vfs_fat16_key.ghl'
       - 'src/kernel/grithlk/vfs_fat16_meta.ghl'
       - 'src/kernel/proc/handle_table.inc'
@@ -24,6 +25,7 @@ on:
       - 'scripts/test/test_vfs_context_contract.ps1'
       - 'scripts/test/test_vfs_path_contract.ps1'
       - 'scripts/test/test_vfs_lock_contract.ps1'
+      - 'scripts/test/test_vfs_bootstrap_contract.ps1'
       - 'scripts/test/test_vfs_fat16_key_contract.ps1'
       - 'scripts/test/test_vfs_fat16_meta_contract.ps1'
       - 'scripts/test/test_fat16_vfs_prereqs.ps1'
@@ -65,6 +67,10 @@ jobs:
       - name: Compile and verify VFS no-steal locks
         shell: pwsh
         run: ./scripts/test/test_vfs_lock_contract.ps1
+
+      - name: Compile and verify VFS cold bootstrap
+        shell: pwsh
+        run: ./scripts/test/test_vfs_bootstrap_contract.ps1
 
       - name: Compile and verify FAT16 VFS keys
         shell: pwsh
@@ -134,6 +140,8 @@ jobs:
           %include "build/test-vfs/vfs_path.asm"
           section .text
           %include "build/test-vfs/vfs_lock.asm"
+          section .text
+          %include "build/test-vfs/vfs_bootstrap.asm"
           section .text
           %include "build/test-vfs/vfs_fat16_key.asm"
           section .text
