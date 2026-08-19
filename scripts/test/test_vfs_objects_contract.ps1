@@ -35,14 +35,23 @@ if ($src -match '(?m)^\s*unsafe\s+(asm|raw_io|syscall|user_mem)\b') {
 if ($src -match '(?m)^global\s+vfs_file_set_rights\s*;') {
     throw 'Immutable VFS file rights gained a widening setter'
 }
-if ($src -notmatch '(?s)fn\s+vfs_file_close\(token\).*?sb\(&vfs_file_active\s*\+\s*i,\s*0\);.*?vfs_next_generation') {
-    throw 'File close no longer invalidates active state before generation reuse'
+if ($src -notmatch '(?s)fn\s+vfs_file_close\(token\).*?vfs_file_exists\(token\).*?sb\(&vfs_file_active\s*\+\s*i,\s*0\);.*?vfs_next_generation') {
+    throw 'File close must accept stale-node lifetime tokens and invalidate generation on close'
 }
 if ($src -notmatch '(?s)fn\s+vfs_node_free\(token\).*?if\s+lw\(&vfs_node_refs\s*\+\s*i\s*\*\s*4\)\s*!=\s*0\s*\{\s*return\s+0;') {
     throw 'Node free no longer rejects referenced nodes'
+}
+if ($src -notmatch '(?s)fn\s+vfs_node_mark_stale\(token\).*?VFS_NODE_STALE') {
+    throw 'VFS node layer lost explicit stale state for backend slot reuse'
+}
+if ($src -notmatch '(?s)fn\s+vfs_node_validate\(token\).*?VFS_NODE_LIVE') {
+    throw 'Operational node validation no longer rejects stale objects'
+}
+if ($src -notmatch '(?s)fn\s+vfs_file_alloc\(node_token,\s*flags,\s*rights\).*?vfs_open_flags_valid\(flags\)') {
+    throw 'VFS file allocation no longer validates open flags'
 }
 if ($src -notmatch 'const\s+VFS_NODE_CAP\s*=\s*128;') { throw 'VFS node pool bound drifted' }
 if ($src -notmatch 'const\s+VFS_FILE_CAP\s*=\s*128;') { throw 'VFS file pool bound drifted' }
 if ($src -match '(?m)^\s*(malloc|alloc|heap_)') { throw 'VFS fixed-pool object layer unexpectedly allocates dynamically' }
 
-Write-Host 'VFS objects: PASS (bounded pools, narrow unsafe surface, immutable-rights guards).' -ForegroundColor Green
+Write-Host 'VFS objects: PASS (bounded pools, stale-safe lifetime, narrow unsafe surface, immutable rights).' -ForegroundColor Green
