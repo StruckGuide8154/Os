@@ -18,7 +18,9 @@ if ($LASTEXITCODE -ne 0) { throw 'vfs_objects.ghl failed GritHLK compilation' }
 if (-not (Test-Path $Safety)) { throw 'Missing VFS object safety manifest' }
 
 $m = Get-Content -Raw -Path $Safety | ConvertFrom-Json
-$declared = @($m.unsafe.declared | ForEach-Object { [string]$_ } | Sort-Object)
+$declared = @($m.unsafe.declared | ForEach-Object {
+    if ($null -ne $_.cap) { [string]$_.cap } else { [string]$_ }
+} | Sort-Object)
 $expected = @('implicit_extern', 'raw_mem')
 if (($declared -join ',') -ne ($expected -join ',')) {
     throw "VFS object unsafe surface drifted: expected [$($expected -join ', ')], got [$($declared -join ', ')]"
