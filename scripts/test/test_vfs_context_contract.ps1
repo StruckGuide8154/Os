@@ -24,17 +24,21 @@ if (@($m.unsafe.privileged).Count -ne 0) { throw 'VFS context gained privileged 
 
 $src = Get-Content -Raw -Path $Source
 if ($src -notmatch 'const\s+VFS_CTX_SLOTS\s*=\s*12;') { throw 'VFS context slot bound drifted' }
-if ($src -notmatch '(?s)fn\s+vfs_ctx_chdir_to_node\(slot,\s*dir_node,\s*rights\).*?vfs_rights_subset\(root_rights,\s*rights\)\s*==\s*0\s*\{\s*return\s+0;') {
-    throw 'chdir no longer proves new rights are a subset of root rights'
+if ($src -notmatch 'const\s+VFS_CTX_LOCK_BASE\s*=\s*3;') { throw 'VFS context lock-ID base drifted from vfs_lock contract' }
+if ($src -notmatch '(?s)fn\s+vfs_ctx_chdir_to_node\(slot,\s*dir_node,\s*rights\).*?vfs_lock_acquire\(lid,\s*VFS_CTX_LOCK_SPINS\).*?vfs_rights_subset\(root_rights,\s*rights\)\s*==\s*0') {
+    throw 'chdir no longer serializes and attenuates rights against the slot root'
 }
-if ($src -notmatch '(?s)fn\s+vfs_ctx_init_slot\(slot,\s*root_node,\s*rights\).*?vfs_node_get_type\(root_node\)\s*!=\s*VFS_OBJ_DIR') {
-    throw 'slot init no longer requires a directory root node'
+if ($src -notmatch '(?s)fn\s+vfs_ctx_init_slot\(slot,\s*root_node,\s*rights\).*?vfs_node_get_type\(root_node\)\s*!=\s*VFS_OBJ_DIR.*?vfs_lock_acquire\(lid,\s*VFS_CTX_LOCK_SPINS\)') {
+    throw 'slot init no longer requires a directory root and a per-slot lock'
 }
-if ($src -notmatch '(?s)fn\s+vfs_ctx_reset_slot\(slot\).*?sq\(cp,\s*0\);.*?sq\(rp,\s*0\);.*?vfs_ctx_bump_epoch\(slot\);.*?vfs_file_close') {
+if ($src -notmatch '(?s)fn\s+vfs_ctx_reset_unlocked\(slot\).*?sq\(cp,\s*0\);.*?sq\(rp,\s*0\);.*?vfs_ctx_bump_epoch\(slot\);.*?vfs_file_close') {
     throw 'context reset no longer unpublishes before closing private files'
+}
+if ($src -notmatch '(?s)fn\s+vfs_ctx_reset_slot\(slot\).*?vfs_lock_acquire\(lid,\s*VFS_CTX_LOCK_SPINS\).*?vfs_ctx_reset_unlocked\(slot\).*?vfs_lock_release\(lid\)') {
+    throw 'public context reset is not serialized by the slot lock'
 }
 if ($src -match '(?m)^\s*unsafe\s+(asm|raw_io|syscall|user_mem|kernel_priv|kernel_io)\b') {
     throw 'VFS context gained authority beyond module-owned state'
 }
 
-Write-Host 'VFS context: PASS (per-slot root/cwd, rights attenuation, bounded state).' -ForegroundColor Green
+Write-Host 'VFS context: PASS (per-slot root/cwd, no-steal mutation locks, rights attenuation, bounded state).' -ForegroundColor Green
