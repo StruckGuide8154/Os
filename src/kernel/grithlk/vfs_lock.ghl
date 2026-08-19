@@ -1,0 +1,138 @@
+# ============================================================================
+# vfs_lock.ghl - bounded, NO-STEAL locks for VFS authority/metadata state.
+#
+# Filesystem integrity has a different failure preference from the workqueue:
+# a waiter may time out and fail an operation, but it must NEVER take ownership
+# while another core could still be inside the critical section. Lock stealing
+# would turn a liveness event into concurrent metadata mutation.
+#
+# Locks are selected by small IDs, not caller-provided pointers. This keeps the
+# authority surface finite and prevents this module becoming a generic arbitrary
+# atomic-memory primitive.
+#
+# BSP recovery integration uses bounded_lock.ghl's held-lock registry. A normal
+# waiter never steals. If the watchdog explicitly unwinds the BSP, its recovery
+# pad may release locks recorded through blk_held_push(). AP abandonment remains
+# fail-closed: waiters time out until a dedicated recovery authority handles it.
+#
+# SMP publication relies on x86 TSO: successful lock cmpxchg acquires, and the
+# owner-checked plain zero store releases after all critical-section writes.
+# ============================================================================
+
+module "vfs_lock";
+
+unsafe raw_mem;          # bounded lw/sw over module-owned lock words/counters
+unsafe kernel_priv;      # atomic_cmpxchg + pause
+unsafe implicit_extern;  # address-of module-owned lock storage
+
+global vfs_lock_abi_version;
+global vfs_lock_init;
+global vfs_lock_acquire;
+global vfs_lock_release;
+global vfs_lock_owner;
+global vfs_lock_timeouts;
+global vfs_lock_bad_releases;
+
+extern blk_self_tag;
+extern blk_held_push;
+extern blk_held_pop;
+
+const VFS_LOCK_ABI_VERSION = 1;
+
+# Named authority domains. Context locks are one per app slot so unrelated cwd
+# changes never contend. FAT_BACKEND serializes the CURRENT legacy shared FAT
+# scratch/cache only during migration, not the generic VFS read hot path.
+const VFS_LOCK_OBJECTS     = 0;
+const VFS_LOCK_NAMESPACE   = 1;
+const VFS_LOCK_FAT_BACKEND = 2;
+const VFS_LOCK_CTX_BASE    = 3;
+const VFS_LOCK_CTX_COUNT   = 12;
+const VFS_LOCK_COUNT       = 15;
+
+# Each owner word lives at the start of its own 64-byte cache line.
+const VFS_LOCK_STRIDE = 64;
+const VFS_LOCK_MAX_SPINS = 65536;
+
+align 64;
+reserve vfs_lock_words[960]; # VFS_LOCK_COUNT * VFS_LOCK_STRIDE
+align 64;
+reserve vfs_lock_timeout_v[8];
+reserve vfs_lock_bad_release_v[8];
+
+fn vfs_lock_abi_version() { return VFS_LOCK_ABI_VERSION; }
+
+fn vfs_lock_id_valid(id) {
+    if id >= VFS_LOCK_COUNT { return 0; }
+    return 1;
+}
+
+fn vfs_lock_ptr(id) {
+    if vfs_lock_id_valid(id) == 0 { return 0; }
+    return &vfs_lock_words + id * VFS_LOCK_STRIDE;
+}
+
+# Boot-only initialization. Runtime recovery must use explicit held-lock recovery,
+# never call this to erase ownership underneath a live critical section.
+fn vfs_lock_init() {
+    let i = 0;
+    while i < VFS_LOCK_COUNT {
+        sw(&vfs_lock_words + i * VFS_LOCK_STRIDE, 0);
+        i = i + 1;
+    }
+    sq(&vfs_lock_timeout_v, 0);
+    sq(&vfs_lock_bad_release_v, 0);
+    return 1;
+}
+
+# vfs_lock_acquire(id, spin_budget) -> 1 acquired, 0 timeout/invalid.
+# Bounded TTAS: only cmpxchg when the word appears free. There is deliberately
+# NO deadline-steal path. spin_budget=0 still performs one immediate try.
+fn vfs_lock_acquire(id, spin_budget) {
+    let p = vfs_lock_ptr(id);
+    if p == 0 { return 0; }
+    let tag = blk_self_tag();
+    if tag == 0 { return 0; }
+
+    let budget = spin_budget;
+    if budget > VFS_LOCK_MAX_SPINS { budget = VFS_LOCK_MAX_SPINS; }
+    let tries = 0;
+    while 1 {
+        if lw(p) == 0 {
+            if atomic_cmpxchg(p, 0, tag) == 0 {
+                blk_held_push(p);
+                return 1;
+            }
+        }
+        if tries >= budget {
+            sq(&vfs_lock_timeout_v, lq(&vfs_lock_timeout_v) + 1);
+            return 0;
+        }
+        tries = tries + 1;
+        pause();
+    }
+    return 0;
+}
+
+# Owner-checked release. A wrong-core or double release never clears the lock.
+fn vfs_lock_release(id) {
+    let p = vfs_lock_ptr(id);
+    if p == 0 { return 0; }
+    let tag = blk_self_tag();
+    if tag == 0 { return 0; }
+    if lw(p) != tag {
+        sq(&vfs_lock_bad_release_v, lq(&vfs_lock_bad_release_v) + 1);
+        return 0;
+    }
+    blk_held_pop(p);
+    sw(p, 0);
+    return 1;
+}
+
+fn vfs_lock_owner(id) {
+    let p = vfs_lock_ptr(id);
+    if p == 0 { return 0; }
+    return lw(p);
+}
+
+fn vfs_lock_timeouts() { return lq(&vfs_lock_timeout_v); }
+fn vfs_lock_bad_releases() { return lq(&vfs_lock_bad_release_v); }
