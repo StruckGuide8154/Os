@@ -35,7 +35,7 @@ const F16_ATTR_KNOWN     = 0x3F;
 
 const F16_ENTRY_DELETED = 0xE5;
 const F16_CLUSTER_MIN   = 2;
-const F16_CLUSTER_MAX   = 0xFFF7;
+const F16_CLUSTER_MAX   = 0xFFF6; # 0xFFF7 is BAD, 0xFFF8.. are EOC/reserved
 const F16_SPC_MAX       = 128;
 const F16_SECTOR_BYTES  = 512;
 
