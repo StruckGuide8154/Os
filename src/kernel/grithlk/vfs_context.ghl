@@ -11,13 +11,13 @@
 #   * a chdir can only retain rights that are already a subset of the slot root;
 #   * root/cwd must resolve to live directory objects;
 #   * slot indices are bounded before touching module-owned storage;
-#   * context reset closes both private file objects and bumps an epoch.
+#   * init/reset/chdir are serialized by a dedicated per-slot NO-STEAL lock;
+#   * context reset unpublishes both private file tokens before closing them.
 #
-# PERFORMANCE: one array index for root/cwd lookup; no path parsing or crypto.
-#
-# SMP NOTE: this phase is intentionally compile-gated but not runtime-wired.
-# Context mutation is serialized by the future per-slot VFS context lock before
-# any syscall can call init/chdir/reset concurrently.
+# PERFORMANCE:
+#   * unrelated app slots never contend on cwd/root mutation;
+#   * root/cwd observation remains one lockless aligned u64 load + validation;
+#   * no path parsing, heap allocation, or crypto occurs here.
 # ============================================================================
 
 module "vfs_context";
@@ -41,9 +41,15 @@ extern vfs_file_close;
 extern vfs_file_get_rights;
 extern vfs_rights_valid;
 extern vfs_rights_subset;
+extern vfs_lock_acquire;
+extern vfs_lock_release;
 
-const VFS_CONTEXT_ABI_VERSION = 1;
+const VFS_CONTEXT_ABI_VERSION = 2;
 const VFS_CTX_SLOTS = 12;
+
+# Must match vfs_lock.ghl: context lock IDs are 3..14, one per app slot.
+const VFS_CTX_LOCK_BASE = 3;
+const VFS_CTX_LOCK_SPINS = 65536;
 
 const VFS_OBJ_DIR = 2;
 const VFS_O_DIRECTORY = 0x0010;
@@ -53,15 +59,23 @@ const VFS_R_ENUM     = 0x0010;
 const VFS_R_TRAVERSE = 0x0400;
 const VFS_CTX_DIR_MIN_RIGHTS = 0x0411; # LOOKUP|ENUM|TRAVERSE
 
+align 64;
 reserve vfs_ctx_root_file[96];  # 12 * u64 private VfsFile tokens
+align 64;
 reserve vfs_ctx_cwd_file[96];   # 12 * u64 private VfsFile tokens
-reserve vfs_ctx_epoch_v[96];    # 12 * u64 mutation epoch, never intentionally 0 after init/reset
+align 64;
+reserve vfs_ctx_epoch_v[96];    # 12 * u64 mutation epoch
 
 fn vfs_context_abi_version() { return VFS_CONTEXT_ABI_VERSION; }
 
 fn vfs_ctx_slot_valid(slot) {
     if slot >= VFS_CTX_SLOTS { return 0; }
     return 1;
+}
+
+fn vfs_ctx_lock_id(slot) {
+    if vfs_ctx_slot_valid(slot) == 0 { return 0xFFFFFFFFFFFFFFFF; }
+    return VFS_CTX_LOCK_BASE + slot;
 }
 
 fn vfs_ctx_bump_epoch(slot) {
@@ -77,18 +91,17 @@ fn vfs_ctx_epoch(slot) {
     return lq(&vfs_ctx_epoch_v + slot * 8);
 }
 
-# Close context-private files. cwd/root are deliberately separate VfsFile
-# objects even when they reference the same root node, so each owns exactly one
-# node reference and neither token aliases the other.
-fn vfs_ctx_reset_slot(slot) {
-    if vfs_ctx_slot_valid(slot) == 0 { return 0; }
+# Caller holds this slot's context lock. cwd/root are deliberately separate
+# VfsFile objects even when they reference the same root node, so each owns
+# exactly one node reference and neither token aliases the other.
+fn vfs_ctx_reset_unlocked(slot) {
     let cp = &vfs_ctx_cwd_file + slot * 8;
     let rp = &vfs_ctx_root_file + slot * 8;
     let cwd = lq(cp);
     let root = lq(rp);
 
-    # Unpublish first. A future synchronized runtime caller can never observe a
-    # context token that this function is in the process of closing.
+    # Unpublish first. Readers can see either the old token or zero, but never a
+    # partially rewritten token. Close then invalidates old generations.
     sq(cp, 0);
     sq(rp, 0);
     vfs_ctx_bump_epoch(slot);
@@ -96,6 +109,15 @@ fn vfs_ctx_reset_slot(slot) {
     if cwd != 0 { vfs_file_close(cwd); }
     if root != 0 { vfs_file_close(root); }
     return 1;
+}
+
+fn vfs_ctx_reset_slot(slot) {
+    if vfs_ctx_slot_valid(slot) == 0 { return 0; }
+    let lid = vfs_ctx_lock_id(slot);
+    if vfs_lock_acquire(lid, VFS_CTX_LOCK_SPINS) == 0 { return 0; }
+    let ok = vfs_ctx_reset_unlocked(slot);
+    vfs_lock_release(lid);
+    return ok;
 }
 
 # Initialize a slot from a live root directory node. Root and cwd each receive
@@ -107,24 +129,33 @@ fn vfs_ctx_init_slot(slot, root_node, rights) {
     if vfs_rights_valid(rights) == 0 { return 0; }
     if vfs_rights_subset(rights, VFS_CTX_DIR_MIN_RIGHTS) == 0 { return 0; }
 
-    # Reset an old context before publishing the replacement. This is safe in
-    # the pre-runtime phase; the runtime lock lands before concurrent use.
-    vfs_ctx_reset_slot(slot);
+    let lid = vfs_ctx_lock_id(slot);
+    if vfs_lock_acquire(lid, VFS_CTX_LOCK_SPINS) == 0 { return 0; }
+    vfs_ctx_reset_unlocked(slot);
 
     let root_file = vfs_file_alloc(root_node, VFS_O_DIRECTORY, rights);
-    if root_file == 0 { return 0; }
+    if root_file == 0 {
+        vfs_lock_release(lid);
+        return 0;
+    }
     let cwd_file = vfs_file_alloc(root_node, VFS_O_DIRECTORY, rights);
     if cwd_file == 0 {
         vfs_file_close(root_file);
+        vfs_lock_release(lid);
         return 0;
     }
 
     sq(&vfs_ctx_root_file + slot * 8, root_file);
     sq(&vfs_ctx_cwd_file + slot * 8, cwd_file);
     vfs_ctx_bump_epoch(slot);
+    vfs_lock_release(lid);
     return 1;
 }
 
+# Observation is deliberately lockless. Tokens are aligned u64 values, publish
+# atomically, and vfs_file_validate() rejects a token that has since been closed.
+# Runtime path-walking will retain/derive the object while holding the context
+# lock before this becomes an authority-bearing syscall path.
 fn vfs_ctx_get_root(slot) {
     if vfs_ctx_slot_valid(slot) == 0 { return 0; }
     let f = lq(&vfs_ctx_root_file + slot * 8);
@@ -151,18 +182,36 @@ fn vfs_ctx_chdir_to_node(slot, dir_node, rights) {
     if vfs_rights_valid(rights) == 0 { return 0; }
     if vfs_rights_subset(rights, VFS_CTX_DIR_MIN_RIGHTS) == 0 { return 0; }
 
-    let root = vfs_ctx_get_root(slot);
-    if root == 0 { return 0; }
+    let lid = vfs_ctx_lock_id(slot);
+    if vfs_lock_acquire(lid, VFS_CTX_LOCK_SPINS) == 0 { return 0; }
+
+    # Read the root token while mutation is excluded for this slot.
+    let root = lq(&vfs_ctx_root_file + slot * 8);
+    if root == 0 {
+        vfs_lock_release(lid);
+        return 0;
+    }
+    if vfs_file_validate(root) == 0 {
+        vfs_lock_release(lid);
+        return 0;
+    }
     let root_rights = vfs_file_get_rights(root);
-    if vfs_rights_subset(root_rights, rights) == 0 { return 0; }
+    if vfs_rights_subset(root_rights, rights) == 0 {
+        vfs_lock_release(lid);
+        return 0;
+    }
 
     let next = vfs_file_alloc(dir_node, VFS_O_DIRECTORY, rights);
-    if next == 0 { return 0; }
+    if next == 0 {
+        vfs_lock_release(lid);
+        return 0;
+    }
 
     let p = &vfs_ctx_cwd_file + slot * 8;
     let old = lq(p);
     sq(p, next);
     vfs_ctx_bump_epoch(slot);
     if old != 0 { vfs_file_close(old); }
+    vfs_lock_release(lid);
     return 1;
 }
