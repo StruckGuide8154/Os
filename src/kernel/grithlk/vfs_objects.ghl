@@ -2,9 +2,9 @@
 # vfs_objects.ghl - fixed-pool VFS node/open-file object core.
 #
 # This module owns the generic kernel objects that future VFS handles reference.
-# It performs no filesystem I/O, no path parsing, no allocation, and never sees
-# a user pointer. Pools are fixed-size kernel BSS so exhaustion is explicit and
-# attacker-controlled opens cannot grow kernel memory without bound.
+# It performs no filesystem I/O, no path parsing, no heap allocation, and never
+# sees a user pointer. Pools are fixed-size kernel BSS so exhaustion is explicit
+# and attacker-controlled opens cannot grow kernel memory without bound.
 #
 # SECURITY:
 #   * every object reference is a generation-tagged token, never a raw pointer;
@@ -12,17 +12,21 @@
 #   * file rights are fixed at allocation and have no widening setter;
 #   * a file allocation retains its node; close drops exactly that reference;
 #   * deleted/replaced backend objects become STALE while references exist;
+#   * backend identity is canonicalized under the OBJECTS no-steal lock;
 #   * unknown token magic/kind/index/generation fails closed;
 #   * all pools have hard ceilings.
 #
 # PERFORMANCE:
-#   * lookup is O(1) array indexing;
+#   * token lookup is O(1) array indexing;
 #   * no heap allocation, crypto, name lookup, or filesystem backend call;
-#   * hot file state is kept in parallel compact arrays.
+#   * hot immutable file state is kept in parallel compact arrays;
+#   * canonical-node scan happens on open/materialization only, never read();
+#   * normal read/pread will not take the global OBJECTS lock.
 #
-# SMP NOTE: this phase is intentionally NOT wired into runtime syscalls yet.
-# Allocation/free synchronization lands before the first runtime VFS handle.
-# Reads of immutable rights/node identity remain naturally read-mostly.
+# SMP:
+#   Mutating pool operations are serialized by VFS_LOCK_OBJECTS, whose bounded
+#   acquire NEVER steals. Publication is active-state LAST; teardown clears
+#   active-state FIRST. Read-only validation stays lockless/read-mostly.
 # ============================================================================
 
 module "vfs_objects";
@@ -33,6 +37,7 @@ unsafe implicit_extern;  # address-of module-owned reserve symbols
 global vfs_objects_abi_version;
 global vfs_objects_reset;
 global vfs_node_alloc;
+global vfs_node_find_live;
 global vfs_node_exists;
 global vfs_node_validate;
 global vfs_node_mark_stale;
@@ -47,6 +52,7 @@ global vfs_node_get_fs_id;
 global vfs_node_get_dir_generation;
 global vfs_node_bump_dir_generation;
 global vfs_node_refcount;
+global vfs_file_open_object;
 global vfs_file_alloc;
 global vfs_file_exists;
 global vfs_file_validate;
@@ -64,13 +70,19 @@ extern vfs_rights_subset;
 extern vfs_object_type_valid;
 extern vfs_open_flags_valid;
 extern vfs_checked_add_ok;
+extern vfs_lock_acquire;
+extern vfs_lock_release;
 
-const VFS_OBJECTS_ABI_VERSION = 1;
+const VFS_OBJECTS_ABI_VERSION = 2;
 
 # Fixed ceilings. Keep powers of two so token index validation is cheap and the
 # memory budget remains obvious in review.
 const VFS_NODE_CAP = 128;
 const VFS_FILE_CAP = 128;
+
+# Object mutation lock. Must match vfs_lock.ghl VFS_LOCK_OBJECTS.
+const VFS_OBJ_LOCK_ID = 0;
+const VFS_OBJ_LOCK_SPINS = 65536;
 
 # Token layout (u64):
 #   bits  0..15  index
@@ -99,23 +111,38 @@ const VFS_R_ALL = 0x0FFF;
 const U64_MAX   = 0xFFFFFFFFFFFFFFFF;
 
 # -------------------- node pool --------------------
+align 64;
 reserve vfs_node_active[128];             # u8 state: FREE/LIVE/STALE
+align 64;
 reserve vfs_node_type[128];               # u8
+align 64;
 reserve vfs_node_generation[1024];        # 128 * u64 (low 24 bits used)
-reserve vfs_node_fs_id[512];               # 128 * u32
-reserve vfs_node_refs[512];                # 128 * u32
-reserve vfs_node_size[1024];               # 128 * u64
-reserve vfs_node_key0[1024];               # backend-stable opaque key word 0
-reserve vfs_node_key1[1024];               # backend-stable opaque key word 1
-reserve vfs_node_dir_generation[1024];     # namespace mutation epoch
+align 64;
+reserve vfs_node_fs_id[512];              # 128 * u32
+align 64;
+reserve vfs_node_refs[512];               # 128 * u32
+align 64;
+reserve vfs_node_size[1024];              # 128 * u64
+align 64;
+reserve vfs_node_key0[1024];              # backend-stable opaque key word 0
+align 64;
+reserve vfs_node_key1[1024];              # backend-stable opaque key word 1
+align 64;
+reserve vfs_node_dir_generation[1024];    # namespace mutation epoch
 
 # -------------------- open-file pool --------------------
-reserve vfs_file_active[128];              # u8
-reserve vfs_file_generation[1024];         # 128 * u64 (low 24 bits used)
-reserve vfs_file_node[1024];               # generation-tagged node token
-reserve vfs_file_offset[1024];             # u64
-reserve vfs_file_rights[1024];             # immutable u64 rights mask
-reserve vfs_file_flags[512];               # immutable u32 open flags
+align 64;
+reserve vfs_file_active[128];             # u8
+align 64;
+reserve vfs_file_generation[1024];        # 128 * u64 (low 24 bits used)
+align 64;
+reserve vfs_file_node[1024];              # generation-tagged node token
+align 64;
+reserve vfs_file_offset[1024];            # u64
+align 64;
+reserve vfs_file_rights[1024];            # immutable u64 rights mask
+align 64;
+reserve vfs_file_flags[512];              # immutable u32 open flags
 
 fn vfs_objects_abi_version() { return VFS_OBJECTS_ABI_VERSION; }
 
@@ -152,9 +179,44 @@ fn vfs_next_generation(current) {
     return g;
 }
 
-# Boot/reset helper. Generation is advanced rather than zeroed so calling reset
-# after a recovery event invalidates every token that existed before it.
+# -------------------- lock-free read validators --------------------
+# These helpers only inspect state. Writers publish LIVE/active last and clear it
+# first on teardown. Runtime users still need object ownership (a VfsFile/handle)
+# across an operation; these functions alone are not lifetime references.
+fn vfs_node_exists_unlocked(token) {
+    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_NODE, VFS_NODE_CAP) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    if lb(&vfs_node_active + i) == VFS_NODE_FREE { return 0; }
+    if (lq(&vfs_node_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
+    return 1;
+}
+
+fn vfs_node_validate_unlocked(token) {
+    if vfs_node_exists_unlocked(token) == 0 { return 0; }
+    if lb(&vfs_node_active + vfs_token_index(token)) != VFS_NODE_LIVE { return 0; }
+    return 1;
+}
+
+fn vfs_file_exists_unlocked(token) {
+    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_FILE, VFS_FILE_CAP) == 0 { return 0; }
+    let i = vfs_token_index(token);
+    if lb(&vfs_file_active + i) == 0 { return 0; }
+    if (lq(&vfs_file_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
+    if vfs_node_exists_unlocked(lq(&vfs_file_node + i * 8)) == 0 { return 0; }
+    return 1;
+}
+
+fn vfs_file_validate_unlocked(token) {
+    if vfs_file_exists_unlocked(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(lq(&vfs_file_node + vfs_token_index(token) * 8)) == 0 { return 0; }
+    return 1;
+}
+
+# -------------------- boot/reset --------------------
+# Boot-only. vfs_lock_init() must run before this function is used at runtime.
+# Generation is advanced rather than zeroed so reset invalidates old tokens.
 fn vfs_objects_reset() {
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
     let i = 0;
     while i < VFS_NODE_CAP {
         let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
@@ -180,15 +242,32 @@ fn vfs_objects_reset() {
         sw(&vfs_file_flags + i * 4, 0);
         i = i + 1;
     }
-    return 0;
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return 1;
 }
 
 # -------------------- node lifecycle --------------------
-# key0/key1 are opaque backend-stable identity words. They must never be a live
-# cache pointer. For FAT16 the adapter will encode directory identity + raw slot
-# identity here rather than fat16_root_cache addresses.
-fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
-    if vfs_object_type_valid(obj_type) == 0 { return 0; }
+fn vfs_node_find_live_unlocked(fs_id, key0, key1) {
+    let i = 0;
+    while i < VFS_NODE_CAP {
+        if lb(&vfs_node_active + i) == VFS_NODE_LIVE {
+            if lw(&vfs_node_fs_id + i * 4) == fs_id {
+                if lq(&vfs_node_key0 + i * 8) == key0 {
+                    if lq(&vfs_node_key1 + i * 8) == key1 {
+                        let g = lq(&vfs_node_generation + i * 8) & VFS_TOKEN_GEN_MASK;
+                        return vfs_token_make(i, g, VFS_TOKEN_KIND_NODE);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn vfs_node_alloc_unlocked(fs_id, key0, key1, obj_type, size) {
+    let existing = vfs_node_find_live_unlocked(fs_id, key0, key1);
+    if existing != 0 { return existing; }
     let i = 0;
     while i < VFS_NODE_CAP {
         if lb(&vfs_node_active + i) == VFS_NODE_FREE {
@@ -201,7 +280,7 @@ fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
             sq(&vfs_node_key0 + i * 8, key0);
             sq(&vfs_node_key1 + i * 8, key1);
             sq(&vfs_node_dir_generation + i * 8, 1);
-            # Publish LIVE LAST so no resolver can observe a half-filled node.
+            # Publish LIVE LAST so no lockless validator sees half-filled state.
             sb(&vfs_node_active + i, VFS_NODE_LIVE);
             return vfs_token_make(i, g, VFS_TOKEN_KIND_NODE);
         }
@@ -210,117 +289,141 @@ fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
     return 0;
 }
 
-# Exists accepts LIVE or STALE. It is for lifetime management only, especially
-# closing a file after its backend entry was deleted. Operations use validate.
-fn vfs_node_exists(token) {
-    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_NODE, VFS_NODE_CAP) == 0 { return 0; }
-    let i = vfs_token_index(token);
-    if lb(&vfs_node_active + i) == VFS_NODE_FREE { return 0; }
-    if (lq(&vfs_node_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
-    return 1;
+# Public canonical lookup. This is an OPEN/PATH operation, not a read hot path.
+fn vfs_node_find_live(fs_id, key0, key1) {
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let token = vfs_node_find_live_unlocked(fs_id, key0, key1);
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return token;
 }
 
-# Operational validation rejects STALE objects.
-fn vfs_node_validate(token) {
-    if vfs_node_exists(token) == 0 { return 0; }
-    if lb(&vfs_node_active + vfs_token_index(token)) != VFS_NODE_LIVE { return 0; }
-    return 1;
+# Canonical allocation: if this backend identity already has a LIVE node, return
+# that node rather than creating a parallel identity. Callers that immediately
+# need an open file should prefer vfs_file_open_object(), which also takes the
+# node reference before releasing the lock.
+fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
+    if fs_id == 0 { return 0; }
+    if vfs_object_type_valid(obj_type) == 0 { return 0; }
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let token = vfs_node_alloc_unlocked(fs_id, key0, key1, obj_type, size);
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return token;
 }
+
+fn vfs_node_exists(token) { return vfs_node_exists_unlocked(token); }
+fn vfs_node_validate(token) { return vfs_node_validate_unlocked(token); }
 
 fn vfs_node_mark_stale(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
-    sb(&vfs_node_active + vfs_token_index(token), VFS_NODE_STALE);
-    return 1;
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let ok = 0;
+    if vfs_node_validate_unlocked(token) != 0 {
+        sb(&vfs_node_active + vfs_token_index(token), VFS_NODE_STALE);
+        ok = 1;
+    }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return ok;
 }
 
 fn vfs_node_is_stale(token) {
-    if vfs_node_exists(token) == 0 { return 0; }
+    if vfs_node_exists_unlocked(token) == 0 { return 0; }
     if lb(&vfs_node_active + vfs_token_index(token)) == VFS_NODE_STALE { return 1; }
     return 0;
 }
 
-# Free only an unreferenced LIVE or STALE node. State is cleared before mutable
-# fields are scrubbed so no future resolver can accept it during teardown.
+# Free only an unreferenced LIVE or STALE node.
 fn vfs_node_free(token) {
-    if vfs_node_exists(token) == 0 { return 0; }
-    let i = vfs_token_index(token);
-    if lw(&vfs_node_refs + i * 4) != 0 { return 0; }
-    sb(&vfs_node_active + i, VFS_NODE_FREE);
-    let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
-    sq(&vfs_node_generation + i * 8, g);
-    sb(&vfs_node_type + i, 0);
-    sw(&vfs_node_fs_id + i * 4, 0);
-    sw(&vfs_node_refs + i * 4, 0);
-    sq(&vfs_node_size + i * 8, 0);
-    sq(&vfs_node_key0 + i * 8, 0);
-    sq(&vfs_node_key1 + i * 8, 0);
-    sq(&vfs_node_dir_generation + i * 8, 0);
-    return 1;
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let ok = 0;
+    if vfs_node_exists_unlocked(token) != 0 {
+        let i = vfs_token_index(token);
+        if lw(&vfs_node_refs + i * 4) == 0 {
+            # Unpublish first, then invalidate generation and scrub.
+            sb(&vfs_node_active + i, VFS_NODE_FREE);
+            let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
+            sq(&vfs_node_generation + i * 8, g);
+            sb(&vfs_node_type + i, 0);
+            sw(&vfs_node_fs_id + i * 4, 0);
+            sw(&vfs_node_refs + i * 4, 0);
+            sq(&vfs_node_size + i * 8, 0);
+            sq(&vfs_node_key0 + i * 8, 0);
+            sq(&vfs_node_key1 + i * 8, 0);
+            sq(&vfs_node_dir_generation + i * 8, 0);
+            ok = 1;
+        }
+    }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return ok;
 }
 
 fn vfs_node_get_type(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lb(&vfs_node_type + vfs_token_index(token));
 }
 fn vfs_node_get_size(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_node_size + vfs_token_index(token) * 8);
 }
 fn vfs_node_set_size(token, size) {
-    if vfs_node_validate(token) == 0 { return 0; }
-    sq(&vfs_node_size + vfs_token_index(token) * 8, size);
-    return 1;
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let ok = 0;
+    if vfs_node_validate_unlocked(token) != 0 {
+        sq(&vfs_node_size + vfs_token_index(token) * 8, size);
+        ok = 1;
+    }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return ok;
 }
 fn vfs_node_get_key0(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_node_key0 + vfs_token_index(token) * 8);
 }
 fn vfs_node_get_key1(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_node_key1 + vfs_token_index(token) * 8);
 }
 fn vfs_node_get_fs_id(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lw(&vfs_node_fs_id + vfs_token_index(token) * 4);
 }
 fn vfs_node_get_dir_generation(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_node_dir_generation + vfs_token_index(token) * 8);
 }
 fn vfs_node_bump_dir_generation(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
-    let i = vfs_token_index(token);
-    let g = lq(&vfs_node_dir_generation + i * 8) + 1;
-    if g == 0 { g = 1; }
-    sq(&vfs_node_dir_generation + i * 8, g);
-    return g;
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let out = 0;
+    if vfs_node_validate_unlocked(token) != 0 {
+        let i = vfs_token_index(token);
+        let g = lq(&vfs_node_dir_generation + i * 8) + 1;
+        if g == 0 { g = 1; }
+        sq(&vfs_node_dir_generation + i * 8, g);
+        out = g;
+    }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return out;
 }
 fn vfs_node_refcount(token) {
-    if vfs_node_exists(token) == 0 { return 0; }
+    if vfs_node_exists_unlocked(token) == 0 { return 0; }
     return lw(&vfs_node_refs + vfs_token_index(token) * 4);
 }
 
 # -------------------- file lifecycle --------------------
-fn vfs_file_alloc(node_token, flags, rights) {
-    if vfs_node_validate(node_token) == 0 { return 0; }
-    if vfs_open_flags_valid(flags) == 0 { return 0; }
-    if vfs_rights_valid(rights) == 0 { return 0; }
+fn vfs_file_alloc_unlocked(node_token, flags, rights) {
+    if vfs_node_validate_unlocked(node_token) == 0 { return 0; }
     let i = 0;
     while i < VFS_FILE_CAP {
         if lb(&vfs_file_active + i) == 0 {
             let ng = vfs_token_index(node_token);
             let refs = lw(&vfs_node_refs + ng * 4);
             if refs == 0xFFFFFFFF { return 0; }
-
             let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
             sq(&vfs_file_generation + i * 8, g);
             sq(&vfs_file_node + i * 8, node_token);
             sq(&vfs_file_offset + i * 8, 0);
-            # Rights + flags are assigned once, before publication. There are no
-            # widening setters anywhere in this module.
             sq(&vfs_file_rights + i * 8, rights & VFS_R_ALL);
             sw(&vfs_file_flags + i * 4, flags);
             sw(&vfs_node_refs + ng * 4, refs + 1);
+            # Publish active LAST.
             sb(&vfs_file_active + i, 1);
             return vfs_token_make(i, g, VFS_TOKEN_KIND_FILE);
         }
@@ -329,73 +432,102 @@ fn vfs_file_alloc(node_token, flags, rights) {
     return 0;
 }
 
-# Lifetime validation accepts a file whose node has become STALE so close can
-# always drop its reference. Operational validation below requires a LIVE node.
-fn vfs_file_exists(token) {
-    if vfs_token_shape_valid(token, VFS_TOKEN_KIND_FILE, VFS_FILE_CAP) == 0 { return 0; }
-    let i = vfs_token_index(token);
-    if lb(&vfs_file_active + i) == 0 { return 0; }
-    if (lq(&vfs_file_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
-    if vfs_node_exists(lq(&vfs_file_node + i * 8)) == 0 { return 0; }
-    return 1;
+# Atomic backend materialization + open. This is the preferred runtime primitive:
+# canonical node selection and the first node reference happen under ONE lock,
+# so a zero-ref node cannot disappear between lookup and file creation.
+fn vfs_file_open_object(fs_id, key0, key1, obj_type, size, flags, rights) {
+    if fs_id == 0 { return 0; }
+    if vfs_object_type_valid(obj_type) == 0 { return 0; }
+    if vfs_open_flags_valid(flags) == 0 { return 0; }
+    if vfs_rights_valid(rights) == 0 { return 0; }
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+
+    let node = vfs_node_find_live_unlocked(fs_id, key0, key1);
+    if node == 0 {
+        node = vfs_node_alloc_unlocked(fs_id, key0, key1, obj_type, size);
+    } else {
+        if lb(&vfs_node_type + vfs_token_index(node)) != obj_type {
+            vfs_lock_release(VFS_OBJ_LOCK_ID);
+            return 0;
+        }
+    }
+
+    let file = 0;
+    if node != 0 { file = vfs_file_alloc_unlocked(node, flags, rights); }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return file;
 }
 
-fn vfs_file_validate(token) {
-    if vfs_file_exists(token) == 0 { return 0; }
-    if vfs_node_validate(lq(&vfs_file_node + vfs_token_index(token) * 8)) == 0 { return 0; }
-    return 1;
+fn vfs_file_alloc(node_token, flags, rights) {
+    if vfs_open_flags_valid(flags) == 0 { return 0; }
+    if vfs_rights_valid(rights) == 0 { return 0; }
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let file = vfs_file_alloc_unlocked(node_token, flags, rights);
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return file;
 }
+
+fn vfs_file_exists(token) { return vfs_file_exists_unlocked(token); }
+fn vfs_file_validate(token) { return vfs_file_validate_unlocked(token); }
 
 fn vfs_file_close(token) {
-    if vfs_file_exists(token) == 0 { return 0; }
-    let i = vfs_token_index(token);
-    let node = lq(&vfs_file_node + i * 8);
-    let ni = vfs_token_index(node);
-
-    # Stop new validation first, then invalidate generation and scrub state.
-    sb(&vfs_file_active + i, 0);
-    let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
-    sq(&vfs_file_generation + i * 8, g);
-    sq(&vfs_file_node + i * 8, 0);
-    sq(&vfs_file_offset + i * 8, 0);
-    sq(&vfs_file_rights + i * 8, 0);
-    sw(&vfs_file_flags + i * 4, 0);
-
-    let refs = lw(&vfs_node_refs + ni * 4);
-    if refs > 0 { sw(&vfs_node_refs + ni * 4, refs - 1); }
-    return 1;
+    if vfs_lock_acquire(VFS_OBJ_LOCK_ID, VFS_OBJ_LOCK_SPINS) == 0 { return 0; }
+    let ok = 0;
+    if vfs_file_exists_unlocked(token) != 0 {
+        let i = vfs_token_index(token);
+        let node = lq(&vfs_file_node + i * 8);
+        let ni = vfs_token_index(node);
+        # Stop new validation first, then invalidate generation and scrub state.
+        sb(&vfs_file_active + i, 0);
+        let g = vfs_next_generation(lq(&vfs_file_generation + i * 8));
+        sq(&vfs_file_generation + i * 8, g);
+        sq(&vfs_file_node + i * 8, 0);
+        sq(&vfs_file_offset + i * 8, 0);
+        sq(&vfs_file_rights + i * 8, 0);
+        sw(&vfs_file_flags + i * 4, 0);
+        let refs = lw(&vfs_node_refs + ni * 4);
+        if refs > 0 { sw(&vfs_node_refs + ni * 4, refs - 1); }
+        ok = 1;
+    }
+    vfs_lock_release(VFS_OBJ_LOCK_ID);
+    return ok;
 }
 
-# Required rights are a subset check against immutable file rights.
+# Required rights are a subset check against immutable file rights. No lock is
+# needed because rights are written before file publication and never widened.
 fn vfs_file_require_rights(token, required) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     if vfs_rights_valid(required) == 0 { return 0; }
     return vfs_rights_subset(lq(&vfs_file_rights + vfs_token_index(token) * 8), required);
 }
 
 fn vfs_file_get_node(token) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_file_node + vfs_token_index(token) * 8);
 }
 fn vfs_file_get_rights(token) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_file_rights + vfs_token_index(token) * 8);
 }
 fn vfs_file_get_flags(token) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     return lw(&vfs_file_flags + vfs_token_index(token) * 4);
 }
 fn vfs_file_get_offset(token) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     return lq(&vfs_file_offset + vfs_token_index(token) * 8);
 }
+
+# Offset mutation is not exposed to the runtime syscall bridge yet. `pread` is
+# the first read path. A per-file offset lock lands before shared `read` wiring so
+# normal reads never need the global OBJECTS lock.
 fn vfs_file_set_offset(token, offset) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     sq(&vfs_file_offset + vfs_token_index(token) * 8, offset);
     return 1;
 }
 fn vfs_file_advance(token, delta) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_validate_unlocked(token) == 0 { return 0; }
     let i = vfs_token_index(token);
     let old = lq(&vfs_file_offset + i * 8);
     if vfs_checked_add_ok(old, delta, U64_MAX) == 0 { return 0; }
