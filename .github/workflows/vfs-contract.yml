@@ -1,0 +1,32 @@
+name: VFS Contract
+
+on:
+  push:
+    branches:
+      - vfs-foundation
+  pull_request:
+    paths:
+      - 'src/kernel/grithlk/vfs_core.ghl'
+      - 'docs/vfs-architecture.md'
+      - 'scripts/test/test_vfs_contract.ps1'
+      - '.github/workflows/vfs-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  vfs-contract:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile and verify VFS policy core
+        shell: pwsh
+        run: ./scripts/test/test_vfs_contract.ps1
