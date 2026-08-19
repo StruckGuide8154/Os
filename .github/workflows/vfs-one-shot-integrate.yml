@@ -1,0 +1,116 @@
+name: VFS One-Shot Integration
+
+on:
+  push:
+    branches:
+      - vfs-foundation
+    paths:
+      - '.github/workflows/vfs-one-shot-integrate.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: vfs-foundation
+          fetch-depth: 0
+
+      - name: Apply guarded build integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          build = Path('scripts/build/build_uefi.ps1')
+          kernel = Path('src/kernel/kernel_build.asm')
+          bt = build.read_text(encoding='utf-8')
+          kt = kernel.read_text(encoding='utf-8')
+
+          registry_anchor = "    @{ src = 'src\\kernel\\grithlk\\fat16_core.ghl'; out = 'build\\ghl\\fat16_core.asm' },"
+          registry_add = """    # Capability-safe VFS foundation. Kept adjacent to FAT16 while the
+    # compatibility backend is migrated behind generic VFS objects/capabilities.
+    @{ src = 'src\\kernel\\grithlk\\vfs_core.ghl'; out = 'build\\ghl\\vfs_core.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_lock.ghl'; out = 'build\\ghl\\vfs_lock.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_objects.ghl'; out = 'build\\ghl\\vfs_objects.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_open.ghl'; out = 'build\\ghl\\vfs_open.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_context.ghl'; out = 'build\\ghl\\vfs_context.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_path.ghl'; out = 'build\\ghl\\vfs_path.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_fat16_key.ghl'; out = 'build\\ghl\\vfs_fat16_key.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_fat16_meta.ghl'; out = 'build\\ghl\\vfs_fat16_meta.asm' },
+    @{ src = 'src\\kernel\\grithlk\\vfs_bootstrap.ghl'; out = 'build\\ghl\\vfs_bootstrap.asm' },"""
+
+          include_anchor = 'section .text\n%include "build/ghl/fat16_core.asm"'
+          include_add = '''section .text
+%include "build/ghl/fat16_core.asm"
+; Capability-safe VFS foundation. These modules are linked now but the bootstrap
+; remains deliberately disconnected from kmain until read-only backend/runtime
+; tests are ready. Both BIOS and UEFI consume this same kernel translation unit.
+section .text
+%include "build/ghl/vfs_core.asm"
+section .text
+%include "build/ghl/vfs_lock.asm"
+section .text
+%include "build/ghl/vfs_objects.asm"
+section .text
+%include "build/ghl/vfs_open.asm"
+section .text
+%include "build/ghl/vfs_context.asm"
+section .text
+%include "build/ghl/vfs_path.asm"
+section .text
+%include "build/ghl/vfs_fat16_key.asm"
+section .text
+%include "build/ghl/vfs_fat16_meta.asm"
+section .text
+%include "build/ghl/vfs_bootstrap.asm"'''
+
+          already_registry = "src\\kernel\\grithlk\\vfs_core.ghl" in bt
+          already_include = 'build/ghl/vfs_core.asm' in kt
+          if already_registry != already_include:
+              raise SystemExit('partial VFS integration detected; refusing asymmetric patch')
+
+          if not already_registry:
+              if bt.count(registry_anchor) != 1:
+                  raise SystemExit(f'expected exactly one FAT16 registry anchor, got {bt.count(registry_anchor)}')
+              if kt.count(include_anchor) != 1:
+                  raise SystemExit(f'expected exactly one FAT16 include anchor, got {kt.count(include_anchor)}')
+              bt = bt.replace(registry_anchor, registry_anchor + '\n' + registry_add, 1)
+              kt = kt.replace(include_anchor, include_add, 1)
+              build.write_text(bt, encoding='utf-8')
+              kernel.write_text(kt, encoding='utf-8')
+
+          expected = [
+              'vfs_core','vfs_lock','vfs_objects','vfs_open','vfs_context',
+              'vfs_path','vfs_fat16_key','vfs_fat16_meta','vfs_bootstrap'
+          ]
+          bt2 = build.read_text(encoding='utf-8')
+          kt2 = kernel.read_text(encoding='utf-8')
+          for name in expected:
+              src = f"src\\kernel\\grithlk\\{name}.ghl"
+              out = f"build\\ghl\\{name}.asm"
+              inc = f'build/ghl/{name}.asm'
+              if bt2.count(src) != 1 or bt2.count(out) != 1:
+                  raise SystemExit(f'{name}: registry insertion missing/duplicated')
+              if kt2.count(inc) != 1:
+                  raise SystemExit(f'{name}: kernel include missing/duplicated')
+          print('VFS integration anchors verified for 9 modules.')
+          PY
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          if git diff --quiet -- scripts/build/build_uefi.ps1 src/kernel/kernel_build.asm; then
+            echo 'Integration already present; nothing to commit.'
+            exit 0
+          fi
+          git config user.name 'Grit VFS Integration Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add scripts/build/build_uefi.ps1 src/kernel/kernel_build.asm
+          git commit -m 'vfs: wire foundation into canonical kernel build'
+          git push origin HEAD:vfs-foundation
