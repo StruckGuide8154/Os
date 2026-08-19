@@ -10,6 +10,7 @@ on:
       - 'src/kernel/grithlk/vfs_core.ghl'
       - 'src/kernel/grithlk/vfs_objects.ghl'
       - 'src/kernel/grithlk/vfs_context.ghl'
+      - 'src/kernel/grithlk/vfs_path.ghl'
       - 'src/kernel/grithlk/vfs_fat16_key.ghl'
       - 'src/kernel/grithlk/vfs_fat16_meta.ghl'
       - 'src/kernel/proc/handle_table.inc'
@@ -20,6 +21,7 @@ on:
       - 'scripts/test/test_vfs_contract.ps1'
       - 'scripts/test/test_vfs_objects_contract.ps1'
       - 'scripts/test/test_vfs_context_contract.ps1'
+      - 'scripts/test/test_vfs_path_contract.ps1'
       - 'scripts/test/test_vfs_fat16_key_contract.ps1'
       - 'scripts/test/test_vfs_fat16_meta_contract.ps1'
       - 'scripts/test/test_fat16_vfs_prereqs.ps1'
@@ -54,6 +56,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test/test_vfs_context_contract.ps1
 
+      - name: Compile and verify canonical VFS path iterator
+        shell: pwsh
+        run: ./scripts/test/test_vfs_path_contract.ps1
+
       - name: Compile and verify FAT16 VFS keys
         shell: pwsh
         run: ./scripts/test/test_vfs_fat16_key_contract.ps1
@@ -73,6 +79,39 @@ jobs:
       - name: Install NASM
         shell: pwsh
         run: choco install nasm -y --no-progress
+
+      - name: Assemble VFS modules as one kernel translation unit
+        shell: pwsh
+        run: |
+          $harness = @'
+          bits 64
+          %ifmacro extern 1-*
+          %unmacro extern 1-*
+          %endif
+          %macro extern 1-*
+          %endmacro
+          %ifmacro global 1-*
+          %unmacro global 1-*
+          %endif
+          %macro global 1-*
+          %endmacro
+          section .text
+          %include "build/test-vfs/vfs_core.asm"
+          section .text
+          %include "build/test-vfs/vfs_objects.asm"
+          section .text
+          %include "build/test-vfs/vfs_context.asm"
+          section .text
+          %include "build/test-vfs/vfs_path.asm"
+          section .text
+          %include "build/test-vfs/vfs_fat16_key.asm"
+          section .text
+          %include "build/test-vfs/vfs_fat16_meta.asm"
+          '@
+          $harnessPath = Join-Path $env:RUNNER_TEMP 'grit-vfs-linkage.asm'
+          [System.IO.File]::WriteAllText($harnessPath, $harness, [System.Text.Encoding]::ASCII)
+          nasm -f win64 -o build\test-vfs\vfs_linkage.obj -I "$PWD\" $harnessPath
+          if ($LASTEXITCODE -ne 0) { throw 'VFS single-TU linkage assembly failed' }
 
       - name: Assemble hardened handle table
         shell: pwsh
