@@ -320,6 +320,17 @@ $KernelModules = @(
     # root/file caches live in `.bss` via `reserve` (zero image bytes). Provides
     # the SYS_FS_* worker globals + per-slot cwd ownership and TOCTOU snapshot.
     @{ src = 'src\kernel\grithlk\fat16_core.ghl'; out = 'build\ghl\fat16_core.asm' },
+    # Capability-safe VFS foundation. Kept adjacent to FAT16 while the
+    # compatibility backend is migrated behind generic VFS objects/capabilities.
+    @{ src = 'src\kernel\grithlk\vfs_core.ghl'; out = 'build\ghl\vfs_core.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_lock.ghl'; out = 'build\ghl\vfs_lock.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_objects.ghl'; out = 'build\ghl\vfs_objects.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_open.ghl'; out = 'build\ghl\vfs_open.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_context.ghl'; out = 'build\ghl\vfs_context.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_path.ghl'; out = 'build\ghl\vfs_path.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_fat16_key.ghl'; out = 'build\ghl\vfs_fat16_key.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_fat16_meta.ghl'; out = 'build\ghl\vfs_fat16_meta.asm' },
+    @{ src = 'src\kernel\grithlk\vfs_bootstrap.ghl'; out = 'build\ghl\vfs_bootstrap.asm' },
     # Zero-asm SMP work queue (replaces proc/workqueue.asm + workqueue_api.inc +
     # workqueue_worker.inc). Lock-free atomic_cmpxchg claim, APERF/MPERF MHz
     # accounting, and a SECURE job-ID allow-list (wq_job_table) dispatched via the

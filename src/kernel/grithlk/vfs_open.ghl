@@ -1,0 +1,57 @@
+# ============================================================================
+# vfs_open.ghl - zero-unsafe open-intent authority firewall.
+#
+# Object storage deliberately keeps immutable rights, but a runtime-facing open
+# also needs one structural rule: the rights attached to the resulting VfsFile
+# must cover every right implied by its open flags. This module centralizes that
+# proof so no backend can accidentally create O_WRITE/O_CREATE/O_DIRECTORY state
+# with insufficient authority and hope a later caller remembers to check.
+#
+# This is policy glue only: no memory access, I/O, allocation, user pointers, or
+# cryptography. Backends should call these checked wrappers, not raw object-pool
+# allocation functions.
+# ============================================================================
+
+module "vfs_open";
+
+global vfs_open_abi_version;
+global vfs_open_rights_cover_flags;
+global vfs_open_object_checked;
+global vfs_open_existing_checked;
+
+extern vfs_open_flags_valid;
+extern vfs_open_required_rights;
+extern vfs_rights_valid;
+extern vfs_rights_subset;
+extern vfs_file_open_object;
+extern vfs_file_alloc;
+
+const VFS_OPEN_ABI_VERSION = 1;
+
+fn vfs_open_abi_version() { return VFS_OPEN_ABI_VERSION; }
+
+# Returns 1 only when both inputs are valid and immutable file rights contain
+# every right implied by the requested open flags.
+fn vfs_open_rights_cover_flags(flags, rights) {
+    if vfs_open_flags_valid(flags) == 0 { return 0; }
+    if vfs_rights_valid(rights) == 0 { return 0; }
+    let required = vfs_open_required_rights(flags);
+    if required == 0 { return 0; }
+    if vfs_rights_subset(rights, required) == 0 { return 0; }
+    return 1;
+}
+
+# Preferred backend materialization path: validate open intent before the object
+# pool is entered, then canonicalize node identity + take the first reference in
+# the existing atomic vfs_file_open_object() critical section.
+fn vfs_open_object_checked(fs_id, key0, key1, obj_type, size, flags, rights) {
+    if vfs_open_rights_cover_flags(flags, rights) == 0 { return 0; }
+    return vfs_file_open_object(fs_id, key0, key1, obj_type, size, flags, rights);
+}
+
+# Checked wrapper for opening an already-retained/canonical node, used by VFS
+# context/bootstrap code and future dentry hits.
+fn vfs_open_existing_checked(node_token, flags, rights) {
+    if vfs_open_rights_cover_flags(flags, rights) == 0 { return 0; }
+    return vfs_file_alloc(node_token, flags, rights);
+}
