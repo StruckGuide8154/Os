@@ -1,0 +1,126 @@
+# ============================================================================
+# vfs_bootstrap.ghl - cold-boot assembly of the initial read-only VFS namespace.
+#
+# This module is NOT wired into kmain yet. It proves that the policy, lock,
+# object, FAT16-key and per-slot context layers can form one coherent root
+# namespace before user-visible VFS syscalls are introduced.
+#
+# Cold-init contract:
+#   1. FAT16 media init has already succeeded.
+#   2. Call exactly once before runtime VFS users exist.
+#   3. Initialize no-steal locks, then object pools.
+#   4. Create the canonical FAT16 root node and one permanent root VfsFile pin.
+#   5. Give all 12 app slots independent root+cwd VfsFile objects.
+#
+# Failure is rollback-safe. An attempted second call is rejected rather than
+# clearing live lock ownership/state.
+# ============================================================================
+
+module "vfs_bootstrap";
+
+unsafe raw_mem;          # bounded load/store of module-owned bootstrap state
+unsafe implicit_extern;  # address-of module-owned state
+
+global vfs_bootstrap_abi_version;
+global vfs_bootstrap_cold_init;
+global vfs_bootstrap_state;
+global vfs_bootstrap_root_file;
+
+extern vfs_lock_init;
+extern vfs_objects_reset;
+extern vfs_fat16_key_make_root;
+extern vfs_node_alloc;
+extern vfs_node_free;
+extern vfs_file_alloc;
+extern vfs_file_close;
+extern vfs_ctx_init_slot;
+extern vfs_ctx_reset_slot;
+
+const VFS_BOOTSTRAP_ABI_VERSION = 1;
+
+const VFS_BOOT_COLD   = 0;
+const VFS_BOOT_INITING = 1;
+const VFS_BOOT_READY  = 2;
+const VFS_BOOT_FAILED = 3;
+
+const VFS_FSID_FAT16 = 1;
+const VFS_OBJ_DIR = 2;
+const VFS_O_DIRECTORY = 0x0010;
+const VFS_APP_SLOTS = 12;
+
+# LOOKUP|READ|STAT|ENUM|TRAVERSE. Deliberately excludes every mutating right.
+const VFS_ROOT_RO_RIGHTS = 0x041B;
+
+align 64;
+reserve vfs_boot_state_v[8];
+reserve vfs_boot_root_file_v[8];
+reserve vfs_boot_root_node_v[8];
+
+fn vfs_bootstrap_abi_version() { return VFS_BOOTSTRAP_ABI_VERSION; }
+fn vfs_bootstrap_state() { return lq(&vfs_boot_state_v); }
+fn vfs_bootstrap_root_file() {
+    if lq(&vfs_boot_state_v) != VFS_BOOT_READY { return 0; }
+    return lq(&vfs_boot_root_file_v);
+}
+
+fn vfs_bootstrap_fail(root_file, root_node, initialized_slots) {
+    let i = 0;
+    while i < initialized_slots {
+        vfs_ctx_reset_slot(i);
+        i = i + 1;
+    }
+    if root_file != 0 { vfs_file_close(root_file); }
+    if root_node != 0 { vfs_node_free(root_node); }
+    sq(&vfs_boot_root_file_v, 0);
+    sq(&vfs_boot_root_node_v, 0);
+    sq(&vfs_boot_state_v, VFS_BOOT_FAILED);
+    return 0;
+}
+
+fn vfs_bootstrap_cold_init() {
+    # One-way state machine. Never erase a potentially-live lock table by
+    # "retrying" initialization in place.
+    if lq(&vfs_boot_state_v) != VFS_BOOT_COLD { return 0; }
+    sq(&vfs_boot_state_v, VFS_BOOT_INITING);
+
+    if vfs_lock_init() == 0 {
+        sq(&vfs_boot_state_v, VFS_BOOT_FAILED);
+        return 0;
+    }
+    if vfs_objects_reset() == 0 {
+        sq(&vfs_boot_state_v, VFS_BOOT_FAILED);
+        return 0;
+    }
+
+    let key = vfs_fat16_key_make_root();
+    if key == 0 {
+        sq(&vfs_boot_state_v, VFS_BOOT_FAILED);
+        return 0;
+    }
+
+    let root_node = vfs_node_alloc(VFS_FSID_FAT16, key, 0, VFS_OBJ_DIR, 0);
+    if root_node == 0 {
+        sq(&vfs_boot_state_v, VFS_BOOT_FAILED);
+        return 0;
+    }
+
+    # Permanent kernel-private pin keeps the root node referenced even if every
+    # app context is recycled simultaneously.
+    let root_file = vfs_file_alloc(root_node, VFS_O_DIRECTORY, VFS_ROOT_RO_RIGHTS);
+    if root_file == 0 {
+        return vfs_bootstrap_fail(0, root_node, 0);
+    }
+    sq(&vfs_boot_root_node_v, root_node);
+    sq(&vfs_boot_root_file_v, root_file);
+
+    let slot = 0;
+    while slot < VFS_APP_SLOTS {
+        if vfs_ctx_init_slot(slot, root_node, VFS_ROOT_RO_RIGHTS) == 0 {
+            return vfs_bootstrap_fail(root_file, root_node, slot);
+        }
+        slot = slot + 1;
+    }
+
+    sq(&vfs_boot_state_v, VFS_BOOT_READY);
+    return 1;
+}
