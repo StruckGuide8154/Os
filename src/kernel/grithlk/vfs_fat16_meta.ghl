@@ -1,0 +1,111 @@
+# ============================================================================
+# vfs_fat16_meta.ghl - pure FAT16 metadata validation for the VFS adapter.
+#
+# This is the scalar firewall between raw FAT directory fields and generic VFS
+# nodes. It does not read memory, issue I/O, allocate, or retain a cache pointer.
+# The eventual backend materializer reads a bounded 32-byte entry into trusted
+# scratch, extracts scalars, and runs them through this module before creating a
+# VfsNode.
+# ============================================================================
+
+module "vfs_fat16_meta";
+
+global vfs_fat16_meta_abi_version;
+global vfs_fat16_spc_valid;
+global vfs_fat16_cluster_valid;
+global vfs_fat16_entry_classify;
+global vfs_fat16_entry_cluster_valid;
+global vfs_fat16_read_count;
+global vfs_fat16_clusters_needed;
+global vfs_fat16_fat_capacity_entries;
+
+const VFS_FAT16_META_ABI_VERSION = 1;
+
+const VFS_OBJ_FILE = 1;
+const VFS_OBJ_DIR  = 2;
+
+const F16_ATTR_READ_ONLY = 0x01;
+const F16_ATTR_HIDDEN    = 0x02;
+const F16_ATTR_SYSTEM    = 0x04;
+const F16_ATTR_VOLUME_ID = 0x08;
+const F16_ATTR_DIRECTORY = 0x10;
+const F16_ATTR_ARCHIVE   = 0x20;
+const F16_ATTR_LFN       = 0x0F;
+const F16_ATTR_KNOWN     = 0x3F;
+
+const F16_ENTRY_DELETED = 0xE5;
+const F16_CLUSTER_MIN   = 2;
+const F16_CLUSTER_MAX   = 0xFFF7;
+const F16_SPC_MAX       = 128;
+const F16_SECTOR_BYTES  = 512;
+
+fn vfs_fat16_meta_abi_version() { return VFS_FAT16_META_ABI_VERSION; }
+
+# FAT sectors-per-cluster must be a power of two in 1..128.
+fn vfs_fat16_spc_valid(spc) {
+    if spc == 0 { return 0; }
+    if spc > F16_SPC_MAX { return 0; }
+    if (spc & (spc - 1)) != 0 { return 0; }
+    return 1;
+}
+
+fn vfs_fat16_cluster_valid(cluster) {
+    if cluster < F16_CLUSTER_MIN { return 0; }
+    if cluster > F16_CLUSTER_MAX { return 0; }
+    return 1;
+}
+
+# Classify one already-bounded 32-byte directory entry from scalar fields.
+# Returns 0 for end/deleted/LFN/volume-id/unknown-attribute entries, otherwise a
+# generic VFS object type. Hidden/system/read-only are policy bits, not reasons
+# to pretend the object does not exist.
+fn vfs_fat16_entry_classify(first_byte, attr) {
+    if first_byte == 0 { return 0; }
+    if first_byte == F16_ENTRY_DELETED { return 0; }
+    if (attr & F16_ATTR_KNOWN) != attr { return 0; }
+    if attr == F16_ATTR_LFN { return 0; }
+    if (attr & F16_ATTR_VOLUME_ID) != 0 { return 0; }
+    if (attr & F16_ATTR_DIRECTORY) != 0 { return VFS_OBJ_DIR; }
+    return VFS_OBJ_FILE;
+}
+
+# Validate the first-cluster/size relationship after classification.
+# Directories represented by an entry always need a real data cluster. Empty
+# files may use cluster 0; a nonzero file size always requires a valid cluster.
+fn vfs_fat16_entry_cluster_valid(obj_type, size, first_cluster) {
+    if obj_type == VFS_OBJ_DIR {
+        return vfs_fat16_cluster_valid(first_cluster);
+    }
+    if obj_type != VFS_OBJ_FILE { return 0; }
+    if size == 0 {
+        if first_cluster == 0 { return 1; }
+        return vfs_fat16_cluster_valid(first_cluster);
+    }
+    return vfs_fat16_cluster_valid(first_cluster);
+}
+
+# Effective byte count for pread(file_size, offset, requested). This avoids
+# offset+requested entirely: EOF and oversized requests are decided by subtracting
+# from the already-validated file extent.
+fn vfs_fat16_read_count(file_size, offset, requested) {
+    if offset >= file_size { return 0; }
+    let remain = file_size - offset;
+    if requested < remain { return requested; }
+    return remain;
+}
+
+# Number of clusters required to represent size bytes. Uses (size-1)/N + 1 so
+# the ceiling calculation cannot overflow through `size + N - 1`.
+fn vfs_fat16_clusters_needed(size, sectors_per_cluster) {
+    if vfs_fat16_spc_valid(sectors_per_cluster) == 0 { return 0; }
+    if size == 0 { return 0; }
+    let cluster_bytes = sectors_per_cluster * F16_SECTOR_BYTES;
+    return (size - 1) / cluster_bytes + 1;
+}
+
+# One FAT16 entry is 2 bytes; sectors are fixed to 512 by the mount contract.
+# This helper is used by BPB validation to prove the FAT can actually address
+# the computed data-cluster geometry rather than merely fitting in the cache.
+fn vfs_fat16_fat_capacity_entries(fat_sectors) {
+    return fat_sectors * (F16_SECTOR_BYTES / 2);
+}
