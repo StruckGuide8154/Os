@@ -49,9 +49,10 @@ const F16K_KIND_ENTRY = 2;
 const F16K_RAW_SLOT_CAP = 512;
 
 # FAT16 data clusters valid for ordinary directory parents. 0 means the fixed
-# root directory. 1 is reserved; 0xFFF8.. are end-of-chain/reserved markers.
+# root directory. 1 is reserved; 0xFFF7 is the BAD-cluster marker and
+# 0xFFF8..0xFFFF are end-of-chain/reserved markers.
 const F16K_CLUSTER_MIN = 2;
-const F16K_CLUSTER_MAX = 0xFFF7;
+const F16K_CLUSTER_MAX = 0xFFF6;
 
 fn vfs_fat16_key_abi_version() { return VFS_FAT16_KEY_ABI_VERSION; }
 
