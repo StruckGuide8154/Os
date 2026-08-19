@@ -1,0 +1,233 @@
+# ============================================================================
+# vfs_fat16_backend.ghl - read-only FAT16 materialization seam for VFS.
+#
+# This module is the ONLY VFS layer allowed to look at the legacy live FAT16
+# directory cache. The cache is transient scratch, not object identity:
+#
+#   acquire VFS_LOCK_FAT_BACKEND
+#   -> fully materialize requested parent directory through fat16_change_dir()
+#   -> inspect/copy scalar entry metadata
+#   -> validate it through vfs_fat16_meta
+#   -> derive stable (parent cluster, raw slot) key
+#   -> create/open generic VFS object
+#   -> release lock
+#
+# No fat16_root_cache pointer is stored in a VfsNode/VfsFile or returned to a
+# caller. This module performs no ATA I/O directly and receives only kernel-owned
+# snapshotted component bytes, never a user pointer.
+#
+# VFS v1 FAT naming is deliberately conservative 8.3. The path layer may accept
+# longer generic components, but this backend rejects any name it cannot map
+# losslessly to a single short-name directory entry.
+# ============================================================================
+
+module "vfs_fat16_backend";
+
+unsafe raw_mem;          # bounded reads of FAT16 scratch + kernel path snapshot
+unsafe implicit_extern;  # addresses of fat16_core module-owned cache/geometry
+
+global vfs_fat16_backend_abi_version;
+global vfs_fat16_materialize_raw;
+global vfs_fat16_lookup_component;
+global vfs_fat16_component_is_83;
+
+extern fat16_change_dir;
+extern fat16_root_cache;
+extern f16_root_entries;
+extern vfs_lock_acquire;
+extern vfs_lock_release;
+extern vfs_fat16_parent_cluster_valid;
+extern vfs_fat16_key_make_entry;
+extern vfs_fat16_entry_classify;
+extern vfs_fat16_entry_cluster_valid;
+extern vfs_open_object_checked;
+
+const VFS_FAT16_BACKEND_ABI_VERSION = 1;
+const VFS_FSID_FAT16 = 1;
+const VFS_LOCK_FAT_BACKEND = 2;
+const VFS_FAT_LOCK_SPINS = 65536;
+const VFS_FAT_RAW_SLOT_CAP = 512;
+const VFS_FAT_ENTRY_SIZE = 32;
+
+const F16_DIR_ATTR = 11;
+const F16_DIR_FIRST_CLUS_LO = 26;
+const F16_DIR_FILE_SIZE = 28;
+
+fn vfs_fat16_backend_abi_version() { return VFS_FAT16_BACKEND_ABI_VERSION; }
+
+fn f16b_rd_u16(p) {
+    return lb(p) | (lb(p + 1) << 8);
+}
+
+fn f16b_rd_u32(p) {
+    return lb(p) | (lb(p + 1) << 8) | (lb(p + 2) << 16) | (lb(p + 3) << 24);
+}
+
+fn f16b_fold_ascii(c) {
+    if c >= 97 {
+        if c <= 122 { return c - 32; }
+    }
+    return c;
+}
+
+# Conservative FAT short-name character set. Reject controls, spaces, path/meta
+# separators and wildcard syntax rather than silently canonicalizing ambiguity.
+fn f16b_short_char_valid(c) {
+    c = f16b_fold_ascii(c);
+    if c < 33 { return 0; }
+    if c > 126 { return 0; }
+    if c == 34 { return 0; }  # quote
+    if c == 42 { return 0; }  # *
+    if c == 43 { return 0; }  # +
+    if c == 44 { return 0; }  # ,
+    if c == 47 { return 0; }  # /
+    if c == 58 { return 0; }  # :
+    if c == 59 { return 0; }  # ;
+    if c == 60 { return 0; }
+    if c == 61 { return 0; }
+    if c == 62 { return 0; }
+    if c == 63 { return 0; }  # ?
+    if c == 91 { return 0; }
+    if c == 92 { return 0; }  # backslash
+    if c == 93 { return 0; }
+    if c == 124 { return 0; }
+    return 1;
+}
+
+# Returns packed base_len | (ext_len << 8) | (dot_index << 16), or 0 invalid.
+# dot_index=0xFF means no dot.
+fn f16b_component_shape(name, length) {
+    if length == 0 { return 0; }
+    if length > 12 { return 0; } # max 8 + '.' + 3
+    let dot = 0xFF;
+    let i = 0;
+    while i < length {
+        let c = lb(name + i);
+        if c == 0 { return 0; }
+        if c == 46 {
+            if dot != 0xFF { return 0; }
+            dot = i;
+        } else {
+            if f16b_short_char_valid(c) == 0 { return 0; }
+        }
+        i = i + 1;
+    }
+
+    let base_len = length;
+    let ext_len = 0;
+    if dot != 0xFF {
+        if dot == 0 { return 0; }
+        if dot + 1 >= length { return 0; }
+        base_len = dot;
+        ext_len = length - dot - 1;
+    }
+    if base_len == 0 { return 0; }
+    if base_len > 8 { return 0; }
+    if ext_len > 3 { return 0; }
+    return base_len | (ext_len << 8) | (dot << 16);
+}
+
+fn vfs_fat16_component_is_83(name, length) {
+    if f16b_component_shape(name, length) == 0 { return 0; }
+    return 1;
+}
+
+fn f16b_entry_name_matches(ent, name, length) {
+    let shape = f16b_component_shape(name, length);
+    if shape == 0 { return 0; }
+    let base_len = shape & 0xFF;
+    let ext_len = (shape >> 8) & 0xFF;
+    let dot = (shape >> 16) & 0xFF;
+
+    let i = 0;
+    while i < 8 {
+        let expected = 32;
+        if i < base_len { expected = f16b_fold_ascii(lb(name + i)); }
+        if f16b_fold_ascii(lb(ent + i)) != expected { return 0; }
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < 3 {
+        let expected = 32;
+        if i < ext_len { expected = f16b_fold_ascii(lb(name + dot + 1 + i)); }
+        if f16b_fold_ascii(lb(ent + 8 + i)) != expected { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Caller holds VFS_LOCK_FAT_BACKEND and the requested parent has already been
+# fully materialized. Returns an open generic VfsFile token or 0.
+fn f16b_materialize_loaded(parent_cluster, raw_slot, flags, rights) {
+    if raw_slot >= VFS_FAT_RAW_SLOT_CAP { return 0; }
+    let max_entries = lw(&f16_root_entries);
+    if max_entries > VFS_FAT_RAW_SLOT_CAP { max_entries = VFS_FAT_RAW_SLOT_CAP; }
+    if raw_slot >= max_entries { return 0; }
+
+    let ent = &fat16_root_cache + raw_slot * VFS_FAT_ENTRY_SIZE;
+    let first = lb(ent);
+    let attr = lb(ent + F16_DIR_ATTR);
+    let obj_type = vfs_fat16_entry_classify(first, attr);
+    if obj_type == 0 { return 0; }
+
+    let cluster = f16b_rd_u16(ent + F16_DIR_FIRST_CLUS_LO);
+    let size = f16b_rd_u32(ent + F16_DIR_FILE_SIZE);
+    if vfs_fat16_entry_cluster_valid(obj_type, size, cluster) == 0 { return 0; }
+
+    let key = vfs_fat16_key_make_entry(parent_cluster, raw_slot);
+    if key == 0 { return 0; }
+
+    # key1 remains zero in the pre-runtime foundation. VFS bootstrap is not yet
+    # called from kmain, and mutation compatibility must move behind VFS before
+    # live nodes are exposed, so raw-slot reuse cannot race this path in runtime.
+    return vfs_open_object_checked(VFS_FSID_FAT16, key, 0, obj_type, size, flags, rights);
+}
+
+# Materialize a known raw FAT directory slot. No cache pointer survives return.
+fn vfs_fat16_materialize_raw(parent_cluster, raw_slot, flags, rights) {
+    if vfs_fat16_parent_cluster_valid(parent_cluster) == 0 { return 0; }
+    if raw_slot >= VFS_FAT_RAW_SLOT_CAP { return 0; }
+    if vfs_lock_acquire(VFS_LOCK_FAT_BACKEND, VFS_FAT_LOCK_SPINS) == 0 { return 0; }
+    if fat16_change_dir(parent_cluster) != 0 {
+        vfs_lock_release(VFS_LOCK_FAT_BACKEND);
+        return 0;
+    }
+    let file = f16b_materialize_loaded(parent_cluster, raw_slot, flags, rights);
+    vfs_lock_release(VFS_LOCK_FAT_BACKEND);
+    return file;
+}
+
+# Lookup one kernel-snapshotted short-name component within a stable parent
+# directory identity. Scans raw slots so the resulting key is independent of the
+# legacy "nth valid entry" API and remains stable across unrelated deletions.
+fn vfs_fat16_lookup_component(parent_cluster, name, length, flags, rights) {
+    if vfs_fat16_parent_cluster_valid(parent_cluster) == 0 { return 0; }
+    if f16b_component_shape(name, length) == 0 { return 0; }
+    if vfs_lock_acquire(VFS_LOCK_FAT_BACKEND, VFS_FAT_LOCK_SPINS) == 0 { return 0; }
+    if fat16_change_dir(parent_cluster) != 0 {
+        vfs_lock_release(VFS_LOCK_FAT_BACKEND);
+        return 0;
+    }
+
+    let n = lw(&f16_root_entries);
+    if n > VFS_FAT_RAW_SLOT_CAP { n = VFS_FAT_RAW_SLOT_CAP; }
+    let slot = 0;
+    while slot < n {
+        let ent = &fat16_root_cache + slot * VFS_FAT_ENTRY_SIZE;
+        let first = lb(ent);
+        if first == 0 { break; }
+        let attr = lb(ent + F16_DIR_ATTR);
+        if vfs_fat16_entry_classify(first, attr) != 0 {
+            if f16b_entry_name_matches(ent, name, length) != 0 {
+                let file = f16b_materialize_loaded(parent_cluster, slot, flags, rights);
+                vfs_lock_release(VFS_LOCK_FAT_BACKEND);
+                return file;
+            }
+        }
+        slot = slot + 1;
+    }
+
+    vfs_lock_release(VFS_LOCK_FAT_BACKEND);
+    return 0;
+}
