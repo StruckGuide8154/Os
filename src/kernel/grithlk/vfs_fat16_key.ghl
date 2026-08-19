@@ -1,0 +1,113 @@
+# ============================================================================
+# vfs_fat16_key.ghl - pure FAT16 backend identity codec for VFS.
+#
+# A VFS node must NEVER use a pointer into fat16_root_cache as backend identity:
+# that cache is reloaded for different directories/slots. FAT16 object location
+# is instead represented by the directory that owns the entry plus the entry's
+# RAW 32-byte slot number. Rename preserves this identity; delete marks the VFS
+# node stale before the slot may be reused, and a recreated object receives a
+# fresh VFS node generation.
+#
+# This module is deliberately zero-unsafe and allocation-free.
+# ============================================================================
+
+module "vfs_fat16_key";
+
+global vfs_fat16_key_abi_version;
+global vfs_fat16_key_make_root;
+global vfs_fat16_key_make_entry;
+global vfs_fat16_key_valid;
+global vfs_fat16_key_kind;
+global vfs_fat16_key_parent_cluster;
+global vfs_fat16_key_raw_slot;
+global vfs_fat16_parent_cluster_valid;
+
+const VFS_FAT16_KEY_ABI_VERSION = 1;
+
+# Key layout (u64):
+#   bits  0..15  parent directory start cluster (0 = FAT16 fixed root)
+#   bits 16..31  raw directory slot (0..511 for current bounded cache)
+#   bits 32..39  key kind
+#   bits 40..47  key ABI version
+#   bits 48..63  magic 0xF16A
+const F16K_PARENT_MASK = 0xFFFF;
+const F16K_SLOT_SHIFT  = 16;
+const F16K_SLOT_MASK   = 0xFFFF;
+const F16K_KIND_SHIFT  = 32;
+const F16K_KIND_MASK   = 0xFF;
+const F16K_VER_SHIFT   = 40;
+const F16K_VER_MASK    = 0xFF;
+const F16K_MAGIC_SHIFT = 48;
+const F16K_MAGIC       = 0xF16A;
+const F16K_MAGIC_MASK  = 0xFFFF;
+
+const F16K_KIND_ROOT  = 1;
+const F16K_KIND_ENTRY = 2;
+
+# fat16_core.ghl bounds both the fixed root and materialized subdirectory cache
+# to 16 KiB = 512 raw 32-byte directory slots.
+const F16K_RAW_SLOT_CAP = 512;
+
+# FAT16 data clusters valid for ordinary directory parents. 0 means the fixed
+# root directory. 1 is reserved; 0xFFF8.. are end-of-chain/reserved markers.
+const F16K_CLUSTER_MIN = 2;
+const F16K_CLUSTER_MAX = 0xFFF7;
+
+fn vfs_fat16_key_abi_version() { return VFS_FAT16_KEY_ABI_VERSION; }
+
+fn vfs_fat16_parent_cluster_valid(cluster) {
+    if cluster == 0 { return 1; }
+    if cluster < F16K_CLUSTER_MIN { return 0; }
+    if cluster > F16K_CLUSTER_MAX { return 0; }
+    return 1;
+}
+
+fn f16k_pack(kind, parent_cluster, raw_slot) {
+    return (F16K_MAGIC << F16K_MAGIC_SHIFT)
+         | (VFS_FAT16_KEY_ABI_VERSION << F16K_VER_SHIFT)
+         | ((kind & F16K_KIND_MASK) << F16K_KIND_SHIFT)
+         | ((raw_slot & F16K_SLOT_MASK) << F16K_SLOT_SHIFT)
+         | (parent_cluster & F16K_PARENT_MASK);
+}
+
+# The fixed FAT16 root has no parent directory entry, so it uses a separate key
+# kind instead of inventing a fake raw slot that could collide with real media.
+fn vfs_fat16_key_make_root() {
+    return f16k_pack(F16K_KIND_ROOT, 0, 0);
+}
+
+fn vfs_fat16_key_make_entry(parent_cluster, raw_slot) {
+    if vfs_fat16_parent_cluster_valid(parent_cluster) == 0 { return 0; }
+    if raw_slot >= F16K_RAW_SLOT_CAP { return 0; }
+    return f16k_pack(F16K_KIND_ENTRY, parent_cluster, raw_slot);
+}
+
+fn vfs_fat16_key_kind(key) {
+    return (key >> F16K_KIND_SHIFT) & F16K_KIND_MASK;
+}
+fn vfs_fat16_key_parent_cluster(key) {
+    return key & F16K_PARENT_MASK;
+}
+fn vfs_fat16_key_raw_slot(key) {
+    return (key >> F16K_SLOT_SHIFT) & F16K_SLOT_MASK;
+}
+
+fn vfs_fat16_key_valid(key) {
+    if key == 0 { return 0; }
+    if ((key >> F16K_MAGIC_SHIFT) & F16K_MAGIC_MASK) != F16K_MAGIC { return 0; }
+    if ((key >> F16K_VER_SHIFT) & F16K_VER_MASK) != VFS_FAT16_KEY_ABI_VERSION { return 0; }
+
+    let kind = vfs_fat16_key_kind(key);
+    let parent = vfs_fat16_key_parent_cluster(key);
+    let slot = vfs_fat16_key_raw_slot(key);
+
+    if kind == F16K_KIND_ROOT {
+        if parent != 0 { return 0; }
+        if slot != 0 { return 0; }
+        return 1;
+    }
+    if kind != F16K_KIND_ENTRY { return 0; }
+    if vfs_fat16_parent_cluster_valid(parent) == 0 { return 0; }
+    if slot >= F16K_RAW_SLOT_CAP { return 0; }
+    return 1;
+}
