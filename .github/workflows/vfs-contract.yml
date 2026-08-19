@@ -111,6 +111,19 @@ jobs:
           %endif
           %macro global 1-*
           %endmacro
+
+          ; The isolated VFS bundle intentionally depends on exactly these
+          ; pre-existing kernel recovery hooks. Stub only them so any OTHER
+          ; unresolved external remains a hard linkage failure.
+          section .text
+          blk_self_tag:
+              mov eax, 1
+              ret
+          blk_held_push:
+              ret
+          blk_held_pop:
+              ret
+
           section .text
           %include "build/test-vfs/vfs_core.asm"
           section .text
