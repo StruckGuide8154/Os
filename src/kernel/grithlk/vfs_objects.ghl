@@ -11,6 +11,7 @@
 #   * closing/freeing bumps the generation before a slot can be reused;
 #   * file rights are fixed at allocation and have no widening setter;
 #   * a file allocation retains its node; close drops exactly that reference;
+#   * deleted/replaced backend objects become STALE while references exist;
 #   * unknown token magic/kind/index/generation fails closed;
 #   * all pools have hard ceilings.
 #
@@ -32,7 +33,10 @@ unsafe implicit_extern;  # address-of module-owned reserve symbols
 global vfs_objects_abi_version;
 global vfs_objects_reset;
 global vfs_node_alloc;
+global vfs_node_exists;
 global vfs_node_validate;
+global vfs_node_mark_stale;
+global vfs_node_is_stale;
 global vfs_node_free;
 global vfs_node_get_type;
 global vfs_node_get_size;
@@ -44,6 +48,7 @@ global vfs_node_get_dir_generation;
 global vfs_node_bump_dir_generation;
 global vfs_node_refcount;
 global vfs_file_alloc;
+global vfs_file_exists;
 global vfs_file_validate;
 global vfs_file_close;
 global vfs_file_require_rights;
@@ -57,6 +62,7 @@ global vfs_file_advance;
 extern vfs_rights_valid;
 extern vfs_rights_subset;
 extern vfs_object_type_valid;
+extern vfs_open_flags_valid;
 extern vfs_checked_add_ok;
 
 const VFS_OBJECTS_ABI_VERSION = 1;
@@ -82,14 +88,18 @@ const VFS_TOKEN_MAGIC_MASK = 0xFFFF;
 const VFS_TOKEN_KIND_NODE  = 1;
 const VFS_TOKEN_KIND_FILE  = 2;
 
-# Generic VFS object type values. Kept in lockstep with vfs_core.ghl.
-const VFS_OBJ_FILE = 1;
-const VFS_OBJ_DIR  = 2;
-const VFS_R_ALL    = 0x0FFF;
-const U64_MAX      = 0xFFFFFFFFFFFFFFFF;
+# Node state. STALE keeps identity/refcount alive so existing open files can
+# close safely, while every operational validation fails. This prevents a FAT16
+# directory-slot delete/recreate from turning an old open token into a new file.
+const VFS_NODE_FREE  = 0;
+const VFS_NODE_LIVE  = 1;
+const VFS_NODE_STALE = 2;
+
+const VFS_R_ALL = 0x0FFF;
+const U64_MAX   = 0xFFFFFFFFFFFFFFFF;
 
 # -------------------- node pool --------------------
-reserve vfs_node_active[128];             # u8
+reserve vfs_node_active[128];             # u8 state: FREE/LIVE/STALE
 reserve vfs_node_type[128];               # u8
 reserve vfs_node_generation[1024];        # 128 * u64 (low 24 bits used)
 reserve vfs_node_fs_id[512];               # 128 * u32
@@ -149,7 +159,7 @@ fn vfs_objects_reset() {
     while i < VFS_NODE_CAP {
         let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
         sq(&vfs_node_generation + i * 8, g);
-        sb(&vfs_node_active + i, 0);
+        sb(&vfs_node_active + i, VFS_NODE_FREE);
         sb(&vfs_node_type + i, 0);
         sw(&vfs_node_fs_id + i * 4, 0);
         sw(&vfs_node_refs + i * 4, 0);
@@ -181,7 +191,7 @@ fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
     if vfs_object_type_valid(obj_type) == 0 { return 0; }
     let i = 0;
     while i < VFS_NODE_CAP {
-        if lb(&vfs_node_active + i) == 0 {
+        if lb(&vfs_node_active + i) == VFS_NODE_FREE {
             let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
             sq(&vfs_node_generation + i * 8, g);
             sw(&vfs_node_fs_id + i * 4, fs_id);
@@ -191,8 +201,8 @@ fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
             sq(&vfs_node_key0 + i * 8, key0);
             sq(&vfs_node_key1 + i * 8, key1);
             sq(&vfs_node_dir_generation + i * 8, 1);
-            # Publish active LAST so no resolver can observe a half-filled node.
-            sb(&vfs_node_active + i, 1);
+            # Publish LIVE LAST so no resolver can observe a half-filled node.
+            sb(&vfs_node_active + i, VFS_NODE_LIVE);
             return vfs_token_make(i, g, VFS_TOKEN_KIND_NODE);
         }
         i = i + 1;
@@ -200,25 +210,47 @@ fn vfs_node_alloc(fs_id, key0, key1, obj_type, size) {
     return 0;
 }
 
-fn vfs_node_validate(token) {
+# Exists accepts LIVE or STALE. It is for lifetime management only, especially
+# closing a file after its backend entry was deleted. Operations use validate.
+fn vfs_node_exists(token) {
     if vfs_token_shape_valid(token, VFS_TOKEN_KIND_NODE, VFS_NODE_CAP) == 0 { return 0; }
     let i = vfs_token_index(token);
-    if lb(&vfs_node_active + i) == 0 { return 0; }
+    if lb(&vfs_node_active + i) == VFS_NODE_FREE { return 0; }
     if (lq(&vfs_node_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
     return 1;
 }
 
-# Free only an unreferenced node. Active is cleared before mutable fields are
-# scrubbed so a racing future resolver cannot accept the object during teardown.
-fn vfs_node_free(token) {
+# Operational validation rejects STALE objects.
+fn vfs_node_validate(token) {
+    if vfs_node_exists(token) == 0 { return 0; }
+    if lb(&vfs_node_active + vfs_token_index(token)) != VFS_NODE_LIVE { return 0; }
+    return 1;
+}
+
+fn vfs_node_mark_stale(token) {
     if vfs_node_validate(token) == 0 { return 0; }
+    sb(&vfs_node_active + vfs_token_index(token), VFS_NODE_STALE);
+    return 1;
+}
+
+fn vfs_node_is_stale(token) {
+    if vfs_node_exists(token) == 0 { return 0; }
+    if lb(&vfs_node_active + vfs_token_index(token)) == VFS_NODE_STALE { return 1; }
+    return 0;
+}
+
+# Free only an unreferenced LIVE or STALE node. State is cleared before mutable
+# fields are scrubbed so no future resolver can accept it during teardown.
+fn vfs_node_free(token) {
+    if vfs_node_exists(token) == 0 { return 0; }
     let i = vfs_token_index(token);
     if lw(&vfs_node_refs + i * 4) != 0 { return 0; }
-    sb(&vfs_node_active + i, 0);
+    sb(&vfs_node_active + i, VFS_NODE_FREE);
     let g = vfs_next_generation(lq(&vfs_node_generation + i * 8));
     sq(&vfs_node_generation + i * 8, g);
     sb(&vfs_node_type + i, 0);
     sw(&vfs_node_fs_id + i * 4, 0);
+    sw(&vfs_node_refs + i * 4, 0);
     sq(&vfs_node_size + i * 8, 0);
     sq(&vfs_node_key0 + i * 8, 0);
     sq(&vfs_node_key1 + i * 8, 0);
@@ -264,13 +296,14 @@ fn vfs_node_bump_dir_generation(token) {
     return g;
 }
 fn vfs_node_refcount(token) {
-    if vfs_node_validate(token) == 0 { return 0; }
+    if vfs_node_exists(token) == 0 { return 0; }
     return lw(&vfs_node_refs + vfs_token_index(token) * 4);
 }
 
 # -------------------- file lifecycle --------------------
 fn vfs_file_alloc(node_token, flags, rights) {
     if vfs_node_validate(node_token) == 0 { return 0; }
+    if vfs_open_flags_valid(flags) == 0 { return 0; }
     if vfs_rights_valid(rights) == 0 { return 0; }
     let i = 0;
     while i < VFS_FILE_CAP {
@@ -296,18 +329,25 @@ fn vfs_file_alloc(node_token, flags, rights) {
     return 0;
 }
 
-fn vfs_file_validate(token) {
+# Lifetime validation accepts a file whose node has become STALE so close can
+# always drop its reference. Operational validation below requires a LIVE node.
+fn vfs_file_exists(token) {
     if vfs_token_shape_valid(token, VFS_TOKEN_KIND_FILE, VFS_FILE_CAP) == 0 { return 0; }
     let i = vfs_token_index(token);
     if lb(&vfs_file_active + i) == 0 { return 0; }
     if (lq(&vfs_file_generation + i * 8) & VFS_TOKEN_GEN_MASK) != vfs_token_generation(token) { return 0; }
-    # A live file whose node has disappeared is corruption; fail closed.
-    if vfs_node_validate(lq(&vfs_file_node + i * 8)) == 0 { return 0; }
+    if vfs_node_exists(lq(&vfs_file_node + i * 8)) == 0 { return 0; }
+    return 1;
+}
+
+fn vfs_file_validate(token) {
+    if vfs_file_exists(token) == 0 { return 0; }
+    if vfs_node_validate(lq(&vfs_file_node + vfs_token_index(token) * 8)) == 0 { return 0; }
     return 1;
 }
 
 fn vfs_file_close(token) {
-    if vfs_file_validate(token) == 0 { return 0; }
+    if vfs_file_exists(token) == 0 { return 0; }
     let i = vfs_token_index(token);
     let node = lq(&vfs_file_node + i * 8);
     let ni = vfs_token_index(node);
