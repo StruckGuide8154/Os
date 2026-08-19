@@ -9,13 +9,16 @@ on:
       - 'src/kernel/grithlk/vfs_core.ghl'
       - 'src/kernel/grithlk/vfs_objects.ghl'
       - 'src/kernel/grithlk/vfs_fat16_key.ghl'
+      - 'src/kernel/grithlk/vfs_fat16_meta.ghl'
       - 'src/kernel/proc/handle_table.inc'
       - 'src/include/boot_memory.inc'
       - 'src/include/constants.inc'
       - 'docs/vfs-architecture.md'
+      - 'docs/vfs-fat16-migration-audit.md'
       - 'scripts/test/test_vfs_contract.ps1'
       - 'scripts/test/test_vfs_objects_contract.ps1'
       - 'scripts/test/test_vfs_fat16_key_contract.ps1'
+      - 'scripts/test/test_vfs_fat16_meta_contract.ps1'
       - 'scripts/test/test_handle_table_authority.ps1'
       - '.github/workflows/vfs-contract.yml'
 
@@ -46,6 +49,10 @@ jobs:
       - name: Compile and verify FAT16 VFS keys
         shell: pwsh
         run: ./scripts/test/test_vfs_fat16_key_contract.ps1
+
+      - name: Compile and verify FAT16 metadata firewall
+        shell: pwsh
+        run: ./scripts/test/test_vfs_fat16_meta_contract.ps1
 
       - name: Verify handle authority is kernel-owned
         shell: pwsh
