@@ -25,11 +25,17 @@ $expected = @('implicit_extern', 'raw_mem')
 if (($declared -join ',') -ne ($expected -join ',')) {
     throw "VFS object unsafe surface drifted: expected [$($expected -join ', ')], got [$($declared -join ', ')]"
 }
-if (@($m.unsafe.broad).Count -ne 0) { throw 'VFS objects use a broad unsafe override' }
-if (@($m.unsafe.privileged).Count -ne 0) { throw 'VFS objects use a privileged unsafe override' }
+# gritc intentionally classifies raw_mem + implicit_extern as broad capabilities.
+# Pin that exact reviewed set rather than pretending a module-owned BSS pool is
+# zero-unsafe or allowing future broad authority to hide beside it.
+$broad = @($m.unsafe.broad | ForEach-Object { [string]$_ } | Sort-Object)
+if (($broad -join ',') -ne ($expected -join ',')) {
+    throw "VFS object broad-capability set drifted: expected [$($expected -join ', ')], got [$($broad -join ', ')]"
+}
+if (@($m.unsafe.privileged).Count -ne 0) { throw 'VFS objects use a privileged unsafe capability' }
 
 $src = Get-Content -Raw -Path $Source
-if ($src -match '(?m)^\s*unsafe\s+(asm|raw_io|syscall|user_mem)\b') {
+if ($src -match '(?m)^\s*unsafe\s+(asm|raw_io|syscall|user_mem|kernel_priv|kernel_io)\b') {
     throw 'VFS object layer gained forbidden authority beyond module-owned memory'
 }
 if ($src -match '(?m)^global\s+vfs_file_set_rights\s*;') {
@@ -54,4 +60,4 @@ if ($src -notmatch 'const\s+VFS_NODE_CAP\s*=\s*128;') { throw 'VFS node pool bou
 if ($src -notmatch 'const\s+VFS_FILE_CAP\s*=\s*128;') { throw 'VFS file pool bound drifted' }
 if ($src -match '(?m)^\s*(malloc|alloc|heap_)') { throw 'VFS fixed-pool object layer unexpectedly allocates dynamically' }
 
-Write-Host 'VFS objects: PASS (bounded pools, stale-safe lifetime, narrow unsafe surface, immutable rights).' -ForegroundColor Green
+Write-Host 'VFS objects: PASS (bounded pools, stale-safe lifetime, exact unsafe set, immutable rights).' -ForegroundColor Green
