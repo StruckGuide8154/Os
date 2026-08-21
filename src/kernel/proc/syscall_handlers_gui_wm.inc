@@ -185,6 +185,17 @@
     cmp rax, -1
     je .sc_wm_create_store
     movzx ecx, ax
+    ; Self-bound the pool index before it is turned into a store address.
+    ; `movzx ecx, ax` keeps only the low 16 bits, so the `cmp rax, -1` above is
+    ; the ONLY thing standing between a non-index return value and the OR write
+    ; below -- and it is a 64-bit compare, so it would miss a 32-bit-width
+    ; failure code (eax = -1 leaves rax = 0x00000000FFFFFFFF, ax = 0xFFFF, an
+    ; index of 65535 => a write ~16 MiB past WINDOW_POOL_ADDR). wm_do_create
+    ; currently returns a full-width `mov rax, -1`, so this is unreachable
+    ; today, but the write target must not depend on a callee's choice of
+    ; return width. Bound it here and fail closed.
+    cmp ecx, MAX_WINDOWS
+    jae .sc_wm_create_store
     imul ecx, ecx, WINDOW_STRUCT_SIZE
     add rcx, WINDOW_POOL_ADDR
     ; App-created windows are provisioned by their already-sandboxed caller (the

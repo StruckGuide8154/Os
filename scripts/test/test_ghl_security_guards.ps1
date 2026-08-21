@@ -318,6 +318,23 @@ if ($LASTEXITCODE -ne 0) {
     throw 'INV-DRIVER-NO-DMA-MINT failed against the real broker (a driver_id can reach a DMA window outside its granted table, or a grant path mints unauthorized authority).'
 }
 
+Write-Host '[ghl-security] === Compiler peephole pass D: rax-preserving bracket soundness ===' -ForegroundColor Cyan
+$PeepholeEval = Join-Path $Root 'scripts\test\eval_peephole_rax_bracket.py'
+if (-not (Test-Path -LiteralPath $PeepholeEval)) {
+    throw "Missing peephole pass-D soundness proof: $PeepholeEval"
+}
+# Selftest first: the proof must catch a PLANTED pass D that compares the DEST
+# spelling instead of the canonical register (so `mov eax/ax/al, ..` escapes the
+# rax guard), so this guard can never silently rot into a no-op.
+& python $PeepholeEval --selftest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Peephole pass-D soundness selftest failed (a planted spelling-compare pass D was NOT caught).'
+}
+& python $PeepholeEval
+if ($LASTEXITCODE -ne 0) {
+    throw 'Peephole pass D is not observationally equivalent to the unoptimized push rax/pop rax bracket (an optimizer miscompile clobbers a preserved register).'
+}
+
 Write-Host '[ghl-security] === Track-5 monitor-HAL detect/select/second-stage/IOMMU (real GHL math) ===' -ForegroundColor Cyan
 $MonHalEval = Join-Path $Root 'scripts\test\eval_mon_hal.py'
 if (-not (Test-Path -LiteralPath $MonHalEval)) {

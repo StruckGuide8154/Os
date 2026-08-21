@@ -38,6 +38,13 @@ extern net_rx_frame;
 fn rtl8156_handle_frame(rdi frame, rcx len) preserves(all) {
     call net_rx_frame(rdi: frame, rcx: len);
 
+    # The ethertype read below dereferences frame+12..13, so a runt frame must
+    # be rejected BEFORE it, not by the per-branch `len < 42` checks that follow
+    # (those gate the ARP/IPv4 field reads, but only after these two bytes have
+    # already been loaded). A device/wire-supplied length under 14 would
+    # otherwise read up to 2 bytes past the received frame.
+    if len < 14 { return; }
+
     let ethertype = lb(frame + 12) | (lb(frame + 13) << 8);
 
     if ethertype == 0x0608 {                 # ARP

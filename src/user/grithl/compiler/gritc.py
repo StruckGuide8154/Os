@@ -747,6 +747,12 @@ def _emit_db_bytes(val):
 #      middle mov neither reads nor writes rax (and does not read rsp, which
 #      the push displaced), the bracket is a pure no-op and is dropped. This is
 #      the dominant binary-op RHS shape left after pass C (mov rcx, imm/slot).
+#      "Writes rax" must be judged on the CANONICAL register, not the spelling:
+#      `mov eax/ax/al, OP` all write rax, and in the original their result is
+#      dead (the `pop rax` overwrites it) while in the rewritten form it
+#      survives - so matching only the literal string "rax" would turn a
+#      register-preserving bracket into a clobber. Same for every spelling of
+#      rsp. Proven by scripts/test/eval_peephole_rax_bracket.py.
 #   E) jmp L ; L:   -> L:
 #      A jump to the literally-next code line (the unconditional `jmp .fn_end`
 #      the emitter places before the epilogue label on every final return).
@@ -972,7 +978,11 @@ def _peephole(lines, extended=True, zero_idiom=False):
                 if mm and mp and mp.group(1) == "rax":
                     dest = mm.group(1).strip()
                     src = mm.group(2).strip()
-                    if (dest not in ("rax", "rsp")
+                    # Compare on the CANONICAL 64-bit register: `eax`, `ax` and
+                    # `al` are all writes to rax and must be rejected here, or
+                    # dropping the bracket promotes a dead partial write into a
+                    # live clobber of the value the pop was restoring.
+                    if (_canon(dest) not in ("rax", "rsp")
                         and re.fullmatch(r"[a-z][a-z0-9]+", dest)
                         and _canon(dest)
                         and not re.search(r"\brax\b", src)
