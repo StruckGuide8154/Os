@@ -199,7 +199,7 @@ if ($LASTEXITCODE -ne 0) {
 $themeTestStderr = [System.IO.Path]::GetTempFileName()
 try {
     $themeTests = Start-Process -FilePath 'python' `
-        -ArgumentList @('-m', 'unittest', 'discover', '-s', (Join-Path $Root 'tests'), '-p', 'test_theme_tool.py') `
+        -ArgumentList @('-m', 'unittest', 'discover', '-s', (Join-Path $Root 'tests'), '-p', 'test_*.py') `
         -RedirectStandardError $themeTestStderr -NoNewWindow -Wait -PassThru
     Get-Content -LiteralPath $themeTestStderr | Write-Host
     if ($themeTests.ExitCode -ne 0) {
