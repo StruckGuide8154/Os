@@ -2,5 +2,5 @@
 # Dependabot (.github/dependabot.yml) is responsible for proposing reviewed
 # version updates rather than allowing unreviewed future releases at install time.
 qiskit==2.4.1
-qiskit-ibm-runtime==0.47.0
+qiskit-ibm-runtime==0.49.0
 numpy==2.4.6
